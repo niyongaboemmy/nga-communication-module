@@ -15,22 +15,40 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
 
-  /* Semantic surface tokens — byte-identical to the `colors` block in
-     nga_central_mis/frontend/tailwind.config.js and nga-task-mentor/client's,
-     so `bg-surface-light`, `text-text-secondary-dark` etc. mean the same thing
-     in all three apps. SRS §15.2 asks for exactly this: one token set per theme. */
+  /* Light tokens stay byte-identical to the `colors` block in
+     nga_central_mis/frontend/tailwind.config.js and nga-task-mentor/client's.
+
+     The DARK ramp intentionally diverges. The shared dark set is built around a
+     #0f172a base with #1e293b/#334155 above it — a lifted navy that reads too
+     bright across a chat shell, where chrome occupies far more of the viewport
+     than it does in a MIS page of tables. Tupo therefore runs its own, deeper
+     six-step ramp. Every dark surface in the app maps onto exactly one of these
+     steps; no component should reintroduce a raw Tailwind gray or slate background.
+
+       background  #070c15  app canvas, message pane        (deepest)
+       chrome      #0b111d  rail, lists, panels, composer, headers
+       surface     #101827  inset fields, chips, day dividers
+       elevated    #16202f  bubbles, menus, dropdowns, cards
+       card        #1c2635  raised / hover state above elevated
+       border      #222d3f  hairlines throughout
+
+     Retune the dark theme from these six lines, never per-component. */
   --color-background-light: #ffffff;
-  --color-background-dark: #0f172a;
+  --color-background-dark: #070c15;
   --color-surface-light: #f8fafc;
-  --color-surface-dark: #1e293b;
+  --color-surface-dark: #101827;
   --color-card-light: #ffffff;
-  --color-card-dark: #334155;
+  --color-card-dark: #1c2635;
   --color-text-primary-light: #1e293b;
   --color-text-primary-dark: #f1f5f9;
   --color-text-secondary-light: #64748b;
   --color-text-secondary-dark: #94a3b8;
   --color-border-light: #e2e8f0;
-  --color-border-dark: #475569;
+  --color-border-dark: #222d3f;
+
+  /* The two extra steps the shared set has no name for. */
+  --color-chrome-dark: #0b111d;
+  --color-elevated-dark: #16202f;
 
   /* SRS §15.2 motion scale: 150ms for micro-interactions, 250ms for panels. */
   --duration-micro: 150ms;

@@ -30,14 +30,14 @@ export const ContextPanel: React.FC<{
   return (
     <aside
       aria-label="Conversation details"
-      className="flex h-full min-h-0 w-full flex-col border-l border-border-light bg-white dark:border-gray-700/30 dark:bg-gray-800/20"
+      className="flex h-full min-h-0 w-full flex-col border-l border-border-light bg-white dark:border-border-dark/30 dark:bg-chrome-dark"
     >
-      <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border-light px-3 dark:border-gray-700/30">
+      <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border-light px-3 dark:border-border-dark/30">
         <h2 className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">Details</h2>
         <IconButton label="Close details" onClick={onClose}><X size={18} /></IconButton>
       </header>
 
-      <div className="shrink-0 border-b border-border-light px-2 pt-2 dark:border-gray-700/30" role="tablist">
+      <div className="shrink-0 border-b border-border-light px-2 pt-2 dark:border-border-dark/30" role="tablist">
         <div className="flex gap-1">
           {TABS.map(({ id, label, icon: Icon }) => (
             <button
@@ -64,7 +64,7 @@ export const ContextPanel: React.FC<{
               {c.kind === 'dm' ? (
                 <Avatar name={c.name} src={c.avatarUrl} size={72} className="mx-auto" presence={c.presence} />
               ) : (
-                <span className="mx-auto grid h-[72px] w-[72px] place-items-center rounded-2xl bg-slate-100 text-2xl font-bold text-slate-500 dark:bg-gray-700/60 dark:text-slate-300">
+                <span className="mx-auto grid h-[72px] w-[72px] place-items-center rounded-2xl bg-slate-100 text-2xl font-bold text-slate-500 dark:bg-card-dark/60 dark:text-slate-300">
                   #
                 </span>
               )}
@@ -82,7 +82,7 @@ export const ContextPanel: React.FC<{
               ].map(({ icon: Icon, label }) => (
                 <button
                   key={label}
-                  className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:border-gray-700/50 dark:bg-gray-800/50 dark:text-text-secondary-dark dark:hover:bg-gray-700/50"
+                  className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-secondary-dark dark:hover:bg-card-dark/50"
                 >
                   <Icon size={16} /> {label}
                 </button>

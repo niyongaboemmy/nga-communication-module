@@ -18,9 +18,9 @@ export const SignIn: React.FC = () => {
   if (isAuthenticated) return <Navigate to="/app" replace />;
 
   return (
-    <div className="grid min-h-full place-items-center bg-slate-50 px-4 dark:bg-slate-900">
+    <div className="grid min-h-full place-items-center bg-slate-50 px-4 dark:bg-chrome-dark">
       <main className="w-full max-w-sm">
-        <div className="rounded-xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+        <div className="rounded-xl border border-slate-200 bg-white p-8 shadow-sm dark:border-border-dark dark:bg-elevated-dark">
           <div className="mb-6 flex items-center gap-3">
             <Logo size={40} decorative />
             <div>

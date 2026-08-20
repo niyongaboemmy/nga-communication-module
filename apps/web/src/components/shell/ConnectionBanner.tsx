@@ -44,7 +44,7 @@ export const ConnectionBanner: React.FC<{ status: ConnectionStatus }> = ({ statu
       className={`animate-fade-in flex shrink-0 items-center justify-center gap-2 px-4 py-1.5 text-xs font-medium ${
         reconnecting
           ? 'bg-amber-50 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
-          : 'bg-slate-800 text-slate-100 dark:bg-gray-700 dark:text-slate-100'
+          : 'bg-slate-800 text-slate-100 dark:bg-card-dark dark:text-slate-100'
       }`}
     >
       {reconnecting ? <RefreshCw size={13} className="animate-spin" /> : <CloudOff size={13} />}

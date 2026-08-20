@@ -73,7 +73,7 @@ const AppTile: React.FC<{
     >
       <span className="relative mb-1.5">
         <span
-          className={`flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg border border-gray-100 bg-white shadow-[0_4px_10px_rgba(0,0,0,0.06)] transition-all duration-200 group-hover:scale-105 dark:border-gray-700/50 dark:bg-gray-800 dark:shadow-[0_4px_14px_rgba(0,0,0,0.3)] ${cardHover}`}
+          className={`flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg border border-gray-100 bg-white shadow-[0_4px_10px_rgba(0,0,0,0.06)] transition-all duration-200 group-hover:scale-105 dark:border-border-dark/50 dark:bg-elevated-dark dark:shadow-[0_4px_14px_rgba(0,0,0,0.3)] ${cardHover}`}
         >
           {iconUrl && !broken ? (
             <img
@@ -167,7 +167,7 @@ export const AppsSwitcher: React.FC = () => {
              backdrop left to sample — the 5% would just show the panes bleeding
              through unblurred. Opaque gives the frosted-panel *appearance* the
              sibling apps intend, which is the thing that has to match. */
-          className="animate-pop absolute left-0 z-60 mt-2 w-[300px] origin-top-left overflow-hidden rounded-2xl bg-white shadow-[0_16px_40px_rgba(0,0,0,0.15)] ring-1 ring-black/5 sm:w-[340px] dark:bg-gray-900 dark:shadow-[0_16px_40px_rgba(0,0,0,0.5)] dark:ring-white/10"
+          className="animate-pop absolute left-0 z-60 mt-2 w-[300px] origin-top-left overflow-hidden rounded-2xl bg-white shadow-[0_16px_40px_rgba(0,0,0,0.15)] ring-1 ring-black/5 sm:w-[340px] dark:bg-chrome-dark dark:shadow-[0_16px_40px_rgba(0,0,0,0.5)] dark:ring-white/10"
         >
           <div className="p-3.5 pb-0">
             <div className="mb-3 flex items-center justify-between">
@@ -187,7 +187,7 @@ export const AppsSwitcher: React.FC = () => {
               <button
                 onClick={() => setOpen(false)}
                 aria-label="Close"
-                className="rounded-full p-1.5 text-gray-400 transition-all duration-200 hover:bg-gray-100 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+                className="rounded-full p-1.5 text-gray-400 transition-all duration-200 hover:bg-gray-100 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-elevated-dark dark:hover:text-gray-200"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -204,7 +204,7 @@ export const AppsSwitcher: React.FC = () => {
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search for apps..."
                 aria-label="Search for apps"
-                className="w-full rounded-full border border-gray-200 bg-gray-50 py-2 pl-9 pr-3 text-xs text-text-primary-light transition-all placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-700/50 dark:bg-gray-800/50 dark:text-text-primary-dark dark:placeholder:text-gray-500"
+                className="w-full rounded-full border border-gray-200 bg-gray-50 py-2 pl-9 pr-3 text-xs text-text-primary-light transition-all placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-primary-dark dark:placeholder:text-gray-500"
               />
             </div>
           </div>
@@ -227,7 +227,7 @@ export const AppsSwitcher: React.FC = () => {
 
             {filtered.length === 0 && !showBackToMis && (
               <div className="py-8 text-center">
-                <span className="mx-auto mb-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-gray-50 dark:bg-gray-800">
+                <span className="mx-auto mb-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-gray-50 dark:bg-elevated-dark">
                   <Search className="h-5 w-5 text-gray-300 dark:text-gray-600" />
                 </span>
                 <p className="text-xs font-medium text-text-secondary-light dark:text-text-secondary-dark/70">

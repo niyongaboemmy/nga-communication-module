@@ -48,8 +48,8 @@ export const SsoCallback: React.FC = () => {
   }, [navigate, setSession]);
 
   return (
-    <div className="min-h-full grid place-items-center bg-slate-50 px-4 dark:bg-slate-950">
-      <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <div className="min-h-full grid place-items-center bg-slate-50 px-4 dark:bg-background-dark">
+      <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm dark:border-border-dark dark:bg-chrome-dark">
         {!error ? (
           <>
             <div className="mx-auto mb-5 h-8 w-8 animate-spin rounded-full border-2 border-slate-200 border-t-brand-500" />
@@ -65,7 +65,7 @@ export const SsoCallback: React.FC = () => {
             <p className="mt-1 mb-6 text-sm text-slate-500 dark:text-slate-400">{error}</p>
             <button
               onClick={() => navigate('/')}
-              className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-border-dark dark:text-slate-200 dark:hover:bg-elevated-dark"
             >
               <ArrowLeft size={15} /> Back to sign in
             </button>

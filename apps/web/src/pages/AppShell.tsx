@@ -75,7 +75,7 @@ const RailLink: React.FC<{ entry: NavEntry; badge?: number }> = ({ entry, badge 
               `hidden` on touch widths where hover does not exist. */}
           <span
             role="tooltip"
-            className="pointer-events-none absolute left-full z-60 ml-3 hidden whitespace-nowrap rounded-lg bg-slate-900 px-2 py-1 text-xs font-medium text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 md:block dark:bg-gray-700"
+            className="pointer-events-none absolute left-full z-60 ml-3 hidden whitespace-nowrap rounded-lg bg-slate-900 px-2 py-1 text-xs font-medium text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 md:block dark:bg-card-dark"
           >
             {label}
           </span>
@@ -88,13 +88,13 @@ const RailLink: React.FC<{ entry: NavEntry; badge?: number }> = ({ entry, badge 
 const Rail: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modules, admin }) => (
   <nav
     aria-label="Modules"
-    className="relative z-30 hidden w-16 shrink-0 flex-col items-center gap-1.5 border-r border-border-light bg-white py-3 md:flex dark:border-gray-700/30 dark:bg-gray-800/30"
+    className="relative z-30 hidden w-16 shrink-0 flex-col items-center gap-1.5 border-r border-border-light bg-white py-3 md:flex dark:border-border-dark/30 dark:bg-chrome-dark"
   >
     {modules.map((entry) => <RailLink key={entry.to} entry={entry} />)}
 
     {admin.length > 0 && (
       <>
-        <div className="my-1.5 h-px w-7 bg-border-light dark:bg-gray-700/50" />
+        <div className="my-1.5 h-px w-7 bg-border-light dark:bg-card-dark/50" />
         {admin.map((entry) => <RailLink key={entry.to} entry={entry} />)}
       </>
     )}
@@ -150,7 +150,7 @@ const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modu
     <>
       <nav
         aria-label="Modules"
-        className="pb-safe relative z-30 flex shrink-0 items-stretch gap-0.5 border-t border-border-light bg-white/95 px-1.5 pt-1 backdrop-blur-md md:hidden dark:border-gray-700/40 dark:bg-gray-800/90"
+        className="pb-safe relative z-30 flex shrink-0 items-stretch gap-0.5 border-t border-border-light bg-white/95 px-1.5 pt-1 backdrop-blur-md md:hidden dark:border-border-dark/40 dark:bg-chrome-dark/90"
       >
         {primary.map((entry) => <TabLink key={entry.to} entry={entry} />)}
         {overflow.length > 0 && (
@@ -169,8 +169,8 @@ const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modu
       {sheetOpen && (
         <div className="fixed inset-0 z-80 md:hidden" role="dialog" aria-modal="true" aria-label="More">
           <div className="absolute inset-0 bg-black/40" onClick={() => setSheetOpen(false)} />
-          <div className="pb-safe animate-fade-in absolute inset-x-0 bottom-0 rounded-t-3xl border-t border-border-light bg-white p-3 dark:border-gray-700/40 dark:bg-gray-800">
-            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300 dark:bg-gray-600" />
+          <div className="pb-safe animate-fade-in absolute inset-x-0 bottom-0 rounded-t-3xl border-t border-border-light bg-white p-3 dark:border-border-dark/40 dark:bg-elevated-dark">
+            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300 dark:bg-border-dark" />
             <div className="grid grid-cols-4 gap-1">
               {overflow.map(({ to, icon: Icon, label }) => (
                 <NavLink
@@ -178,7 +178,7 @@ const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modu
                   to={to}
                   className="flex flex-col items-center gap-2 rounded-2xl px-1 py-3 text-center text-[11px] font-medium text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
                 >
-                  <span className="grid h-11 w-11 place-items-center rounded-2xl bg-surface-light text-text-secondary-light dark:bg-gray-700/50 dark:text-text-secondary-dark">
+                  <span className="grid h-11 w-11 place-items-center rounded-2xl bg-surface-light text-text-secondary-light dark:bg-card-dark/50 dark:text-text-secondary-dark">
                     <Icon size={20} />
                   </span>
                   <span className="leading-tight">{label}</span>
@@ -244,7 +244,7 @@ const UserMenu: React.FC = () => {
       {open && (
         <div
           role="menu"
-          className="animate-pop absolute right-0 z-60 mt-2 w-60 origin-top-right rounded-2xl border border-border-light bg-white p-1.5 shadow-xl shadow-slate-900/5 dark:border-gray-700/50 dark:bg-gray-800 dark:shadow-black/40"
+          className="animate-pop absolute right-0 z-60 mt-2 w-60 origin-top-right rounded-2xl border border-border-light bg-white p-1.5 shadow-xl shadow-slate-900/5 dark:border-border-dark/50 dark:bg-elevated-dark dark:shadow-black/40"
         >
           <div className="flex items-center gap-3 rounded-xl px-2.5 py-2.5">
             <Avatar name={user.name} src={user.avatarUrl} size={38} />
@@ -257,7 +257,7 @@ const UserMenu: React.FC = () => {
               </p>
             </div>
           </div>
-          <div className="my-1 h-px bg-border-light dark:bg-gray-700/50" />
+          <div className="my-1 h-px bg-border-light dark:bg-card-dark/50" />
           <button
             role="menuitem"
             onClick={signOut}
@@ -281,7 +281,7 @@ const TopBar: React.FC = () => {
          hangs off it — above the panes below. The thread header and the
          conversation list both use backdrop-blur, which creates a stacking
          context; without this the later sibling would paint over the menus. */
-      className="relative z-50 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-border-light/70 bg-white/80 px-3 backdrop-blur-md sm:px-4 dark:border-gray-700/40 dark:bg-gray-800/50"
+      className="relative z-50 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-border-light/70 bg-white/80 px-3 backdrop-blur-md sm:px-4 dark:border-border-dark/40 dark:bg-chrome-dark/80"
     >
       {/* Left cluster — waffle then logo, identical to the MIS and TaskMentor. */}
       <div className="flex min-w-0 items-center gap-1 sm:gap-2">
@@ -298,11 +298,11 @@ const TopBar: React.FC = () => {
           input: the real surface is a command palette, and a fake input that
           steals focus on a phone is a trap. */}
       <button
-        className="hidden max-w-md flex-1 items-center gap-2 rounded-xl border border-border-light bg-surface-light px-3 py-2 text-sm text-text-secondary-light transition-colors duration-150 hover:border-blue-300 hover:bg-white md:flex dark:border-gray-700/50 dark:bg-gray-800/60 dark:text-text-secondary-dark dark:hover:border-blue-800 dark:hover:bg-gray-800"
+        className="hidden max-w-md flex-1 items-center gap-2 rounded-xl border border-border-light bg-surface-light px-3 py-2 text-sm text-text-secondary-light transition-colors duration-150 hover:border-blue-300 hover:bg-white md:flex dark:border-border-dark/50 dark:bg-chrome-dark/70 dark:text-text-secondary-dark dark:hover:border-blue-800 dark:hover:bg-chrome-dark"
       >
         <Search size={15} />
         <span className="flex-1 text-left">Search people, channels and messages</span>
-        <kbd className="hidden items-center gap-0.5 rounded-md border border-border-light bg-white px-1.5 py-0.5 font-sans text-[10px] font-semibold text-text-secondary-light lg:flex dark:border-gray-600 dark:bg-gray-700 dark:text-text-secondary-dark">
+        <kbd className="hidden items-center gap-0.5 rounded-md border border-border-light bg-white px-1.5 py-0.5 font-sans text-[10px] font-semibold text-text-secondary-light lg:flex dark:border-border-dark dark:bg-card-dark dark:text-text-secondary-dark">
           <Command size={9} />K
         </kbd>
       </button>
@@ -315,14 +315,14 @@ const TopBar: React.FC = () => {
         <IconButton label="Notifications" className="relative">
           <Bell size={18} />
           {/* Placeholder dot until the Phase 5 notification centre feeds it. */}
-          <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-red-500 ring-2 ring-white dark:ring-gray-800" />
+          <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-red-500 ring-2 ring-white dark:ring-border-dark" />
         </IconButton>
 
         <IconButton label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} onClick={toggleTheme}>
           {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
         </IconButton>
 
-        <div className="mx-1 hidden h-6 w-px bg-border-light sm:block dark:bg-gray-700/60" />
+        <div className="mx-1 hidden h-6 w-px bg-border-light sm:block dark:bg-card-dark/60" />
         <UserMenu />
       </div>
     </header>

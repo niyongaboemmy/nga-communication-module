@@ -45,7 +45,7 @@ const ThreadHeader: React.FC<{
   const Icon = c.kind === 'dm' ? null : KIND_ICON[c.kind];
 
   return (
-    <header className="relative z-20 flex h-14 min-w-0 shrink-0 items-center gap-2 border-b border-border-light bg-white/90 px-2 backdrop-blur-md sm:px-4 dark:border-gray-700/30 dark:bg-gray-800/40">
+    <header className="relative z-20 flex h-14 min-w-0 shrink-0 items-center gap-2 border-b border-border-light bg-white/90 px-2 backdrop-blur-md sm:px-4 dark:border-border-dark/30 dark:bg-chrome-dark/80">
       {/* Back is the mobile push-navigation affordance; on md+ both panes are
           visible at once so it would be meaningless. */}
       <IconButton label="Back to conversations" className="md:hidden" onClick={onBack}>
@@ -59,7 +59,7 @@ const ThreadHeader: React.FC<{
         {c.kind === 'dm' ? (
           <Avatar name={c.name} src={c.avatarUrl} size={34} presence={c.presence} />
         ) : (
-          <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 dark:bg-gray-700/60 dark:text-slate-300">
+          <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 dark:bg-card-dark/60 dark:text-slate-300">
             {Icon && <Icon size={17} />}
           </span>
         )}
@@ -139,7 +139,7 @@ const MessageRow: React.FC<{ message: Message; newGroup: boolean }> = ({ message
   if (m.system) {
     return (
       <li className="flex justify-center px-4 py-2">
-        <span className="rounded-full bg-surface-light px-3 py-1 text-xs text-text-secondary-light dark:bg-gray-800/60 dark:text-text-secondary-dark">
+        <span className="rounded-full bg-surface-light px-3 py-1 text-xs text-text-secondary-light dark:bg-elevated-dark/70 dark:text-text-secondary-dark">
           {m.body}
         </span>
       </li>
@@ -179,7 +179,7 @@ const MessageRow: React.FC<{ message: Message; newGroup: boolean }> = ({ message
           className={`message-body px-3.5 py-2 text-sm ${
             mine
               ? 'bubble-out bg-blue-600 text-white'
-              : 'bubble-in border border-border-light bg-white text-text-primary-light dark:border-gray-700/40 dark:bg-gray-800 dark:text-text-primary-dark'
+              : 'bubble-in border border-border-light bg-white text-text-primary-light dark:border-border-dark/40 dark:bg-elevated-dark dark:text-text-primary-dark'
           } ${m.status === 'failed' ? 'ring-1 ring-red-400' : ''}`}
         >
           <Body text={m.body} />
@@ -190,7 +190,7 @@ const MessageRow: React.FC<{ message: Message; newGroup: boolean }> = ({ message
               key={a.id}
               href="#"
               className={`mt-2 flex items-center gap-2.5 rounded-xl px-2.5 py-2 transition-colors duration-150 ${
-                mine ? 'bg-white/15 hover:bg-white/25' : 'bg-surface-light hover:bg-slate-100 dark:bg-gray-700/50 dark:hover:bg-gray-700'
+                mine ? 'bg-white/15 hover:bg-white/25' : 'bg-surface-light hover:bg-slate-100 dark:bg-card-dark/50 dark:hover:bg-card-dark'
               }`}
             >
               <FileText size={18} className="shrink-0 opacity-80" />
@@ -220,7 +220,7 @@ const MessageRow: React.FC<{ message: Message; newGroup: boolean }> = ({ message
                 className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors duration-150 ${
                   r.mine
                     ? 'border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-                    : 'border-border-light bg-white text-text-secondary-light hover:bg-surface-light dark:border-gray-700 dark:bg-gray-800 dark:text-text-secondary-dark'
+                    : 'border-border-light bg-white text-text-secondary-light hover:bg-surface-light dark:border-border-dark dark:bg-elevated-dark dark:text-text-secondary-dark'
                 }`}
               >
                 <span>{r.emoji}</span>
@@ -240,7 +240,7 @@ const MessageRow: React.FC<{ message: Message; newGroup: boolean }> = ({ message
           the same menu is reached by long-press, which the `…` button also
           opens, so nothing is unreachable without a mouse. */}
       <div
-        className={`absolute -top-3 flex items-center gap-0.5 z-10 rounded-xl border border-border-light bg-white p-0.5 opacity-0 shadow-sm transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 dark:border-gray-700 dark:bg-gray-800 ${
+        className={`absolute -top-3 flex items-center gap-0.5 z-10 rounded-xl border border-border-light bg-white p-0.5 opacity-0 shadow-sm transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
           mine ? 'left-12' : 'right-4'
         }`}
       >
@@ -343,7 +343,7 @@ export const MessageThread: React.FC<{
                   <React.Fragment key={m.id}>
                     {showDay && (
                       <li className="sticky top-0 z-10 flex justify-center py-2">
-                        <span className="rounded-full border border-border-light bg-white/90 px-3 py-0.5 text-[11px] font-semibold text-text-secondary-light backdrop-blur dark:border-gray-700/50 dark:bg-gray-800/90 dark:text-text-secondary-dark">
+                        <span className="rounded-full border border-border-light bg-white/90 px-3 py-0.5 text-[11px] font-semibold text-text-secondary-light backdrop-blur dark:border-border-dark/50 dark:bg-elevated-dark/90 dark:text-text-secondary-dark">
                           {day}
                         </span>
                       </li>

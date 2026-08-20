@@ -151,19 +151,19 @@ export const RolesPermissions: React.FC = () => {
             <input
               autoFocus placeholder="Role name" value={newRole.name}
               onChange={(e) => setNewRole({ ...newRole, name: e.target.value })}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-border-dark dark:bg-chrome-dark dark:text-slate-100"
             />
             <select
               value={newRole.level}
               onChange={(e) => setNewRole({ ...newRole, level: e.target.value })}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-border-dark dark:bg-chrome-dark dark:text-slate-100"
             >
               {LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
             <input
               placeholder="Description (optional)" value={newRole.description}
               onChange={(e) => setNewRole({ ...newRole, description: e.target.value })}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-border-dark dark:bg-chrome-dark dark:text-slate-100"
             />
             <div className="flex gap-2">
               <Button onClick={create} disabled={!newRole.name.trim() || saving}>Create</Button>
@@ -178,15 +178,15 @@ export const RolesPermissions: React.FC = () => {
 
       <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
         <Card className="h-fit overflow-hidden">
-          <ul className="divide-y divide-slate-100 dark:divide-slate-700">
+          <ul className="divide-y divide-slate-100 dark:divide-border-dark">
             {roles.map((role) => (
               <li key={role.id}>
                 <button
                   onClick={() => setSelectedId(role.id)}
                   className={`flex w-full items-start gap-2 px-4 py-3 text-left transition-colors ${
                     role.id === selectedId
-                      ? 'bg-blue-50 dark:bg-slate-700'
-                      : 'hover:bg-slate-50 dark:hover:bg-slate-700/50'
+                      ? 'bg-blue-50 dark:bg-card-dark'
+                      : 'hover:bg-slate-50 dark:hover:bg-card-dark/50'
                   }`}
                 >
                   <div className="min-w-0 flex-1">
@@ -210,7 +210,7 @@ export const RolesPermissions: React.FC = () => {
 
         {selected && catalog && (
           <Card className="overflow-hidden">
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-700">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-border-dark">
               <div>
                 <div className="flex items-center gap-2">
                   <ShieldCheck size={16} className="text-blue-600 dark:text-blue-400" />
@@ -236,12 +236,12 @@ export const RolesPermissions: React.FC = () => {
             </div>
 
             {!canManage && (
-              <p className="border-b border-slate-100 bg-slate-50 px-5 py-2 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-400">
+              <p className="border-b border-slate-100 bg-slate-50 px-5 py-2 text-xs text-slate-500 dark:border-border-dark dark:bg-chrome-dark/50 dark:text-slate-400">
                 You have read-only access to roles. ROLES_PERMISSIONS_MANAGE is required to edit them.
               </p>
             )}
 
-            <div className="divide-y divide-slate-100 dark:divide-slate-700">
+            <div className="divide-y divide-slate-100 dark:divide-border-dark">
               {catalog.categoryOrder.map((category) => {
                 const perms = catalog.grouped[category] ?? [];
                 const onCount = perms.filter((p) => draft.has(p.key)).length;
@@ -269,13 +269,13 @@ export const RolesPermissions: React.FC = () => {
                           key={p.key}
                           title={p.description}
                           className={`flex items-start gap-2 rounded-lg px-2 py-1.5 text-sm ${
-                            canManage ? 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50' : 'cursor-default'
+                            canManage ? 'cursor-pointer hover:bg-slate-50 dark:hover:bg-card-dark/50' : 'cursor-default'
                           }`}
                         >
                           <input
                             type="checkbox" checked={draft.has(p.key)} disabled={!canManage}
                             onChange={() => toggle(p.key)}
-                            className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600"
+                            className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-border-dark"
                           />
                           <span className="min-w-0">
                             <span className="block font-mono text-xs text-slate-700 dark:text-slate-200">{p.key}</span>

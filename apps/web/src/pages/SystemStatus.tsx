@@ -50,7 +50,7 @@ export const SystemStatus: React.FC = () => {
 
       <ul className="space-y-3">
         {services.map((s) => (
-          <li key={s.key} className="flex items-start gap-3 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
+          <li key={s.key} className="flex items-start gap-3 rounded-xl border border-slate-200 p-4 dark:border-border-dark">
             <span className="mt-0.5">
               {s.state === 'checking' && <Loader2 size={18} className="animate-spin text-slate-400" />}
               {s.state === 'healthy' && <CheckCircle2 size={18} className="text-emerald-500" />}

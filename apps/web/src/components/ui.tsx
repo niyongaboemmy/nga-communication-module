@@ -15,7 +15,7 @@ import React from 'react';
 
 export const Card: React.FC<{ className?: string; children: React.ReactNode }> = ({ className = '', children }) => (
   <div
-    className={`rounded-xl border border-border-light bg-card-light dark:border-gray-700/40 dark:bg-gray-800/40 ${className}`}
+    className={`rounded-xl border border-border-light bg-card-light dark:border-border-dark/40 dark:bg-elevated-dark/40 ${className}`}
   >
     {children}
   </div>
@@ -42,7 +42,7 @@ export const Button: React.FC<ButtonProps> = ({
     primary: 'bg-blue-600 text-white hover:bg-blue-700 shadow-sm shadow-blue-600/20',
     secondary:
       'border border-border-light bg-white text-text-primary-light hover:bg-surface-light ' +
-      'dark:border-gray-700 dark:bg-gray-800 dark:text-text-primary-dark dark:hover:bg-gray-700',
+      'dark:border-border-dark dark:bg-elevated-dark dark:text-text-primary-dark dark:hover:bg-card-dark',
     ghost:
       'text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light ' +
       'dark:text-text-secondary-dark dark:hover:bg-surface-dark dark:hover:text-text-primary-dark',
@@ -108,7 +108,7 @@ export const PresenceDot: React.FC<{
     role="img"
     aria-label={presence}
     style={style}
-    className={`block rounded-full ring-2 ring-white dark:ring-gray-900 ${PRESENCE_TONE[presence]} ${className}`}
+    className={`block rounded-full ring-2 ring-white dark:ring-border-dark ${PRESENCE_TONE[presence]} ${className}`}
   />
 );
 
@@ -233,13 +233,13 @@ export const PageHeader: React.FC<{
 
 export const Spinner: React.FC<{ className?: string }> = ({ className = '' }) => (
   <div
-    className={`h-5 w-5 animate-spin rounded-full border-2 border-border-light border-t-blue-600 dark:border-gray-700 dark:border-t-blue-500 ${className}`}
+    className={`h-5 w-5 animate-spin rounded-full border-2 border-border-light border-t-blue-600 dark:border-border-dark dark:border-t-blue-500 ${className}`}
   />
 );
 
 /** UX-4 — skeletons for list and conversation loading, never spinners. */
 export const Skeleton: React.FC<{ className?: string }> = ({ className = '' }) => (
-  <div className={`skeleton rounded-lg bg-slate-200/70 dark:bg-gray-700/50 ${className}`} />
+  <div className={`skeleton rounded-lg bg-slate-200/70 dark:bg-card-dark/50 ${className}`} />
 );
 
 export const EmptyState: React.FC<{
@@ -279,7 +279,7 @@ export const SearchInput: React.FC<
       type="search"
       className={`w-full rounded-xl border border-border-light bg-surface-light py-2 text-sm text-text-primary-light placeholder:text-text-secondary-light/80 ` +
         `focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 ` +
-        `dark:border-gray-700/50 dark:bg-gray-800/60 dark:text-text-primary-dark dark:placeholder:text-text-secondary-dark/70 dark:focus:bg-gray-800 ` +
+        `dark:border-border-dark/50 dark:bg-elevated-dark/60 dark:text-text-primary-dark dark:placeholder:text-text-secondary-dark/70 dark:focus:bg-elevated-dark ` +
         `${icon ? 'pl-9 pr-3' : 'px-3'} ${className}`}
       {...rest}
     />

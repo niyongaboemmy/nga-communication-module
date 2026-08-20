@@ -38,7 +38,7 @@ export const AuditLog: React.FC = () => {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-400">
+              <thead className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-border-dark dark:bg-chrome-dark/50 dark:text-slate-400">
                 <tr>
                   <th className="px-4 py-3 font-medium">When</th>
                   <th className="px-4 py-3 font-medium">Actor</th>
@@ -47,9 +47,9 @@ export const AuditLog: React.FC = () => {
                   <th className="px-4 py-3 font-medium">IP</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+              <tbody className="divide-y divide-slate-100 dark:divide-border-dark">
                 {entries.map((e) => (
-                  <tr key={e.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/40">
+                  <tr key={e.id} className="hover:bg-slate-50 dark:hover:bg-card-dark/40">
                     <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500 tabular-nums dark:text-slate-400">
                       {new Date(e.created_at).toLocaleString()}
                     </td>

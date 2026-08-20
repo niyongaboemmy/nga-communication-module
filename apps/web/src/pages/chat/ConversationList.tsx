@@ -47,7 +47,7 @@ const Row: React.FC<{
             className={`grid h-[38px] w-[38px] shrink-0 place-items-center rounded-xl ${
               c.kind === 'announcement'
                 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
-                : 'bg-slate-100 text-slate-500 dark:bg-gray-700/60 dark:text-slate-300'
+                : 'bg-slate-100 text-slate-500 dark:bg-card-dark/60 dark:text-slate-300'
             }`}
           >
             {Icon && <Icon size={18} />}
@@ -155,8 +155,8 @@ export const ConversationList: React.FC<{
   const canCreate = can(['CHANNEL_CREATE', 'DM_START']);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-white dark:bg-gray-800/20">
-      <div className="shrink-0 border-b border-border-light px-3 py-3 dark:border-gray-700/30">
+    <div className="flex h-full min-h-0 flex-col bg-white dark:bg-chrome-dark">
+      <div className="shrink-0 border-b border-border-light px-3 py-3 dark:border-border-dark/30">
         <div className="mb-2.5 flex items-center justify-between gap-2">
           <h2 className="text-base font-bold tracking-tight text-text-primary-light dark:text-text-primary-dark">
             Chat

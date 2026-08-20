@@ -24,8 +24,8 @@ export const PendingAccess: React.FC = () => {
   };
 
   return (
-    <div className="grid min-h-full place-items-center bg-slate-50 px-4 dark:bg-slate-900">
-      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-8 text-center dark:border-slate-700 dark:bg-slate-800">
+    <div className="grid min-h-full place-items-center bg-slate-50 px-4 dark:bg-chrome-dark">
+      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-8 text-center dark:border-border-dark dark:bg-elevated-dark">
         <Logo size={36} className="mx-auto mb-4" decorative />
         <div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-full bg-amber-100 text-amber-600 dark:bg-amber-900/40 dark:text-amber-400">
           <Clock size={24} />

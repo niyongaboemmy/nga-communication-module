@@ -84,7 +84,7 @@ export const Users: React.FC = () => {
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && load(query)}
             placeholder="Search by name or email"
-            className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+            className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm dark:border-border-dark dark:bg-elevated-dark dark:text-slate-100"
           />
         </div>
         <Button variant="secondary" onClick={() => load(query)}>Search</Button>
@@ -98,7 +98,7 @@ export const Users: React.FC = () => {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-400">
+              <thead className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-border-dark dark:bg-chrome-dark/50 dark:text-slate-400">
                 <tr>
                   <th className="px-4 py-3 font-medium">User</th>
                   <th className="px-4 py-3 font-medium">Role</th>
@@ -107,9 +107,9 @@ export const Users: React.FC = () => {
                   {canManage && <th className="px-4 py-3 font-medium" />}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+              <tbody className="divide-y divide-slate-100 dark:divide-border-dark">
                 {users.map((u) => (
-                  <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/40">
+                  <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-card-dark/40">
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900 dark:text-slate-100">{u.name}</div>
                       <div className="text-xs text-slate-400">{u.email || `MIS #${u.mis_user_id}`}</div>
@@ -119,7 +119,7 @@ export const Users: React.FC = () => {
                         <select
                           value={u.role_id ?? ''}
                           onChange={(e) => assignRole(u, e.target.value === '' ? null : Number(e.target.value))}
-                          className="rounded-lg border border-slate-300 px-2 py-1 text-xs dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                          className="rounded-lg border border-slate-300 px-2 py-1 text-xs dark:border-border-dark dark:bg-elevated-dark dark:text-slate-100"
                         >
                           <option value="">— Unassigned —</option>
                           {roles.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}

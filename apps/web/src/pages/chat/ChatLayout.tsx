@@ -64,7 +64,7 @@ export const ChatLayout: React.FC = () => {
           beyond it: a list that grows with the viewport just makes long lines
           of preview text, it does not become more readable. */}
       <div
-        className={`w-full min-w-0 shrink-0 border-r border-border-light md:w-72 lg:w-80 dark:border-gray-700/30 ${
+        className={`w-full min-w-0 shrink-0 border-r border-border-light md:w-72 lg:w-80 dark:border-border-dark/30 ${
           showListOnMobile ? 'flex' : 'hidden md:flex'
         }`}
       >
