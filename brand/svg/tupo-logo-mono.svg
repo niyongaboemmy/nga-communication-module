@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 579 256" role="img" aria-label="Tupo">
+  <title>Tupo</title>
+  <g transform="translate(0,28.2) scale(1.5600)" fill="currentColor" fill-rule="evenodd">
+    <path d="M64 10a48 48 0 1 1 0 96 48 48 0 0 1-15.5-2.6l-26.8 17.4 8.9-25.6A48 48 0 0 1 64 10zm-28 34a6.5 6.5 0 0 0 0 13h56a6.5 6.5 0 0 0 0-13zm0 22a6.5 6.5 0 0 0 0 13h34a6.5 6.5 0 0 0 0-13z"/>
+  </g>
+  <text x="236" y="174" fill="currentColor"
+    font-family="Inter, ui-sans-serif, system-ui, -apple-system, sans-serif"
+    font-size="152" font-weight="600" letter-spacing="-5">Tupo</text>
+</svg>

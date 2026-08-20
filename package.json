@@ -1,0 +1,32 @@
+{
+  "name": "tupo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tupo — NGA unified communication platform (chat, meet, files, mail, feed)",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run preflight && concurrently -n api,realtime,files,worker,web -c blue,magenta,yellow,gray,green \"npm run dev -w @tupo/api\" \"npm run dev -w @tupo/realtime\" \"npm run dev -w @tupo/files\" \"npm run dev -w @tupo/worker\" \"npm run dev -w @tupo/web\"",
+    "dev:backend": "concurrently -n api,realtime,files,worker -c blue,magenta,yellow,gray \"npm run dev -w @tupo/api\" \"npm run dev -w @tupo/realtime\" \"npm run dev -w @tupo/files\" \"npm run dev -w @tupo/worker\"",
+    "build": "npm run build -w @tupo/shared && npm run build -w @tupo/db && npm run build -w @tupo/api && npm run build -w @tupo/realtime && npm run build -w @tupo/files && npm run build -w @tupo/worker && npm run build -w @tupo/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "db:migrate": "npm run migrate -w @tupo/db",
+    "db:seed": "npm run seed -w @tupo/db",
+    "health": "node scripts/health.mjs",
+    "clean": "rm -rf apps/*/dist packages/*/dist apps/web/dist",
+    "preflight": "node scripts/preflight.mjs",
+    "verify": "node scripts/verify.mjs",
+    "e2e": "node scripts/e2e-sso.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2"
+  }
+}

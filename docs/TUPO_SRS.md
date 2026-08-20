@@ -221,7 +221,7 @@ Tupo is a **new, independently deployable product** in the NGA ecosystem. It doe
 ### 3.5 Assumptions and dependencies
 
 - **A-1** MIS SSO client credentials for Tupo will be issued before development of the auth module begins.
-- **A-2** A DNS zone (`tupo.nga.ac.rw` or equivalent) and wildcard TLS certificate will be available.
+- **A-2** A DNS zone (`tupo.amashuri.com` or equivalent) and wildcard TLS certificate will be available.
 - **A-3** UDP ports required by the SFU and TURN can be opened on the security group; if institutional firewalls block UDP, TURN over TCP/TLS on 443 is the fallback and will be enabled by default.
 - **A-4** Object storage is S3 or a self-hosted MinIO cluster on EBS; the file service must work identically against either.
 - **A-5** An SMTP relay (Amazon SES or institutional relay) is available for outbound mail.
@@ -400,7 +400,7 @@ Requirements are identified as `FR-<MODULE>-<n>` and carry a priority: **M** (mu
 | FR-AUTH-4 | M | Multi-device sessions are supported. Each device has an id, a label (browser/OS), a last-seen timestamp and an IP; a user can list and revoke devices individually or all-but-current. |
 | FR-AUTH-5 | M | WebSocket connections authenticate with the same access token during the handshake and are force-disconnected on token revocation. |
 | FR-AUTH-6 | M | `preferred_theme` from the MIS token is applied on first load. |
-| FR-AUTH-7 | S | Break-glass local admin accounts (max 3, TOTP-protected) so the platform can be administered while MIS is down. |
+| ~~FR-AUTH-7~~ | — | ~~Break-glass local admin accounts (max 3, TOTP-protected).~~ **STRUCK.** Tupo must have no login of its own, and a break-glass credential is a second login path. Replaced by the sibling-app approach: an `ADMIN_USERNAMES`/`ADMIN_EMAILS` allowlist that elevates a user *who has already authenticated through the MIS*. No credential is ever stored. |
 | FR-AUTH-8 | M | Bot/integration principals authenticate with scoped, revocable API keys — never with a user session. |
 | FR-AUTH-9 | M | All authentication events (login, refresh, revoke, failure) are written to the audit log with IP and user agent. |
 
@@ -591,7 +591,7 @@ Requirements are identified as `FR-<MODULE>-<n>` and carry a priority: **M** (mu
 | FR-INT-3 | M | Public REST API v1 with API-key or OAuth2 client-credential auth, documented in OpenAPI, rate-limited per key. |
 | FR-INT-4 | S | Bot framework: bot identities that can post, read subscribed channels, respond to slash commands and render interactive buttons. |
 | FR-INT-5 | S | Embeddable widgets so the MIS and TaskMentor can render a Tupo channel or a "start meeting" button inside their own pages, authenticated by short-lived embed tokens. |
-| FR-INT-6 | M | Deep links (`tupo://` / `https://tupo.nga.ac.rw/c/{id}/{seq}`) so notifications from other systems land on the exact message. |
+| FR-INT-6 | M | Deep links (`tupo://` / `https://tupo.amashuri.com/c/{id}/{seq}`) so notifications from other systems land on the exact message. |
 
 ---
 
@@ -852,7 +852,7 @@ Search / notifications / admin
 
 ### 9.1 Connection lifecycle
 
-1. Client connects to `wss://tupo.nga.ac.rw/socket.io` with the access token in the handshake auth payload.
+1. Client connects to `wss://tupo.amashuri.com/socket.io` with the access token in the handshake auth payload.
 2. Server validates the token, registers `sess:{user_id}:{device_id} → node_id` in Redis, joins the socket to `user:{user_id}` and to a room per open conversation.
 3. Client sends `sync:request` with `{conversations: [{id, last_seq}], last_notification_id}`.
 4. Server replies `sync:response` with missed messages, receipt updates, membership changes and presence — or `sync:reset` when the gap is too large.
@@ -1029,7 +1029,7 @@ Tupo therefore enforces, and the UI communicates, the following limits:
 | SEC-A3 | Access tokens are 15-minute JWTs signed with RS256; refresh tokens are opaque, rotated on every use, and reuse of a consumed refresh token revokes the whole device family. |
 | SEC-A4 | Cookies are `httpOnly`, `Secure`, `SameSite=Lax`; CSRF double-submit token on state-changing requests. |
 | SEC-A5 | Session revocation propagates to live WebSockets within 5 seconds. |
-| SEC-A6 | TOTP MFA is mandatory for system administrators and break-glass accounts. |
+| SEC-A6 | MFA is the MIS's responsibility, not Tupo's — Tupo holds no credential to protect with a second factor. Administrator MFA is enforced at the MIS. |
 
 ### 12.2 Authorization
 
@@ -1142,7 +1142,7 @@ Scaling procedure is documented as a runbook: add stateless `tupo-api`/`tupo-rea
 
 ### 13.6 Maintainability
 
-- Monorepo (pnpm workspaces) with `packages/shared` holding Zod schemas, socket event types and constants used by both client and server, so contract drift is impossible.
+- Monorepo (**npm workspaces** — chosen over pnpm to match the sibling NGA repos and their deploy scripts) with `packages/shared` holding Zod schemas, socket event types and constants used by both client and server, so contract drift is impossible.
 - Strict TypeScript (`strict: true`, `noUncheckedIndexedAccess`); ESLint + Prettier enforced in CI.
 - Conventional Commits; every change reviewed; migrations are versioned, forward-only and reversible-by-compensation.
 - Minimum 70% unit-test coverage on business logic; 100% of auth and permission logic covered.
@@ -1182,6 +1182,7 @@ Estimated steady-state cost at this footprint is roughly **US$450–700/month** 
 | 3478 | UDP/TCP | STUN/TURN | Public |
 | 7880/7881 | TCP | LiveKit signalling | Public via Nginx |
 | 50000–60000 | UDP | SFU media | Public |
+| 5190–5194 | TCP | api · realtime · files · worker · web (behind nginx) | localhost only |
 | 5432 / 6379 | TCP | PostgreSQL / Redis | VPC security group only |
 | 7700 / 3310 | TCP | Meilisearch / clamd | VPC security group only |
 
@@ -1344,7 +1345,7 @@ The system is accepted when all of the following are demonstrated on the product
 # ── tupo-api ──────────────────────────────────────────────
 NODE_ENV=production
 PORT=4000
-APP_URL=https://tupo.nga.ac.rw
+APP_URL=https://tupo.amashuri.com
 DATABASE_URL=postgres://tupo:***@data-1:5432/tupo
 REDIS_URL=redis://data-1:6379/0
 JWT_PRIVATE_KEY_PATH=/etc/tupo/keys/jwt.pem
@@ -1353,11 +1354,11 @@ ACCESS_TOKEN_TTL=15m
 REFRESH_TOKEN_TTL=30d
 
 # MIS SSO (see SSO_CLIENT_INTEGRATION.md)
-NGA_MIS_BASE_URL=https://ngamis.isengesho.com
-MIS_LOGIN_URL=https://nga.ac.rw/mis/login
+NGA_MIS_BASE_URL=https://mis.amashuri.com
+MIS_LOGIN_URL=https://mis.amashuri.com/login
 SSO_CLIENT_ID=***
 SSO_CLIENT_SECRET=***
-SSO_REDIRECT_URI=https://tupo.nga.ac.rw/sso/callback
+SSO_REDIRECT_URI=https://tupo.amashuri.com/sso/callback
 
 # ── tupo-realtime ─────────────────────────────────────────
 SOCKET_PORT=4001
@@ -1377,10 +1378,10 @@ CLAMAV_HOST=worker-1
 CLAMAV_PORT=3310
 
 # ── tupo-sfu / meet ───────────────────────────────────────
-LIVEKIT_URL=wss://meet.tupo.nga.ac.rw
+LIVEKIT_URL=wss://meet.tupo.amashuri.com
 LIVEKIT_API_KEY=***
 LIVEKIT_API_SECRET=***
-TURN_URLS=turn:turn.tupo.nga.ac.rw:3478,turns:turn.tupo.nga.ac.rw:443
+TURN_URLS=turn:turn.tupo.amashuri.com:3478,turns:turn.tupo.amashuri.com:443
 TURN_SHARED_SECRET=***
 
 # ── worker / search / mail / push ─────────────────────────
@@ -1389,15 +1390,15 @@ MEILISEARCH_MASTER_KEY=***
 SMTP_HOST=email-smtp.eu-west-1.amazonaws.com
 SMTP_USER=***
 SMTP_PASS=***
-MAIL_FROM="NGA Tupo <no-reply@nga.ac.rw>"
+MAIL_FROM="NGA Tupo <no-reply@amashuri.com>"
 VAPID_PUBLIC_KEY=***
 VAPID_PRIVATE_KEY=***
 
 # ── tupo-web ──────────────────────────────────────────────
-VITE_API_URL=https://tupo.nga.ac.rw/api/v1
-VITE_SOCKET_URL=wss://tupo.nga.ac.rw
-VITE_LIVEKIT_URL=wss://meet.tupo.nga.ac.rw
-VITE_MIS_LOGIN_URL=https://nga.ac.rw/mis/login
+VITE_API_URL=https://tupo.amashuri.com/api/v1
+VITE_SOCKET_URL=wss://tupo.amashuri.com
+VITE_LIVEKIT_URL=wss://meet.tupo.amashuri.com
+VITE_MIS_LOGIN_URL=https://mis.amashuri.com/login
 VITE_SSO_CLIENT_ID=***
 ```
 

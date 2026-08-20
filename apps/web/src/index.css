@@ -1,0 +1,168 @@
+@import "tailwindcss";
+
+/**
+ * Tupo shares the NGA Central MIS / TaskMentor design language so the four apps
+ * read as one system: Inter at a 15px base, a blue-600 accent, the same
+ * semantic slate palette, and dark mode driven by a `.dark` class on <html>.
+ *
+ * Tailwind 4 resolves `dark:` from prefers-color-scheme by default, which would
+ * ignore the user's explicit choice and the preferred_theme carried over from
+ * the MIS. Bind it to the class instead — matching the MIS's `darkMode: "class"`.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+
+  /* Semantic surface tokens — byte-identical to the `colors` block in
+     nga_central_mis/frontend/tailwind.config.js and nga-task-mentor/client's,
+     so `bg-surface-light`, `text-text-secondary-dark` etc. mean the same thing
+     in all three apps. SRS §15.2 asks for exactly this: one token set per theme. */
+  --color-background-light: #ffffff;
+  --color-background-dark: #0f172a;
+  --color-surface-light: #f8fafc;
+  --color-surface-dark: #1e293b;
+  --color-card-light: #ffffff;
+  --color-card-dark: #334155;
+  --color-text-primary-light: #1e293b;
+  --color-text-primary-dark: #f1f5f9;
+  --color-text-secondary-light: #64748b;
+  --color-text-secondary-dark: #94a3b8;
+  --color-border-light: #e2e8f0;
+  --color-border-dark: #475569;
+
+  /* SRS §15.2 motion scale: 150ms for micro-interactions, 250ms for panels. */
+  --duration-micro: 150ms;
+  --duration-panel: 250ms;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  /* Denser base scale, matching the MIS: Windows browsers render the default
+     16px rem scale noticeably larger than macOS at the same resolution. */
+  font-size: 15px;
+}
+
+@media (min-width: 1920px) {
+  html { font-size: 14.5px; }
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  line-height: 1.6;
+  font-family: var(--font-sans);
+  /* A chat app is a fixed-height application surface, not a document: the
+     panes scroll, the page never does. Without this, iOS Safari rubber-bands
+     the whole shell every time the user flicks the message list. */
+  overscroll-behavior: none;
+}
+* { font-optical-sizing: auto; }
+
+table td, table th, .tabular-nums { font-variant-numeric: tabular-nums; }
+
+:root { color-scheme: light; }
+:root.dark { color-scheme: dark; }
+
+/* ============================================================
+   Scrollbars — macOS style, hidden until hover. Lifted from the
+   MIS so a message list scrolls the same way a MIS table does.
+   ============================================================ */
+* { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+*:hover { scrollbar-color: rgb(148 163 184 / 0.5) transparent; }
+.dark *:hover { scrollbar-color: rgb(100 116 139 / 0.6) transparent; }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 9999px; }
+*:hover::-webkit-scrollbar-thumb { background: rgb(148 163 184 / 0.5); }
+.dark *:hover::-webkit-scrollbar-thumb { background: rgb(100 116 139 / 0.6); }
+
+/* ============================================================
+   Motion
+   ============================================================ */
+@keyframes tupo-fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes tupo-slide-in-right { from { transform: translateX(100%); } to { transform: none; } }
+@keyframes tupo-slide-in-left { from { transform: translateX(-100%); } to { transform: none; } }
+@keyframes tupo-pop { from { opacity: 0; transform: scale(0.96) translateY(-4px); } to { opacity: 1; transform: none; } }
+
+.animate-fade-in { animation: tupo-fade-in var(--duration-micro) ease-out both; }
+.animate-panel-in-right { animation: tupo-slide-in-right var(--duration-panel) cubic-bezier(0.32, 0.72, 0, 1) both; }
+.animate-panel-in-left { animation: tupo-slide-in-left var(--duration-panel) cubic-bezier(0.32, 0.72, 0, 1) both; }
+.animate-pop { animation: tupo-pop var(--duration-micro) ease-out both; }
+
+/* SRS §15.2: motion is disabled entirely under prefers-reduced-motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================
+   Stacking order
+   ------------------------------------------------------------
+   Panes use backdrop-blur and sticky positioning, both of which
+   create stacking contexts — so "later sibling wins" decides what
+   covers what unless every layer is declared. One scale, used
+   everywhere, in ascending order:
+
+     10  in-pane chrome    sticky day dividers, message hover actions
+     20  pane headers      the thread header
+     30  navigation        icon rail, mobile tab bar
+     50  top bar           and 60 for the menus hanging off it
+     70  overlay scrims    the dimmed backdrop behind a panel
+     80  overlay panels    context panel, mobile "More" sheet
+
+   Anything floating above the page — a menu, a drawer, a sheet —
+   belongs at 60 or above. Nothing should introduce a value outside
+   this list.
+   ============================================================ */
+
+/* ============================================================
+   Chat-specific primitives
+   ============================================================ */
+
+/* The app occupies the visual viewport, not the layout viewport, so the
+   composer stays docked above the on-screen keyboard on mobile rather than
+   being pushed below the fold. `dvh` is the modern fix; the `vh` line is the
+   fallback for browsers that predate it. */
+.h-app { height: 100vh; height: 100dvh; }
+
+/* Notches and home indicators. Applied to the mobile tab bar and composer. */
+.pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
+.pt-safe { padding-top: env(safe-area-inset-top, 0px); }
+
+/* Message bubbles use the 16px radius from §15.2, with the corner nearest the
+   author squared off so a run of messages reads as one block. */
+.bubble-in  { border-radius: 16px 16px 16px 4px; }
+.bubble-out { border-radius: 16px 16px 4px 16px; }
+
+/* Long words, URLs and pasted tokens must wrap inside a bubble rather than
+   forcing the whole pane to scroll sideways. */
+.message-body {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.5; /* §15.2: 1.5 for message bodies */
+}
+
+/* UX-4: skeletons, never spinners, for list and conversation loading. */
+@keyframes tupo-shimmer { 100% { transform: translateX(100%); } }
+.skeleton { position: relative; overflow: hidden; }
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.45), transparent);
+  animation: tupo-shimmer 1.6s infinite;
+}
+.dark .skeleton::after {
+  background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.06), transparent);
+}

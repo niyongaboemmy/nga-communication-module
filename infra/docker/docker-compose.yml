@@ -1,0 +1,64 @@
+# Tupo development dependencies.
+#
+# Optional: if you already run PostgreSQL and Redis locally (Homebrew), Tupo
+# works without Docker. This file exists so a clean machine can get the full
+# dependency set — including the ones Phase 2+ needs — in one command:
+#   docker compose -f infra/docker/docker-compose.yml up -d
+name: tupo
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: tupo
+      POSTGRES_PASSWORD: tupo
+      POSTGRES_DB: tupo_dev
+    ports: ["5432:5432"]
+    volumes: ["tupo_pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tupo -d tupo_dev"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: ["tupo_redisdata:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  # Phase 2 — object storage for tupo-files (STORAGE_DRIVER=s3).
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: tupo
+      MINIO_ROOT_PASSWORD: tupo_dev_secret
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["tupo_miniodata:/data"]
+
+  # Phase 5 — typo-tolerant search.
+  meilisearch:
+    image: getmeili/meilisearch:v1.11
+    environment:
+      MEILI_MASTER_KEY: tupo_dev_master_key
+      MEILI_ENV: development
+    ports: ["7700:7700"]
+    volumes: ["tupo_meilidata:/meili_data"]
+
+  # Phase 3 — WebRTC SFU. Host networking is required: the SFU advertises its
+  # own IP in ICE candidates, and Docker's bridge NAT breaks that.
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --dev --bind 0.0.0.0
+    network_mode: host
+    profiles: ["meet"]
+
+volumes:
+  tupo_pgdata:
+  tupo_redisdata:
+  tupo_miniodata:
+  tupo_meilidata:

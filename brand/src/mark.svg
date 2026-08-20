@@ -1,0 +1,26 @@
+<!--
+  Tupo master mark — hand-authored vector, the source of truth for every asset.
+
+  A round speech bubble with two message lines knocked out of it.
+
+  Why this shape:
+  - ONE shape. The supplied artwork was five, whose 5.7%-of-box strokes render
+    as a 1.1px line at a 20px header icon — sub-pixel, so it greyed out.
+  - Round, not a rounded-square container. A filled container reads as an app
+    icon pasted into the page; the circle carries ~60% of that visual mass and
+    sits with the interface instead of shouting over it.
+  - The lines are KNOCKED OUT, not painted white, so a single file works on
+    light and dark and supports currentColor for mono use.
+  - Two lines rather than three dots: it reads as a message, not a loading
+    state, and the wider-over-narrower pairing survives to 16px.
+
+  Contract for build-assets.py: the children of #artwork are copied verbatim
+  into every output, so only attributes valid in BOTH SVG and JSX may be used
+  (x, y, width, height, rx, cx, cy, r, d, opacity, transform). No hyphenated
+  attributes — fill-rule is applied by the generator on the wrapping group.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <g id="artwork">
+    <path d="M64 10a48 48 0 1 1 0 96 48 48 0 0 1-15.5-2.6l-26.8 17.4 8.9-25.6A48 48 0 0 1 64 10zm-28 34a6.5 6.5 0 0 0 0 13h56a6.5 6.5 0 0 0 0-13zm0 22a6.5 6.5 0 0 0 0 13h34a6.5 6.5 0 0 0 0-13z"/>
+  </g>
+</svg>
