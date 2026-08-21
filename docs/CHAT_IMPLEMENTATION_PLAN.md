@@ -1031,3 +1031,97 @@ that a test was silently depending on the absence of.
 
 UI gate: **139 / 0**. API gates unchanged at 51/43/35/42/34/54/52, unit tests
 233 / 0, typecheck and build clean.
+
+
+## 19. The chat dock — chat from anywhere but Meet
+
+Chat is the thing people are interrupted by, and until now the only way to
+answer was to navigate to `/app/chat` and abandon whatever you were doing. The
+notification bridge already reached every page; this gives the notification
+somewhere to go.
+
+### Where it appears, and where it must not
+
+Hidden on `/app/chat` — the chat page *is* the chat, so a floating shortcut to
+it is noise — and on `/app/meet*` and `/meet/*`. A meeting already has its own
+room-scoped chat panel, and a second, different chat floating over a call is a
+way to send a message to the wrong place. Navigating into either suppressed
+route closes an open dock, so it is never left hanging over a page that hides
+it.
+
+It also lifts clear of `MiniCall`: both default to the bottom-right corner and
+would otherwise sit on top of each other, so the dock reads `shouldShowMini`
+and moves up.
+
+### It is a shell, on purpose
+
+The list, thread and composer inside it are the **same components the full page
+renders**. Link unfurling, translation, threads, uploads, reactions and the
+windowed message log therefore behave identically in a 380px dock, and a fix to
+any of them lands in both places at once. What the dock adds is framing: where
+it sits, when it appears, and how you get out of it. The side panels it cannot
+sensibly show at that width — search, saved, channel settings — hand off to the
+full page rather than being reimplemented.
+
+### Hoisting the store
+
+`ChatProvider` moved from inside `ChatLayout` to above `<Routes>`. Two
+providers would mean two conversation lists, two sets of socket handlers, and
+two unread counts that disagree with each other. Every effect inside is guarded
+on `user`, so mounting it over the sign-in route costs nothing, and the list now
+survives navigating away and back instead of refetching each time. A gate check
+asserts there is exactly one conversation list on the chat page, because "one
+of everything" is the property that hoisting could quietly break.
+
+### Interaction
+
+Full sheet on a phone (a 380px window on a 390px screen is a worse version of
+the page it is shortcutting to), a docked window on desktop that leaves the page
+visible behind it. `⌘/Ctrl ⇧ M` toggles — chosen because `⌘K`, `⌘F` and `⌘⇧S`
+are already bound inside the chat page and a global binding would shadow them.
+Escape closes, except inside the composer where Escape already means something.
+Click-outside closes, on `pointerdown` so a drag out of the panel does not count
+as leaving, and ignoring portalled dialogs the dock itself opened. Focus returns
+to the launcher on close.
+
+The badge pulses when the count **rises**, not whenever it is non-zero — a badge
+that animates forever is wallpaper — and turns rose when any of the unread are
+mentions, because colour is the only thing that distinguishes them at 14px.
+
+### Two real defects found while testing this
+
+**A poll vote could be silently lost.** `PollCard` fetches the poll on mount and
+subscribes to `poll:updated`. If a vote landed while that initial GET was still
+in flight, the event applied first and the fetch — a snapshot taken *before* the
+vote — resolved second and overwrote it. The bars then sat at the old numbers
+until a reload, the exact failure the component's own comment says it exists to
+prevent. It presented as a gate that failed 2 runs in 3. Fixed with a counter of
+applied live updates: the fetch now defers to anything newer rather than
+assuming it is authoritative. Pre-existing; the hoist only shifted timing enough
+to expose it.
+
+**Tailwind cannot see a class name built at runtime.** The first version
+composed the panel's position as `` sm:${bottom} ``, which produces a valid class
+string in the DOM that was never compiled into the stylesheet, so it silently
+did nothing. Positions are now whole literal strings.
+
+### Three failures that were the tests, not the code
+
+Recorded because each looked like a product bug for a while:
+
+- **`boundingBox()` measures the transform.** The panel opens with
+  `animate-dock-in`, which starts at `scale(0.94)`; measuring mid-animation read
+  367px on a 390px screen and looked like the mobile breakpoint was broken. A
+  browser probe showed the panel was a correct 390px all along. The check uses
+  `offsetWidth`, which is the layout width and ignores transforms.
+- **Two random ids do not sort predictably.** The same-name picker check asserted
+  which twin was in row 0 — a coin flip. Compared as a set now.
+- **`img.complete` sampled once.** The attachment ACL check asked "has it loaded"
+  a few milliseconds too early and reported a working ACL as broken. It waits for
+  the `load` event now.
+
+### Regression
+
+UI gate **156 / 0**, meet UI **65 / 0**, core 51, live 43, threads 35, files 42,
+notifications 34, power 54, admin 52, runtime 8/8, unit tests 233 / 0.
+Typecheck, build and `npm audit --omit=dev` all clean.

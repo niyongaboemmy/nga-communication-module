@@ -443,8 +443,21 @@ try {
 
   // The bug this phase exists to fix: the recipient must actually be able to
   // load the bytes, not just see a broken box.
+  /*
+   * Waited for, not sampled. `complete` is false until the bytes have been
+   * fetched and decoded, so evaluating it the instant the button appears asks
+   * "has it loaded yet" a few milliseconds too early and reports a working ACL
+   * as a broken one.
+   */
   const loaded = await bobImageMsg.locator('img').first()
-    .evaluate((img) => (img).complete && (img).naturalWidth > 0)
+    .evaluate((img) => (img).complete && (img).naturalWidth > 0
+      ? true
+      : new Promise((resolve) => {
+          img.addEventListener('load', () => resolve((img).naturalWidth > 0), { once: true });
+          img.addEventListener('error', () => resolve(false), { once: true });
+          setTimeout(() => resolve((img).naturalWidth > 0), 10000);
+        }),
+    { timeout: 15000 })
     .catch(() => false);
   check('the recipient’s browser can actually load the image — the Phase 0 ACL could not',
     loaded === true, String(loaded));
@@ -705,9 +718,11 @@ try {
   await twinRows.first().waitFor({ timeout: 8000 });
   check('two people with the same name both appear — they are two accounts',
     (await twinRows.count()) === 2, `${await twinRows.count()} rows`);
+  // Compared as a set: the two ids are random hex and do not sort predictably,
+  // so asserting which one is in row 0 is a coin flip, not a check.
+  const twinText = (await twinRows.nth(0).innerText()) + (await twinRows.nth(1).innerText());
   check('and each row shows the email, so they can be told apart',
-    (await twinRows.nth(0).innerText()).includes(twinA.id)
-      && (await twinRows.nth(1).innerText()).includes(twinB.id));
+    twinText.includes(twinA.id) && twinText.includes(twinB.id));
 
   const tints = await pick.locator('[role="option"] span[aria-hidden="true"]')
     .evaluateAll((els) => els.slice(0, 2).map((e) => e.className));
@@ -1068,6 +1083,128 @@ try {
   const noSideScroll = await A.page.evaluate(
     () => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1);
   check('with no horizontal overflow from the spacers', noSideScroll);
+
+  /* ── The chat dock on other pages ─────────────────────────────────────── */
+
+  /*
+   * The dock's entire reason to exist is being reachable from somewhere that
+   * is not the chat page, so every check here is run from another route.
+   */
+  const dockButton = A.page.getByRole('button', { name: /^Messages/ });
+
+  check('the launcher is not shown on the chat page itself — it would shortcut to here',
+    (await dockButton.count()) === 0);
+
+  await A.page.goto(`${BASE}/app/meet`, { waitUntil: 'domcontentloaded' });
+  await A.page.waitForTimeout(1500);
+  check('and not in Meet, which has its own room-scoped chat',
+    (await dockButton.count()) === 0);
+
+  await A.page.goto(`${BASE}/app/files`, { waitUntil: 'domcontentloaded' });
+  await A.page.waitForTimeout(1500);
+  check('but it is there on another page', await visible(dockButton, 8000));
+
+  // Bob sends while Alice is on a different page entirely.
+  const dockText = `Dock ping ${randomBytes(3).toString('hex')}`;
+  await B.page.evaluate(async ([text]) => {
+    const t = localStorage.getItem('tupo_token');
+    const convs = await fetch('/api/chat/conversations', {
+      headers: { Authorization: `Bearer ${t}` },
+    }).then((r) => r.json());
+    const dm = convs.data.conversations.find((c) => c.type === 'dm');
+    await fetch(`/api/chat/conversations/${dm.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
+      body: JSON.stringify({ body: text, nonce: `dock-${Date.now()}` }),
+    });
+  }, [dockText]);
+
+  const badged = await A.page.getByRole('button', { name: /Messages, \d+ unread/ })
+    .waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false);
+  check('a message arriving while you are elsewhere badges the launcher',
+    badged, await dockButton.getAttribute('aria-label'));
+
+  await dockButton.click();
+  const dock = A.page.getByRole('dialog', { name: 'Messages' });
+  check('clicking it opens the panel without leaving the page', await visible(dock, 5000));
+  check('and the page underneath is still the one you were on',
+    new URL(A.page.url()).pathname === '/app/files', new URL(A.page.url()).pathname);
+
+  check('the panel lists your conversations', await visible(dock.getByText(/Bosco Rugema/).first(), 8000));
+  await dock.getByText(/Bosco Rugema/).first().click();
+  check('opening one shows the message that just arrived',
+    await visible(dock.getByText(dockText), 8000));
+
+  // Replying from the dock must be a real send, not a stub.
+  const dockReply = `Replied from the dock ${randomBytes(3).toString('hex')}`;
+  // Bob has been moved through several channels by earlier sections, so point
+  // him back at the DM first — otherwise this asserts against whatever log he
+  // happens to have open and fails for a reason that has nothing to do with
+  // the dock.
+  await B.page.locator('li', { hasText: /Ada Umutoni/ }).first().click();
+  await B.page.waitForTimeout(800);
+  await dock.locator('#composer').fill(dockReply);
+  await dock.locator('#composer').press('Enter');
+  check('you can reply from the dock, and it reaches the other person',
+    await visible(B.page.getByRole('log', { name: 'Messages' }).getByText(dockReply), 12000));
+
+  await A.page.screenshot({ path: `${SHOTS}/19-dock-open.png` });
+
+  check('Back returns to the conversation list',
+    await (async () => {
+      await dock.getByRole('button', { name: 'Back to conversations' }).click();
+      return visible(dock.getByText(/Bosco Rugema/).first(), 4000);
+    })());
+
+  await A.page.keyboard.press('Escape');
+  check('Escape closes it', await hidden(dock, 4000));
+
+  await A.page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+M' : 'Control+Shift+M');
+  check('and the keyboard shortcut opens it again', await visible(dock, 5000));
+
+  // The full-page control must hand off, not open a second copy of chat.
+  await dock.getByRole('button', { name: 'Open the full chat page' }).click();
+  await A.page.waitForTimeout(1200);
+  check('the expand control takes you to the full chat page',
+    new URL(A.page.url()).pathname === '/app/chat', new URL(A.page.url()).pathname);
+  check('and the dock is gone once you are there', await hidden(dock, 4000));
+
+  // Hoisting the provider must not have given the page two of everything.
+  check('there is exactly one conversation list, not one per mount point',
+    (await A.page.getByRole('heading', { name: 'Chat', exact: true }).count()) === 1,
+    `${await A.page.getByRole('heading', { name: 'Chat', exact: true }).count()} found`);
+
+  await A.page.goto(`${BASE}/app/files`, { waitUntil: 'domcontentloaded' });
+  await A.page.waitForTimeout(1200);
+  const phoneDock = A.page.getByRole('button', { name: /^Messages/ });
+  await A.page.setViewportSize({ width: 390, height: 844 });
+  await A.page.waitForTimeout(600);
+  await phoneDock.click();
+  const dockSheet = A.page.getByRole('dialog', { name: 'Messages' });
+  const sheetShown = await visible(dockSheet, 5000);
+  /*
+   * offsetWidth, not boundingBox().
+   *
+   * The panel opens with `animate-dock-in`, which starts at scale(0.94).
+   * boundingBox() reports the *transformed* rectangle, so measuring during the
+   * 200ms animation reads 367px on a 390px screen and looks like a layout bug.
+   * offsetWidth is the layout width and ignores the transform entirely.
+   */
+  const sheetGeom = await A.page.evaluate(() => {
+    const el = document.querySelector('[role="dialog"][aria-label="Messages"]');
+    return { w: el?.offsetWidth ?? 0, avail: document.documentElement.clientWidth };
+  });
+  check('on a phone the dock opens as a full sheet, not a 380px window',
+    sheetShown && sheetGeom.w >= sheetGeom.avail - 2,
+    `${sheetGeom.w}px of ${sheetGeom.avail}px available`);
+  check('and the launcher hides behind it rather than covering a message',
+    !(await phoneDock.isVisible()));
+  await A.page.screenshot({ path: `${SHOTS}/20-dock-phone.png` });
+
+  await A.page.setViewportSize({ width: 1440, height: 900 });
+  await A.page.waitForTimeout(500);
+  await A.page.goto(`${BASE}/app/chat`, { waitUntil: 'domcontentloaded' });
+  await A.page.waitForSelector('#composer');
 
   /* ── Responsive ───────────────────────────────────────────────────────── */
 

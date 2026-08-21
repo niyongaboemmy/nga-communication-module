@@ -4,6 +4,8 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { MeetCallProvider } from './context/MeetCallContext';
 import { NotificationProvider } from './context/NotificationContext';
 import { MiniCall } from './components/meet/MiniCall';
+import { ChatProvider } from './pages/chat/ChatProvider';
+import { ChatDock } from './pages/chat/ChatDock';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ChatNotificationBridge } from './context/ChatNotificationBridge';
 import { usePermissions } from './hooks/usePermissions';
@@ -66,6 +68,14 @@ export const App: React.FC = () => (
         the floating mini-call something to render.
       */}
       <MeetCallProvider>
+      {/*
+        Chat state lives here rather than inside /app/chat, because the dock
+        renders on every other page and both must read the same store. Two
+        providers would mean two conversation lists and two unread counts that
+        disagree. Every effect inside is guarded on `user`, so mounting it over
+        the sign-in route costs nothing.
+      */}
+      <ChatProvider>
         <Routes>
           <Route path="/" element={<SignIn />} />
           <Route path="/sso/callback" element={<SsoCallback />} />
@@ -119,6 +129,12 @@ export const App: React.FC = () => (
         <ErrorBoundary fallback={null}>
           <ChatNotificationBridge />
         </ErrorBoundary>
+
+        {/* The launcher, on every page but chat itself and Meet. Inside the
+            provider above, so it reads the same conversations and the same
+            unread counts the chat page does. */}
+        <ChatDock />
+      </ChatProvider>
       </MeetCallProvider>
       </NotificationProvider>
     </BrowserRouter>

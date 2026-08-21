@@ -113,6 +113,22 @@ table td, table th, .tabular-nums { font-variant-numeric: tabular-nums; }
 .animate-panel-in-left { animation: tupo-slide-in-left var(--duration-panel) cubic-bezier(0.32, 0.72, 0, 1) both; }
 .animate-pop { animation: tupo-pop var(--duration-micro) ease-out both; }
 
+/*
+ * The chat dock, growing out of its launcher in the bottom-right corner.
+ * transform-origin is what sells it — without it the panel scales from its
+ * own middle and reads as a modal appearing rather than a drawer opening.
+ * On a phone the panel is a full sheet, where the same keyframe is just a
+ * short rise; that is the right amount of motion for a sheet too.
+ */
+@keyframes tupo-dock-in {
+  from { opacity: 0; transform: scale(0.94) translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+.animate-dock-in {
+  transform-origin: bottom right;
+  animation: tupo-dock-in 200ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
 /* SRS §15.2: motion is disabled entirely under prefers-reduced-motion. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

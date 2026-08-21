@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { BarChart3, Check, Lock, Users } from 'lucide-react';
 import { Spinner } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
@@ -27,10 +27,29 @@ export const PollCard: React.FC<{
   const [busy, setBusy] = useState(false);
   const [missing, setMissing] = useState(false);
 
+  /*
+   * Counts live updates that have already been applied.
+   *
+   * The initial GET and the socket race each other. If a vote is cast while
+   * that GET is still in flight, the event arrives first, the fetch resolves
+   * second, and the response — a snapshot taken *before* the vote — overwrites
+   * it. The bars then sit at the old numbers until a reload, which is the exact
+   * failure this component exists to avoid.
+   *
+   * So the fetch defers to anything newer rather than assuming it is authoritative.
+   */
+  const liveUpdates = useRef(0);
+
   useEffect(() => {
     let cancelled = false;
+    const seenBefore = liveUpdates.current;
     chatApi.getPollByMessage(conversationId, messageId)
-      .then((p) => { if (!cancelled) setPoll(p); })
+      .then((p) => {
+        if (cancelled) return;
+        // A live update landed while this was in flight; it is newer than us.
+        if (liveUpdates.current !== seenBefore) return;
+        setPoll(p);
+      })
       .catch(() => { if (!cancelled) setMissing(true); });
     return () => { cancelled = true; };
   }, [conversationId, messageId]);
@@ -42,7 +61,10 @@ export const PollCard: React.FC<{
       const incoming = p.poll as chatApi.WirePoll;
       // Only this poll. One channel can hold several, and every vote in any of
       // them arrives on the same event.
-      if (incoming?.messageId === messageId) setPoll(incoming);
+      if (incoming?.messageId === messageId) {
+        liveUpdates.current += 1;
+        setPoll(incoming);
+      }
     };
     socket.on('poll:updated', onUpdate);
     return () => { socket.off('poll:updated', onUpdate); };

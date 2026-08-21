@@ -5,7 +5,7 @@ import { ConversationList } from './ConversationList';
 import { MessageThread } from './MessageThread';
 import { Composer } from './Composer';
 import { ContextPanel } from './ContextPanel';
-import { ChatProvider, useChat } from './ChatProvider';
+import { useChat } from './ChatProvider';
 import { ThreadPanel } from './ThreadPanel';
 import { SavedItems } from './SavedItems';
 import { NotificationSettings } from './NotificationSettings';
@@ -298,10 +298,16 @@ const ChatWorkspace: React.FC = () => {
   );
 };
 
+/*
+ * No <ChatProvider> here any more — it is mounted above the router in App.tsx.
+ *
+ * The dock needs the same store on every page, and two providers would mean
+ * two conversation lists, two sets of socket handlers and two unread counts
+ * that disagree with each other. Hoisting it also means the list survives
+ * navigating away and back, instead of refetching each time.
+ */
 export const ChatLayout: React.FC = () => (
-  <ChatProvider>
-    <ErrorBoundary label="chat">
-      <ChatWorkspace />
-    </ErrorBoundary>
-  </ChatProvider>
+  <ErrorBoundary label="chat">
+    <ChatWorkspace />
+  </ErrorBoundary>
 );
