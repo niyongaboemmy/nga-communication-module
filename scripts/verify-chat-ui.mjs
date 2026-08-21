@@ -21,6 +21,7 @@ try {
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import { randomBytes } from 'node:crypto';
+import { purgeUsers } from './lib/purge.mjs';
 
 const ROOT = process.cwd();
 const SHOTS = process.argv[2] ?? `${ROOT}/.chat-ui-shots`;
@@ -110,9 +111,12 @@ const sendReady = (page) =>
  * actually needs to be true.
  */
 const BASE = 'http://localhost:5194';
+const API = 'http://localhost:5190';
 const browser = await chromium.launch();
 const alice = await makeUser('Ada Umutoni');
 const bob = await makeUser('Bosco Rugema');
+/** Extra accounts made mid-run, so the cleanup can remove them too. */
+const cleanupIds = [];
 
 const contexts = [];
 async function openAs(u, width = 1440, height = 900) {
@@ -126,7 +130,7 @@ async function openAs(u, width = 1440, height = 900) {
   page.on('pageerror', (e) => errors.push(String(e)));
   await page.goto(`${BASE}/app/chat`, { waitUntil: 'domcontentloaded' });
   contexts.push(ctx);
-  return { page, errors };
+  return { page, errors, token: u.token, id: u.id };
 }
 
 try {
@@ -143,7 +147,9 @@ try {
   check('the new-conversation dialog opens', true);
 
   await A.page.getByLabel('Search people').fill('Bosco');
-  await A.page.getByRole('button', { name: /Bosco Rugema/ }).first().click();
+  // The person rows are listbox options now, not bare buttons — the picker is
+  // keyboard-navigable and reports its active row via aria-activedescendant.
+  await A.page.getByRole('option', { name: /Bosco Rugema/ }).first().click();
   await A.page.getByRole('button', { name: 'Open chat' }).click();
   await A.page.getByRole('dialog').waitFor({ state: 'detached' });
 
@@ -183,9 +189,12 @@ try {
 
   await B.page.locator('#composer').waitFor();
   await B.page.locator('#composer').type('typing something', { delay: 30 });
-  const typingLine = A.page.getByText(/is typing/);
-  check('a typing indicator reaches the other person',
-    await visible(typingLine, 6000));
+  // Scoped to the thread header: the sidebar row shows a typing line as well
+  // now, and an unscoped match hits both.
+  const typingLine = A.page.locator('section[aria-label] header').getByText(/is typing/);
+  check('a typing indicator reaches the other person', await visible(typingLine, 6000));
+  check('and the sidebar row shows it too, the way WhatsApp does',
+    await visible(A.page.locator('li').filter({ hasText: /is typing/ }).first(), 6000));
   await A.page.screenshot({ path: `${SHOTS}/03-alice-typing.png` });
 
   /* ── Reply back ───────────────────────────────────────────────────────── */
@@ -676,6 +685,60 @@ try {
 
   /* ── Channel directory ────────────────────────────────────────────────── */
 
+  /* ── Same-named people in the picker ──────────────────────────────────── */
+
+  /*
+   * A school has more than one person with a given name. The picker used to
+   * render them as identical rows — same name, same role, same initials, same
+   * avatar colour — with no way to tell which was which.
+   */
+  const twinName = `Twin Uwase ${randomBytes(2).toString('hex')}`;
+  const twinA = await makeUser(twinName);
+  const twinB = await makeUser(twinName);
+  cleanupIds.push(twinA.id, twinB.id);
+
+  await A.page.getByRole('button', { name: 'New conversation' }).click();
+  const pick = A.page.getByRole('dialog', { name: 'New conversation' });
+  await visible(pick, 4000);
+  await pick.getByLabel('Search people').fill(twinName);
+  const twinRows = pick.getByRole('option', { hasText: twinName });
+  await twinRows.first().waitFor({ timeout: 8000 });
+  check('two people with the same name both appear — they are two accounts',
+    (await twinRows.count()) === 2, `${await twinRows.count()} rows`);
+  check('and each row shows the email, so they can be told apart',
+    (await twinRows.nth(0).innerText()).includes(twinA.id)
+      && (await twinRows.nth(1).innerText()).includes(twinB.id));
+
+  const tints = await pick.locator('[role="option"] span[aria-hidden="true"]')
+    .evaluateAll((els) => els.slice(0, 2).map((e) => e.className));
+  check('and they are given different avatar colours rather than one shared tint',
+    tints[0] !== tints[1]);
+
+  // Searching by address narrows to exactly one of the two.
+  await pick.getByLabel('Search people').fill(twinB.id);
+  await A.page.waitForTimeout(700);
+  check('searching by email finds the specific account',
+    (await pick.getByRole('option').count()) === 1,
+    `${await pick.getByRole('option').count()} rows`);
+
+  await pick.getByLabel('Search people').fill(twinName);
+  await A.page.waitForTimeout(700);
+  await pick.getByLabel('Search people').press('ArrowDown');
+  const secondId = await pick.getByRole('option').nth(1).getAttribute('id');
+  check('↓ moves the highlight without leaving the search box',
+    (await pick.getByLabel('Search people').getAttribute('aria-activedescendant')) === secondId,
+    secondId ?? 'none');
+
+  await pick.getByLabel('Search people').press('Enter');
+  check('↵ picks the highlighted person — the right one of the two',
+    (await pick.locator('footer').innerText()).includes(twinName));
+  check('and it is the second row that was chosen, not the first',
+    (await pick.getByRole('option').nth(1).getAttribute('aria-selected')) === 'true');
+
+  await A.page.screenshot({ path: `${SHOTS}/18-same-name-picker.png` });
+  await pick.getByRole('button', { name: 'Close' }).click();
+  await hidden(pick, 4000);
+
   const chanName = `Directory ${randomBytes(3).toString('hex')}`;
   await A.page.getByRole('button', { name: 'New conversation' }).click();
   const newDialog = A.page.getByRole('dialog', { name: 'New conversation' });
@@ -751,6 +814,261 @@ try {
 
   await chanSettings.getByRole('button', { name: 'Close channel settings' }).click();
 
+  /* ── Mention names in the UI ──────────────────────────────────────────── */
+
+  // A mention of somebody who has NOT spoken in the loaded window used to
+  // render "@someone" — the client was inferring names from senders.
+  const quietPerson = await makeUser('Silent Mukamana');
+  cleanupIds.push(quietPerson.id);
+  await A.page.evaluate(async (peer) => {
+    const t = localStorage.getItem('tupo_token');
+    await fetch('/api/chat/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
+      body: JSON.stringify({ type: 'channel', name: `Names ${Date.now()}`, memberIds: [peer] }),
+    });
+  }, quietPerson.id);
+  await A.page.reload({ waitUntil: 'domcontentloaded' });
+  await A.page.waitForSelector('#composer');
+  await A.page.locator('li', { hasText: /^Names/ }).first().click();
+  await A.page.waitForTimeout(700);
+
+  await A.page.locator('#composer').type('@Silent', { delay: 40 });
+  await visible(A.page.getByRole('listbox', { name: 'Mention someone' }), 5000);
+  await A.page.keyboard.press('Enter');
+  await A.page.locator('#composer').type('please check');
+  await A.page.locator('#composer').press('Enter');
+
+  const namesLog = A.page.getByRole('log', { name: 'Messages' });
+  check('a mention of someone who has never spoken still renders their real name',
+    await visible(namesLog.getByText('@Silent Mukamana').first(), 8000));
+  check('and "@someone" never appears',
+    (await namesLog.getByText('@someone').count()) === 0);
+
+  const sidebarPreview = await A.page.locator('li', { hasText: /^Names/ }).first().innerText();
+  check('the sidebar preview shows the name too, not a raw id',
+    sidebarPreview.includes('Silent Mukamana') && !sidebarPreview.includes('<@'),
+    sidebarPreview.replace(/\n/g, ' ').slice(0, 90));
+
+  /* ── Meeting shortcut ─────────────────────────────────────────────────── */
+
+  await A.page.getByRole('button', { name: 'Start or schedule a meeting' }).click();
+  const meetPopover = A.page.getByRole('dialog', { name: 'Start or schedule a meeting' });
+  check('the meeting control opens from the composer', await visible(meetPopover, 5000));
+  // "What is it about?" and "Add to calendar" are Meet's own QuickSchedule.
+  // Finding them here is the proof that the component is reused rather than
+  // reimplemented.
+  check('and reuses the Meet quick-scheduler rather than a second copy of it',
+    await visible(meetPopover.getByPlaceholder('What is it about?'), 5000));
+  check('offering to start a call immediately as well',
+    await visible(meetPopover.getByRole('button', { name: /Start now/ })));
+
+  await meetPopover.getByPlaceholder('What is it about?').fill('Exam briefing');
+  await meetPopover.getByRole('button', { name: /Add to calendar/ }).click();
+  check('scheduling posts a meeting card into the conversation',
+    await visible(namesLog.getByRole('button', { name: /^Join/ }).first(), 12000));
+  check('the card offers the meeting link',
+    await visible(namesLog.getByRole('button', { name: 'Copy the meeting link' }).first()));
+  await A.page.screenshot({ path: `${SHOTS}/16-meet-card.png` });
+
+  /* ── Shortcuts that were advertised but not bound ─────────────────────── */
+
+  const typoText = `Typo mesage ${randomBytes(3).toString('hex')}`;
+  await A.page.locator('#composer').fill(typoText);
+  await A.page.locator('#composer').press('Enter');
+  await visible(namesLog.getByText(typoText).first(), 8000);
+  // Wait for the send to settle. `↑` deliberately skips a message that is still
+  // pending — there is nothing on the server to edit yet — so pressing it the
+  // instant the optimistic bubble appears targets the message before it.
+  await visible(
+    namesLog.locator('li', { hasText: typoText })
+      .getByLabel(/^(Sent|Delivered|Read)$/).first(),
+    8000,
+  );
+
+  await A.page.locator('#composer').press('ArrowUp');
+  const upEditor = A.page.getByLabel('Edit message text');
+  check('↑ on an empty composer opens your last message for editing',
+    await visible(upEditor, 5000));
+  check('and pre-fills it with what you wrote',
+    (await upEditor.inputValue()) === typoText,
+    await upEditor.inputValue());
+  await upEditor.press('Escape');
+
+  await A.page.locator('#composer').fill('not empty');
+  await A.page.locator('#composer').press('ArrowUp');
+  check('but ↑ with text in the box does not hijack the caret',
+    (await A.page.getByLabel('Edit message text').count()) === 0);
+  await A.page.locator('#composer').fill('');
+
+  // Shift+Escape clears every badge, including Bob's unread elsewhere.
+  await B.page.locator('#composer').fill(`Unread for Ada ${randomBytes(2).toString('hex')}`);
+  await B.page.locator('#composer').press('Enter');
+  await A.page.waitForTimeout(1200);
+  check('an unread badge is showing before the shortcut',
+    await visible(A.page.getByLabel(/^\d+ unread/).first(), 8000));
+  // Pressed from the composer on purpose: that is where the caret lives, and
+  // the chord previously did nothing there.
+  await A.page.locator('#composer').press('Shift+Escape');
+  check('⇧Esc marks everything read, even with the caret in the composer',
+    await hidden(A.page.getByLabel(/^\d+ unread/).first(), 8000));
+
+  /* ── Link preview and translation controls ────────────────────────────── */
+
+  await A.page.locator('#composer').fill('Metadata check http://169.254.169.254/latest/');
+  await A.page.locator('#composer').press('Enter');
+  await visible(namesLog.getByText('Metadata check'), 8000);
+  await A.page.waitForTimeout(3000);
+  check('a link to the cloud metadata endpoint renders no preview card — the SSRF guard reaches the UI',
+    (await namesLog.locator('[data-link-preview]').count()) === 0);
+  check('but the URL itself is still a working link — we block fetching it, not saying it',
+    (await namesLog.locator('a[href="http://169.254.169.254/latest/"]').count()) > 0);
+
+  // Sent as the other member, because you cannot translate your own message.
+  const foreignText = 'Bonjour, la reunion commence a neuf heures precises.';
+  await A.page.evaluate(async ([tok, text]) => {
+    const convs = await fetch('/api/chat/conversations', {
+      headers: { Authorization: `Bearer ${tok}` },
+    }).then((r) => r.json());
+    const target = convs.data.conversations.find((c) => c.name?.startsWith('Names'));
+    await fetch(`/api/chat/conversations/${target.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+      body: JSON.stringify({ body: text, nonce: `fr-${Date.now()}` }),
+    });
+  }, [quietPerson.token, foreignText]);
+
+  const foreignRow = namesLog.locator('li', { hasText: foreignText }).first();
+  await foreignRow.waitFor({ timeout: 10000 });
+  await foreignRow.hover();
+  check('a translate control is offered on someone else’s message',
+    await visible(foreignRow.getByRole('button', { name: 'Translate' }), 5000));
+  check('and not on your own — translating what you just typed is not a feature',
+    (await namesLog.locator('li', { hasText: typoText })
+      .getByRole('button', { name: 'Translate' }).count()) === 0);
+
+  await foreignRow.getByRole('button', { name: 'Translate' }).click();
+  await A.page.getByRole('menuitem', { name: 'English' }).click();
+  const translated = await visible(foreignRow.getByText(/machine translation/i), 30000);
+  check('translating shows the result under the original, labelled as a machine translation',
+    translated);
+  check('and the original stays on screen — the translation is a reading aid, not a replacement',
+    await visible(foreignRow.getByText(foreignText)));
+  await A.page.screenshot({ path: `${SHOTS}/17-translate.png` });
+
+  /* ── Virtualisation ───────────────────────────────────────────────────── */
+
+  /*
+   * 600 messages. Note the paging: the thread loads ~40 at a time, so simply
+   * posting a lot of messages proves nothing about windowing — the DOM is small
+   * because most of the log has not been fetched yet. The check has to scroll
+   * back until the in-memory log actually crosses the threshold. An earlier
+   * version of this check asserted "fewer than 200 rows" straight after load and
+   * passed for exactly that wrong reason.
+   */
+  // Posted from Node, not from the page: 600 in-page fetches contend with the
+  // live socket and the browser's own connection limit, and a chunk of them
+  // quietly never landed — which read as "virtualisation never engaged".
+  const bulkHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${A.token}` };
+  const bulkConv = await fetch(`${API}/api/chat/conversations`, { headers: bulkHeaders })
+    .then((r) => r.json())
+    .then((r) => r.data.conversations.find((c) => c.name?.startsWith('Names')));
+  for (let k = 0; k < 20; k++) {
+    await Promise.all(Array.from({ length: 30 }, (_, i) => fetch(
+      `${API}/api/chat/conversations/${bulkConv.id}/messages`, {
+        method: 'POST',
+        headers: bulkHeaders,
+        body: JSON.stringify({ body: `bulk ${k}-${i} filler text of ordinary length`, nonce: `bulk-${k}-${i}` }),
+      })));
+  }
+  const bulkCount = Number((await pool.query(
+    'SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1', [bulkConv.id])).rows[0].n);
+  check('the long conversation really is long — the fixture itself is verified',
+    bulkCount > 560, `${bulkCount} messages`);
+
+  await A.page.reload({ waitUntil: 'domcontentloaded' });
+  await A.page.waitForSelector('#composer');
+  await A.page.locator('li', { hasText: /^Names/ }).first().click();
+  await A.page.waitForTimeout(1500);
+
+  /** Geometry of the scroller that actually holds the log. */
+  const logState = () => A.page.evaluate(() => {
+    let el = document.querySelector('[role="log"]');
+    while (el && el.scrollHeight <= el.clientHeight + 4) el = el.parentElement;
+    if (!el) return null;
+    const box = el.getBoundingClientRect();
+    const rows = [...document.querySelectorAll('[data-message-row]')];
+    // How much of the viewport is actually covered by rendered rows? A window
+    // that has drifted off leaves blank space, and blank space is the failure
+    // mode that matters — a user scrolls and sees nothing.
+    let covered = 0;
+    for (const r of rows) {
+      const b = r.getBoundingClientRect();
+      if (b.bottom > box.top && b.top < box.bottom) {
+        covered += Math.min(b.bottom, box.bottom) - Math.max(b.top, box.top);
+      }
+    }
+    return {
+      rows: rows.length,
+      coverage: Math.round((100 * covered) / box.height),
+      scrollHeight: Math.round(el.scrollHeight),
+      atTopText: rows[0]?.innerText.slice(0, 40) ?? '',
+    };
+  });
+
+  const scrollLogTo = (frac) => A.page.evaluate((f) => {
+    let el = document.querySelector('[role="log"]');
+    while (el && el.scrollHeight <= el.clientHeight + 4) el = el.parentElement;
+    el.scrollTop = (el.scrollHeight - el.clientHeight) * f;
+  }, frac);
+
+  /*
+   * Page back until the scroller is far taller than what is rendered. Note the
+   * measure: the *rendered row count* cannot be used to detect that the log has
+   * grown, because capping it is exactly what windowing does. Scroll extent is
+   * the honest signal — it reflects every message the client holds, rendered or
+   * spacered.
+   */
+  let deep = null;
+  let reachedTop = false;
+  for (let n = 0; n < 20; n++) {
+    await scrollLogTo(0);
+    await A.page.waitForTimeout(1000);
+    deep = await logState();
+    if (/bulk 0-/.test(deep.atTopText)) reachedTop = true;
+    if (deep.scrollHeight > 15000) break;
+  }
+
+  check('scrolling back keeps loading older messages until the log is long',
+    (deep?.scrollHeight ?? 0) > 15000, `${deep?.scrollHeight}px of scroll`);
+  check('and the DOM holds a window of it, not all 600 messages',
+    (deep?.rows ?? 999) < 200, `${deep?.rows} rows rendered`);
+  check('the spacers keep the scrollbar honest — it spans the whole conversation',
+    (deep?.scrollHeight ?? 0) > (deep?.rows ?? 0) * 120,
+    `${deep?.scrollHeight}px for ${deep?.rows} rendered rows`);
+
+  let worstCoverage = 100;
+  for (const frac of [1, 0.6, 0.3, 0.05]) {
+    await scrollLogTo(frac);
+    await A.page.waitForTimeout(900);
+    worstCoverage = Math.min(worstCoverage, (await logState()).coverage);
+  }
+  check('and no scroll position shows blank space where messages should be',
+    worstCoverage >= 85, `${worstCoverage}% of the viewport covered at worst`);
+
+  for (let n = 0; n < 25 && !reachedTop; n++) {
+    await scrollLogTo(0);
+    await A.page.waitForTimeout(800);
+    const st = await logState();
+    if (/Silent Mukamana|bulk 0-/.test(st.atTopText)) reachedTop = true;
+  }
+  check('and the very top is still reachable — the first message, not an empty spacer',
+    reachedTop);
+
+  const noSideScroll = await A.page.evaluate(
+    () => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1);
+  check('with no horizontal overflow from the spacers', noSideScroll);
+
   /* ── Responsive ───────────────────────────────────────────────────────── */
 
   const phone = await browser.newContext({
@@ -793,15 +1111,15 @@ try {
 } finally {
   for (const c of contexts) await c.close().catch(() => {});
   await browser.close();
-  const ids = [alice.id, bob.id];
+  const ids = [alice.id, bob.id, ...cleanupIds];
   // Order matters: files reference users, so deleting users first fails on the
   // foreign key — and a throwing `finally` swallows whatever actually went
   // wrong in the body, which is how this hid a real timeout.
-  await pool.query(
-    `DELETE FROM conversations WHERE created_by = ANY($1::text[]) OR id IN (
-       SELECT conversation_id FROM conversation_members WHERE user_id = ANY($1::text[]))`, [ids]);
-  await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]);
-  await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [ids]);
+  // One helper, in dependency order, each step in its own try/catch — see
+  // scripts/lib/purge.mjs for why the previous inline version leaked users on
+  // every interrupted run.
+  try { await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]); } catch { /* files may not reference these */ }
+  await purgeUsers(pool, ids);
   await pool.end();
 }
 

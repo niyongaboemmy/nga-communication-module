@@ -150,8 +150,16 @@ export const Avatar: React.FC<{
   presence?: Presence;
   /** Channel avatars are square-ish; people are round (§15.2: full for avatars). */
   shape?: 'circle' | 'rounded';
+  /**
+   * What the tint is derived from, when that should not be the name.
+   *
+   * Two people called Aline Uwase otherwise get the same initials *and* the
+   * same colour, which makes them indistinguishable at a glance. Pass a user id
+   * and they get different colours.
+   */
+  tintKey?: string;
   className?: string;
-}> = ({ name, src, size = 36, presence, shape = 'circle', className = '' }) => {
+}> = ({ name, src, size = 36, presence, shape = 'circle', tintKey, className = '' }) => {
   const radius = shape === 'circle' ? 'rounded-full' : 'rounded-xl';
   return (
     <span className={`relative inline-flex shrink-0 ${className}`} style={{ width: size, height: size }}>
@@ -164,7 +172,7 @@ export const Avatar: React.FC<{
       ) : (
         <span
           aria-hidden="true"
-          className={`grid h-full w-full place-items-center bg-gradient-to-br ${tintFor(name)} ${radius} font-semibold text-white`}
+          className={`grid h-full w-full place-items-center bg-gradient-to-br ${tintFor(tintKey ?? name)} ${radius} font-semibold text-white`}
           style={{ fontSize: Math.max(10, size * 0.36) }}
         >
           {initialsOf(name)}
@@ -231,9 +239,20 @@ export const PageHeader: React.FC<{
   </div>
 );
 
+/**
+ * A `<span>`, not a `<div>`.
+ *
+ * A spinner belongs inside paragraphs, buttons and headings — all of which
+ * accept phrasing content only. As a div it produced "In HTML, <div> cannot be
+ * a descendant of <p>" and a hydration warning wherever it was used inline.
+ * `inline-block` keeps the box identical; flex and grid parents blockify their
+ * children anyway, so no existing layout changes.
+ */
 export const Spinner: React.FC<{ className?: string }> = ({ className = '' }) => (
-  <div
-    className={`h-5 w-5 animate-spin rounded-full border-2 border-border-light border-t-blue-600 dark:border-border-dark dark:border-t-blue-500 ${className}`}
+  <span
+    role="status"
+    aria-label="Loading"
+    className={`inline-block h-5 w-5 animate-spin rounded-full border-2 border-border-light border-t-blue-600 dark:border-border-dark dark:border-t-blue-500 ${className}`}
   />
 );
 

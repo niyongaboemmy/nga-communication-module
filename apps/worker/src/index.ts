@@ -6,6 +6,7 @@ import { pingDb } from '@tupo/db';
 import { runMeetWrapUp, type MeetWrapUpData } from './jobs/meetWrapUp.js';
 import { runScheduledMessages } from './jobs/scheduledMessages.js';
 import { runChatSweeps } from './jobs/chatSweeps.js';
+import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -59,6 +60,16 @@ const worker = new Worker(
         processed++;
         lastJobAt = new Date().toISOString();
         return runChatSweeps();
+      }
+
+      // Link previews (FR-MSG-22). Off the send path on purpose — see the job.
+      case 'chat:unfurl': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runUnfurl(
+          job.data as UnfurlJobData,
+          process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/0',
+        );
       }
 
       default:

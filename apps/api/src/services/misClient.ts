@@ -57,3 +57,42 @@ export async function verifyMisSession(misToken: string): Promise<'valid' | 'inv
     return 'unreachable';
   }
 }
+
+/**
+ * Push the user's appearance choice back to the MIS so every NGA app agrees
+ * on it — `PATCH /users/me/theme`, the same endpoint TaskMentor proxies to.
+ *
+ * Returns false rather than throwing: the MIS being slow or down must not stop
+ * a user from switching to dark mode. Tupo's own copy is already saved by the
+ * time this runs, and the next login re-reads the MIS anyway.
+ */
+export async function updateMisTheme(misToken: string, theme: 'light' | 'dark'): Promise<boolean> {
+  try {
+    const response = await fetch(`${config.misBaseUrl}/users/me/theme`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${misToken}` },
+      body: JSON.stringify({ theme }),
+    });
+    if (!response.ok) {
+      console.warn('[mis] theme sync rejected:', response.status);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('[mis] theme sync unreachable:', err);
+    return false;
+  }
+}
+
+/**
+ * Read the MIS's copy of the appearance preference. The MIS is the source of
+ * truth across the app family, so this is what a change made in the MIS (or in
+ * a sibling app) looks like from here. Null means "MIS could not tell us" —
+ * the caller falls back to Tupo's stored value rather than flipping the UI.
+ */
+export async function fetchMisTheme(misToken: string): Promise<'light' | 'dark' | null> {
+  const me = await fetchMe(misToken);
+  const user = (me?.user ?? {}) as Record<string, unknown>;
+  const theme = user.preferred_theme;
+  return theme === 'light' || theme === 'dark' ? theme : null;
+}

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Paperclip, Smile, AtSign, Send, Mic, Lock, Archive, CloudOff, X, Quote,
-  FileText, AlertCircle, Upload, Clock, Slash,
+  FileText, AlertCircle, Upload, Clock, Slash, CalendarPlus,
 } from 'lucide-react';
 import { IconButton } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -19,6 +19,7 @@ import { VoiceRecorder, canRecordVoice } from './VoiceRecorder';
 import { formatBytes } from './data';
 import { parseSlashCommand, matchCommands } from './slashCommands';
 import { SchedulePopover } from './SchedulePopover';
+import { MeetSchedulePopover } from './MeetSchedulePopover';
 import type { Conversation } from './types';
 
 /**
@@ -47,7 +48,7 @@ export const Composer: React.FC<{
   const navigate = useNavigate();
   const {
     send, notifyTyping, draftFor, setDraft, connected, queued, replyTarget, setReplyTarget,
-    enterToSend,
+    enterToSend, lastEditableOwnMessage, setEditingId,
   } = useChat();
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -58,6 +59,7 @@ export const Composer: React.FC<{
   const [dragging, setDragging] = useState(false);
   const [mention, setMention] = useState<MentionQuery | null>(null);
   const [scheduling, setScheduling] = useState(false);
+  const [meetOpen, setMeetOpen] = useState(false);
   const [members, setMembers] = useState<WireMember[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const tray = useUploads();
@@ -167,8 +169,11 @@ export const Composer: React.FC<{
         return;
 
       case 'meet':
+        // Opens the scheduler here rather than navigating to Meet: the whole
+        // point of the shortcut is to stay in the conversation the meeting is
+        // about.
         setDraft(conversation.id, '');
-        navigate('/app/meet');
+        setMeetOpen(true);
         return;
 
       case 'poll':
@@ -213,6 +218,22 @@ export const Composer: React.FC<{
      * Enter has to be the only way to start a new line and the button has to be
      * the only way to send.
      */
+    /*
+     * ↑ on an empty composer edits your last message.
+     *
+     * Only when empty, and only with the caret at the start — otherwise the key
+     * is doing its ordinary job of moving through what someone is writing, and
+     * hijacking it would be maddening.
+     */
+    if (e.key === 'ArrowUp' && !value && !mention) {
+      const target = lastEditableOwnMessage();
+      if (target) {
+        e.preventDefault();
+        setEditingId(target.id);
+        return;
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey && !touch && enterToSend) {
       e.preventDefault();
       submit();
@@ -531,6 +552,26 @@ export const Composer: React.FC<{
 
         {/* Send swaps to a mic when there is nothing to send — the button slot
             never sits there disabled and dead. */}
+        {(can('MEET_START') || can('MEET_SCHEDULE')) && (
+          <div className="relative">
+            <IconButton
+              label="Start or schedule a meeting"
+              active={meetOpen}
+              onClick={() => setMeetOpen((v) => !v)}
+            >
+              <CalendarPlus size={18} />
+            </IconButton>
+            {meetOpen && (
+              <MeetSchedulePopover
+                conversation={conversation}
+                onClose={() => setMeetOpen(false)}
+                onAnnounce={({ body, metadata }) =>
+                  send({ body, type: 'call_event', metadata })}
+              />
+            )}
+          </div>
+        )}
+
         {/* Schedule sits beside send rather than inside a menu: "send this
             later" is a decision made at the moment of sending. */}
         {can('MESSAGE_SCHEDULE') && value.trim() && (

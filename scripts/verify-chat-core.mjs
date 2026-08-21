@@ -19,6 +19,7 @@ import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
 import { io as ioClient } from 'socket.io-client';
+import { purgeUsers } from './lib/purge.mjs';
 
 const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
@@ -414,10 +415,11 @@ try {
   for (const s of sockets) s.close();
   // Users cascade; conversations they created do not, so they go first.
   const ids = [alice.id, bob.id, mallory.id, student.id];
-  await pool.query(
-    `DELETE FROM conversations WHERE created_by = ANY($1::text[]) OR id IN (
-       SELECT conversation_id FROM conversation_members WHERE user_id = ANY($1::text[]))`, [ids]);
-  await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [ids]);
+  // One helper, in dependency order, each step in its own try/catch — see
+  // scripts/lib/purge.mjs for why the previous inline version leaked users on
+  // every interrupted run.
+  try { await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]); } catch { /* files may not reference these */ }
+  await purgeUsers(pool, ids);
   await pool.end();
 }
 

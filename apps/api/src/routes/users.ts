@@ -3,10 +3,54 @@ import { getPool } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
-import { audit } from '../services/userService.js';
+import { audit, getUserTheme, setUserTheme } from '../services/userService.js';
+import { fetchMisTheme, updateMisTheme } from '../services/misClient.js';
 
 const router = Router();
 router.use(authMiddleware);
+
+/**
+ * The caller's appearance preference, read back from the MIS so a change made
+ * in the MIS — or in TaskMentor, or Discipline & Attendance — shows up here
+ * too. The MIS is the single source of truth for this across the app family.
+ *
+ * Falls back to Tupo's stored copy when the MIS cannot be reached, so a blip
+ * never flips a dark-mode user back to light.
+ */
+router.get('/me/theme', async (req: Request, res: Response) => {
+  const actor = (req as AuthenticatedRequest).user!;
+  const local = await getUserTheme(actor.id);
+
+  const misTheme = actor.misToken ? await fetchMisTheme(actor.misToken) : null;
+  if (misTheme && misTheme !== local) {
+    // The MIS moved on without us; adopt it so the local copy stays usable
+    // as the offline fallback.
+    await setUserTheme(actor.id, misTheme);
+  }
+
+  return res.json(ok({ theme: misTheme ?? local ?? 'light', source: misTheme ? 'mis' : 'local' }));
+});
+
+/**
+ * Save the caller's appearance preference — locally first, then up to the MIS
+ * (`PATCH /users/me/theme`) so the rest of the NGA apps pick it up.
+ *
+ * The MIS leg is best-effort: `misSynced: false` tells the client the choice is
+ * saved but has not propagated yet. Failing the whole request over an
+ * unreachable MIS would make a theme toggle feel broken.
+ */
+router.patch('/me/theme', async (req: Request, res: Response) => {
+  const actor = (req as AuthenticatedRequest).user!;
+  const theme = String(req.body?.theme ?? '');
+  if (theme !== 'light' && theme !== 'dark') {
+    return res.status(400).json(fail("theme must be 'light' or 'dark'."));
+  }
+
+  await setUserTheme(actor.id, theme);
+  const misSynced = actor.misToken ? await updateMisTheme(actor.misToken, theme) : false;
+
+  return res.json(ok({ theme, misSynced }));
+});
 
 /** The roster, with each user's current role. */
 router.get('/', authorizePermission('USERS_VIEW', 'USERS_MANAGE'), async (req: Request, res: Response) => {

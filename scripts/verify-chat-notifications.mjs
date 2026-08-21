@@ -14,6 +14,7 @@ import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
+import { purgeUsers } from './lib/purge.mjs';
 
 const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
@@ -120,6 +121,53 @@ try {
   const bobAfter = (await api('/api/chat/conversations', bob.token))
     .data.conversations.find((c) => c.id === channelId);
   check('and reading clears it', bobAfter.unreadMentions === 0, String(bobAfter.unreadMentions));
+
+  /* ── Mention names are resolved everywhere ─────────────────────────────── */
+  step('mention names');
+
+  const named = await post(alice, `Please cover for <@${bob.id}> on Friday`);
+  check('a message carries resolved names for the ids in its body',
+    named.mentionNames?.[bob.id] === 'Notif Bob',
+    JSON.stringify(named.mentionNames));
+
+  const sidebar = (await api('/api/chat/conversations', carol.token))
+    .data.conversations.find((c) => c.id === channelId);
+  check('the sidebar preview shows the real name, not "@mention"',
+    sidebar.lastMessage.preview.includes('@Notif Bob'),
+    sidebar.lastMessage.preview);
+  check('and never leaks the raw id form',
+    !sidebar.lastMessage.preview.includes('<@'), sidebar.lastMessage.preview);
+
+  await clearNotifications(ids);
+  await post(alice, `Morning <@${carol.id}>, can you take Hall B?`);
+  await sleep(300);
+  const carolPreview = (await notificationsOf(carol.id))[0];
+  check('a notification body names the person mentioned rather than "@someone"',
+    carolPreview?.body?.includes('@Notif Carol') === true,
+    JSON.stringify(carolPreview?.body));
+
+  const found = await api(
+    `/api/chat/search?q=${encodeURIComponent('Hall')}`, carol.token);
+  check('search results resolve mentions too',
+    found.data.hits.length > 0 && !found.data.hits[0].highlight.includes('<@'),
+    JSON.stringify(found.data.hits[0]?.highlight));
+
+  // A mention of a deleted account must degrade, not show a raw id.
+  const ghost = await makeUser('Notif Ghost');
+  await pool.query(
+    `INSERT INTO conversation_members (conversation_id, user_id, role) VALUES ($1,$2,'member')`,
+    [channelId, ghost.id]);
+  const ghostMsg = await post(alice, `Thanks <@${ghost.id}>`);
+  await pool.query('DELETE FROM notifications WHERE user_id = $1', [ghost.id]);
+  await pool.query('DELETE FROM message_mentions WHERE user_id = $1', [ghost.id]);
+  await pool.query('DELETE FROM conversation_members WHERE user_id = $1', [ghost.id]);
+  await pool.query('DELETE FROM users WHERE id = $1', [ghost.id]);
+
+  const reread = (await api(`/api/chat/conversations/${channelId}/messages?limit=10`, alice.token))
+    .data.messages.find((m) => m.id === ghostMsg.id);
+  check('a mention of a deleted account degrades to a readable placeholder',
+    reread.mentionNames[ghost.id] === 'Unknown person',
+    JSON.stringify(reread.mentionNames));
 
   /* ── Broadcast mentions ────────────────────────────────────────────────── */
   step('@here and @channel');
@@ -301,11 +349,11 @@ try {
 } catch (err) {
   fails.push(`❌ threw: ${err instanceof Error ? err.stack : err}`);
 } finally {
-  await pool.query(
-    `DELETE FROM conversations WHERE created_by = ANY($1::text[]) OR id IN (
-       SELECT conversation_id FROM conversation_members WHERE user_id = ANY($1::text[]))`, [ids]);
-  await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]);
-  await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [ids]);
+  // One helper, in dependency order, each step in its own try/catch — see
+  // scripts/lib/purge.mjs for why the previous inline version leaked users on
+  // every interrupted run.
+  try { await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]); } catch { /* files may not reference these */ }
+  await purgeUsers(pool, ids);
   await pool.end();
 }
 

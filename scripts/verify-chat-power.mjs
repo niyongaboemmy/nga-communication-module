@@ -13,6 +13,7 @@ import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
+import { purgeUsers } from './lib/purge.mjs';
 
 const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
@@ -172,6 +173,64 @@ try {
     `UPDATE conversation_members SET left_at = NULL
       WHERE conversation_id = $1 AND user_id = $2`, [channelId, bob.id]);
 
+  /* ── Link unfurling, and the SSRF guard ────────────────────────────────── */
+  step('link unfurling');
+
+  /** Wait for the worker to record a verdict for a URL. */
+  const waitForPreview = async (url, ms = 15000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      const { rows } = await pool.query(
+        'SELECT status, title FROM link_previews WHERE url = $1', [url]);
+      if (rows[0]) return rows[0];
+      await sleep(500);
+    }
+    return null;
+  };
+
+  // The attack: make the server read its own network.
+  const metadataUrl = 'http://169.254.169.254/latest/meta-data/';
+  await post(alice, channelId, `have a look at ${metadataUrl}`);
+  const metadataVerdict = await waitForPreview(metadataUrl);
+  check('a link to the cloud metadata address is refused, not fetched',
+    metadataVerdict?.status === 'blocked', JSON.stringify(metadataVerdict));
+
+  const localApi = 'http://127.0.0.1:5190/health';
+  await post(alice, channelId, `and ${localApi}`);
+  const localVerdict = await waitForPreview(localApi);
+  check('so is a link pointed at the server’s own API on loopback',
+    localVerdict?.status === 'blocked', JSON.stringify(localVerdict));
+
+  const privateHost = 'http://10.0.0.1/admin';
+  await post(alice, channelId, `also ${privateHost}`);
+  const privateVerdict = await waitForPreview(privateHost);
+  check('and a private RFC 1918 address',
+    privateVerdict?.status === 'blocked', JSON.stringify(privateVerdict));
+
+  // A blocked link must produce no card at all — the refusal is cached so the
+  // address is not re-resolved, but nothing is shown for it.
+  const withBlocked = (await api(
+    `/api/chat/conversations/${channelId}/messages?limit=20`, bob.token))
+    .data.messages.find((m) => m.body?.includes('169.254.169.254'));
+  check('a blocked link renders no preview card',
+    withBlocked && withBlocked.linkPreviews.length === 0,
+    JSON.stringify(withBlocked?.linkPreviews));
+
+  const { rows: linked } = await pool.query(
+    'SELECT count(*)::int AS n FROM message_links WHERE conversation_id = $1', [channelId]);
+  check('the links are still recorded against the message, so a later refetch knows about them',
+    linked[0].n >= 3, String(linked[0].n));
+
+  // Two messages sharing a URL must not cause two fetches.
+  const beforeRows = (await pool.query(
+    'SELECT count(*)::int AS n FROM link_previews WHERE url = $1', [metadataUrl])).rows[0].n;
+  await post(alice, channelId, `again ${metadataUrl}`);
+  await sleep(2500);
+  const afterRows = (await pool.query(
+    'SELECT count(*)::int AS n FROM link_previews WHERE url = $1', [metadataUrl])).rows[0].n;
+  check('a URL is cached once however many messages carry it',
+    beforeRows === 1 && afterRows === 1, `${beforeRows} then ${afterRows}`);
+
   /* ── Scheduled send ────────────────────────────────────────────────────── */
   step('scheduled send');
 
@@ -244,6 +303,57 @@ try {
     !(await api('/api/chat/scheduled', alice.token)).data.scheduled
       .some((s) => s.id === cancellable.data.scheduled.id));
 
+  /* ── Inline translation ────────────────────────────────────────────────── */
+  step('translation');
+
+  const langs = await api('/api/chat/languages', bob.token);
+  check('the supported languages are advertised',
+    langs.status === 200 && Object.keys(langs.data.languages).length === 3,
+    JSON.stringify(langs.data?.languages));
+
+  const toTranslate = await post(alice, channelId, 'Good morning, the exam starts at eight.');
+  const trUrl =
+    `/api/chat/conversations/${channelId}/messages/${toTranslate.id}/translate`;
+
+  const badLang = await api(trUrl, bob.token, {
+    method: 'POST', body: JSON.stringify({ language: 'klingon' }) });
+  check('an unsupported language is refused rather than passed to the model',
+    badLang.status === 400, String(badLang.status));
+
+  const outsiderTr = await api(trUrl, mallory.token, {
+    method: 'POST', body: JSON.stringify({ language: 'fr' }) });
+  check('translation is a read of the conversation, so a non-member is refused',
+    outsiderTr.status === 404, String(outsiderTr.status));
+
+  const translated = await api(trUrl, bob.token, {
+    method: 'POST', body: JSON.stringify({ language: 'fr' }) });
+  if (translated.status === 503) {
+    check('translation is unavailable in this environment — skipped', true,
+      translated.body.message ?? '');
+  } else {
+    check('a message can be translated',
+      translated.status === 200 && typeof translated.data.text === 'string'
+        && translated.data.text.length > 0,
+      JSON.stringify(translated.data?.text)?.slice(0, 80));
+    check('and the first call is not served from cache',
+      translated.data.cached === false, String(translated.data?.cached));
+
+    const again = await api(trUrl, pupil.token, {
+      method: 'POST', body: JSON.stringify({ language: 'fr' }) });
+    check('a second reader gets the cached translation, not a second model call',
+      again.data.cached === true, String(again.data?.cached));
+    check('and the same text', again.data.text === translated.data.text);
+
+    // An edit must invalidate it, or the translation describes what the
+    // message used to say.
+    await api(`/api/chat/conversations/${channelId}/messages/${toTranslate.id}`, alice.token, {
+      method: 'PATCH', body: JSON.stringify({ body: 'Correction: the exam starts at nine.' }) });
+    const afterEdit = await api(trUrl, bob.token, {
+      method: 'POST', body: JSON.stringify({ language: 'fr' }) });
+    check('editing the message invalidates its cached translation',
+      afterEdit.data.cached === false, String(afterEdit.data?.cached));
+  }
+
   /* ── Polls ─────────────────────────────────────────────────────────────── */
   step('polls');
 
@@ -315,11 +425,11 @@ try {
 } catch (err) {
   fails.push(`❌ threw: ${err instanceof Error ? err.stack : err}`);
 } finally {
-  await pool.query(
-    `DELETE FROM conversations WHERE created_by = ANY($1::text[]) OR id IN (
-       SELECT conversation_id FROM conversation_members WHERE user_id = ANY($1::text[]))`, [ids]);
-  await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]);
-  await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [ids]);
+  // One helper, in dependency order, each step in its own try/catch — see
+  // scripts/lib/purge.mjs for why the previous inline version leaked users on
+  // every interrupted run.
+  try { await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]); } catch { /* files may not reference these */ }
+  await purgeUsers(pool, ids);
   await pool.end();
 }
 

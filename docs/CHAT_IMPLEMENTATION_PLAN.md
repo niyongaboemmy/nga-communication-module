@@ -761,3 +761,273 @@ npm run verify:chat:ui             # two real browsers
 
 Run the gates **sequentially and not alongside a build** — `npm run build`
 rewrites `packages/*/dist`, which restarts the API under `tsx watch` mid-run.
+
+---
+
+## 16. Polish pass — mentions, meetings, and the rough edges
+
+**Gate: 416 checks, 0 failures** (291 → 416 as the new checks landed).
+9/9 workspaces typecheck and build, `npm audit` 0.
+
+### The mention problem, in full
+
+Mentions are *stored* as `<@id>` so a name change leaves no stale copies in
+history. That is right, but the display side was only half-built, and it showed
+in four different places at once:
+
+| Surface | Was | Now |
+|---|---|---|
+| Message log | `@someone` for anyone who had not spoken in the loaded window | The real name, always |
+| Sidebar preview | `@mention` | `@Aline Uwase` |
+| Notification body | `can @someone cover period 4` | `can @Aline Uwase cover period 4` |
+| Search results | raw `<@2161…>` | The real name |
+
+The root cause was that the client *inferred* names from the senders it had
+loaded. The fix is `mentionNames` on `WireMessage`, resolved server-side for a
+whole page in one query, plus `renderMentionsAsText` for the three surfaces that
+are plain strings with no React tree to build pills into.
+
+A mention of a deleted account degrades to "Unknown person" rather than printing
+an id at the reader. Asserted.
+
+### Meeting shortcut
+
+A calendar control beside the composer, and `/meet`. It reuses Meet's own
+`QuickSchedule` **verbatim** rather than reimplementing it — that component
+already knows not to propose a time in the past, to clamp suggestions to hours a
+school meets in, and to offer chips rather than a masked time input. A second
+copy of that judgement would drift within a month.
+
+Two things it does that a pasted link cannot:
+
+- The meeting is created with `conversationId`, and Meet's join path already
+  treats membership of that conversation as a grant — so everyone in the channel
+  can join without being individually invited. No new access model was needed;
+  `meetings.conversation_id` already existed.
+- The message is a `call_event` carrying the meeting id, rendered as a **live
+  card**: "Live now · 3 in the room", or "Ended", or the scheduled time. A URL
+  posted an hour ago cannot say any of that. The body text remains as the
+  fallback that notifications, previews and search read, and is not drawn when
+  the card renders.
+
+### Smoothness
+
+| Added | Why |
+|---|---|
+| Typing shows in the sidebar row, not only in the open conversation | Where WhatsApp puts it, and where it answers "are they replying?" |
+| Emoji-only messages render large and without a bubble | A lone 👍 in 14px body text inside a bubble reads as a typo |
+| `↑` on an empty composer edits your last message | It was advertised in the shortcut sheet and not bound |
+| `⇧Esc` marks everything read | Same |
+
+### Defects found
+
+| Defect | Cause | Fix |
+|---|---|---|
+| **The shortcut sheet advertised two shortcuts that did not exist** | Written a phase ahead of the implementation | Both implemented. A reference that lies is worse than a shorter one — people stop trusting the rest of it |
+| **`⇧Esc` did nothing where people actually are** | The whole Escape branch was gated behind "not typing", and the composer is focused by default | The chord is handled before that guard. Plain Escape still belongs to the composer; a two-key chord does not |
+| **The sidebar showed `<@2161…>` for a message you had just sent** | The socket path rebuilds the preview locally so the list moves instantly, and it used the raw body — the server's resolved preview was overwritten | The client resolves mentions too, from `mentionNames` |
+| **`<div>` inside `<p>`, and a hydration warning** | `Spinner` rendered a `<div>`, and a spinner belongs inside paragraphs, buttons and headings — all phrasing-content only | `Spinner` is now a `<span>` with an accessible name. Fixed at the source, so all 28 call sites are correct |
+
+Two test-side notes: the new sidebar typing line made an unscoped
+`getByText(/is typing/)` match twice, and `↑` correctly refuses to edit a message
+that is still sending — the gate now waits for the delivery tick rather than
+racing the ack.
+
+### Still not done at the end of §16
+
+Message-list virtualisation, link unfurling, and inline translation. All
+`S`/`C` priority in §2. §17 closes all three.
+
+
+## 17. The last three — unfurling, translation, virtualisation
+
+### Link unfurling (FR-MSG-24)
+
+`0013_link_previews.sql` adds `link_previews`, keyed by the SHA-256 of the
+*normalised* URL rather than the URL as typed, so the same page shared with a
+tracking parameter and without it is fetched once; and `message_links`, joining
+messages to previews.
+
+The whole of `packages/chat/src/unfurl.ts` exists because fetching a URL a user
+typed is a server-side request forgery primitive. It is not enough to reject
+`127.0.0.1` by string: the defence is to resolve the hostname, check every
+returned address against the blocked ranges, and then **pin the connection to
+the address that was checked** — otherwise DNS can return a public address for
+the check and a private one for the fetch. Redirects are followed manually
+(`redirect: 'manual'`) so each hop is re-resolved and re-vetted; letting the
+runtime follow them would skip the guard on every hop after the first. The
+body is capped at 512 KB and parsed with regexes, never a DOM parser, because a
+DOM parser on hostile input is a second attack surface for no benefit.
+
+Blocked: loopback, link-local (including `169.254.169.254`, the cloud metadata
+endpoint), RFC 1918, CGNAT, and the IPv6 equivalents — including
+`::ffff:10.0.0.1`, the IPv4-mapped form that a naive range check misses.
+
+Unfurling is enqueued, never inline: it runs as job `chat:unfurl` from both the
+REST route and the socket path, and the worker re-emits `message:updated` when
+a preview lands. Sending a message must not wait on a third-party host.
+
+14 unit tests cover the address ranges specifically, including the edges that a
+wrong bitmask gets wrong in the *permissive* direction — `172.15.x` and
+`172.32.x` must be allowed, and a check that only ever asserts blocking would
+pass with everything blocked.
+
+### Inline translation (FR-MSG-25)
+
+`0014_message_translations.sql` caches per `(message_id, language)` — but with
+a `source_hash` column, so an edit invalidates the cache. Without it the feature
+misleads: someone reads a corrected message and gets the translation of the
+uncorrected one.
+
+Three languages (English, Kinyarwanda, French), a closed list, because an open
+language list means an open prompt. The message is fenced between markers and
+the prompt states that the text between them is data and must never be
+followed — a chat message is untrusted input, and someone will type "ignore
+your instructions" into a school chat to see what happens.
+
+The UI renders the translation *under* the original, labelled as a machine
+translation and dismissible, and only on other people's messages.
+
+### Message-list virtualisation (U-6)
+
+`useVirtualWindow.ts`, and deliberately not a conventional virtualiser. The
+usual approach — absolutely positioned rows over a measured spacer — needs a
+height for every row before it renders. A chat message has no such thing: it
+wraps to an unknown number of lines, may carry an image whose aspect ratio is
+only known after layout, and grows when someone adds a reaction.
+
+Instead it renders a contiguous window plus 40 rows of overscan and pads the
+gap with two plain spacer elements whose height comes from the *measured*
+average of what has actually rendered. Rows keep their natural height, nothing
+is positioned absolutely, and the browser's own scroll anchoring keeps working.
+Below 200 messages it is inert.
+
+#### The check that passed for the wrong reason
+
+The first version of the gate posted 600 messages, loaded the conversation and
+asserted the DOM held fewer than 200 rows. It passed. It proved nothing: the
+thread pages ~40 messages at a time, so the DOM was small because most of the
+log had never been fetched. Windowing had not engaged at all.
+
+The second version tried to detect the crossing by watching the rendered row
+count climb past 240 — which is unreachable *by construction*, since capping
+that number is precisely what windowing does.
+
+The honest measure is scroll extent, which reflects every message the client
+holds whether rendered or spacered. The gate now scrolls back until the
+scroller exceeds 15,000 px and then asserts the DOM holds under 200 rows.
+Measured: **606 messages, 16,311 px of scroll, 99 rows in the DOM**, ≥93 % of
+the viewport covered by real rows at every scroll position tested (blank space
+is the failure mode that matters), and the very first message still reachable.
+
+#### Defect found on the way
+
+`loadOlder` had no `catch`. A page request that failed left the error
+unhandled; worse, any future change that set `hasMore = false` in that path
+would silently truncate history and look identical to reaching the top. It now
+catches and deliberately leaves `hasMore` alone — a page that failed to load is
+not the top of the conversation.
+
+`LinkPreviewCard` gained a `data-link-preview` attribute: the card and a plain
+autolink were indistinguishable to a test, and the first version of the preview
+check was matching the autolink.
+
+### Regression at the close of §17
+
+| Gate | Result |
+| --- | --- |
+| core | 51 / 0 |
+| live | 43 / 0 |
+| threads | 35 / 0 |
+| files | 42 / 0 |
+| notifications | 34 / 0 |
+| power | 54 / 0 |
+| admin | 52 / 0 |
+| ui (browser) | 132 / 0 |
+| unit tests | 233 / 0 |
+
+Typecheck clean, build clean, `npm audit --omit=dev` 0 vulnerabilities.
+
+Two false failures were seen and traced, not papered over: an API gate run and
+a `--workspaces` test run both failed while a package rebuild was restarting
+the services under `tsx watch`. Both passed on a clean re-run. The standing
+rule holds — gates run sequentially, and never alongside a build.
+
+
+## 18. The people picker — six identical rows
+
+Reported from the running app: the "New conversation" dialog listed six people
+all called "Aline Uwase", all "Staff", all with the same initials and the same
+avatar colour.
+
+### It was not a duplicate query
+
+The first thing to rule out. `/api/chat/directory` is a single-table `SELECT`
+with no join, so it cannot fan out rows. The six entries were six genuinely
+distinct accounts that happened to share a display name.
+
+Which means the bug is not "stop duplicating" — it is that **the picker gave no
+way to tell two accounts apart**, and that is a defect even with one duplicate
+name in the whole school. A name is not an identifier.
+
+### The fix
+
+- `/api/chat/directory` now returns `email`, and matches it in the search — if
+  you know which one you want, you know their address. Ordered by
+  `name, email` so same-named people have a stable order rather than whatever
+  the planner chose that day.
+- The row shows the address **only where the name repeats in the current result
+  set**. Showing everybody's email all the time is noise; showing it exactly
+  where the list is ambiguous is the whole fix.
+- `Avatar` gained `tintKey`. The tint was derived from the name, so identical
+  names got identical colours; the picker keys it on the user id instead.
+
+### Interaction
+
+The dialog was mouse-only. It now behaves like a recipient field:
+
+- `role="combobox"` over a `role="listbox"`, with `aria-activedescendant` — ↑/↓
+  move the highlight without the caret leaving the search box, ↵ picks.
+- ↵ in multi-select clears the box so the next name can be typed straight away.
+- Backspace on an empty box removes the last chip.
+- ⌘/Ctrl+↵ submits from anywhere, including the name and topic fields.
+- The matched substring is highlighted in both name and address.
+- The footer says what will happen ("Opening a chat with …", "3 people added")
+  rather than leaving the button as the only feedback.
+- Chips carry the avatar and an accessible "Remove <name>" label.
+
+### Why there were six
+
+Not a product bug: leftover test accounts from my own gate runs. Worth fixing
+properly, because it is a real class of defect.
+
+Teardown ran inside a `finally` as:
+
+    DELETE FROM conversations WHERE ...;
+    DELETE FROM users WHERE ...;
+
+If any of those conversations still had messages, the first statement failed on
+the foreign key, the `finally` threw, and the second never ran — so **every
+interrupted run leaked its whole cast of users**, silently. Three interrupted
+chat runs and two meet runs had accumulated 20 accounts.
+
+`scripts/lib/purge.mjs` replaces it: deletion in dependency order, each step in
+its own try/catch, so a failing step can neither stop the remaining steps nor
+mask the error the test was actually reporting. Wired into all eight chat gates
+and into `verify-meet-prejoin.mjs` — which had no `try/finally` at all, and is
+where the two "Aline Uwase" rows came from. Verified: a full eight-gate sweep
+now leaves **0** test accounts behind.
+
+### Checks added
+
+Two accounts are created with a deliberately identical name, and the gate
+asserts both appear, both show their address, they get **different** avatar
+tints, searching by address narrows to one, ↓ moves `aria-activedescendant`,
+and ↵ selects the second row rather than the first.
+
+One selector had to change: the person rows are `role="option"` now, so
+`getByRole('button', …)` no longer matches them — an accessibility improvement
+that a test was silently depending on the absence of.
+
+UI gate: **139 / 0**. API gates unchanged at 51/43/35/42/34/54/52, unit tests
+233 / 0, typecheck and build clean.

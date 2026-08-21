@@ -11,6 +11,10 @@ import * as chat from '@tupo/chat';
 import { ChatError } from '@tupo/chat';
 import { emitToConversation, emitToUsers } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
+import { enqueueUnfurl } from '../services/queue.js';
+import {
+  translateMessage, isSupportedLanguage, SUPPORTED_LANGUAGES,
+} from '../services/translateService.js';
 
 /**
  * Chat REST.
@@ -127,18 +131,27 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
   const limit = Math.min(Math.max(Number(req.query.limit ?? 20), 1), 50);
 
   const { rows } = await getPool().query<{
-    id: string; name: string; avatar_url: string | null; role: string;
+    id: string; name: string; avatar_url: string | null; role: string; email: string;
   }>(
-    `SELECT id, name, avatar_url, role
+    /*
+     * The email comes back because display names are not unique. A school has
+     * more than one Aline Uwase, and a picker that shows six identical rows is
+     * a picker you cannot use — the client shows the address to tell them
+     * apart. It is searchable for the same reason: if you know which one you
+     * want, you know their address.
+     */
+    `SELECT id, name, avatar_url, role, email
        FROM users
       WHERE id <> $1 AND status = 'active'
-        AND ($2 = '' OR name ILIKE '%' || $2 || '%')
+        AND ($2 = '' OR name ILIKE '%' || $2 || '%' OR email ILIKE '%' || $2 || '%')
         -- Someone who blocked you, or whom you blocked, is not in your picker.
         AND NOT EXISTS (
           SELECT 1 FROM user_blocks b
            WHERE (b.blocker_id = users.id AND b.blocked_id = $1)
               OR (b.blocker_id = $1 AND b.blocked_id = users.id))
-      ORDER BY name ASC
+      -- Name, then email: same-named people get a stable, predictable order
+      -- rather than whatever the planner felt like.
+      ORDER BY name ASC, email ASC
       LIMIT $3`,
     [me.id, q, limit],
   );
@@ -147,6 +160,7 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
   res.json(ok({
     people: rows.map((r) => ({
       id: r.id, name: r.name, avatarUrl: r.avatar_url, role: r.role,
+      email: r.email,
       presence: online[r.id] ?? 'offline',
     })),
   }));
@@ -386,6 +400,15 @@ async function fanOutNewMessage(
 ): Promise<void> {
   emitToConversation(conversationId, 'message:new', {
     conversationId, message: result.message,
+  });
+
+  // Queued, not awaited: fetching somebody else's server is not allowed to be
+  // in the way of the message appearing.
+  void enqueueUnfurl({
+    conversationId,
+    messageId: result.message.id,
+    senderId: result.message.senderId,
+    body: result.message.body,
   });
 
   // Who gets *told*, as opposed to who gets the socket event, is a different
@@ -694,6 +717,41 @@ router.get('/conversations/:id/messages/:messageId/context',
   }));
 
 /* ────────────────────────────────────────────────────────────────────────── *
+ * Inline translation  (FR-MSG-25)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/languages', wrap(async (_req, res) => {
+  res.json(ok({ languages: SUPPORTED_LANGUAGES }));
+}));
+
+router.post('/conversations/:id/messages/:messageId/translate',
+  authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+    const me = actor(req);
+    const { id, messageId } = req.params as { id: string; messageId: string };
+    // Membership first. Translation reads the message body, so it is a read of
+    // the conversation and is authorised as one.
+    await chat.requireMembership(me.id, id);
+
+    const language = String(req.body?.language ?? '');
+    if (!isSupportedLanguage(language)) {
+      return res.status(400).json(fail('That is not a language Tupo translates into.'));
+    }
+
+    const message = await chat.getMessage(me.id, id, messageId);
+    if (!message || message.deletedAt) return res.status(404).json(fail('Message not found.'));
+    if (!message.body) return res.status(400).json(fail('There is nothing to translate.'));
+
+    try {
+      res.json(ok(await translateMessage(messageId, message.body, language)));
+    } catch (err) {
+      // A model being unavailable is a 503, not a 500: nothing is wrong with
+      // the request and retrying later is the right advice.
+      res.status(503).json(fail(
+        err instanceof Error ? err.message : 'Translation is unavailable right now.'));
+    }
+  }));
+
+/* ────────────────────────────────────────────────────────────────────────── *
  * Preferences and badges
  * ────────────────────────────────────────────────────────────────────────── */
 
@@ -857,6 +915,21 @@ router.post('/polls/:pollId/close', wrap(async (req, res) => {
     });
   }
   res.json(ok({ poll }));
+}));
+
+router.post('/read-all', wrap(async (req, res) => {
+  const me = actor(req);
+  const cleared = await chat.markAllConversationsRead(me.id);
+  // Every device this person owns clears at once — the point of the action is
+  // that the badge is gone everywhere, not just where it was pressed.
+  const conversations = await chat.listConversations(me.id);
+  for (const c of conversations) {
+    emitToUsers([me.id], 'conversation:unread', {
+      conversationId: c.id, unread: c.unread,
+      unreadMentions: c.unreadMentions, lastReadSeq: c.lastReadSeq,
+    });
+  }
+  res.json(ok({ cleared }));
 }));
 
 /* ────────────────────────────────────────────────────────────────────────── *

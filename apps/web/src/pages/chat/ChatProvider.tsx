@@ -4,7 +4,7 @@ import React, {
 import type {
   ConversationSummary, MessageType, NotificationLevel, TypingUser, WireMessage,
 } from '@tupo/shared';
-import { TYPING_THROTTLE_MS } from '@tupo/shared';
+import { TYPING_THROTTLE_MS, EDIT_WINDOW_MS } from '@tupo/shared';
 import { getSocket } from '../../lib/socket';
 import { useAuth } from '../../context/AuthContext';
 import { apiGet } from '../../lib/api';
@@ -45,11 +45,14 @@ interface ChatValue {
   loadOlder: () => Promise<void>;
 
   typing: TypingUser[];
+  /** Typing sets for every conversation, so the sidebar can show them too. */
+  typingByConversation: Record<string, TypingUser[]>;
   connected: boolean;
 
   send: (input: {
     body: string; replyToId?: string | null; threadRootId?: string | null;
     attachments?: string[]; type?: MessageType;
+    metadata?: Record<string, unknown>;
   }) => Promise<void>;
   retry: (nonce: string) => Promise<void>;
   react: (messageId: string, emoji: string) => Promise<void>;
@@ -79,6 +82,12 @@ interface ChatValue {
   queued: number;
   notifyTyping: () => void;
   markReadTo: (seq: number) => void;
+  markEverythingRead: () => Promise<void>;
+  /** The newest message of mine that can still be edited — what ↑ targets. */
+  lastEditableOwnMessage: () => WireMessage | null;
+  /** Which message the log should render in its inline editor, if any. */
+  editingId: string | null;
+  setEditingId: (id: string | null) => void;
 
   draftFor: (conversationId: string) => string;
   setDraft: (conversationId: string, text: string) => void;
@@ -93,6 +102,29 @@ interface ChatValue {
 }
 
 const ChatContext = createContext<ChatValue | null>(null);
+
+/**
+ * The one-line summary the sidebar shows for a message that just arrived.
+ *
+ * Mirrors the server's stored preview, including resolving `<@id>` to a name.
+ * The socket path rebuilds it locally so the list moves immediately rather than
+ * waiting for a refetch, which means the resolution has to exist in both
+ * places — the alternative is a row that reads "You: <@2161…>" until something
+ * else happens to reload it.
+ */
+function previewOf(message: WireMessage): string {
+  if (message.body) {
+    return message.body.replace(
+      /<@([A-Za-z0-9_-]{1,64})>/g,
+      (_whole, id: string) => `@${message.mentionNames?.[id] ?? 'someone'}`,
+    );
+  }
+  if (message.type === 'voice_note') return '🎤 Voice message';
+  if (message.type === 'poll') return '📊 Poll';
+  if (message.attachments.length === 1) return '📎 Attachment';
+  if (message.attachments.length > 1) return `📎 ${message.attachments.length} attachments`;
+  return '';
+}
 
 /** A client-side id for a send, so a retry resolves to the same message. */
 const newNonce = () =>
@@ -120,6 +152,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [threadLoading, setThreadLoading] = useState(false);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [enterToSend, setEnterToSend] = useState(true);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   /* `activeId` is read inside socket handlers that are registered once. A ref
    * keeps them looking at the current value instead of the one captured when
@@ -200,6 +233,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return [...page.messages.filter((m) => !seen.has(m.id)), ...prev];
       });
       setHasMore(page.hasMore);
+    } catch {
+      // Deliberately leave hasMore alone. A page that failed to load is not the
+      // top of the conversation, and treating it as one silently truncates the
+      // history — the next scroll should try again.
     } finally {
       setLoadingMore(false);
     }
@@ -238,7 +275,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
             lastSeq: Math.max(c.lastSeq, message.seq),
             lastMessage: {
               at: message.createdAt,
-              preview: message.body ?? (message.attachments.length ? '📎 Attachment' : ''),
+              // Resolved here as well as on the server. The stored preview
+              // already has names in it, but this path rebuilds the preview
+              // locally so the sidebar moves the instant a message arrives —
+              // and using the raw body put "<@2161…>" in front of the reader.
+              preview: previewOf(message),
               senderId: message.senderId,
               senderName: message.senderName,
             },
@@ -416,6 +457,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Answering a message in one channel and then switching would otherwise
     // attach the quote to a conversation it does not belong to.
     setReplyTarget(null);
+    setEditingId(null);
     setThreadRootId(null);
     setThreadMessages([]);
   }, []);
@@ -423,6 +465,34 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /* ────────────────────────────────────────────────────────────────────── *
    * Sending
    * ────────────────────────────────────────────────────────────────────── */
+
+  const markEverythingRead = useCallback(async () => {
+    // Applied locally first: the badges are the whole point of the action, and
+    // waiting a round trip to see them clear feels like the key did nothing.
+    setConversations((prev) => prev.map((c) => ({
+      ...c, unread: 0, unreadMentions: 0, lastReadSeq: Math.max(c.lastReadSeq, c.lastSeq),
+    })));
+    try { await chatApi.markAllRead(); }
+    catch { void refresh(); }
+  }, [refresh]);
+
+  /**
+   * The message ↑ should open for editing.
+   *
+   * Newest first, mine, not deleted, not a system notice, and still inside the
+   * edit window — anything else and the key opens an editor that cannot save.
+   */
+  const lastEditableOwnMessage = useCallback((): WireMessage | null => {
+    if (!user) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.senderId !== user.id) continue;
+      if (m.deletedAt || m.type === 'system' || m.delivery === 'pending') continue;
+      if (Date.now() - new Date(m.createdAt).getTime() > EDIT_WINDOW_MS) continue;
+      return m;
+    }
+    return null;
+  }, [messages, user]);
 
   const draftFor = useCallback((id: string) => drafts[id]?.text ?? '', [drafts]);
 
@@ -440,6 +510,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const send = useCallback(async (input: {
     body: string; replyToId?: string | null; threadRootId?: string | null;
     attachments?: string[]; type?: MessageType;
+    metadata?: Record<string, unknown>;
   }) => {
     const conversationId = activeIdRef.current;
     if (!conversationId || !user) return;
@@ -472,8 +543,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         : null,
       pinnedAt: null, pinnedBy: null, saved: false, editedCount: 0,
-      forwardedFrom: null, mentionsMe: false,
-      delivery: 'pending', readCount: 0, metadata: {},
+      forwardedFrom: null, mentionsMe: false, mentionNames: {}, linkPreviews: [],
+      delivery: 'pending', readCount: 0, metadata: input.metadata ?? {},
     };
 
     setMessages((prev) => [...prev, optimistic]);
@@ -484,6 +555,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       conversationId, body, nonce,
       type: input.type, threadRootId: input.threadRootId ?? null,
       replyToId, attachments: input.attachments ?? [],
+      metadata: input.metadata ?? {},
     };
 
     /*
@@ -773,8 +845,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     conversations, conversationsLoading, activeId, setActiveId, active,
     messages, messagesLoading, hasMore, loadingMore, loadOlder,
     typing: (activeId && typingByConv[activeId]) || [],
+    typingByConversation: typingByConv,
     connected,
     send, retry, react, edit, remove, notifyTyping, markReadTo, queued,
+    markEverythingRead, lastEditableOwnMessage, editingId, setEditingId,
     replyTarget, setReplyTarget,
     threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
     pin, save, forward, jumpTo, highlightedId,

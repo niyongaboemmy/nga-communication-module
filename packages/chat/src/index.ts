@@ -10,3 +10,4 @@
  */
 export * from './service.js';
 export * from './notifications.js';
+export * from './unfurl.js';

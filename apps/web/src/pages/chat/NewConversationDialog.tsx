@@ -22,8 +22,32 @@ interface Person {
   name: string;
   avatarUrl: string | null;
   role: string;
+  email: string;
   presence: string;
 }
+
+/**
+ * Highlight the part of a string the query matched.
+ *
+ * Worth the few lines: when six rows read "Aline Uwase" and you have typed an
+ * address fragment, seeing *where* it matched is the difference between reading
+ * the list and scanning it.
+ */
+const Highlight: React.FC<{ text: string; query: string }> = ({ text, query }) => {
+  const q = query.trim();
+  if (!q) return <>{text}</>;
+  const at = text.toLowerCase().indexOf(q.toLowerCase());
+  if (at < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, at)}
+      <mark className="bg-transparent font-semibold text-blue-600 dark:text-blue-300">
+        {text.slice(at, at + q.length)}
+      </mark>
+      {text.slice(at + q.length)}
+    </>
+  );
+};
 
 type Mode = 'dm' | 'group' | 'channel';
 
@@ -46,8 +70,16 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
   const [announcement, setAnnouncement] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  /** Index of the keyboard-highlighted row in the results list. */
+  const [cursor, setCursor] = useState(0);
+
+  /* The Escape/Tab listener is bound once; this keeps ⌘↵ pointed at the
+     current submit without re-binding the listener on every keystroke. */
+  const submitRef = useRef<() => void>(() => {});
+
   const dialogRef = useRef<HTMLDivElement>(null);
   const firstFieldRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => { firstFieldRef.current?.focus(); }, [mode]);
 
@@ -56,6 +88,13 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { onClose(); return; }
+      // ⌘/Ctrl+↵ submits from anywhere, including the name and topic fields,
+      // so filling the form never means hunting for the button.
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        submitRef.current();
+        return;
+      }
       if (e.key !== 'Tab' || !dialogRef.current) return;
       const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
         'button, input, textarea, select, a[href], [tabindex]:not([tabindex="-1"])',
@@ -84,6 +123,25 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
     }, 220);
     return () => { cancelled = true; clearTimeout(t); };
   }, [query, mode]);
+
+  useEffect(() => { setCursor(0); }, [query, mode]);
+
+  useEffect(() => {
+    listRef.current?.querySelector('[data-active="true"]')
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [cursor, people]);
+
+  /*
+   * Display names are not unique, so work out which ones repeat *in this
+   * result set* and show the address only for those. Showing everybody's email
+   * all the time is noise; showing it exactly where the list is ambiguous is
+   * the whole fix.
+   */
+  const ambiguous = useMemo(() => {
+    const seen = new Map<string, number>();
+    for (const p of people) seen.set(p.name, (seen.get(p.name) ?? 0) + 1);
+    return new Set([...seen].filter(([, n]) => n > 1).map(([n]) => n));
+  }, [people]);
 
   const toggle = (p: Person) => setSelected((prev) => (
     prev.some((s) => s.id === p.id) ? prev.filter((s) => s.id !== p.id) : [...prev, p]
@@ -129,6 +187,8 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
       setBusy(false);
     }
   };
+
+  submitRef.current = () => { void submit(); };
 
   const MODES: Array<{ id: Mode; label: string; icon: typeof Hash; show: boolean }> = [
     { id: 'dm', label: 'Direct message', icon: MessageSquare, show: canDm },
@@ -212,8 +272,38 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
               ref={mode === 'dm' ? firstFieldRef : undefined}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder={mode === 'dm' ? 'Search people' : 'Add people'}
+              placeholder={mode === 'dm' ? 'Search by name or email' : 'Add people by name or email'}
               aria-label="Search people"
+              role="combobox"
+              aria-expanded={people.length > 0}
+              aria-controls="directory-results"
+              aria-activedescendant={people[cursor] ? `person-${people[cursor].id}` : undefined}
+              autoComplete="off"
+              /*
+               * The list is navigable without leaving the box. Typing then
+               * reaching for the mouse to pick the third of six identical rows
+               * is the slow path; ↑/↓/Enter is the one people actually use.
+               */
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setCursor((c) => Math.min(c + 1, people.length - 1));
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setCursor((c) => Math.max(c - 1, 0));
+                } else if (e.key === 'Enter' && people[cursor]) {
+                  e.preventDefault();
+                  const p = people[cursor]!;
+                  if (mode === 'dm') setSelected([p]); else toggle(p);
+                  // In multi-select the box clears so you can type the next
+                  // name straight away, which is how you add five people.
+                  if (mode !== 'dm') setQuery('');
+                } else if (e.key === 'Backspace' && !query && selected.length) {
+                  // Backspace on an empty box removes the last chip — the
+                  // convention every recipient field uses.
+                  setSelected((prev) => prev.slice(0, -1));
+                }
+              }}
               className="w-full rounded-lg border border-border-light bg-surface-light py-2 pl-9 pr-3 text-sm text-text-primary-light outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 dark:border-border-dark/50 dark:bg-elevated-dark/60 dark:text-text-primary-dark"
             />
           </div>
@@ -224,8 +314,11 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
                 <button
                   key={p.id}
                   onClick={() => toggle(p)}
-                  className="flex items-center gap-1 rounded-full bg-blue-50 px-2 py-1 text-xs text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+                  aria-label={`Remove ${p.name}${ambiguous.has(p.name) ? ` (${p.email})` : ''}`}
+                  title={p.email}
+                  className="flex items-center gap-1 rounded-full bg-blue-50 px-2 py-1 text-xs text-blue-700 transition-colors hover:bg-blue-100 dark:bg-blue-900/30 dark:text-blue-300 dark:hover:bg-blue-900/50"
                 >
+                  <Avatar name={p.name} tintKey={p.id} src={p.avatarUrl ?? undefined} size={16} />
                   {p.name} <X size={11} />
                 </button>
               ))}
@@ -236,25 +329,56 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
             <div className="grid place-items-center py-6"><Spinner /></div>
           ) : people.length === 0 ? (
             <p className="py-6 text-center text-xs text-text-secondary-light dark:text-text-secondary-dark">
-              {query ? 'Nobody matches that name.' : 'No one to show.'}
+              {query ? `Nobody matches “${query}” — try an email address.` : 'No one to show.'}
             </p>
           ) : (
-            <ul className="space-y-0.5">
-              {people.map((p) => {
+            <ul ref={listRef} id="directory-results" role="listbox" aria-label="People" className="space-y-0.5">
+              {people.map((p, i) => {
                 const on = selected.some((s) => s.id === p.id);
+                const active = i === cursor;
+                // Only where the name repeats — see `ambiguous` above.
+                const needsEmail = ambiguous.has(p.name);
                 return (
                   <li key={p.id}>
                     <button
+                      id={`person-${p.id}`}
+                      role="option"
+                      aria-selected={on}
+                      data-active={active}
+                      onMouseEnter={() => setCursor(i)}
                       onClick={() => (mode === 'dm' ? setSelected([p]) : toggle(p))}
-                      aria-pressed={on}
                       className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors duration-150 ${
-                        on ? 'bg-blue-50 dark:bg-blue-900/25' : 'hover:bg-surface-light dark:hover:bg-surface-dark'
+                        on
+                          ? 'bg-blue-50 dark:bg-blue-900/25'
+                          : active
+                            ? 'bg-surface-light dark:bg-surface-dark'
+                            : 'hover:bg-surface-light dark:hover:bg-surface-dark'
                       }`}
                     >
-                      <Avatar name={p.name} src={p.avatarUrl ?? undefined} size={30} presence={toPresence(p.presence)} />
+                      <Avatar
+                        name={p.name}
+                        /* Keyed on the id, so two people with one name are two
+                           colours rather than one. */
+                        tintKey={p.id}
+                        src={p.avatarUrl ?? undefined}
+                        size={30}
+                        presence={toPresence(p.presence)}
+                      />
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm text-text-primary-light dark:text-text-primary-dark">{p.name}</span>
-                        <span className="block truncate text-[11px] capitalize text-text-secondary-light dark:text-text-secondary-dark">{p.role}</span>
+                        <span className="block truncate text-sm text-text-primary-light dark:text-text-primary-dark">
+                          <Highlight text={p.name} query={query} />
+                        </span>
+                        <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
+                          <span className="shrink-0 capitalize">{p.role}</span>
+                          {needsEmail && (
+                            <>
+                              <span aria-hidden="true" className="opacity-40">·</span>
+                              <span className="truncate">
+                                <Highlight text={p.email} query={query} />
+                              </span>
+                            </>
+                          )}
+                        </span>
                       </span>
                       {on && <Check size={15} className="shrink-0 text-blue-600 dark:text-blue-400" />}
                     </button>
@@ -265,7 +389,17 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
           )}
         </div>
 
-        <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-border-light px-4 py-3 dark:border-border-dark/30">
+        <footer className="flex shrink-0 items-center gap-2 border-t border-border-light px-4 py-3 dark:border-border-dark/30">
+          {/* Says what will happen, so the button is not the only feedback. */}
+          <p className="min-w-0 flex-1 truncate text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
+            {mode === 'dm'
+              ? (selected[0]
+                ? `Opening a chat with ${selected[0].name}`
+                : 'Pick someone — ↑ ↓ to move, ↵ to choose')
+              : selected.length
+                ? `${selected.length} ${selected.length === 1 ? 'person' : 'people'} added`
+                : 'Nobody added yet'}
+          </p>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button onClick={submit} disabled={!canSubmit}>
             {busy ? <Spinner className="h-4 w-4" /> : mode === 'dm' ? 'Open chat' : 'Create'}

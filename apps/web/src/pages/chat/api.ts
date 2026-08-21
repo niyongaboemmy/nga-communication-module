@@ -340,3 +340,25 @@ export const setStatus = (status: { emoji?: string | null; text?: string | null;
 
 export const updateProfile = (patch: { title?: string | null; pronouns?: string | null }) =>
   apiPatch<{ profile: UserProfile }>('/api/chat/profile', patch).then((r) => r.data!.profile);
+
+/** Clear every unread badge at once (⇧Esc). */
+export const markAllRead = () =>
+  apiPost<{ cleared: number }>('/api/chat/read-all').then((r) => r.data!.cleared);
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Translation
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export const TRANSLATION_LANGUAGES = {
+  en: 'English',
+  rw: 'Kinyarwanda',
+  fr: 'French',
+} as const;
+
+export type LanguageCode = keyof typeof TRANSLATION_LANGUAGES;
+
+export const translateMessage = (
+  conversationId: string, messageId: string, language: LanguageCode,
+) => apiPost<{ language: LanguageCode; text: string; cached: boolean }>(
+  `/api/chat/conversations/${conversationId}/messages/${messageId}/translate`, { language },
+).then((r) => r.data!);

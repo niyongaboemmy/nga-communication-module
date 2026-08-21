@@ -66,7 +66,7 @@ const SidePanel: React.FC<{
 const ChatWorkspace: React.FC = () => {
   const {
     conversations, conversationsLoading, activeId, setActiveId, active,
-    threadRootId, openThread, markReadTo,
+    threadRootId, openThread, markReadTo, markEverythingRead,
   } = useChat();
 
   /*
@@ -159,9 +159,22 @@ const ChatWorkspace: React.FC = () => {
         e.preventDefault(); setPanel('saved'); return;
       }
 
+      /*
+       * Shift+Escape clears every badge, and works **while typing**.
+       *
+       * Plain Escape does not: in the composer it belongs to the composer,
+       * where it drops a quote-reply. But a two-key chord is deliberate, and
+       * gating it behind "not typing" meant it never fired where people
+       * actually are — the composer is focused by default.
+       */
+      if (e.key === 'Escape' && e.shiftKey) {
+        e.preventDefault();
+        void markEverythingRead();
+        return;
+      }
+
       // Escape closes the open panel; with nothing open it marks the
       // conversation read, which is the behaviour people bring with them.
-      // Skipped while typing, where Escape belongs to the composer.
       if (e.key === 'Escape' && !typing) {
         if (panel !== 'none') { closePanel(); return; }
         if (active) markReadTo(active.lastSeq);
@@ -170,7 +183,7 @@ const ChatWorkspace: React.FC = () => {
 
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [panel, closePanel, active, markReadTo]);
+  }, [panel, closePanel, active, markReadTo, markEverythingRead]);
 
   const paletteActions = useMemo<PaletteAction[]>(() => [
     { id: 'search', label: 'Search messages', hint: 'Ctrl/⌘ F', icon: PALETTE_ICONS.search, run: () => setPanel('search') },

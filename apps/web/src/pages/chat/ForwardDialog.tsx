@@ -109,7 +109,7 @@ export const ForwardDialog: React.FC<{
           </p>
           <div className="max-h-24 overflow-y-auto text-sm text-text-primary-light dark:text-text-primary-dark">
             {message.body
-              ? <RichText text={message.body} names={{ [message.senderId]: message.senderName }} />
+              ? <RichText text={message.body} names={message.mentionNames} />
               : <span className="italic opacity-70">{message.attachments.length} attachment(s)</span>}
           </div>
         </div>

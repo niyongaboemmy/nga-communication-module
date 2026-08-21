@@ -84,3 +84,31 @@ export async function enqueueMeetWrapUp(meetingId: string, host: SessionClaims):
     return false;
   }
 }
+
+/**
+ * Unfurl the links in a message (FR-MSG-22).
+ *
+ * Fail-soft like everything else on this queue: a missing link preview is a
+ * message that looks slightly plainer, and it must never be able to fail — or
+ * delay — the send that triggered it.
+ */
+export async function enqueueUnfurl(data: {
+  conversationId: string; messageId: string; senderId: string; body: string | null;
+}): Promise<boolean> {
+  if (!data.body || !/https?:\/\//.test(data.body)) return false;
+  const q = getQueue();
+  if (!q) return false;
+  try {
+    await q.add('chat:unfurl', data, {
+      // One retry. If somebody's server is down now it will probably still be
+      // down in a minute, and a preview is not worth a retry storm.
+      attempts: 2,
+      backoff: { type: 'fixed', delay: 20_000 },
+      removeOnComplete: 50,
+      removeOnFail: 20,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}

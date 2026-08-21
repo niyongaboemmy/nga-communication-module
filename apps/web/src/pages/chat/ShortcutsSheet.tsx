@@ -8,6 +8,11 @@ import { IconButton } from '../../components/ui';
  * Every shortcut listed here has a visible control too. A shortcut sheet is a
  * way to go faster, never the only way to reach something — otherwise the
  * feature is hidden from everyone who has not opened this dialog.
+ *
+ * And every shortcut listed here is **bound**. Two of them were not: `↑` to
+ * edit and `⇧Esc` to mark everything read were documented for a phase before
+ * they existed. A reference that lies is worse than a shorter one, because
+ * people stop trusting the rest of it.
  */
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
@@ -31,7 +36,7 @@ const GROUPS: Array<{ title: string; items: Array<[string, string]> }> = [
       [`${MOD} Enter`, 'Send, whatever Enter is set to do'],
       ['@', 'Mention someone'],
       ['/', 'Slash command'],
-      ['↑', 'Edit your last message'],
+      ['↑', 'Edit your last message (with the box empty)'],
     ],
   },
   {

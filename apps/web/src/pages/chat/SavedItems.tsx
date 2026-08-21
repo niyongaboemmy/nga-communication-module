@@ -118,10 +118,7 @@ export const SavedItems: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                     </span>
                     <span className="mt-0.5 line-clamp-3 block text-xs text-text-secondary-light dark:text-text-secondary-dark">
                       {item.message.body
-                        ? <RichText
-                            text={item.message.body}
-                            names={{ [item.message.senderId]: item.message.senderName }}
-                          />
+                        ? <RichText text={item.message.body} names={item.message.mentionNames} />
                         : `${item.message.attachments.length} attachment(s)`}
                     </span>
                   </span>

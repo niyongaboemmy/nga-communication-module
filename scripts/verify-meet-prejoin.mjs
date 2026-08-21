@@ -14,6 +14,7 @@ import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
+import { purgeUsers } from './lib/purge.mjs';
 const env = Object.fromEntries(readFileSync('apps/api/.env','utf8').split('\n')
   .filter(l => l.includes('=') && !l.trimStart().startsWith('#'))
   .map(l => [l.slice(0,l.indexOf('=')).trim(), l.slice(l.indexOf('=')+1).trim()]));
@@ -30,6 +31,13 @@ const token=jwt.sign(user,env.JWT_SECRET,{expiresIn:'20m'});
 const seed={tupo_token:token,tupo_user:JSON.stringify(user),tupo_permissions:JSON.stringify([]),
   tupo_role_permissions:JSON.stringify({keys:perms,name:'Staff'})};
 const api=(p,init={})=>fetch(`http://localhost:5190${p}`,{...init,headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`,...(init.headers||{})}}).then(r=>r.json());
+
+/*
+ * Everything below runs inside a try/finally. It did not, and any check that
+ * threw left the test account in the users table — which is how six accounts
+ * all named "Aline Uwase" ended up in the people picker.
+ */
+try {
 const m=(await api('/api/meet',{method:'POST',body:JSON.stringify({title:'Device check meeting',
   scheduledStart:new Date(Date.now()+3600e3).toISOString()})})).data;
 
@@ -92,9 +100,14 @@ await page.waitForTimeout(400);
 check('and can be backed out of', !(await page.getByRole('dialog').isVisible().catch(()=>false)));
 
 check('no page errors', errors.length===0, errors.slice(0,2).join(' | '));
-await browser.close();
-await pool.query(`DELETE FROM meetings WHERE host_id=$1`,[id]);
-await pool.query(`DELETE FROM users WHERE id=$1`,[id]);
-await pool.end();
+} catch (err) {
+  fail.push('threw');
+  console.error(`❌ threw: ${err instanceof Error ? err.stack : err}`);
+} finally {
+  await browser.close().catch(() => {});
+  try { await pool.query(`DELETE FROM meetings WHERE host_id=$1`, [id]); } catch { /* nothing to remove */ }
+  await purgeUsers(pool, [id]);
+  await pool.end();
+}
 console.log(`\n${pass.length} passed, ${fail.length} failed`);
 process.exit(fail.length?1:0);

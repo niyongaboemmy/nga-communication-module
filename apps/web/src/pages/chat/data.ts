@@ -106,3 +106,30 @@ export const SECTION_LABEL: Record<SidebarSection, string> = {
 };
 
 export const SECTION_ORDER: SidebarSection[] = ['starred', 'channels', 'groups', 'direct'];
+
+/**
+ * A message that is nothing but a few emoji.
+ *
+ * Rendered large and without a bubble, the way every messaging product people
+ * already use does it. A lone 👍 set in 14px body text inside a chat bubble
+ * reads as a typo; at three times the size it reads as the gesture it is.
+ *
+ * Capped at three, because the effect is about a gesture rather than a
+ * sentence — a line of twenty emoji is a sentence.
+ */
+export function emojiOnly(body: string | null): boolean {
+  if (!body) return false;
+  const trimmed = body.trim();
+  if (!trimmed || trimmed.length > 24) return false;
+
+  // Strip emoji, their modifiers, and the zero-width joiners that hold
+  // multi-part sequences (👩‍🏫) together. Anything left means it is text.
+  const withoutEmoji = trimmed
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/[\u{1F3FB}-\u{1F3FF}\u{FE0F}\u{200D}\u{20E3}]/gu, '')
+    .replace(/\s/g, '');
+  if (withoutEmoji.length > 0) return false;
+
+  const count = [...trimmed.matchAll(/\p{Extended_Pictographic}/gu)].length;
+  return count > 0 && count <= 3;
+}

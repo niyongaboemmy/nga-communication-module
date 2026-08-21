@@ -1,6 +1,7 @@
 import type { Server, Socket } from 'socket.io';
 import type { Redis } from 'ioredis';
 import * as chat from '@tupo/chat';
+import { enqueueUnfurl } from './queue.js';
 import { ChatError } from '@tupo/chat';
 import {
   TYPING_TTL_SECONDS, conversationRoom, typingKey, userRoom,
@@ -108,6 +109,12 @@ export function registerChatHandlers(
         // Sending is the strongest possible signal that you are not typing.
         await clearTyping(p.conversationId);
         await fanOutMessage(io, p.conversationId, result);
+        void enqueueUnfurl({
+          conversationId: p.conversationId,
+          messageId: result.message.id,
+          senderId: result.message.senderId,
+          body: result.message.body,
+        });
 
         // The socket is the normal send path, so it is the path that has to
         // raise notifications. Fail-soft: a notification that did not fire is a

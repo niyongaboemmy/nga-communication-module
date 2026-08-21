@@ -56,6 +56,29 @@ describe('POST /api/sso/exchange', () => {
     expect(res.body.data.user.misToken).toBeUndefined();
   });
 
+  it("carries the MIS's appearance preference into the session", async () => {
+    mockMis();
+    const res = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(res.body.data.user.preferredTheme).toBe('dark');
+  });
+
+  it("prefers the live /users/me theme over the one baked into the exchange payload", async () => {
+    // The exchange says 'dark'; the hydrated profile says the user has since
+    // switched to 'light' in the MIS. The live read must win.
+    mockMis({
+      meBody: {
+        success: true,
+        data: {
+          user: { user_id: 991, preferred_theme: 'light' },
+          profile: { name: 'Aline Uwase', email: 'aline@amashuri.com' },
+          permissions: ['MARK_ATTENDANCE'],
+        },
+      },
+    });
+    const res = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(res.body.data.user.preferredTheme).toBe('light');
+  });
+
   it('is idempotent across repeat logins — one user row, not two', async () => {
     mockMis();
     await request(app).post('/api/sso/exchange').send({ code: 'code-1' });

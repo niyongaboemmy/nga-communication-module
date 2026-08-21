@@ -1,6 +1,9 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import type { SessionUser } from '@tupo/shared';
-import { SESSION_KEY, USER_KEY, PERMISSIONS_KEY, ROLE_PERMISSIONS_KEY, clearSession } from '../lib/api';
+import {
+  SESSION_KEY, USER_KEY, PERMISSIONS_KEY, ROLE_PERMISSIONS_KEY, clearSession, apiGet, apiPatch,
+} from '../lib/api';
+import { THEME_KEY, readStoredTheme, storeTheme, patchCachedUserTheme } from '../lib/theme';
 
 type Theme = 'light' | 'dark';
 
@@ -27,6 +30,9 @@ interface AuthContextValue {
   refreshPermissions: () => Promise<void>;
   signOut: () => void;
   theme: Theme;
+  /** Set the appearance and persist it — locally at once, then up to the MIS
+   *  so every NGA app follows. */
+  setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
 }
 
@@ -39,7 +45,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [rolePermissions, setRolePermissions] = useState<string[]>([]);
   const [roleName, setRoleName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [theme, setTheme] = useState<Theme>('light');
+  // Initialised straight from storage rather than in an effect: starting at
+  // 'light' and correcting later would write 'light' over the user's saved
+  // choice on every reload, which is exactly why the theme never stuck.
+  const [theme, setThemeState] = useState<Theme>(readStoredTheme);
+  /** When the MIS was last consulted about the theme. Also bumped on a local
+   *  change, so a pull cannot race an in-flight save and undo it. */
+  const lastPull = useRef(0);
 
   useEffect(() => {
     const savedToken = localStorage.getItem(SESSION_KEY);
@@ -53,8 +65,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const savedRole = JSON.parse(localStorage.getItem(ROLE_PERMISSIONS_KEY) ?? '{"keys":[],"name":null}');
         setRolePermissions(savedRole.keys ?? []);
         setRoleName(savedRole.name ?? null);
-        const saved = (localStorage.getItem('tupo_theme') ?? parsed.preferredTheme ?? 'light') as Theme;
-        setTheme(saved);
+        // Nothing to restore for the theme: it was read from storage before
+        // the first render. Only adopt the session's copy when this browser
+        // has no saved choice of its own.
+        if (!localStorage.getItem(THEME_KEY) && parsed.preferredTheme) {
+          setThemeState(parsed.preferredTheme);
+        }
       } catch {
         // Corrupt storage is not a recoverable session — start clean.
         clearSession();
@@ -67,7 +83,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // The `.dark` class is what drives Tailwind's dark: variant here, matching
     // the MIS's `darkMode: "class"` so the two apps theme identically.
     document.documentElement.classList.toggle('dark', theme === 'dark');
-    localStorage.setItem('tupo_theme', theme);
+    storeTheme(theme);
   }, [theme]);
 
   const signOut = useCallback(() => {
@@ -121,7 +137,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setPermissions(perms);
     setRolePermissions(rolePerms);
     setRoleName(newRoleName);
-    if (newUser.preferredTheme) setTheme(newUser.preferredTheme);
+    // The MIS is the source of truth for appearance, so a fresh sign-in adopts
+    // whatever it says — that is how a change made in the MIS or a sibling app
+    // reaches this browser.
+    if (newUser.preferredTheme) {
+      setThemeState(newUser.preferredTheme);
+      storeTheme(newUser.preferredTheme);
+    }
   }, []);
 
   const refreshPermissions = useCallback(async () => {
@@ -148,11 +170,66 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (token) void refreshPermissions();
   }, [token, refreshPermissions]);
 
+  /**
+   * A theme the user picked here. Saved locally first so the UI is instant and
+   * survives a reload even when offline, then pushed to the MIS
+   * (`PATCH /users/me/theme` behind our own API) so TaskMentor, Discipline &
+   * Attendance and the MIS itself all follow. A failed push is deliberately
+   * silent — the choice is already saved, and the next sign-in reconciles.
+   */
+  const setTheme = useCallback((next: Theme) => {
+    lastPull.current = Date.now();
+    setThemeState(next);
+    storeTheme(next);
+    patchCachedUserTheme(USER_KEY, next);
+    setUser((u) => (u ? { ...u, preferredTheme: next } : u));
+
+    if (!localStorage.getItem(SESSION_KEY)) return;
+    void apiPatch('/api/users/me/theme', { theme: next }).catch(() => {
+      // Offline, or the MIS is down. Nothing to undo.
+    });
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    setTheme(theme === 'light' ? 'dark' : 'light');
+  }, [theme, setTheme]);
+
+  /**
+   * Pull the MIS's copy back down, so a theme changed in the MIS or a sibling
+   * app lands here without a re-login. Runs when a session appears and again
+   * when the tab is brought back to the foreground — throttled, because the
+   * backend has to ask the MIS to answer it.
+   */
+  useEffect(() => {
+    if (!token) return;
+
+    const pull = async () => {
+      if (Date.now() - lastPull.current < 60_000) return;
+      lastPull.current = Date.now();
+      try {
+        const body = await apiGet<{ theme: Theme }>('/api/users/me/theme');
+        const remote = body.data?.theme;
+        if (remote === 'light' || remote === 'dark') {
+          setThemeState(remote);
+          storeTheme(remote);
+          patchCachedUserTheme(USER_KEY, remote);
+        }
+      } catch {
+        // Keep whatever is on screen; the MIS is the source of truth but not
+        // a reason to break the UI when it is unreachable.
+      }
+    };
+
+    void pull();
+    const onFocus = () => { if (document.visibilityState === 'visible') void pull(); };
+    document.addEventListener('visibilitychange', onFocus);
+    return () => document.removeEventListener('visibilitychange', onFocus);
+  }, [token]);
+
   return (
     <AuthContext.Provider value={{
       isAuthenticated: !!token, user, token, permissions, rolePermissions, roleName, loading,
-      signIn, setSession, signOut, refreshPermissions, theme,
-      toggleTheme: () => setTheme((t) => (t === 'light' ? 'dark' : 'light')),
+      signIn, setSession, signOut, refreshPermissions, theme, setTheme, toggleTheme,
     }}>
       {children}
     </AuthContext.Provider>

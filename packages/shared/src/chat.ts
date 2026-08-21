@@ -132,7 +132,24 @@ export interface WireMessage {
   editedCount: number;
   forwardedFrom: { senderId: string; senderName: string; conversationName: string | null } | null;
 
+  /** Unfurled links in this message's body (FR-MSG-22). Empty until fetched. */
+  linkPreviews: Array<{
+    url: string;
+    title: string | null;
+    description: string | null;
+    imageUrl: string | null;
+    siteName: string | null;
+  }>;
+
   mentionsMe: boolean;
+  /**
+   * userId → display name, for every `<@id>` in this message's body.
+   *
+   * Resolved server-side per page. The client used to infer names from whoever
+   * was loaded in the log, which rendered a mention of anyone who had not
+   * spoken recently as "@someone".
+   */
+  mentionNames: Record<string, string>;
   /** Sender-side aggregate: the weakest state across recipients. */
   delivery: DeliveryState;
   /** How many members have read it — shown on the receipt sheet, not the bubble. */

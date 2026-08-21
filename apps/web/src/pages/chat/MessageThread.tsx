@@ -8,7 +8,9 @@ import {
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
-import { dayLabel, startsNewGroup, timeOf, formatBytes, firstUnreadId, typingLabel } from './data';
+import {
+  dayLabel, startsNewGroup, timeOf, formatBytes, firstUnreadId, typingLabel, emojiOnly,
+} from './data';
 import { useChat } from './ChatProvider';
 import { toPresence } from './types';
 import type { Conversation, Message } from './types';
@@ -18,6 +20,11 @@ import { ForwardDialog } from './ForwardDialog';
 import { MessageAttachments } from './Attachments';
 import { PinnedBar } from './PinnedBar';
 import { PollCard } from './PollCard';
+import { MeetCard } from './MeetCard';
+import { LinkPreviewCard } from './LinkPreviewCard';
+import { TranslateControl } from './TranslateButton';
+import { useVirtualWindow } from './useVirtualWindow';
+import type { MeetMessageMetadata } from './MeetCard';
 import { QUICK_REACTIONS, EDIT_WINDOW_MS } from '@tupo/shared';
 
 /**
@@ -156,6 +163,7 @@ const MessageRow: React.FC<{
   const { user } = useAuth();
   const {
     react, edit, remove, pin, save, openThread, setReplyTarget, jumpTo, highlightedId,
+    editingId, setEditingId,
   } = useChat();
   const [picking, setPicking] = useState(false);
   const [forwarding, setForwarding] = useState(false);
@@ -166,6 +174,14 @@ const MessageRow: React.FC<{
   const editRef = useRef<HTMLTextAreaElement>(null);
 
   const mine = m.senderId === user?.id;
+
+  // ↑ in the composer names a message; this is the row that answers.
+  useEffect(() => {
+    if (editingId !== m.id) return;
+    setDraft(m.body ?? '');
+    setEditing(true);
+    setEditingId(null);
+  }, [editingId, m.id, m.body, setEditingId]);
 
   useEffect(() => {
     if (!editing) return;
@@ -201,6 +217,11 @@ const MessageRow: React.FC<{
 
   const failed = m.delivery === 'failed';
   const pending = m.delivery === 'pending';
+  // A bare 👍 gets no bubble and three times the size.
+  const bigEmoji = emojiOnly(m.body) && m.attachments.length === 0 && !m.replyTo;
+  const meetMeta = m.type === 'call_event'
+    ? (m.metadata as { meet?: MeetMessageMetadata })?.meet ?? null
+    : null;
   // Editing is the author's, within the window, and never on a message that has
   // not landed yet — there is nothing on the server to edit.
   const withinEditWindow = Date.now() - new Date(m.createdAt).getTime() < EDIT_WINDOW_MS;
@@ -217,6 +238,7 @@ const MessageRow: React.FC<{
   return (
     <li
       id={`msg-${m.id}`}
+      data-message-row=""
       className={`group relative flex gap-2.5 px-2 sm:px-4 ${newGroup ? 'mt-3' : 'mt-0.5'} ${
         mine ? 'flex-row-reverse' : ''
       } ${m.mentionsMe ? 'bg-amber-50/60 dark:bg-amber-500/5' : ''} ${
@@ -276,11 +298,16 @@ const MessageRow: React.FC<{
           </div>
         ) : (
           <div
-            className={`message-body px-3.5 py-2 text-sm ${
-              mine
-                ? 'bubble-out bg-blue-600 text-white'
-                : 'bubble-in border border-border-light bg-white text-text-primary-light dark:border-border-dark/40 dark:bg-elevated-dark dark:text-text-primary-dark'
-            } ${failed ? 'ring-1 ring-red-400' : ''} ${pending ? 'opacity-75' : ''}`}
+            className={
+              bigEmoji
+                // No bubble, no padding: the emoji *is* the message.
+                ? `text-4xl leading-tight ${pending ? 'opacity-75' : ''}`
+                : `message-body px-3.5 py-2 text-sm ${
+                    mine
+                      ? 'bubble-out bg-blue-600 text-white'
+                      : 'bubble-in border border-border-light bg-white text-text-primary-light dark:border-border-dark/40 dark:bg-elevated-dark dark:text-text-primary-dark'
+                  } ${failed ? 'ring-1 ring-red-400' : ''} ${pending ? 'opacity-75' : ''}`
+            }
           >
             {/* Quote-reply context, rendered above the message it answers. */}
             {m.replyTo && (
@@ -310,11 +337,34 @@ const MessageRow: React.FC<{
               </p>
             )}
 
-            {m.body && <RichText text={m.body} names={names} meId={user?.id} onDark={mine} />}
+            {/* The body of a meeting message duplicates the card's own title, so
+                it is not drawn when the card is. It still exists on the row —
+                notifications, sidebar previews and search all need a sentence,
+                and it is the fallback if the card ever fails to load. */}
+            {m.body && !meetMeta && (
+              /* `mentionNames` comes from the server and covers everyone this
+                 message mentions; `names` is the fallback built from senders
+                 in the loaded window. The server's map wins — the fallback is
+                 what used to render "@someone" for anyone who had not spoken. */
+              <RichText
+                text={m.body}
+                names={{ ...names, ...m.mentionNames }}
+                meId={user?.id}
+                onDark={mine}
+              />
+            )}
             {m.editedAt && (
               <span className="ml-1.5 text-[10px] opacity-70" title={`Edited ${timeOf(m.editedAt)}`}>
                 (edited)
               </span>
+            )}
+
+            {meetMeta && <MeetCard meta={meetMeta} onDark={mine} />}
+
+            {/* Only the first. A message with three links unfurled into three
+                cards is a wall, and the links themselves are still in the text. */}
+            {m.linkPreviews.length > 0 && m.linkPreviews[0] && (
+              <LinkPreviewCard preview={m.linkPreviews[0]} onDark={mine} />
             )}
 
             {m.type === 'poll' && (
@@ -333,6 +383,16 @@ const MessageRow: React.FC<{
               </span>
             )}
           </div>
+        )}
+
+        {/* Offered only on other people's messages with real text: translating
+            your own words tells you nothing. */}
+        {!mine && m.body && !meetMeta && m.body.trim().length > 8 && (
+          <TranslateControl
+            conversationId={m.conversationId}
+            messageId={m.id}
+            onDark={false}
+          />
         )}
 
         {/* UX-1: a failure is never silent, and the retry sits on the message
@@ -580,6 +640,16 @@ export const MessageThread: React.FC<{
     return out;
   }, [messages, user]);
 
+  /*
+   * Windowing (U-6). Inert below 200 messages; above it, only a slice of the
+   * log is in the DOM. See useVirtualWindow for why this is not a conventional
+   * absolute-positioned virtualiser.
+   */
+  const window_ = useVirtualWindow(scrollRef, messages.length, conversation.id);
+  const visibleMessages = window_.disabled
+    ? messages
+    : messages.slice(window_.start, window_.end);
+
   const dividerId = useMemo(
     () => firstUnreadId(messages, conversation.lastReadSeq, user?.id ?? ''),
     [messages, conversation.lastReadSeq, user?.id],
@@ -709,7 +779,14 @@ export const MessageThread: React.FC<{
                arriving messages without the whole list being re-read, and it
                gives the transcript a name of its own separate from the pane. */
             <ul role="log" aria-label="Messages" aria-relevant="additions">
-              {messages.map((m, i) => {
+              {/* Spacers hold the scrollbar the right length while the rows
+                  above the window are not rendered. Plain height, no absolute
+                  positioning, so every row keeps its natural size. */}
+              {window_.padTop > 0 && (
+                <li style={{ height: window_.padTop }} aria-hidden="true" />
+              )}
+              {visibleMessages.map((m, vi) => {
+                const i = window_.start + vi;
                 const day = dayLabel(m.createdAt);
                 const showDay = day !== lastDay;
                 lastDay = day;
@@ -740,6 +817,9 @@ export const MessageThread: React.FC<{
                   </React.Fragment>
                 );
               })}
+              {window_.padBottom > 0 && (
+                <li style={{ height: window_.padBottom }} aria-hidden="true" />
+              )}
             </ul>
           )}
           <div ref={bottomRef} />

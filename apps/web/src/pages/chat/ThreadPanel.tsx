@@ -50,7 +50,7 @@ const ThreadMessage: React.FC<{
           </span>
         </div>
         <div className="mt-0.5 text-sm leading-relaxed text-text-primary-light dark:text-text-primary-dark">
-          {m.body && <RichText text={m.body} names={names} meId={user?.id} />}
+          {m.body && <RichText text={m.body} names={{ ...names, ...m.mentionNames }} meId={user?.id} />}
           {m.editedAt && <span className="ml-1 text-[10px] opacity-70">(edited)</span>}
         </div>
         {m.reactions.length > 0 && (

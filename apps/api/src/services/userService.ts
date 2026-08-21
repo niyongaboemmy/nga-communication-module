@@ -49,7 +49,7 @@ export async function upsertMisUser(params: {
   const derivedRoleId = roleName ? await systemRoleIdByName(pool, roleName) : null;
 
   if (existing) {
-    await pool.query(
+    const updated = await pool.query<{ preferred_theme: 'light' | 'dark' | null }>(
       `UPDATE users
           SET name = $2,
               email = COALESCE(NULLIF($3, ''), email),
@@ -62,14 +62,19 @@ export async function upsertMisUser(params: {
               role_id = CASE WHEN $8 OR NOT role_assigned_by_admin THEN $9 ELSE role_id END,
               last_login_at = now(),
               updated_at = now()
-        WHERE id = $1`,
+        WHERE id = $1
+      RETURNING preferred_theme`,
       [existing.id, params.name, params.email, params.avatarUrl ?? null,
        finalRole, params.forceAdmin, params.preferredTheme ?? null,
        params.forceAdmin, derivedRoleId]
     );
     return {
       id: existing.id, misUserId: params.misUserId, name: params.name, email: params.email,
-      role: finalRole, avatarUrl: params.avatarUrl, preferredTheme: params.preferredTheme,
+      role: finalRole, avatarUrl: params.avatarUrl,
+      // The stored value, not the incoming one: a returning user whose MIS
+      // payload carried no theme still has their saved choice honoured, which
+      // is why the COALESCE above keeps it.
+      preferredTheme: (updated.rows[0]?.preferred_theme ?? undefined) as 'light' | 'dark' | undefined,
     };
   }
 
@@ -85,6 +90,26 @@ export async function upsertMisUser(params: {
     id, misUserId: params.misUserId, name: params.name, email: params.email,
     role: finalRole, avatarUrl: params.avatarUrl, preferredTheme: params.preferredTheme,
   };
+}
+
+/**
+ * Tupo's own copy of the appearance preference. The MIS remains the source of
+ * truth across the app family; this row is what keeps the UI correct while the
+ * MIS is unreachable, and what the session is hydrated from at login.
+ */
+export async function setUserTheme(userId: string, theme: 'light' | 'dark'): Promise<void> {
+  await getPool().query(
+    'UPDATE users SET preferred_theme = $2, updated_at = now() WHERE id = $1',
+    [userId, theme]
+  );
+}
+
+export async function getUserTheme(userId: string): Promise<'light' | 'dark' | null> {
+  const { rows } = await getPool().query<{ preferred_theme: 'light' | 'dark' | null }>(
+    'SELECT preferred_theme FROM users WHERE id = $1',
+    [userId]
+  );
+  return rows[0]?.preferred_theme ?? null;
 }
 
 /** Append-only audit trail (SRS FR-ADM-4). Never throws into the request path. */

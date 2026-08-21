@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { getPool, snowflake } from '@tupo/db';
+import { previewsForMessages } from './unfurl.js';
 import type { PoolClient } from 'pg';
 import {
   DEFAULT_PAGE_SIZE, EDIT_WINDOW_MS, MAX_MESSAGE_LENGTH, MAX_PAGE_SIZE,
@@ -472,7 +473,10 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
      * object would be faster and wrong — it is global, gappy, and gives no
      * per-conversation ordering guarantee at all.
      */
-    const preview = previewOf(body, attachments.length, input.type);
+    // Resolved to names *here*, because this string is stored and read back by
+    // the sidebar with no chance to resolve anything later. "@mention" in a
+    // conversation list tells the reader nothing about who was addressed.
+    const preview = previewOf(await renderMentionsAsText(body), attachments.length, input.type);
     const { rows: seqRows } = await client.query<{ last_seq: string }>(
       `UPDATE conversations
           SET last_seq = last_seq + 1,
@@ -607,7 +611,8 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
 
 /** The one-line summary the sidebar shows. Attachments get a shape, not a name. */
 function previewOf(body: string, attachmentCount: number, type?: MessageType): string {
-  if (body) return body.replace(MENTION_PATTERN, '@mention').slice(0, 200);
+  // Mentions are expected to be resolved already — see the call site.
+  if (body) return body.slice(0, 200);
   if (type === 'voice_note') return '🎤 Voice message';
   if (type === 'poll') return '📊 Poll';
   if (attachmentCount === 1) return '📎 Attachment';
@@ -845,6 +850,10 @@ function toWireMessage(r: MessageRow, viewerId: string, memberCount = 2): WireMe
     editedCount: r.edited_count ?? 0,
     forwardedFrom: r.forwarded_from ?? null,
     mentionsMe: Boolean(r.mentions_me),
+    // Both filled in for a whole page at once — see attachMentionNames and
+    // attachLinkPreviews.
+    mentionNames: {},
+    linkPreviews: [],
     delivery,
     readCount,
     metadata: (r.metadata ?? {}) as Record<string, unknown>,
@@ -860,7 +869,8 @@ export async function getMessage(
   );
   if (!rows[0]) return null;
   const count = await memberCountOf(conversationId);
-  return toWireMessage(rows[0], viewerId, count);
+  const [message] = await hydrateMessages([toWireMessage(rows[0], viewerId, count)]);
+  return message ?? null;
 }
 
 async function memberCountOf(conversationId: string): Promise<number> {
@@ -919,7 +929,7 @@ export async function listMessages(
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const count = await memberCountOf(conversationId);
-  const messages = page.map((r) => toWireMessage(r, viewerId, count));
+  const messages = await hydrateMessages(page.map((r) => toWireMessage(r, viewerId, count)));
   if (opts.after === undefined) messages.reverse();
 
   return {
@@ -1440,7 +1450,7 @@ export async function editMessage(
       `UPDATE conversations
           SET last_message_preview = $2
         WHERE id = $1 AND last_seq = $3::bigint`,
-      [conversationId, previewOf(body, 0), row.seq],
+      [conversationId, previewOf(await renderMentionsAsText(body), 0), row.seq],
     );
 
     await client.query('COMMIT');
@@ -1726,7 +1736,7 @@ export async function listPinned(
     [viewerId, conversationId],
   );
   const count = await memberCountOf(conversationId);
-  return rows.map((r) => toWireMessage(r, viewerId, count));
+  return hydrateMessages(rows.map((r) => toWireMessage(r, viewerId, count)));
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -1811,8 +1821,9 @@ export async function listSaved(
     [userId, Math.min(Math.max(limit, 1), 100)],
   );
 
-  return rows.map((r) => ({
-    message: toWireMessage(r, userId),
+  const messages = await hydrateMessages(rows.map((r) => toWireMessage(r, userId)));
+  return rows.map((r, i) => ({
+    message: messages[i]!,
     conversationName: r.conversation_type === 'dm'
       ? (r.peer_name ?? 'Direct message')
       : (r.conversation_name ?? 'Conversation'),
@@ -1934,7 +1945,7 @@ export async function messageContext(
   );
 
   const count = await memberCountOf(conversationId);
-  const messages = rows.map((r) => toWireMessage(r, viewerId, count));
+  const messages = await hydrateMessages(rows.map((r) => toWireMessage(r, viewerId, count)));
   const target = messages.find((m) => m.id === messageId);
   if (!target) throw new ChatError('Message not found.', 404);
 
@@ -2177,15 +2188,23 @@ export async function searchMessages(
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
 
+  const searchMessagesOut = await hydrateMessages(
+    page.map((r) => toWireMessage(r, viewerId)));
+
+  // The highlight is a plain string with no React tree to build pills into, so
+  // its ids become names in the text. Done after `ts_headline`, because the
+  // fragment it chose is the only part anyone sees.
+  const highlights = await Promise.all(page.map((r) => renderMentionsAsText(r.highlight)));
+
   return {
-    hits: page.map((r) => ({
-      message: toWireMessage(r, viewerId),
+    hits: page.map((r, i) => ({
+      message: searchMessagesOut[i]!,
       conversationId: r.conversation_id,
       conversationName: r.conversation_type === 'dm'
         ? (r.peer_name ?? 'Direct message')
         : (r.conversation_name ?? 'Conversation'),
       conversationType: r.conversation_type,
-      highlight: r.highlight,
+      highlight: highlights[i] ?? r.highlight,
     })),
     hasMore,
   };
@@ -3125,4 +3144,120 @@ export async function namesOf(userIds: string[]): Promise<string[]> {
     'SELECT id, name FROM users WHERE id = ANY($1::text[])', [userIds]);
   const byId = new Map(rows.map((r) => [r.id, r.name]));
   return userIds.map((id) => byId.get(id) ?? 'Someone');
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Mention display names
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Resolve the `<@id>` forms in a set of messages to real names.
+ *
+ * Mentions are *stored* as ids so that someone who changes their name does not
+ * leave stale copies of the old one scattered through history. That is right,
+ * but it means every surface that renders a body needs the names — and the
+ * client was previously guessing from whoever happened to be loaded, so a
+ * mention of somebody who had not spoken recently rendered as "@someone".
+ *
+ * Done for a whole page at once: one query for every id across forty messages,
+ * rather than a lookup per mention. Names are attached to the message rather
+ * than substituted into the body, because the body must stay canonical — it is
+ * what gets edited, searched and re-rendered.
+ */
+/**
+ * Everything a page of messages needs resolving in bulk.
+ *
+ * Mention names and link previews are both per-page lookups, and every read
+ * path needs both. Keeping them behind one call is what stops a new endpoint
+ * attaching one and silently omitting the other.
+ */
+export async function hydrateMessages<T extends WireMessage>(messages: T[]): Promise<T[]> {
+  await attachMentionNames(messages);
+  await attachLinkPreviews(messages);
+  return messages;
+}
+
+/** Link previews for a page, from the cache only — never fetched inline. */
+export async function attachLinkPreviews<T extends WireMessage>(messages: T[]): Promise<T[]> {
+  const withLinks = messages.filter((m) => m.body && /https?:\/\//.test(m.body));
+  if (!withLinks.length) return messages;
+
+  const byMessage = await previewsForMessages(withLinks.map((m) => m.id));
+  for (const m of withLinks) {
+    m.linkPreviews = (byMessage[m.id] ?? []).map((p) => ({
+      url: p.url, title: p.title, description: p.description,
+      imageUrl: p.imageUrl, siteName: p.siteName,
+    }));
+  }
+  return messages;
+}
+
+export async function attachMentionNames<T extends WireMessage>(messages: T[]): Promise<T[]> {
+  const ids = new Set<string>();
+  for (const m of messages) {
+    if (!m.body) continue;
+    for (const match of m.body.matchAll(MENTION_PATTERN)) ids.add(match[1]!);
+  }
+  if (!ids.size) return messages;
+
+  const { rows } = await getPool().query<{ id: string; name: string }>(
+    'SELECT id, name FROM users WHERE id = ANY($1::text[])', [[...ids]]);
+  const byId = new Map(rows.map((r) => [r.id, r.name]));
+
+  for (const m of messages) {
+    if (!m.body) continue;
+    const names: Record<string, string> = {};
+    for (const match of m.body.matchAll(MENTION_PATTERN)) {
+      const id = match[1]!;
+      // A mention of a deleted account keeps a readable placeholder rather than
+      // rendering the raw id at somebody.
+      names[id] = byId.get(id) ?? 'Unknown person';
+    }
+    m.mentionNames = names;
+  }
+  return messages;
+}
+
+/**
+ * Turn a body into something readable outside the message log.
+ *
+ * Sidebar previews, notification bodies and search results all render plain
+ * text with no React tree to build mention pills into, so the ids have to
+ * become names in the string itself.
+ */
+export async function renderMentionsAsText(body: string | null): Promise<string> {
+  if (!body) return '';
+  const ids = [...new Set([...body.matchAll(MENTION_PATTERN)].map((m) => m[1]!))];
+  if (!ids.length) return body;
+
+  const { rows } = await getPool().query<{ id: string; name: string }>(
+    'SELECT id, name FROM users WHERE id = ANY($1::text[])', [ids]);
+  const byId = new Map(rows.map((r) => [r.id, r.name]));
+
+  return body.replace(MENTION_PATTERN, (_whole, id: string) => `@${byId.get(id) ?? 'someone'}`);
+}
+
+/**
+ * Mark every conversation read (⇧Esc).
+ *
+ * One statement rather than a loop over conversations: someone who has been
+ * away for a fortnight may have eighty of them, and doing this a round trip at
+ * a time is how "mark all read" becomes a button people press and then watch.
+ */
+export async function markAllConversationsRead(userId: string): Promise<number> {
+  const { rowCount } = await getPool().query(
+    `UPDATE conversation_members m
+        SET last_read_seq = c.last_seq,
+            last_read_at = now(),
+            unread_count = 0,
+            unread_mentions = 0
+       FROM conversations c
+      WHERE c.id = m.conversation_id
+        AND m.user_id = $1
+        AND m.left_at IS NULL
+        AND c.deleted_at IS NULL
+        AND (m.unread_count > 0 OR m.last_read_seq < c.last_seq)`,
+    [userId],
+  );
+  return rowCount ?? 0;
 }

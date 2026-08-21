@@ -79,10 +79,14 @@ router.post('/exchange', async (req: Request, res: Response) => {
     const email = String(profile.email ?? misUser.email ?? '');
     const avatarUrl = (profile.avatar_url ?? misUser.avatar_url) as string | undefined;
 
+    // Appearance follows the MIS. The hydrated `/users/me` copy is preferred
+    // over the one baked into the exchange payload because it is read live,
+    // so a theme the user changed in the MIS (or in a sibling app) since their
+    // last visit is already correct on the first paint here.
+    const rawTheme = (me?.user as Record<string, unknown> | undefined)?.preferred_theme
+      ?? misUser.preferred_theme;
     const preferredTheme =
-      misUser.preferred_theme === 'light' || misUser.preferred_theme === 'dark'
-        ? (misUser.preferred_theme as 'light' | 'dark')
-        : undefined;
+      rawTheme === 'light' || rawTheme === 'dark' ? (rawTheme as 'light' | 'dark') : undefined;
 
     const forceAdmin =
       config.adminUsernames.includes(String(misUser.username ?? name).toLowerCase()) ||

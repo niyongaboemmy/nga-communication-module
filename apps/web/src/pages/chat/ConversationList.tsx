@@ -6,7 +6,7 @@ import {
 import { Avatar, IconButton, SearchInput, Skeleton, UnreadBadge, EmptyState } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
-import { shortStamp, sectionOf, SECTION_LABEL, SECTION_ORDER } from './data';
+import { shortStamp, sectionOf, SECTION_LABEL, SECTION_ORDER, typingLabel } from './data';
 import type { SidebarSection } from './data';
 import { useChat } from './ChatProvider';
 import { toPresence } from './types';
@@ -30,9 +30,10 @@ const KIND_ICON = { channel: Hash, announcement: Megaphone, group: Users } as co
 const Row: React.FC<{
   conversation: Conversation;
   active: boolean;
+  typing: string[];
   onSelect: (id: string) => void;
   onToggleStar: (id: string) => void;
-}> = ({ conversation: c, active, onSelect, onToggleStar }) => {
+}> = ({ conversation: c, active, typing, onSelect, onToggleStar }) => {
   const { user } = useAuth();
   const unread = c.unread > 0;
   const muted = c.notification === 'none' || Boolean(c.mutedUntil);
@@ -103,7 +104,11 @@ const Row: React.FC<{
                   : 'text-text-secondary-light dark:text-text-secondary-dark'
               }`}
             >
-              {c.draft
+              {/* Typing wins over the preview and over a draft: it is the only
+                  one of the three that is happening right now. */}
+              {typing.length > 0
+                ? <span className="text-blue-600 dark:text-blue-400">{typingLabel(typing)}…</span>
+                : c.draft
                 ? <span className="text-amber-600 dark:text-amber-400">Draft: {c.draft}</span>
                 : c.lastMessage
                   ? `${mine ? 'You: ' : c.type !== 'dm' && c.lastMessage.senderName ? `${c.lastMessage.senderName.split(' ')[0]}: ` : ''}${c.lastMessage.preview}`
@@ -184,6 +189,7 @@ export const ConversationList: React.FC<{
   const { can } = usePermissions();
   const {
     conversations, conversationsLoading, activeId, setActiveId, toggleStar, connected,
+    typingByConversation,
   } = useChat();
   const [query, setQuery] = useState('');
   const [unreadOnly, setUnreadOnly] = useState(false);
@@ -302,6 +308,7 @@ export const ConversationList: React.FC<{
                   key={c.id}
                   conversation={c}
                   active={c.id === activeId}
+                  typing={(typingByConversation[c.id] ?? []).map((t) => t.name.split(' ')[0]!)}
                   onSelect={setActiveId}
                   onToggleStar={toggleStar}
                 />

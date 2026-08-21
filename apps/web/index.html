@@ -36,6 +36,24 @@
     />
 
     <title>Tupo — NGA Communication</title>
+
+    <!-- Appearance is applied before the first paint. React only mounts after
+         the bundle parses, and a dark-mode user should never see a white flash
+         while that happens. The class name matches the MIS's `darkMode: "class"`
+         so both apps look identical; AuthContext owns it from here on. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('tupo_theme');
+          if (t !== 'dark' && t !== 'light') {
+            t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          }
+          document.documentElement.classList.toggle('dark', t === 'dark');
+        } catch (e) {
+          /* Storage blocked (private mode, embedded webview) — light is fine. */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

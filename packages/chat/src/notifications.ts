@@ -155,13 +155,20 @@ export async function notifyMention(
 /**
  * What the notification says.
  *
- * Mentions are flattened to "@someone" rather than resolved: this string ends
- * up on a lock screen, and resolving a name there would mean a database round
- * trip per recipient for a line nobody reads twice.
+ * Mentions are resolved to real names. They used to be flattened to "@someone"
+ * to save a lookup — but this line is the *whole* of what someone sees on a
+ * lock screen, and "Aline mentioned you: can @someone cover period 4" is
+ * actively worse than no preview: it reads as though somebody else was asked.
+ *
+ * The names come from `mentionNames`, which the read path already resolved for
+ * the whole page, so this costs nothing extra.
  */
 function previewFor(m: WireMessage): string {
   if (m.body) {
-    return m.body.replace(/<@[A-Za-z0-9_-]{1,64}>/g, '@someone').slice(0, 140);
+    return m.body
+      .replace(/<@([A-Za-z0-9_-]{1,64})>/g,
+        (_whole, id: string) => `@${m.mentionNames?.[id] ?? 'someone'}`)
+      .slice(0, 140);
   }
   if (m.type === 'voice_note') return '🎤 Voice message';
   if (m.attachments.length === 1) return `📎 ${m.attachments[0]!.name}`;
