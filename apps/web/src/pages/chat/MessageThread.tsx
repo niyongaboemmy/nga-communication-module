@@ -15,6 +15,7 @@ import type { Conversation, Message } from './types';
 import { RichText } from './RichText';
 import { EmojiPicker } from './EmojiPicker';
 import { ForwardDialog } from './ForwardDialog';
+import { MessageAttachments } from './Attachments';
 import { PinnedBar } from './PinnedBar';
 import { QUICK_REACTIONS, EDIT_WINDOW_MS } from '@tupo/shared';
 
@@ -306,21 +307,9 @@ const MessageRow: React.FC<{
               </span>
             )}
 
-            {m.attachments.map((a) => (
-              <a
-                key={a.fileId}
-                href={`/api/files/${a.fileId}/content`}
-                className={`mt-2 flex items-center gap-2.5 rounded-xl px-2.5 py-2 transition-colors duration-150 ${
-                  mine ? 'bg-white/15 hover:bg-white/25' : 'bg-surface-light hover:bg-slate-100 dark:bg-card-dark/50 dark:hover:bg-card-dark'
-                }`}
-              >
-                <FileText size={18} className="shrink-0 opacity-80" />
-                <span className="min-w-0">
-                  <span className="block truncate text-xs font-medium">{a.name}</span>
-                  <span className="block text-[11px] opacity-70">{formatBytes(a.size)}</span>
-                </span>
-              </a>
-            ))}
+            {m.attachments.length > 0 && (
+              <MessageAttachments attachments={m.attachments} onDark={mine} />
+            )}
 
             {/* Ticks live inside the sender's own bubble — nobody needs delivery
                 state for a message they did not send. */}

@@ -5,5 +5,7 @@ interface ImportMetaEnv {
   readonly VITE_SSO_CLIENT_ID: string;
   readonly VITE_MIS_HOME_URL?: string;
   readonly VITE_TASKMENTOR_HOME_URL?: string;
+  /** Origin of the realtime gateway. Empty/unset means same-origin. */
+  readonly VITE_SOCKET_URL?: string;
 }
 interface ImportMeta { readonly env: ImportMetaEnv }

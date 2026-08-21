@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { MeetCallProvider } from './context/MeetCallContext';
 import { NotificationProvider } from './context/NotificationContext';
 import { MiniCall } from './components/meet/MiniCall';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { usePermissions } from './hooks/usePermissions';
 import { SignIn } from './pages/SignIn';
 import { SsoCallback } from './pages/SsoCallback';
@@ -102,8 +103,14 @@ export const App: React.FC = () => (
         </Routes>
 
         {/* Rendered outside <Routes> on purpose: it must survive every
-            navigation, and it portals to document.body so no page can clip it. */}
-        <MiniCall />
+            navigation, and it portals to document.body so no page can clip it.
+
+            Behind a boundary with a null fallback: a floating call widget is
+            decoration relative to the rest of the app, and it must never be
+            able to take the sidebar and the conversation down with it. */}
+        <ErrorBoundary fallback={null}>
+          <MiniCall />
+        </ErrorBoundary>
       </MeetCallProvider>
       </NotificationProvider>
     </BrowserRouter>

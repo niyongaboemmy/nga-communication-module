@@ -1,1 +1,5 @@
-storage/
+# The local-driver upload directory, which lives at the app root (./storage
+# per LOCAL_STORAGE_PATH). Anchored with a leading slash on purpose: a bare
+# "storage/" matches at any depth and silently ignored src/storage/ — the
+# storage driver source — which made a clean checkout unbuildable.
+/storage/

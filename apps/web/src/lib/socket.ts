@@ -18,6 +18,28 @@ import { SESSION_KEY } from './api';
 
 export type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
+/**
+ * Origin the realtime gateway is reached on.
+ *
+ * Empty means same-origin, which is what the Vite dev server proxies and what a
+ * single-host deployment uses. Production points this at the gateway's own
+ * subdomain instead, so WebSocket traffic never shares an nginx server block
+ * with the SPA and the REST API.
+ *
+ * Cross-origin is safe here because the handshake authenticates with a bearer
+ * token in `auth`, not a cookie — there is no SameSite behaviour to preserve.
+ * The gateway must list this app's origin in CORS_ORIGINS.
+ */
+export function socketOrigin(): string {
+  return import.meta.env.VITE_SOCKET_URL ?? '';
+}
+
+/** Build a namespace URL that works both same-origin and cross-origin. */
+export function socketUrl(namespace: string): string {
+  const base = socketOrigin().replace(/\/$/, '');
+  return base ? `${base}${namespace}` : namespace;
+}
+
 let socket: AppSocket | null = null;
 let currentToken: string | null = null;
 
@@ -41,7 +63,7 @@ export function getSocket(): AppSocket | null {
 
   if (!socket) {
     currentToken = token;
-    socket = io('/', {
+    socket = io(socketUrl('/'), {
       auth: { token },
       // Polling stays as a fallback: some school and mobile networks block
       // WebSocket upgrades outright.

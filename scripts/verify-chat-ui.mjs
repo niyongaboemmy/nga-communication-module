@@ -80,6 +80,19 @@ const visible = (locator, ms = 6000) =>
 const hidden = (locator, ms = 6000) =>
   locator.waitFor({ state: 'hidden', timeout: ms }).then(() => true).catch(() => false);
 
+/**
+ * Wait until the composer will actually send.
+ *
+ * Send is deliberately disabled while an attachment is still uploading — a
+ * message must not post without the photo it was written about. Pressing Enter
+ * before then is a no-op, so the test has to wait for the same condition the
+ * user would.
+ */
+const sendReady = (page) =>
+  page.locator('button[aria-label="Send message"]')
+    .waitFor({ state: 'visible', timeout: 15000 })
+    .then(() => true).catch(() => false);
+
 const BASE = 'http://localhost:5194';
 const browser = await chromium.launch();
 const alice = await makeUser('Ada Umutoni');
@@ -373,6 +386,82 @@ try {
       && await visible(fwd.getByText(/From You|From Ada Umutoni/).first()));
   await fwd.getByRole('button', { name: 'Cancel' }).click();
 
+  /* ── Attachments ──────────────────────────────────────────────────────── */
+
+  // A 1×1 PNG, so the assertion is about the pipeline rather than the picture.
+  const PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64');
+
+  await A.page.locator('input[type="file"]').setInputFiles({
+    name: 'lesson-plan.png', mimeType: 'image/png', buffer: PNG,
+  });
+  check('a chosen file appears in the composer tray',
+    await visible(A.page.getByRole('list', { name: 'Attachments' })));
+  check('and it uploads without being asked to',
+    await visible(A.page.getByRole('list', { name: 'Attachments' }).getByText('lesson-plan.png')));
+
+  await A.page.locator('#composer').fill('Here is the plan');
+  check('send unlocks once the attachment has finished uploading', await sendReady(A.page));
+  await A.page.locator('#composer').press('Enter');
+
+  const imageMsg = aliceThread.locator('li', { hasText: 'Here is the plan' }).first();
+  await imageMsg.waitFor({ timeout: 10000 });
+  check('the tray clears once the message is sent',
+    (await A.page.getByRole('list', { name: 'Attachments' }).count()) === 0);
+  check('the image renders inline in the sender’s own message',
+    await visible(imageMsg.getByRole('button', { name: /Open lesson-plan\.png/ })));
+
+  const bobImageMsg = bobThread.locator('li', { hasText: 'Here is the plan' }).first();
+  check('and reaches the recipient, who can open it',
+    await visible(bobImageMsg.getByRole('button', { name: /Open lesson-plan\.png/ }), 10000));
+
+  // The bug this phase exists to fix: the recipient must actually be able to
+  // load the bytes, not just see a broken box.
+  const loaded = await bobImageMsg.locator('img').first()
+    .evaluate((img) => (img).complete && (img).naturalWidth > 0)
+    .catch(() => false);
+  check('the recipient’s browser can actually load the image — the Phase 0 ACL could not',
+    loaded === true, String(loaded));
+
+  await bobImageMsg.getByRole('button', { name: /Open lesson-plan\.png/ }).click();
+  const lightbox = B.page.getByRole('dialog', { name: /lesson-plan\.png/ });
+  check('clicking it opens a full-screen viewer', await visible(lightbox, 5000));
+  await B.page.keyboard.press('Escape');
+  check('and Escape closes it', await hidden(lightbox, 3000));
+  await A.page.screenshot({ path: `${SHOTS}/09-alice-attachment.png` });
+
+  /* ── Documents ────────────────────────────────────────────────────────── */
+
+  await A.page.locator('input[type="file"]').setInputFiles({
+    name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('term dates\n'),
+  });
+  await sendReady(A.page);
+  await A.page.locator('#composer').press('Enter');
+  const docMsg = aliceThread.locator('li', { hasText: 'notes.txt' }).first();
+  await docMsg.waitFor({ timeout: 10000 });
+  check('a document with no caption is still a message',
+    await visible(docMsg.getByRole('button', { name: /Download notes\.txt/ })));
+
+  /* ── Refusals ─────────────────────────────────────────────────────────── */
+
+  await A.page.locator('input[type="file"]').setInputFiles({
+    name: 'malware.exe', mimeType: 'application/octet-stream', buffer: Buffer.from('MZ'),
+  });
+  check('a program is refused before it is uploaded, and the reason is stated',
+    await visible(A.page.getByText(/is a program/)));
+
+  /* ── The Files tab ────────────────────────────────────────────────────── */
+
+  await B.page.getByRole('button', { name: 'Conversation details' }).click();
+  await B.page.getByRole('tab', { name: 'Files' }).click();
+  const filesPanel = B.page.getByRole('complementary', { name: 'Conversation details' });
+  check('the Files tab lists what has been shared',
+    await visible(filesPanel.getByText('lesson-plan.png'), 6000));
+  check('with who shared it',
+    await visible(filesPanel.getByText(/Ada Umutoni/).first()));
+  await B.page.screenshot({ path: `${SHOTS}/10-bob-files-tab.png` });
+
   /* ── Responsive ───────────────────────────────────────────────────────── */
 
   const phone = await browser.newContext({
@@ -416,9 +505,13 @@ try {
   for (const c of contexts) await c.close().catch(() => {});
   await browser.close();
   const ids = [alice.id, bob.id];
+  // Order matters: files reference users, so deleting users first fails on the
+  // foreign key — and a throwing `finally` swallows whatever actually went
+  // wrong in the body, which is how this hid a real timeout.
   await pool.query(
     `DELETE FROM conversations WHERE created_by = ANY($1::text[]) OR id IN (
        SELECT conversation_id FROM conversation_members WHERE user_id = ANY($1::text[]))`, [ids]);
+  await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]);
   await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [ids]);
   await pool.end();
 }

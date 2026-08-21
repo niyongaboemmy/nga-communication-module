@@ -1,6 +1,11 @@
-import React, { useState } from 'react';
-import { X, Users, FileText, Info, Bell, BellOff, Star, LogOut, AtSign } from 'lucide-react';
-import { Avatar, IconButton, EmptyState } from '../../components/ui';
+import React, { useEffect, useState } from 'react';
+import {
+  X, Users, FileText, Info, Bell, BellOff, Star, LogOut, AtSign, Download, Image as ImageIcon,
+} from 'lucide-react';
+import { Avatar, IconButton, EmptyState, Skeleton } from '../../components/ui';
+import { listConversationFiles, downloadFile } from './uploads';
+import type { ConversationFile } from './uploads';
+import { formatBytes, shortStamp } from './data';
 import { useChat } from './ChatProvider';
 import { toPresence } from './types';
 import type { Conversation, Member } from './types';
@@ -28,8 +33,23 @@ export const ContextPanel: React.FC<{
   onClose: () => void;
 }> = ({ conversation: c, members, onClose }) => {
   const [tab, setTab] = useState<Tab>('about');
-  const { toggleStar, setNotificationLevel } = useChat();
+  const { toggleStar, setNotificationLevel, jumpTo } = useChat();
   const muted = c.notification === 'none';
+
+  const [files, setFiles] = useState<ConversationFile[] | null>(null);
+  const [filter, setFilter] = useState<'all' | 'image' | 'document'>('all');
+
+  // Fetched when the tab is opened, not on mount: a channel's file history can
+  // be long, and most people never open this tab at all.
+  useEffect(() => {
+    if (tab !== 'files') return;
+    let cancelled = false;
+    setFiles(null);
+    listConversationFiles(c.id, filter === 'all' ? undefined : filter)
+      .then((rows) => { if (!cancelled) setFiles(rows); })
+      .catch(() => { if (!cancelled) setFiles([]); });
+    return () => { cancelled = true; };
+  }, [tab, c.id, filter]);
 
   return (
     <aside
@@ -171,11 +191,75 @@ export const ContextPanel: React.FC<{
         ))}
 
         {tab === 'files' && (
-          <EmptyState
-            icon={<FileText size={22} />}
-            title="No files shared yet"
-            hint="Files attached to messages in this conversation will collect here."
-          />
+          <div>
+            <div className="mb-2 flex gap-1 rounded-lg border border-border-light p-1 dark:border-border-dark/50">
+              {([
+                { id: 'all', label: 'All' },
+                { id: 'image', label: 'Media' },
+                { id: 'document', label: 'Documents' },
+              ] as const).map(({ id, label }) => (
+                <button
+                  key={id}
+                  onClick={() => setFilter(id)}
+                  aria-pressed={filter === id}
+                  className={`flex-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors duration-150 ${
+                    filter === id
+                      ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                      : 'text-text-secondary-light hover:bg-surface-light dark:text-text-secondary-dark dark:hover:bg-surface-dark'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {files === null ? (
+              <div className="space-y-2" aria-busy="true">
+                {Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-12 w-full rounded-lg" />)}
+              </div>
+            ) : files.length === 0 ? (
+              <EmptyState
+                icon={<FileText size={22} />}
+                title="No files shared yet"
+                hint="Files attached to messages in this conversation will collect here."
+              />
+            ) : (
+              <ul className="space-y-1">
+                {files.map((f) => (
+                  <li
+                    key={f.id}
+                    className="group flex items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-surface-light dark:hover:bg-surface-dark"
+                  >
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-500 dark:bg-card-dark/60 dark:text-slate-300">
+                      {f.kind === 'image' || f.kind === 'video'
+                        ? <ImageIcon size={15} /> : <FileText size={15} />}
+                    </span>
+                    {/* Clicking a file goes to the message it was shared in.
+                        A file torn out of its conversation loses the sentence
+                        that explains what it is. */}
+                    <button
+                      onClick={() => void jumpTo(f.messageId)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <span className="block truncate text-xs font-medium text-text-primary-light dark:text-text-primary-dark">
+                        {f.name}
+                      </span>
+                      <span className="block truncate text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
+                        {f.senderName} · {formatBytes(f.size)} · {shortStamp(f.createdAt)}
+                      </span>
+                    </button>
+                    <IconButton
+                      label={`Download ${f.name}`}
+                      size="sm"
+                      onClick={() => void downloadFile(f.id, f.name)}
+                    >
+                      <Download size={14} />
+                    </IconButton>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
       </div>
     </aside>

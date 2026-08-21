@@ -477,3 +477,75 @@ refused action had no effect.
 default, so `'Saved items'` also matched `'Remove from saved items'` on a
 message row. Passing `exact: true` where a name is a prefix of another is not
 optional.
+
+---
+
+## 11. Phase 4 — delivered
+
+**Gate: 42/42 file checks, 60/60 browser checks, and 51 + 43 + 35 on the earlier
+phases with no regression. 9/9 workspaces typecheck and build, `npm audit` 0.**
+
+```
+npm run verify:chat:files   # 42 — upload, access control, tickets, serving rules
+npm run verify:chat:ui      # 60 — two real browsers
+```
+
+### The bug this phase existed to fix
+
+Phase 0 shipped the download route as `owner_id = caller`, with a comment saying
+conversation-scoped ACLs would arrive later. That is not a missing feature, it
+is a broken one: the moment a file is attached to a message, every recipient
+needs to read it and **none of them owns it**. An attachment readable only by
+the person who sent it is not an attachment.
+
+The rule now, in `apps/files/src/access.ts`, checked on every request:
+
+| Who | May read |
+|---|---|
+| The uploader | Always — including before it is attached, which is what makes the ticket → bytes → send pipeline work |
+| A **live** member of a conversation it is attached to | Yes. Attachment is the grant; membership is the check |
+| Anyone else | No — 404, not 403, because confirming a file id exists is itself a disclosure |
+
+Access is *live*, and the gate proves each direction: leaving the conversation
+revokes it, rejoining restores it, and deleting the message that carried the
+file revokes it for recipients while leaving the uploader their own copy.
+
+### Media tickets, and why they are not signed URLs
+
+An `<img>`, `<video>` or `<audio>` cannot send an Authorization header. Fetching
+every image to a blob would work for pictures but destroys range requests, so a
+40 MB lesson recording would have to download in full before playing a second.
+
+So: a 60-second JWT bound to one file and one person, passed as `?t=`.
+
+The distinction that matters — a signed URL **is** the authorisation, and anyone
+holding it gets the bytes for as long as it lives. This ticket carries only an
+*identity*; `canReadFile` still runs on redemption against live membership. The
+gate asserts both consequences: a ticket stops working the instant its holder
+loses access, and a ticket minted for one file cannot be replayed against
+another.
+
+### Also delivered
+
+| Area | Delivered |
+|---|---|
+| Upload | Ticket → XHR with real progress → attach. Starts on choose, not on send; cancel aborts the request rather than ignoring it |
+| Input | File picker, drag-and-drop with a drop overlay, and clipboard paste (screenshots are the commonest attachment there is) |
+| Rendering | Images and video tiled inline with the box reserved from the sender's measured dimensions, lightbox with keyboard nav, documents as rows with a download button |
+| Voice notes | Live analyser meter while recording, waveform computed once at record time, playback with scrub and 1×/1.5×/2× |
+| Files tab | Per-conversation, filterable, each entry jumping back to the message it came from |
+| Serving | `attachment` by default (uploaded HTML is never inline, whatever is asked for), `nosniff`, `private` caching, HTTP 206 range support |
+| Refusals | Size, empty files, and executables — refused at choose time, with the reason stated next to the composer |
+
+### Defects found this phase
+
+| Defect | Cause | Fix |
+|---|---|---|
+| **A rejected `.exe` produced no message at all** | `add()` called `setErrors` from *inside* a `setUploads` updater. React runs updaters during the render phase, so that is a state update during another component's render — unsupported, and silently dropped | Validation and slot accounting moved out of the updater, with a ref mirroring the tray so two drops in one tick cannot both think it is empty |
+| **The `/metadata` route was never registered** | A `str.replace` anchored on comment text an earlier edit had already rewritten. It matched nothing and returned the string unchanged — no error, no route | Re-added with an assertion. Every scripted edit in this codebase now asserts its anchor |
+| **Any component throwing blanked the whole application** | No error boundary anywhere. A hot-reload invalidated a context identity, one consumer threw, and the sidebar, conversation and composer all disappeared | `components/ErrorBoundary.tsx`; the floating call widget behind a silent one, the chat workspace behind a visible one. Hot-reload is a development-only *cause*; "one component removes the product" is not a development-only *consequence* |
+| The browser gate's cleanup deleted users before files, so it died on a foreign key — and a throwing `finally` swallowed the real failure in the body | Ordering | Files first. A cleanup block that can throw will eventually hide the bug you are looking for |
+
+One more test-side lesson: send is deliberately disabled while an attachment is
+uploading, so pressing Enter immediately after choosing a file is a no-op. The
+gate now waits for the same condition a person would.

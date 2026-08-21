@@ -9,6 +9,7 @@ import type {
   MeetSettings, MeetTranscriptSegment, VideoQuality,
 } from '@tupo/shared';
 import { SESSION_KEY, MEET_GUEST_KEY } from '../../lib/api';
+import { socketUrl } from '../../lib/socket';
 import { MeshTransport } from './transport/mesh';
 import { CloudflareTransport } from './transport/cloudflare';
 import type { MediaTransport, RemoteMedia } from './transport/types';
@@ -235,7 +236,7 @@ export function useMeetRoom(
   useEffect(() => {
     if (!ticket) return;
 
-    const socket = io('/meet', {
+    const socket = io(socketUrl('/meet'), {
       auth: {
         token: localStorage.getItem(SESSION_KEY) ?? localStorage.getItem(MEET_GUEST_KEY),
       },

@@ -8,6 +8,7 @@ import { ContextPanel } from './ContextPanel';
 import { ChatProvider, useChat } from './ChatProvider';
 import { ThreadPanel } from './ThreadPanel';
 import { SavedItems } from './SavedItems';
+import { ErrorBoundary } from '../../components/ErrorBoundary';
 import * as chatApi from './api';
 import type { Member } from './types';
 
@@ -170,6 +171,8 @@ const ChatWorkspace: React.FC = () => {
 
 export const ChatLayout: React.FC = () => (
   <ChatProvider>
-    <ChatWorkspace />
+    <ErrorBoundary label="chat">
+      <ChatWorkspace />
+    </ErrorBoundary>
   </ChatProvider>
 );
