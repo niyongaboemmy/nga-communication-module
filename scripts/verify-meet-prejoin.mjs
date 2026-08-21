@@ -37,11 +37,13 @@ const api=(p,init={})=>fetch(`http://localhost:5190${p}`,{...init,headers:{'Cont
  * threw left the test account in the users table — which is how six accounts
  * all named "Aline Uwase" ended up in the people picker.
  */
+// Declared out here so the `finally` below can still close it.
+let browser;
 try {
 const m=(await api('/api/meet',{method:'POST',body:JSON.stringify({title:'Device check meeting',
   scheduledStart:new Date(Date.now()+3600e3).toISOString()})})).data;
 
-const browser = await chromium.launch({ args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'] });
+browser = await chromium.launch({ args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'] });
 const ctx = await browser.newContext({ viewport:{width:1280,height:900}, deviceScaleFactor:2, permissions:['camera','microphone'] });
 await ctx.addInitScript(kv=>{for(const [k,v] of Object.entries(kv)) localStorage.setItem(k,v);}, seed);
 const page = await ctx.newPage();

@@ -15,6 +15,7 @@ import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
+import { purgeUsers } from './lib/purge.mjs';
 const env = Object.fromEntries(readFileSync('apps/api/.env','utf8').split('\n')
   .filter(l => l.includes('=') && !l.trimStart().startsWith('#'))
   .map(l => [l.slice(0,l.indexOf('=')).trim(), l.slice(l.indexOf('=')+1).trim().replace(/^["']|["']$/g, '')]));
@@ -31,6 +32,15 @@ const token=jwt.sign(user,env.JWT_SECRET,{expiresIn:'25m'});
 const seed={tupo_token:token,tupo_user:JSON.stringify(user),tupo_permissions:JSON.stringify([]),
   tupo_role_permissions:JSON.stringify({keys:perms,name:'Staff'})};
 const api=(p,init={})=>fetch(`http://localhost:5190${p}`,{...init,headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`,...(init.headers||{})}}).then(r=>r.json());
+
+/*
+ * try/finally, because there was none: any check that threw left the test
+ * account in the users table. Three of these leaked to *production* and showed
+ * up in the people picker as duplicate "Aline Uwase" rows.
+ */
+// Declared out here so the `finally` below can still close it.
+let browser;
+try {
 
 // History fixtures: meetings spread across months, then ended.
 const ago=(days,h)=>{const d=new Date();d.setDate(d.getDate()-days);d.setHours(h,0,0,0);return d;};
@@ -60,7 +70,7 @@ const bad = await api('/api/meet?scope=past&from=not-a-date&limit=5');
 check('an unparseable date is ignored, not fatal', bad.data !== undefined, `status ${bad.success}`);
 
 // --- Browser: history page + share panel + scheduler ---
-const browser = await chromium.launch();
+browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport:{width:1440,height:1000}, deviceScaleFactor:2 });
 await ctx.addInitScript(kv=>{for(const [k,v] of Object.entries(kv)) localStorage.setItem(k,v);}, seed);
 const page = await ctx.newPage();
@@ -102,9 +112,14 @@ check('it groups them into sections',
   `${await page.getByRole('heading',{level:2}).count()} sections`);
 
 check('no page errors', errors.length===0, errors.slice(0,2).join(' | '));
-await browser.close();
-await pool.query(`DELETE FROM meetings WHERE host_id=$1`,[id]);
-await pool.query(`DELETE FROM users WHERE id=$1`,[id]);
-await pool.end();
+} catch (err) {
+  fail.push('threw');
+  console.error(`❌ threw: ${err instanceof Error ? err.stack : err}`);
+} finally {
+  await browser.close().catch(() => {});
+  try { await pool.query(`DELETE FROM meetings WHERE host_id=$1`, [id]); } catch { /* nothing to remove */ }
+  await purgeUsers(pool, [id]);
+  await pool.end();
+}
 console.log(`\n${pass.length} passed, ${fail.length} failed`);
 process.exit(fail.length?1:0);

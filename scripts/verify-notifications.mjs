@@ -38,7 +38,16 @@ const api = async (path, token, init = {}) => {
   return { status: res.status, body };
 };
 
+/*
+ * The teardown below deletes by prefix, so a later run heals an earlier leak —
+ * but only if someone runs it again on that host. On production nobody does,
+ * which is how leaked gate accounts end up in the people picker. try/finally
+ * so a throw cannot skip it in the first place.
+ */
+// Out here so the `catch`/`finally` and the final report can see them.
 const pass = [], fail = [];
+try {
+
 const check = (n, ok, d='') => (ok ? pass : fail).push(`${ok?'✅':'❌'} ${n}${d?`  — ${d}`:''}`);
 
 const host = await makeUser('Notif Host', 'Staff');
@@ -92,9 +101,13 @@ const after = await api('/api/notifications', other.token);
 check('ending the meeting withdraws the invitation',
   !(after.body.data?.notifications ?? []).some(n => n.subjectId === meetingId));
 
-await pool.query(`DELETE FROM meetings WHERE host_id LIKE 'ntest-%'`).catch(()=>{});
-await pool.query(`DELETE FROM users WHERE id LIKE 'ntest-%'`).catch(()=>{});
-await pool.end();
+} catch (err) {
+  fail.push(`❌ threw: ${err instanceof Error ? err.stack : err}`);
+} finally {
+  await pool.query(`DELETE FROM meetings WHERE host_id LIKE 'ntest-%'`).catch(()=>{});
+  await pool.query(`DELETE FROM users WHERE id LIKE 'ntest-%'`).catch(()=>{});
+  await pool.end();
+}
 console.log([...pass, ...fail].join('\n'));
 console.log(`\n${pass.length} passed, ${fail.length} failed`);
 process.exit(fail.length ? 1 : 0);
