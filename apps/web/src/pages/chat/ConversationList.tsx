@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   Search, Plus, Hash, Megaphone, Star, ChevronRight, BellOff, Users, Filter, Lock, AtSign,
-  Bookmark, Bell,
+  Bookmark, Bell, Compass,
 } from 'lucide-react';
 import { Avatar, IconButton, SearchInput, Skeleton, UnreadBadge, EmptyState } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -178,7 +178,9 @@ const RowSkeleton: React.FC = () => (
 export const ConversationList: React.FC<{
   onOpenSaved?: () => void;
   onOpenSettings?: () => void;
-}> = ({ onOpenSaved, onOpenSettings }) => {
+  onOpenSearch?: () => void;
+  onOpenBrowse?: () => void;
+}> = ({ onOpenSaved, onOpenSettings, onOpenSearch, onOpenBrowse }) => {
   const { can } = usePermissions();
   const {
     conversations, conversationsLoading, activeId, setActiveId, toggleStar, connected,
@@ -236,6 +238,16 @@ export const ConversationList: React.FC<{
             >
               <Filter size={15} />
             </IconButton>
+            {onOpenBrowse && can('CHANNEL_VIEW') && (
+              <IconButton label="Browse channels" size="sm" onClick={onOpenBrowse}>
+                <Compass size={15} />
+              </IconButton>
+            )}
+            {onOpenSearch && (
+              <IconButton label="Search messages" size="sm" onClick={onOpenSearch}>
+                <Search size={15} />
+              </IconButton>
+            )}
             {onOpenSettings && (
               <IconButton label="Notification settings" size="sm" onClick={onOpenSettings}>
                 <Bell size={15} />
@@ -278,8 +290,8 @@ export const ConversationList: React.FC<{
                 : unreadOnly
                   ? 'You are all caught up.'
                   : canCreate
-                    ? 'Start one with the + button above.'
-                    : 'Channels you are added to will appear here.'
+                    ? 'Start one with the + button, or browse the channel directory.'
+                    : 'Channels you are added to will appear here. Browse the directory to find more.'
             }
           />
         ) : (

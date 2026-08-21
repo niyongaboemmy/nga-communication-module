@@ -4,6 +4,8 @@ import { Queue, Worker, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pingDb } from '@tupo/db';
 import { runMeetWrapUp, type MeetWrapUpData } from './jobs/meetWrapUp.js';
+import { runScheduledMessages } from './jobs/scheduledMessages.js';
+import { runChatSweeps } from './jobs/chatSweeps.js';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -42,6 +44,23 @@ const worker = new Worker(
         lastJobAt = new Date().toISOString();
         return runMeetWrapUp(job.data as MeetWrapUpData);
       }
+      // Messages scheduled for later (FR-MSG-18). A repeating sweep rather
+      // than one delayed job per message: the database stays authoritative, so
+      // cancelling is an UPDATE and a Redis flush costs punctuality rather than
+      // people's messages.
+      case 'chat:scheduled-sweep': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runScheduledMessages(process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/0');
+      }
+
+      // Disappearing messages and expired custom statuses (FR-MSG-19, FR-USR-4).
+      case 'chat:sweep': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runChatSweeps();
+      }
+
       default:
         // Fail loudly rather than silently dropping work we don't recognise.
         throw new Error(`Unknown job type: ${job.name}`);
@@ -51,6 +70,36 @@ const worker = new Worker(
 );
 
 worker.on('failed', (job, err) => console.error(`[worker] job ${job?.id} (${job?.name}) failed:`, err.message));
+
+/**
+ * The scheduled-message clock.
+ *
+ * Every 30 seconds. Finer than that spends Redis round trips on nothing;
+ * coarser and "send at 08:00" visibly is not 08:00. `jobId` is fixed so
+ * restarting the worker replaces the repeatable rather than stacking a second
+ * one on top of it — the classic way a sweep quietly starts running twice.
+ */
+const SCHEDULED_SWEEP_MS = 30_000;
+queue.add('chat:scheduled-sweep', {}, {
+  jobId: 'chat-scheduled-sweep',
+  repeat: { every: SCHEDULED_SWEEP_MS },
+  removeOnComplete: 20,
+  removeOnFail: 20,
+}).catch((err) => console.error('[worker] could not register the scheduled sweep:', err.message));
+
+/**
+ * Housekeeping, every five minutes.
+ *
+ * Coarser than the scheduled-message clock on purpose: nobody notices a
+ * disappearing message surviving four minutes past its hour, and sweeping the
+ * messages table every thirty seconds to usually find nothing is a poor trade.
+ */
+queue.add('chat:sweep', {}, {
+  jobId: 'chat-sweep',
+  repeat: { every: 5 * 60_000 },
+  removeOnComplete: 10,
+  removeOnFail: 10,
+}).catch((err) => console.error('[worker] could not register the chat sweep:', err.message));
 worker.on('ready', () => console.log('[worker] connected to redis, waiting for jobs'));
 
 const app = express();

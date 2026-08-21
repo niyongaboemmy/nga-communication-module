@@ -602,3 +602,162 @@ typo from being a privilege-escalation path.
 `networkidle` had worked by luck up to Phase 4, when the socket happened to
 connect after the load settled. It is the wrong condition for any application
 with a persistent connection, and it fails intermittently rather than honestly.
+
+---
+
+## 13. Phase 6 — delivered
+
+**Gate: 40/40 power checks (green first run), 93/93 browser checks, and
+51 + 43 + 35 + 42 + 28 on the earlier phases with no regression. 9/9 workspaces
+typecheck and build.**
+
+```
+npm run verify:chat:power   # 40 — search, scheduled send, polls
+npm run verify:chat:ui      # 93 — two real browsers
+```
+
+### What was built
+
+| Area | Delivered |
+|---|---|
+| Search | Postgres full-text with quoted phrases and `-exclusions`, filters by conversation / person / date / has-file, own panel with marked hits |
+| Command palette | ⌘K over conversations and actions, prefix-ranked, keyboard-only |
+| Scheduled send | Presets plus a custom time, a visible and cancellable queue, a worker sweep that claims atomically |
+| Polls | Ride on a real message, live results over the socket, single or multi choice, anonymous option, close by the author |
+| Slash commands | `/poll /me /shrug /search /saved /scheduled /meet /shortcuts`, with a hint list |
+| Shortcuts | ⌘K, ⌘F, ⌘⇧S, Escape to close-or-mark-read, plus a reference sheet |
+
+### Decisions worth recording
+
+**Search access control is a JOIN, not a filter.** Rows come out of
+`conversation_members` for the searcher, so there is no ordering of clauses in
+which a message from a channel they are not in can appear. The gate posts the
+same rare word into a private channel the searcher cannot see and asserts it
+never comes back — while the channel's own member does get it.
+
+**The highlight is not HTML.** `ts_headline` wants to emit `<b>`; letting it
+would mean the client injecting a string that contains message text as markup,
+which is a stored XSS with extra steps. Matches are wrapped in two ASCII control
+characters and split into React elements instead. Asserted: `!/<[a-z]/.test(highlight)`.
+
+**Scheduled send is a repeating sweep, not one delayed job per message.** A job
+per message sounds tidier and is worse: cancelling means hunting a job by id, a
+Redis flush loses every pending send silently, and the queue becomes the source
+of truth for something the database already knows. Here the database is
+authoritative and the worker is a clock — losing Redis costs punctuality, not
+messages. Claiming uses `FOR UPDATE SKIP LOCKED`, and the gate proves a due
+message is claimed exactly once.
+
+**An unrecognised `/word` is sent as text.** Refusing to post
+"/etc/hosts is the file" would be absurd. A chat that argues with what you typed
+is worse than one with no commands at all.
+
+### Defects found this phase
+
+| Defect | Cause | Fix |
+|---|---|---|
+| **The emoji picker rebuilt its entire DOM about once a second** — measured at 1,432 nodes added and removed in five seconds while it sat open, and it made the buttons intermittently unclickable | `Cell` was declared *inside* `EmojiPicker`. A component defined in another component's body is a new type on every render, so React cannot reconcile it and remounts the whole subtree | Hoisted to module scope and memoised. Churn measured again afterwards: **0** |
+| Three controls shared the accessible name "Search messages" — the panel, the input and the button that opens it | Convenience | The input is now "Search term". Indistinguishable names are indistinguishable to a screen reader, whatever they look like |
+
+Two test-side lessons, both of which produced false failures:
+
+- The Phase 5 section turned **enter-to-send off and never turned it back on**.
+  That preference is persisted per user, so it leaked into every later section
+  and three Phase 6 checks failed because their `Enter` had become a newline. A
+  test that changes durable state has to restore it, or it is testing everything
+  that comes after it as well.
+- Running `npm run build` **concurrently** with a gate rewrites `packages/*/dist`,
+  which restarts the API under `tsx watch` mid-run: five gates reported
+  `fetch failed` at their first call. Gates and builds are now run sequentially.
+
+---
+
+## 14. Phase 7 — delivered
+
+**Gate: 52/52 administration checks, 105/105 browser checks, and every earlier
+phase green with no regression. 9/9 workspaces typecheck and build,
+`npm audit` 0.**
+
+```
+npm run verify:chat:admin   # 52 — discovery, membership, invites, profiles, retention
+npm run verify:chat:ui      # 105 — two real browsers, desktop + phone
+```
+
+### What was built
+
+| Area | Delivered |
+|---|---|
+| Discovery | Public channel directory with search, join in place, "already a member" state |
+| Membership | Add, remove, leave, promote, demote, transfer ownership — each permission-gated and announced |
+| Invites | 128-bit codes, expiry, use limits, revocation |
+| Settings | Topic, archive/reopen, and the disappearing-message policy |
+| Profiles | Card behind every avatar with role, pronouns, local time, status, and one action: message them |
+| Custom status | Emoji, text and an expiry that is honoured on read, not merely swept |
+| Retention | 24 h / 7 / 30 / 90 / 365 days, back-dated onto existing messages, hard-deleted by a worker sweep |
+
+### Decisions worth recording
+
+**A private channel is absent from the directory, not greyed out.** In a school
+the *name* is frequently the sensitive part — a channel named for a pupil under
+review needs no contents read to do damage — so "you cannot join this" has
+already leaked the thing worth protecting.
+
+**Private cannot be made public.** Opening a channel retroactively publishes
+everything ever said in it to people who were never party to it. That is not a
+settings change, it is a disclosure, so the transition is refused in one
+direction only.
+
+**A channel can never be left ownerless.** An admin cannot remove the owner, and
+the owner cannot leave without transferring first. Transfer is one transaction:
+two owners or none are both worse than the operation failing.
+
+**A disappearing message leaves no tombstone.** "This message was deleted" would
+preserve the author, the timing and the fact of it — most of what the setting
+exists to remove. The sweep hard-deletes the row and its reactions, receipts,
+mentions and attachments.
+
+**Rejoining keeps your read position.** `left_at` rather than a delete, so the
+watermark survives and a returning member is not dropped at the top of a channel
+they have already read.
+
+### Defects found this phase
+
+| Defect | Cause | Fix |
+|---|---|---|
+| **Rejoining a channel wiped your saved read position** | The "X joined" system notice is authored by X, and the send path advances the author's watermark to their own message. A rejoin therefore jumped to the bottom | The watermark is no longer advanced for `system` messages. A system notice is not something anyone read |
+| **The member list did not refresh after a promotion or removal** — the panel kept showing the old role until it was closed and reopened, so a moderator could not tell whether their click had worked | Members were fetched once per panel-open | A version counter the mutation bumps, plus a `conversation:member_changed` socket listener so a change made by *anyone* in the room lands |
+
+One gate assumption was wrong rather than the code, twice over: `CHANNEL_ARCHIVE`
+is a Moderator permission and not a Staff one, so both the API and browser gates
+were asserting against a role that correctly cannot archive. The API gate now
+uses a Moderator and additionally asserts the Staff refusal; the browser gate
+asserts the control is **hidden** for Staff, which is the honest UI expectation.
+
+---
+
+## 15. Definition of done — met
+
+| Criterion | Result |
+|---|---|
+| All 7 phase gates green | ✅ 51 + 43 + 35 + 42 + 28 + 40 + 52 = **291 API/socket checks** |
+| Browser verification | ✅ **105 checks** across two live browsers, desktop and phone |
+| `npm run typecheck` | ✅ 0 errors, 9 workspaces |
+| `npm run build` | ✅ 0 errors; web bundle 229 kB gzipped |
+| `npm audit` | ✅ 0 vulnerabilities |
+| Every `M` feature in §2 | ✅ implemented and covered by a gate check or a documented browser pass |
+
+**396 automated checks in total**, all runnable against the live stack:
+
+```
+npm run verify:chat                # spine
+npm run verify:chat:live           # reactions, edits, deletions, notifications
+npm run verify:chat:threads        # threads, quotes, pins, saves, forwarding
+npm run verify:chat:files          # attachments and the access rule
+npm run verify:chat:notifications  # mentions, preferences, quiet hours
+npm run verify:chat:power          # search, scheduling, polls
+npm run verify:chat:admin          # channels, invites, profiles, retention
+npm run verify:chat:ui             # two real browsers
+```
+
+Run the gates **sequentially and not alongside a build** — `npm run build`
+rewrites `packages/*/dist`, which restarts the API under `tsx watch` mid-run.

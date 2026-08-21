@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MessagesSquare } from 'lucide-react';
 import { EmptyState } from '../../components/ui';
 import { ConversationList } from './ConversationList';
@@ -9,15 +9,23 @@ import { ChatProvider, useChat } from './ChatProvider';
 import { ThreadPanel } from './ThreadPanel';
 import { SavedItems } from './SavedItems';
 import { NotificationSettings } from './NotificationSettings';
+import { SearchPanel } from './SearchPanel';
+import { ScheduledPanel } from './ScheduledPanel';
+import { CommandPalette, PALETTE_ICONS } from './CommandPalette';
+import type { PaletteAction } from './CommandPalette';
+import { ShortcutsSheet } from './ShortcutsSheet';
+import { BrowseChannels } from './BrowseChannels';
+import { ChannelSettings } from './ChannelSettings';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import * as chatApi from './api';
+import { getSocket } from '../../lib/socket';
 import type { Member } from './types';
 
 /**
  * Chat, three panes (SRS §15.1).
  *
- *   ≥1280px  list │ thread │ context, all inline
- *   ≥768px   list │ thread, context overlays from the right
+ *   ≥1280px  list │ thread │ side panel, all inline
+ *   ≥768px   list │ thread, side panel overlays from the right
  *   <768px   one pane at a time: the list *is* the screen until a conversation
  *            is opened, then the thread replaces it and Back returns
  *
@@ -27,14 +35,65 @@ import type { Member } from './types';
  * should not be paying to render a 34-row list behind an open conversation.
  */
 
+/** Everything that can occupy the right-hand column. */
+export type Panel =
+  | 'none' | 'details' | 'thread' | 'saved' | 'settings' | 'search' | 'scheduled'
+  | 'browse' | 'channel';
+
+const SidePanel: React.FC<{
+  width: 'wide' | 'narrow';
+  onDismiss: () => void;
+  children: React.ReactNode;
+}> = ({ width, onDismiss, children }) => (
+  <>
+    {/* The scrim exists below xl, where the panel is an overlay. Inline at xl
+        there is nothing to dismiss by clicking past. */}
+    <div
+      className="fixed inset-0 z-70 bg-black/40 xl:hidden"
+      onClick={onDismiss}
+      aria-hidden="true"
+    />
+    <div
+      className={`animate-panel-in-right fixed inset-y-0 right-0 z-80 max-w-[90vw] xl:static xl:z-auto ${
+        width === 'wide' ? 'w-96 xl:w-96' : 'w-80 xl:w-80'
+      }`}
+    >
+      {children}
+    </div>
+  </>
+);
+
 const ChatWorkspace: React.FC = () => {
   const {
-    conversations, conversationsLoading, activeId, setActiveId, active, threadRootId, openThread,
+    conversations, conversationsLoading, activeId, setActiveId, active,
+    threadRootId, openThread, markReadTo,
   } = useChat();
-  const [contextOpen, setContextOpen] = useState(false);
-  const [savedOpen, setSavedOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  /*
+   * One slot, one occupant.
+   *
+   * Details, thread, saved, search, scheduled and settings all render into the
+   * same right-hand column. Six independent booleans meant every new panel had
+   * to be excluded from the render condition of every other one — a condition
+   * already got wrong twice by the time there were four of them. A single value
+   * cannot get out of step with itself.
+   */
+  const [panel, setPanel] = useState<Panel>('none');
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [members, setMembers] = useState<Member[]>([]);
+
+  // A thread is opened from a message's reply button, which lives in the
+  // provider — so the slot follows that state rather than owning it.
+  useEffect(() => {
+    if (threadRootId) setPanel('thread');
+    else setPanel((p) => (p === 'thread' ? 'none' : p));
+  }, [threadRootId]);
+
+  const closePanel = useCallback(() => {
+    if (threadRootId) openThread(null);
+    setPanel('none');
+  }, [threadRootId, openThread]);
 
   /*
    * On a wide screen an empty right-hand pane is wasted space, so open the
@@ -43,10 +102,10 @@ const ChatWorkspace: React.FC = () => {
    *
    * It fires on the *initial load only*, and the latch is set the moment that
    * load finishes — even when it finished with nothing to open. Latching on
-   * "we opened something" instead leaves the effect armed for an empty
-   * account, so the first DM anyone sends them rips them out of whatever they
-   * were doing, opens itself, and marks itself read. Reading someone's message
-   * has to be something the reader did, not something that happened to them.
+   * "we opened something" instead leaves the effect armed for an empty account,
+   * so the first DM anyone sends them rips them out of whatever they were
+   * doing, opens itself, and marks itself read. Reading someone's message has
+   * to be something the reader did, not something that happened to them.
    */
   const autoOpened = useRef(false);
   useEffect(() => {
@@ -57,29 +116,70 @@ const ChatWorkspace: React.FC = () => {
     if (first && window.matchMedia('(min-width: 768px)').matches) setActiveId(first.id);
   }, [activeId, conversationsLoading, conversations, setActiveId]);
 
-  // Members are only needed when the details panel is actually open — a channel
-  // of 400 is a real payload, and the sidebar never shows it.
+  /*
+   * Members are only loaded when a panel that shows them is open — a channel of
+   * 400 is a real payload, and the sidebar never shows it.
+   *
+   * `membersVersion` is what makes the list refetch after somebody is promoted
+   * or removed. Without it the panel kept showing the old role until it was
+   * closed and reopened, so the moderator could not tell whether their click
+   * had done anything.
+   */
+  const [membersVersion, setMembersVersion] = useState(0);
+  const reloadMembers = useCallback(() => setMembersVersion((v) => v + 1), []);
+
   useEffect(() => {
-    if (!activeId || !contextOpen) return;
+    if (!activeId || (panel !== 'details' && panel !== 'channel')) return;
     let cancelled = false;
     chatApi.listMembers(activeId)
       .then((m) => { if (!cancelled) setMembers(m); })
       .catch(() => { if (!cancelled) setMembers([]); });
     return () => { cancelled = true; };
-  }, [activeId, contextOpen]);
+  }, [activeId, panel, membersVersion]);
 
-  // Opening a thread puts the details panel away rather than leaving it stacked
-  // behind, so closing the thread does not reveal a panel nobody asked for.
-  useEffect(() => { if (threadRootId) setContextOpen(false); }, [threadRootId]);
-
-  // Escape closes the overlay context panel — the same key that closes every
-  // other overlay in the app.
+  // A membership change made by anyone in the room, not just by this client.
   useEffect(() => {
-    if (!contextOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setContextOpen(false); };
+    const socket = getSocket();
+    if (!socket) return;
+    socket.on('conversation:member_changed', reloadMembers);
+    return () => { socket.off('conversation:member_changed', reloadMembers); };
+  }, [reloadMembers]);
+
+  /* ── Keyboard shortcuts (UX-4) ───────────────────────────────────────── */
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      const target = e.target as HTMLElement | null;
+      const typing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
+
+      if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); setPaletteOpen(true); return; }
+      if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); setPanel('search'); return; }
+      if (mod && e.shiftKey && e.key.toLowerCase() === 's') {
+        e.preventDefault(); setPanel('saved'); return;
+      }
+
+      // Escape closes the open panel; with nothing open it marks the
+      // conversation read, which is the behaviour people bring with them.
+      // Skipped while typing, where Escape belongs to the composer.
+      if (e.key === 'Escape' && !typing) {
+        if (panel !== 'none') { closePanel(); return; }
+        if (active) markReadTo(active.lastSeq);
+      }
+    };
+
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [contextOpen]);
+  }, [panel, closePanel, active, markReadTo]);
+
+  const paletteActions = useMemo<PaletteAction[]>(() => [
+    { id: 'search', label: 'Search messages', hint: 'Ctrl/⌘ F', icon: PALETTE_ICONS.search, run: () => setPanel('search') },
+    { id: 'saved', label: 'Saved items', hint: 'Ctrl/⌘ ⇧ S', icon: PALETTE_ICONS.saved, run: () => setPanel('saved') },
+    { id: 'scheduled', label: 'Scheduled messages', icon: PALETTE_ICONS.scheduled, run: () => setPanel('scheduled') },
+    { id: 'settings', label: 'Notification settings', icon: PALETTE_ICONS.notifications, run: () => setPanel('settings') },
+    { id: 'browse', label: 'Browse channels', icon: PALETTE_ICONS.newConversation, run: () => setPanel('browse') },
+    { id: 'shortcuts', label: 'Keyboard shortcuts', icon: PALETTE_ICONS.settings, run: () => setShortcutsOpen(true) },
+  ], []);
 
   const showListOnMobile = active === null;
 
@@ -95,8 +195,10 @@ const ChatWorkspace: React.FC = () => {
       >
         <div className="w-full min-w-0">
           <ConversationList
-            onOpenSaved={() => { setSettingsOpen(false); setSavedOpen(true); }}
-            onOpenSettings={() => { setSavedOpen(false); setSettingsOpen(true); }}
+            onOpenSaved={() => setPanel('saved')}
+            onOpenSettings={() => setPanel('settings')}
+            onOpenSearch={() => setPanel('search')}
+            onOpenBrowse={() => setPanel('browse')}
           />
         </div>
       </div>
@@ -106,10 +208,15 @@ const ChatWorkspace: React.FC = () => {
         <MessageThread
           conversation={active}
           onBack={() => setActiveId(null)}
-          onToggleContext={() => setContextOpen((o) => !o)}
-          contextOpen={contextOpen}
+          onToggleContext={() => setPanel((p) => (p === 'details' ? 'none' : 'details'))}
+          contextOpen={panel === 'details'}
+          onOpenSearch={() => setPanel('search')}
+          onOpenChannelSettings={() => setPanel('channel')}
         >
-          <Composer conversation={active} />
+          <Composer
+            conversation={active}
+            onOpenPanel={(p) => (p === 'shortcuts' ? setShortcutsOpen(true) : setPanel(p))}
+          />
         </MessageThread>
       ) : (
         <div className="hidden min-h-0 min-w-0 flex-1 place-items-center bg-surface-light md:grid dark:bg-background-dark">
@@ -123,67 +230,57 @@ const ChatWorkspace: React.FC = () => {
         </div>
       )}
 
-      {/* Notification settings — same slot as the other side panels. */}
-      {settingsOpen && (
-        <>
-          <div
-            className="fixed inset-0 z-70 bg-black/40 xl:hidden"
-            onClick={() => setSettingsOpen(false)}
-            aria-hidden="true"
+      {/* Pane 3 — whichever side panel is open. */}
+      {panel === 'thread' && active && (
+        <SidePanel width="wide" onDismiss={closePanel}>
+          <ThreadPanel conversation={active} />
+        </SidePanel>
+      )}
+      {panel === 'details' && active && (
+        <SidePanel width="narrow" onDismiss={closePanel}>
+          <ContextPanel conversation={active} members={members} onClose={closePanel} />
+        </SidePanel>
+      )}
+      {panel === 'saved' && (
+        <SidePanel width="wide" onDismiss={closePanel}>
+          <SavedItems onClose={closePanel} />
+        </SidePanel>
+      )}
+      {panel === 'settings' && (
+        <SidePanel width="wide" onDismiss={closePanel}>
+          <NotificationSettings onClose={closePanel} />
+        </SidePanel>
+      )}
+      {panel === 'search' && (
+        <SidePanel width="wide" onDismiss={closePanel}>
+          <SearchPanel onClose={closePanel} scopedConversationId={activeId} />
+        </SidePanel>
+      )}
+      {panel === 'scheduled' && (
+        <SidePanel width="wide" onDismiss={closePanel}>
+          <ScheduledPanel onClose={closePanel} />
+        </SidePanel>
+      )}
+      {panel === 'browse' && (
+        <SidePanel width="wide" onDismiss={closePanel}>
+          <BrowseChannels onClose={closePanel} />
+        </SidePanel>
+      )}
+      {panel === 'channel' && active && (
+        <SidePanel width="wide" onDismiss={closePanel}>
+          <ChannelSettings
+            conversation={active}
+            members={members}
+            onMembersChanged={reloadMembers}
+            onClose={closePanel}
           />
-          <div className="animate-panel-in-right fixed inset-y-0 right-0 z-80 w-96 max-w-[90vw] xl:static xl:z-auto xl:w-96">
-            <NotificationSettings onClose={() => setSettingsOpen(false)} />
-          </div>
-        </>
+        </SidePanel>
       )}
 
-      {/* Saved items — same slot as the other side panels. */}
-      {savedOpen && !settingsOpen && (
-        <>
-          <div
-            className="fixed inset-0 z-70 bg-black/40 xl:hidden"
-            onClick={() => setSavedOpen(false)}
-            aria-hidden="true"
-          />
-          <div className="animate-panel-in-right fixed inset-y-0 right-0 z-80 w-96 max-w-[90vw] xl:static xl:z-auto xl:w-96">
-            <SavedItems onClose={() => setSavedOpen(false)} />
-          </div>
-        </>
+      {paletteOpen && (
+        <CommandPalette onClose={() => setPaletteOpen(false)} actions={paletteActions} />
       )}
-
-      {/* Pane 3 — thread. It and the details panel occupy the same slot: two
-          side panels at once leaves the conversation itself too narrow to read,
-          so opening one closes the other. */}
-      {active && threadRootId && !savedOpen && !settingsOpen && (
-        <>
-          <div
-            className="fixed inset-0 z-70 bg-black/40 xl:hidden"
-            onClick={() => openThread(null)}
-            aria-hidden="true"
-          />
-          <div className="animate-panel-in-right fixed inset-y-0 right-0 z-80 w-96 max-w-[90vw] xl:static xl:z-auto xl:w-96">
-            <ThreadPanel conversation={active} />
-          </div>
-        </>
-      )}
-
-      {/* Pane 3b — context. Inline at xl, overlay below it. */}
-      {active && contextOpen && !threadRootId && !savedOpen && !settingsOpen && (
-        <>
-          <div
-            className="fixed inset-0 z-70 bg-black/40 xl:hidden"
-            onClick={() => setContextOpen(false)}
-            aria-hidden="true"
-          />
-          <div className="animate-panel-in-right fixed inset-y-0 right-0 z-80 w-80 max-w-[85vw] xl:static xl:z-auto xl:w-80">
-            <ContextPanel
-              conversation={active}
-              members={members}
-              onClose={() => setContextOpen(false)}
-            />
-          </div>
-        </>
-      )}
+      {shortcutsOpen && <ShortcutsSheet onClose={() => setShortcutsOpen(false)} />}
     </div>
   );
 };

@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Paperclip, Smile, AtSign, Send, Mic, Lock, Archive, CloudOff, X, Quote,
-  FileText, AlertCircle, Upload,
+  FileText, AlertCircle, Upload, Clock, Slash,
 } from 'lucide-react';
 import { IconButton } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { MAX_MESSAGE_LENGTH } from '@tupo/shared';
+import { useNavigate } from 'react-router-dom';
+import { useNotify } from '../../context/NotificationContext';
 import { useChat } from './ChatProvider';
 import { EmojiPicker, rememberEmoji } from './EmojiPicker';
 import { useUploads, MAX_ATTACHMENTS } from './useUploads';
@@ -15,6 +17,8 @@ import * as chatApi from './api';
 import type { WireMember } from '@tupo/shared';
 import { VoiceRecorder, canRecordVoice } from './VoiceRecorder';
 import { formatBytes } from './data';
+import { parseSlashCommand, matchCommands } from './slashCommands';
+import { SchedulePopover } from './SchedulePopover';
 import type { Conversation } from './types';
 
 /**
@@ -33,8 +37,14 @@ import type { Conversation } from './types';
 
 const MAX_ROWS_PX = 160;
 
-export const Composer: React.FC<{ conversation: Conversation }> = ({ conversation }) => {
+export const Composer: React.FC<{
+  conversation: Conversation;
+  /** Lets a slash command open a side panel, which the layout owns. */
+  onOpenPanel?: (panel: 'search' | 'saved' | 'settings' | 'scheduled' | 'shortcuts') => void;
+}> = ({ conversation, onOpenPanel }) => {
   const { can } = usePermissions();
+  const { notify } = useNotify();
+  const navigate = useNavigate();
   const {
     send, notifyTyping, draftFor, setDraft, connected, queued, replyTarget, setReplyTarget,
     enterToSend,
@@ -47,6 +57,7 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
   const [recording, setRecording] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [mention, setMention] = useState<MentionQuery | null>(null);
+  const [scheduling, setScheduling] = useState(false);
   const [members, setMembers] = useState<WireMember[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const tray = useUploads();
@@ -141,9 +152,51 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
     // Send with a half-uploaded photo must not post the sentence without it.
     if (tray.busy) return;
 
-    void send({ body: text, attachments: tray.readyIds });
-    tray.clear();
-  }, [value, send, tray]);
+    // A slash command is resolved here rather than server-side: most of them
+    // open something in this window, and round-tripping "show me my saved
+    // items" through the API would be theatre.
+    const command = parseSlashCommand(text);
+    switch (command.kind) {
+      case 'error':
+        notify({ title: command.message, tone: 'warning' });
+        return;
+
+      case 'open':
+        setDraft(conversation.id, '');
+        onOpenPanel?.(command.target);
+        return;
+
+      case 'meet':
+        setDraft(conversation.id, '');
+        navigate('/app/meet');
+        return;
+
+      case 'poll':
+        setDraft(conversation.id, '');
+        void chatApi.createPoll(conversation.id, {
+          question: command.question, options: command.options,
+        }).catch((err) => notify({
+          title: 'The poll could not be created',
+          body: err instanceof Error ? err.message : undefined,
+          tone: 'error',
+        }));
+        return;
+
+      case 'me':
+        void send({ body: `_${command.body}_`, attachments: tray.readyIds });
+        tray.clear();
+        return;
+
+      case 'shrug':
+        void send({ body: command.body, attachments: tray.readyIds });
+        tray.clear();
+        return;
+
+      default:
+        void send({ body: command.body, attachments: tray.readyIds });
+        tray.clear();
+    }
+  }, [value, send, tray, conversation.id, setDraft, onOpenPanel, notify, navigate]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Escape drops the quote rather than clearing what has been typed —
@@ -438,6 +491,34 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
           )}
         </div>
 
+        {/* The slash hint list. Shown only while the whole message is still
+            just "/word" — once there are arguments, the list is in the way. */}
+        {matchCommands(value).length > 0 && (
+          <div className="absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-2xl border border-border-light bg-white py-1 shadow-2xl dark:border-border-dark/50 dark:bg-elevated-dark">
+            {matchCommands(value).map((c) => (
+              <button
+                key={c.name}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setDraft(conversation.id, `/${c.name} `);
+                  ref.current?.focus();
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-surface-light dark:hover:bg-surface-dark"
+              >
+                <Slash size={11} className="shrink-0 opacity-50" />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-xs font-medium text-text-primary-light dark:text-text-primary-dark">
+                    /{c.name} {c.args && <span className="font-normal opacity-60">{c.args}</span>}
+                  </span>
+                  <span className="block truncate text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
+                    {c.hint}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {mention && (
           <MentionAutocomplete
             members={members}
@@ -450,6 +531,24 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
 
         {/* Send swaps to a mic when there is nothing to send — the button slot
             never sits there disabled and dead. */}
+        {/* Schedule sits beside send rather than inside a menu: "send this
+            later" is a decision made at the moment of sending. */}
+        {can('MESSAGE_SCHEDULE') && value.trim() && (
+          <div className="relative">
+            <IconButton label="Schedule this message" onClick={() => setScheduling(true)}>
+              <Clock size={18} />
+            </IconButton>
+            {scheduling && (
+              <SchedulePopover
+                conversationId={conversation.id}
+                body={value.trim()}
+                onDone={() => { setScheduling(false); setDraft(conversation.id, ''); }}
+                onClose={() => setScheduling(false)}
+              />
+            )}
+          </div>
+        )}
+
         {value.trim() || tray.uploads.length > 0 ? (
           <button
             onClick={submit}

@@ -17,7 +17,7 @@ import { io } from 'socket.io-client';
 const env = Object.fromEntries(
   readFileSync('apps/api/.env', 'utf8').split('\n')
     .filter((l) => l.includes('=') && !l.startsWith('#'))
-    .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim()]),
+    .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')]),
 );
 
 const API = 'http://localhost:5190';

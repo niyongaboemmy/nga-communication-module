@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Clock } from 'lucide-react';
 
 /**
@@ -112,6 +112,28 @@ export function rememberEmoji(emoji: string): void {
   } catch { /* a full or blocked localStorage must not break the picker */ }
 }
 
+/**
+ * One emoji button.
+ *
+ * Defined at module scope, not inside `EmojiPicker`. A component declared in
+ * another component's body is a **new type on every render**, so React cannot
+ * reconcile it — it unmounts and remounts the whole subtree each time. With
+ * three hundred cells that measured at 1,432 DOM nodes destroyed and rebuilt
+ * every five seconds while the picker sat open, and it made the buttons
+ * unclickable often enough for a browser test to time out on one.
+ */
+const EmojiCell: React.FC<{ emoji: string; onPick: (emoji: string) => void }> =
+  React.memo(({ emoji, onPick }) => (
+    <button
+      onClick={() => onPick(emoji)}
+      aria-label={emoji}
+      className="grid h-8 w-8 place-items-center rounded-lg text-xl leading-none transition-colors duration-100 hover:bg-surface-light focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-surface-dark"
+    >
+      {emoji}
+    </button>
+  ));
+EmojiCell.displayName = 'EmojiCell';
+
 export const EmojiPicker: React.FC<{
   onPick: (emoji: string) => void;
   onClose: () => void;
@@ -149,17 +171,10 @@ export const EmojiPicker: React.FC<{
     return ALL.filter(([e, kw]) => kw.includes(q) || e === q).slice(0, 60);
   }, [query]);
 
-  const pick = (emoji: string) => { rememberEmoji(emoji); onPick(emoji); };
-
-  const Cell: React.FC<{ emoji: string }> = ({ emoji }) => (
-    <button
-      onClick={() => pick(emoji)}
-      aria-label={emoji}
-      className="grid h-8 w-8 place-items-center rounded-lg text-xl leading-none transition-colors duration-100 hover:bg-surface-light focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-surface-dark"
-    >
-      {emoji}
-    </button>
-  );
+  const pick = useCallback((emoji: string) => {
+    rememberEmoji(emoji);
+    onPick(emoji);
+  }, [onPick]);
 
   return (
     <div
@@ -192,7 +207,7 @@ export const EmojiPicker: React.FC<{
             </p>
           ) : (
             <div className="grid grid-cols-8 gap-0.5">
-              {results.map(([e]) => <Cell key={e} emoji={e} />)}
+              {results.map(([e]) => <EmojiCell key={e} emoji={e} onPick={pick} />)}
             </div>
           )
         ) : (
@@ -203,7 +218,7 @@ export const EmojiPicker: React.FC<{
                   <Clock size={10} /> Frequently used
                 </h3>
                 <div className="grid grid-cols-8 gap-0.5">
-                  {recent.map((e) => <Cell key={`r-${e}`} emoji={e} />)}
+                  {recent.map((e) => <EmojiCell key={`r-${e}`} emoji={e} onPick={pick} />)}
                 </div>
               </section>
             )}
@@ -213,7 +228,7 @@ export const EmojiPicker: React.FC<{
                   {g.name}
                 </h3>
                 <div className="grid grid-cols-8 gap-0.5">
-                  {g.emoji.map(([e]) => <Cell key={e} emoji={e} />)}
+                  {g.emoji.map(([e]) => <EmojiCell key={e} emoji={e} onPick={pick} />)}
                 </div>
               </section>
             ))}

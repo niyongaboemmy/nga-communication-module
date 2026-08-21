@@ -159,6 +159,16 @@ export interface ChatServerToClientEvents {
     },
   ) => void;
 
+  /** Poll results moved — everyone watching sees the bars change (FR-MSG-21). */
+  'poll:updated': (p: { conversationId: string; poll: unknown }) => void;
+
+  /** A reply landed in a thread. Delivered separately from `message:new` so a
+   *  client can update the thread pane without the reply appearing in the main
+   *  flow, which is the entire point of a thread. */
+  'thread:reply': (
+    p: { conversationId: string; rootId: string; message: WireMessage },
+  ) => void;
+
   /** A draft saved on another device (FR-MSG-17). */
   'conversation:draft': (
     p: { conversationId: string; draft: string | null; at: string },

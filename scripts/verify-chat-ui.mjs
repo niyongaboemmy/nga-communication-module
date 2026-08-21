@@ -29,7 +29,7 @@ mkdirSync(SHOTS, { recursive: true });
 const env = Object.fromEntries(
   readFileSync(`${ROOT}/apps/api/.env`, 'utf8').split('\n')
     .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
-    .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim()]));
+    .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')]));
 
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
 const pass = [], fails = [];
@@ -79,6 +79,13 @@ const visible = (locator, ms = 6000) =>
 
 const hidden = (locator, ms = 6000) =>
   locator.waitFor({ state: 'hidden', timeout: ms }).then(() => true).catch(() => false);
+
+/** Poll an input until it holds the expected value. Same trap as `isVisible`. */
+const valueBecomes = (locator, expected, ms = 6000) =>
+  locator.page().waitForFunction(
+    ([sel, want]) => document.querySelector(sel)?.value === want,
+    [ '#composer', expected ], { timeout: ms },
+  ).then(() => true).catch(() => false);
 
 /**
  * Wait until the composer will actually send.
@@ -545,6 +552,204 @@ try {
   check('and Cmd/Ctrl+Enter still sends',
     await visible(aliceThread.getByText(noSendText).first(), 8000));
   await A.page.screenshot({ path: `${SHOTS}/11-alice-settings.png` });
+
+  /*
+   * Put it back.
+   *
+   * This preference is persisted per user, so leaving it off leaked into every
+   * later section: three checks failed because their plain `Enter` was now a
+   * newline. A test that changes durable state has to restore it, or it is not
+   * testing one thing, it is testing everything that comes after it too.
+   */
+  await A.page.getByRole('button', { name: 'Notification settings' }).click();
+  const settings3 = A.page.getByRole('complementary', { name: 'Notification settings' });
+  await visible(settings3, 5000);
+  await settings3.getByRole('checkbox', { name: /Enter sends the message/ }).check();
+  await A.page.waitForTimeout(600);
+  await settings3.getByRole('button', { name: 'Close notification settings' }).click();
+  await A.page.reload({ waitUntil: 'domcontentloaded' });
+  await A.page.waitForSelector('#composer');
+  await A.page.waitForTimeout(900);
+  check('and turning enter-to-send back on restores it',
+    await visible(A.page.getByText(/Enter.*to send/).first(), 5000));
+
+  /* ── Command palette ──────────────────────────────────────────────────── */
+
+  await A.page.locator('#composer').fill('');
+  await A.page.keyboard.press('ControlOrMeta+k');
+  const palette = A.page.getByRole('dialog', { name: 'Command palette' });
+  check('Ctrl/Cmd K opens the command palette', await visible(palette, 4000));
+  check('and it lists conversations to jump to',
+    await visible(palette.getByRole('option', { name: /Bosco Rugema/ })));
+
+  await A.page.keyboard.type('short');
+  check('typing filters down to matching actions',
+    await visible(palette.getByRole('option', { name: /Keyboard shortcuts/ })));
+  await A.page.keyboard.press('Enter');
+
+  const sheet = A.page.getByRole('dialog', { name: 'Keyboard shortcuts' });
+  check('Enter runs the highlighted action', await visible(sheet, 4000));
+  await A.page.keyboard.press('Escape');
+  check('Escape closes it', await hidden(sheet, 3000));
+
+  /* ── Search ───────────────────────────────────────────────────────────── */
+
+  const needle = `zephyrology${randomBytes(3).toString('hex')}`;
+  await A.page.locator('#composer').fill(`Revision on ${needle} starts Monday`);
+  await A.page.locator('#composer').press('Enter');
+  await visible(aliceThread.getByText(new RegExp(needle)).first(), 8000);
+
+  await A.page.keyboard.press('ControlOrMeta+f');
+  const searchPanel = A.page.getByRole('complementary', { name: 'Search messages' });
+  check('Ctrl/Cmd F opens search', await visible(searchPanel, 4000));
+
+  await A.page.getByLabel('Search term').fill(needle);
+  check('a match is found and shown with its conversation',
+    await visible(searchPanel.getByText(new RegExp(needle)).first(), 8000));
+  check('and the matched word is marked rather than injected as markup',
+    await visible(searchPanel.locator('mark').first(), 6000));
+  await A.page.screenshot({ path: `${SHOTS}/12-alice-search.png` });
+
+  await searchPanel.getByRole('button', { name: 'Close search' }).click();
+
+  /* ── Slash commands ───────────────────────────────────────────────────── */
+
+  await A.page.locator('#composer').fill('/');
+  check('typing a slash lists the commands',
+    await visible(A.page.getByText('Start a poll')));
+
+  await A.page.locator('#composer').fill('/shrug it happens');
+  await A.page.locator('#composer').press('Enter');
+  check('an unknown-looking command still posts its text with the shrug appended',
+    await visible(aliceThread.getByText(/it happens/).first(), 8000));
+
+  // A slash that is not a command must be sent, not argued with.
+  const pathLike = `/etc/hosts note ${randomBytes(3).toString('hex')}`;
+  await A.page.locator('#composer').fill(pathLike);
+  await A.page.locator('#composer').press('Enter');
+  check('a path that starts with a slash is sent as text, not refused',
+    await visible(aliceThread.getByText(pathLike).first(), 8000));
+
+  /* ── Polls ────────────────────────────────────────────────────────────── */
+
+  const pollQ = `Which day ${randomBytes(3).toString('hex')}?`;
+  await A.page.locator('#composer').fill(`/poll "${pollQ}" "Thursday" "Friday"`);
+  await A.page.locator('#composer').press('Enter');
+
+  const pollMsg = aliceThread.locator('li', { hasText: pollQ }).first();
+  await pollMsg.waitFor({ timeout: 10000 });
+  check('/poll creates a poll in the log',
+    await visible(pollMsg.getByRole('button', { name: /Thursday/ })));
+
+  await pollMsg.getByRole('button', { name: /Thursday/ }).click();
+  check('voting registers',
+    await visible(pollMsg.getByRole('button', { name: /Thursday/, pressed: true }), 6000));
+
+  const bobPoll = bobThread.locator('li', { hasText: pollQ }).first();
+  check('and the other person sees the result move without reloading',
+    await visible(bobPoll.getByText(/1 person has voted/), 8000));
+  await A.page.screenshot({ path: `${SHOTS}/13-alice-poll.png` });
+
+  /* ── Scheduled send ───────────────────────────────────────────────────── */
+
+  await A.page.locator('#composer').fill('Sent from the future');
+  await A.page.getByRole('button', { name: 'Schedule this message' }).click();
+  const schedule = A.page.getByRole('dialog', { name: 'Schedule this message' });
+  check('the schedule popover offers sensible presets', await visible(schedule, 4000));
+
+  await schedule.getByRole('button', { name: /Tomorrow, 08:00/ }).click();
+  check('scheduling clears the composer',
+    await valueBecomes(A.page.locator('#composer'), ''));
+
+  await A.page.keyboard.press('ControlOrMeta+k');
+  await A.page.keyboard.type('scheduled');
+  await A.page.keyboard.press('Enter');
+  const scheduledPanel = A.page.getByRole('complementary', { name: 'Scheduled messages' });
+  check('the pending queue is visible', await visible(scheduledPanel, 5000));
+  check('and shows the waiting message',
+    await visible(scheduledPanel.getByText('Sent from the future')));
+
+  await scheduledPanel.getByRole('button', { name: /Cancel scheduled message/ }).click();
+  check('a scheduled message can be cancelled',
+    await visible(scheduledPanel.getByText('Nothing waiting to send'), 6000));
+  await scheduledPanel.getByRole('button', { name: 'Close scheduled messages' }).click();
+
+  /* ── Channel directory ────────────────────────────────────────────────── */
+
+  const chanName = `Directory ${randomBytes(3).toString('hex')}`;
+  await A.page.getByRole('button', { name: 'New conversation' }).click();
+  const newDialog = A.page.getByRole('dialog', { name: 'New conversation' });
+  await visible(newDialog, 4000);
+  await newDialog.getByRole('tab', { name: 'Channel' }).click();
+  await newDialog.getByLabel('Name').fill(chanName);
+  await newDialog.getByRole('button', { name: 'Create' }).click();
+  await hidden(newDialog, 6000);
+  check('a channel can be created from the dialog',
+    await visible(A.page.getByRole('log', { name: 'Messages' })
+      .getByText(/created this channel/).first(), 8000));
+
+  // Bob finds it in the directory and joins.
+  await B.page.getByRole('button', { name: 'Browse channels' }).click();
+  const directory = B.page.getByRole('complementary', { name: 'Browse channels' });
+  check('the channel directory opens', await visible(directory, 5000));
+  check('and lists the new public channel',
+    await visible(directory.getByText(chanName), 8000));
+
+  await directory.locator('li', { hasText: chanName }).getByRole('button', { name: 'Join' }).click();
+  check('joining from the directory opens the channel',
+    await visible(B.page.getByRole('log', { name: 'Messages' })
+      .getByText(/joined the channel/).first(), 10000));
+  await A.page.screenshot({ path: `${SHOTS}/14-directory.png` });
+
+  /* ── Channel settings ─────────────────────────────────────────────────── */
+
+  await A.page.locator('li', { hasText: chanName }).first().click();
+  await A.page.waitForTimeout(600);
+  await A.page.getByRole('button', { name: 'Channel settings' }).click();
+  const chanSettings = A.page.getByRole('complementary', { name: 'Channel settings' });
+  check('channel settings open for the owner', await visible(chanSettings, 5000));
+  check('and list the members',
+    await visible(chanSettings.getByText(/Members ·/), 6000));
+
+  await chanSettings.getByLabel('Channel topic').fill('Timetables and rooms');
+  await chanSettings.getByLabel('Channel topic').blur();
+  check('the topic saves and is announced',
+    await visible(A.page.getByRole('log', { name: 'Messages' })
+      .getByText(/set the topic/).first(), 8000));
+
+  // Promote Bob, then remove him — both from the owner's side.
+  const bobMemberRow = chanSettings.locator('li', { hasText: 'Bosco Rugema' }).first();
+  await bobMemberRow.hover();
+  await bobMemberRow.getByRole('button', { name: /Make Bosco Rugema an admin/ }).click();
+  check('a member can be promoted to admin',
+    await visible(chanSettings.locator('li', { hasText: 'Bosco Rugema' })
+      .getByText('admin').first(), 6000));
+
+  check('an invite link can be created',
+    await (async () => {
+      await chanSettings.getByRole('button', { name: 'Create an invite link' }).click();
+      return visible(chanSettings.getByRole('button', { name: /Copy link/ }), 6000);
+    })());
+
+  /* ── Disappearing messages ────────────────────────────────────────────── */
+
+  await chanSettings.getByRole('button', { name: '7 days', exact: true }).click();
+  check('retention can be set from the panel, and is announced',
+    await visible(A.page.getByRole('log', { name: 'Messages' })
+      .getByText(/disappear after 7 days/).first(), 8000));
+  await A.page.screenshot({ path: `${SHOTS}/15-channel-settings.png` });
+
+  /* ── Archiving is permission-gated in the UI too ──────────────────────── */
+
+  // Ada is Staff, and CHANNEL_ARCHIVE is a Moderator permission. The control
+  // must therefore be absent rather than present-and-403 — the server-side
+  // behaviour is covered by verify:chat:admin.
+  check('the archive control is hidden from someone without CHANNEL_ARCHIVE',
+    (await chanSettings.getByRole('button', { name: /Archive this channel/ }).count()) === 0);
+  check('while the leave control is offered to everyone',
+    await visible(chanSettings.getByRole('button', { name: /Leave this channel/ })));
+
+  await chanSettings.getByRole('button', { name: 'Close channel settings' }).click();
 
   /* ── Responsive ───────────────────────────────────────────────────────── */
 

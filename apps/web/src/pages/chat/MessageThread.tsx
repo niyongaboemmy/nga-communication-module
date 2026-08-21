@@ -3,7 +3,7 @@ import {
   Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
   RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
-  X, Bookmark, Forward, PinOff, Link2, Quote,
+  X, Bookmark, Forward, PinOff, Link2, Quote, Settings,
 } from 'lucide-react';
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -17,6 +17,7 @@ import { EmojiPicker } from './EmojiPicker';
 import { ForwardDialog } from './ForwardDialog';
 import { MessageAttachments } from './Attachments';
 import { PinnedBar } from './PinnedBar';
+import { PollCard } from './PollCard';
 import { QUICK_REACTIONS, EDIT_WINDOW_MS } from '@tupo/shared';
 
 /**
@@ -51,7 +52,9 @@ const ThreadHeader: React.FC<{
   onBack: () => void;
   onToggleContext: () => void;
   contextOpen: boolean;
-}> = ({ conversation: c, onBack, onToggleContext, contextOpen }) => {
+  onOpenSearch: () => void;
+  onOpenChannelSettings: () => void;
+}> = ({ conversation: c, onBack, onToggleContext, contextOpen, onOpenSearch, onOpenChannelSettings }) => {
   const { can } = usePermissions();
   const { typing } = useChat();
   const Icon = c.type === 'dm' ? null : KIND_ICON[c.type];
@@ -106,12 +109,19 @@ const ThreadHeader: React.FC<{
         {can('MESSAGE_PIN') && (
           <IconButton label="Pinned messages" className="hidden sm:grid"><Pin size={17} /></IconButton>
         )}
-        <IconButton label="Search in conversation" className="hidden sm:grid"><Search size={17} /></IconButton>
+        <IconButton label="Search in conversation" className="hidden sm:grid" onClick={onOpenSearch}>
+          <Search size={17} />
+        </IconButton>
         {can('MEET_START') && (
           <>
             <IconButton label="Start an audio call" className="hidden sm:grid"><Phone size={17} /></IconButton>
             <IconButton label="Start a video meeting"><Video size={17} /></IconButton>
           </>
+        )}
+        {c.type !== 'dm' && (c.myRole === 'owner' || c.myRole === 'admin') && (
+          <IconButton label="Channel settings" onClick={onOpenChannelSettings}>
+            <Settings size={17} />
+          </IconButton>
         )}
         <IconButton label="Conversation details" active={contextOpen} onClick={onToggleContext}>
           <Info size={17} />
@@ -305,6 +315,10 @@ const MessageRow: React.FC<{
               <span className="ml-1.5 text-[10px] opacity-70" title={`Edited ${timeOf(m.editedAt)}`}>
                 (edited)
               </span>
+            )}
+
+            {m.type === 'poll' && (
+              <PollCard conversationId={m.conversationId} messageId={m.id} onDark={mine} />
             )}
 
             {m.attachments.length > 0 && (
@@ -540,8 +554,13 @@ export const MessageThread: React.FC<{
   onBack: () => void;
   onToggleContext: () => void;
   contextOpen: boolean;
+  onOpenSearch: () => void;
+  onOpenChannelSettings: () => void;
   children: React.ReactNode; // the composer
-}> = ({ conversation, onBack, onToggleContext, contextOpen, children }) => {
+}> = ({
+  conversation, onBack, onToggleContext, contextOpen, onOpenSearch,
+  onOpenChannelSettings, children,
+}) => {
   const { user } = useAuth();
   const {
     messages, messagesLoading: loading, hasMore, loadingMore, loadOlder,
@@ -646,6 +665,8 @@ export const MessageThread: React.FC<{
         onBack={onBack}
         onToggleContext={onToggleContext}
         contextOpen={contextOpen}
+        onOpenSearch={onOpenSearch}
+        onOpenChannelSettings={onOpenChannelSettings}
       />
 
       <PinnedBar conversation={conversation} />

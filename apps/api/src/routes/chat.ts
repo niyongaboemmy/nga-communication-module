@@ -3,7 +3,7 @@ import { Redis } from 'ioredis';
 import { getPool } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import type { NotificationLevel } from '@tupo/shared';
-import { NOTIFICATION_LEVELS, CONVERSATION_TYPES } from '@tupo/shared';
+import { NOTIFICATION_LEVELS, CONVERSATION_TYPES, MEMBER_ROLES } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
 import { config } from '../config.js';
@@ -737,4 +737,370 @@ router.get('/unread', wrap(async (req, res) => {
   res.json(ok(await chat.totalUnread(actor(req).id)));
 }));
 
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Search
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/search', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  const q = String(req.query.q ?? '');
+  const str = (k: string) => (typeof req.query[k] === 'string' ? req.query[k] as string : undefined);
+  const num = (k: string) => {
+    const n = Number(req.query[k]);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  res.json(ok(await chat.searchMessages(me.id, q, {
+    conversationId: str('conversationId'),
+    fromUserId: str('from'),
+    after: str('after'),
+    before: str('before'),
+    hasFile: req.query.hasFile === 'true',
+    limit: num('limit'),
+    offset: num('offset'),
+  })));
+}));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Scheduled send
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/scheduled', wrap(async (req, res) => {
+  res.json(ok({ scheduled: await chat.listScheduled(actor(req).id) }));
+}));
+
+router.post('/conversations/:id/scheduled', authorizePermission('MESSAGE_SCHEDULE'),
+  wrap(async (req, res) => {
+    const me = actor(req);
+    const id = req.params.id!;
+    const membership = await chat.requireMembership(me.id, id);
+    if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
+
+    const at = new Date(String(req.body?.sendAt ?? ''));
+    const scheduled = await chat.scheduleMessage(
+      me.id, id, String(req.body?.body ?? ''), at,
+      Array.isArray(req.body?.attachments) ? req.body.attachments : [],
+    );
+    res.status(201).json(ok({ scheduled }));
+  }));
+
+router.delete('/scheduled/:id', wrap(async (req, res) => {
+  const cancelled = await chat.cancelScheduled(actor(req).id, req.params.id!);
+  if (!cancelled) return res.status(404).json(fail('Nothing pending with that id.'));
+  res.json(ok({ cancelled: true }));
+}));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Polls
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.post('/conversations/:id/polls', authorizePermission('MESSAGE_SEND'),
+  wrap(async (req, res) => {
+    const me = actor(req);
+    const id = req.params.id!;
+    const membership = await chat.requireMembership(me.id, id);
+    if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
+    if (membership.type === 'announcement'
+        && !me.permissions.has('CHANNEL_ANNOUNCE')
+        && !chat.canManage(membership.role)) {
+      return res.status(403).json(fail('Only announcers can post in this channel.'));
+    }
+
+    const { poll, message } = await chat.createPoll(me.id, id, {
+      question: String(req.body?.question ?? ''),
+      options: Array.isArray(req.body?.options) ? req.body.options : [],
+      multiChoice: req.body?.multiChoice === true,
+      anonymous: req.body?.anonymous === true,
+      closesAt: req.body?.closesAt ?? null,
+    });
+
+    // The poll is a message, so it fans out as one — and notifies as one.
+    emitToConversation(id, 'message:new', { conversationId: id, message });
+    emitToConversation(id, 'poll:updated', { conversationId: id, poll });
+    res.status(201).json(ok({ poll, message }));
+  }));
+
+router.get('/conversations/:id/messages/:messageId/poll', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, messageId } = req.params as { id: string; messageId: string };
+  await chat.requireMembership(me.id, id);
+  const poll = await chat.getPollByMessage(me.id, messageId);
+  if (!poll) return res.status(404).json(fail('No poll on that message.'));
+  res.json(ok({ poll }));
+}));
+
+router.post('/polls/:pollId/vote', wrap(async (req, res) => {
+  const me = actor(req);
+  const options = Array.isArray(req.body?.optionIds) ? req.body.optionIds.map(String) : [];
+  const poll = await chat.votePoll(me.id, req.params.pollId!, options);
+
+  const { rows } = await getPool().query<{ conversation_id: string }>(
+    'SELECT conversation_id FROM polls WHERE id = $1', [req.params.pollId]);
+  if (rows[0]) {
+    // Everyone sees the bars move. A poll whose results only update on reload
+    // is a poll people vote in twice.
+    emitToConversation(rows[0].conversation_id, 'poll:updated', {
+      conversationId: rows[0].conversation_id, poll,
+    });
+  }
+  res.json(ok({ poll }));
+}));
+
+router.post('/polls/:pollId/close', wrap(async (req, res) => {
+  const me = actor(req);
+  const poll = await chat.closePoll(me.id, req.params.pollId!);
+  const { rows } = await getPool().query<{ conversation_id: string }>(
+    'SELECT conversation_id FROM polls WHERE id = $1', [req.params.pollId]);
+  if (rows[0]) {
+    emitToConversation(rows[0].conversation_id, 'poll:updated', {
+      conversationId: rows[0].conversation_id, poll,
+    });
+  }
+  res.json(ok({ poll }));
+}));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Channel discovery and membership
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/browse', authorizePermission('CHANNEL_VIEW'), wrap(async (req, res) => {
+  const me = actor(req);
+  res.json(ok({
+    channels: await chat.discoverChannels(me.id, {
+      query: typeof req.query.q === 'string' ? req.query.q : undefined,
+      limit: Number(req.query.limit ?? 40),
+    }),
+  }));
+}));
+
+router.post('/conversations/:id/join', authorizePermission('CHANNEL_JOIN'),
+  wrap(async (req, res) => {
+    const me = actor(req);
+    const id = req.params.id!;
+    const conversation = await chat.joinChannel(me.id, id);
+
+    await announce(id, me.id, `${me.name} joined the channel.`, { event: 'joined' });
+    emitToConversation(id, 'conversation:member_changed', {
+      conversationId: id, userId: me.id, action: 'joined', memberCount: conversation.memberCount,
+    });
+    await announceConversation(id);
+
+    res.json(ok({ conversation }));
+  }));
+
+router.post('/conversations/:id/members', authorizePermission('CHANNEL_MEMBERS_MANAGE'),
+  wrap(async (req, res) => {
+    const me = actor(req);
+    const id = req.params.id!;
+    const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds.map(String) : [];
+
+    const { added, memberCount } = await chat.addMembersTo(me.id, id, userIds);
+    if (added.length) {
+      const names = await chat.namesOf(added);
+      await announce(id, me.id,
+        `${me.name} added ${names.join(', ')}.`, { event: 'added', userIds: added });
+      for (const userId of added) {
+        emitToConversation(id, 'conversation:member_changed', {
+          conversationId: id, userId, action: 'joined', memberCount,
+        });
+      }
+      // The people just added need it in their sidebar without a reload.
+      await announceConversation(id);
+    }
+
+    res.json(ok({ added, memberCount }));
+  }));
+
+router.delete('/conversations/:id/members/:userId', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, userId } = req.params as { id: string; userId: string };
+  const leaving = userId === me.id;
+
+  if (!leaving && !me.permissions.has('CHANNEL_MEMBERS_MANAGE')) {
+    return res.status(403).json(fail('You cannot remove people from this conversation.'));
+  }
+
+  const target = leaving ? me.name : (await chat.namesOf([userId]))[0] ?? 'Someone';
+  const { memberCount } = await chat.removeMember(me.id, id, userId);
+
+  await announce(id, me.id,
+    leaving ? `${me.name} left the channel.` : `${me.name} removed ${target}.`,
+    { event: leaving ? 'left' : 'removed', userId });
+  emitToConversation(id, 'conversation:member_changed', {
+    conversationId: id, userId, action: leaving ? 'left' : 'removed', memberCount,
+  });
+
+  if (!leaving) {
+    await audit({
+      actorId: me.id, action: 'chat.member.remove', targetType: 'conversation', targetId: id,
+      metadata: { removed: userId }, ipAddress: req.ip, userAgent: req.headers['user-agent'],
+    });
+  }
+
+  res.json(ok({ removed: true, memberCount }));
+}));
+
+router.patch('/conversations/:id/members/:userId', authorizePermission('CHANNEL_MEMBERS_MANAGE'),
+  wrap(async (req, res) => {
+    const me = actor(req);
+    const { id, userId } = req.params as { id: string; userId: string };
+    const role = String(req.body?.role ?? '');
+    if (!MEMBER_ROLES.includes(role as never)) {
+      return res.status(400).json(fail('That is not a channel role.'));
+    }
+
+    await chat.setMemberRole(me.id, id, userId, role as never);
+    emitToConversation(id, 'conversation:member_changed', {
+      conversationId: id, userId, action: 'role_changed', role,
+      memberCount: (await chat.getConversation(me.id, id)).memberCount,
+    });
+    res.json(ok({ role }));
+  }));
+
+router.post('/conversations/:id/transfer', wrap(async (req, res) => {
+  const me = actor(req);
+  const id = req.params.id!;
+  const targetId = String(req.body?.userId ?? '');
+
+  await chat.transferOwnership(me.id, id, targetId);
+  const name = (await chat.namesOf([targetId]))[0] ?? 'someone else';
+  await announce(id, me.id, `${me.name} made ${name} the owner.`, { event: 'ownership' });
+  await audit({
+    actorId: me.id, action: 'chat.ownership.transfer', targetType: 'conversation', targetId: id,
+    metadata: { to: targetId }, ipAddress: req.ip, userAgent: req.headers['user-agent'],
+  });
+  await announceConversation(id);
+  res.json(ok({ transferred: true }));
+}));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Channel settings, archiving, retention
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.patch('/conversations/:id', authorizePermission('CHANNEL_MANAGE'), wrap(async (req, res) => {
+  const me = actor(req);
+  const id = req.params.id!;
+  const body = req.body ?? {};
+
+  const conversation = await chat.updateConversation(me.id, id, {
+    name: typeof body.name === 'string' ? body.name : undefined,
+    topic: body.topic === undefined ? undefined : (body.topic ?? null),
+    description: body.description === undefined ? undefined : (body.description ?? null),
+    iconEmoji: body.iconEmoji === undefined ? undefined : (body.iconEmoji ?? null),
+    avatarColor: body.avatarColor === undefined ? undefined : (body.avatarColor ?? null),
+    isPrivate: body.isPrivate === true ? true : undefined,
+  });
+
+  if (typeof body.topic === 'string') {
+    await announce(id, me.id, `${me.name} set the topic: ${body.topic}`, { event: 'topic' });
+  }
+  await announceConversation(id);
+  res.json(ok({ conversation }));
+}));
+
+router.post('/conversations/:id/archive', authorizePermission('CHANNEL_ARCHIVE'),
+  wrap(async (req, res) => {
+    const me = actor(req);
+    const id = req.params.id!;
+    const archived = req.body?.archived !== false;
+
+    const conversation = await chat.setArchived(me.id, id, archived);
+    await announce(id, me.id,
+      archived
+        ? `${me.name} archived this channel. It is now read-only.`
+        : `${me.name} reopened this channel.`,
+      { event: archived ? 'archived' : 'unarchived' });
+    await audit({
+      actorId: me.id,
+      action: archived ? 'chat.channel.archive' : 'chat.channel.unarchive',
+      targetType: 'conversation', targetId: id,
+      ipAddress: req.ip, userAgent: req.headers['user-agent'],
+    });
+    await announceConversation(id);
+    res.json(ok({ conversation }));
+  }));
+
+router.post('/conversations/:id/retention', authorizePermission('RETENTION_MANAGE', 'CHANNEL_MANAGE'),
+  wrap(async (req, res) => {
+    const me = actor(req);
+    const id = req.params.id!;
+    const days = req.body?.days === null ? null : Number(req.body?.days);
+
+    const conversation = await chat.setRetention(me.id, id, days);
+    await announce(id, me.id,
+      days === null
+        ? `${me.name} turned off disappearing messages.`
+        : `${me.name} set messages to disappear after ${days === 1 ? '24 hours' : `${days} days`}.`,
+      { event: 'retention', days });
+    await audit({
+      actorId: me.id, action: 'chat.retention.set', targetType: 'conversation', targetId: id,
+      metadata: { days }, ipAddress: req.ip, userAgent: req.headers['user-agent'],
+    });
+    res.json(ok({ conversation }));
+  }));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Invite links
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.post('/conversations/:id/invites', authorizePermission('CHANNEL_MEMBERS_MANAGE'),
+  wrap(async (req, res) => {
+    const me = actor(req);
+    const invite = await chat.createInvite(me.id, req.params.id!, {
+      expiresInHours: Number(req.body?.expiresInHours) || null,
+      maxUses: Number(req.body?.maxUses) || null,
+    });
+    res.status(201).json(ok({ invite }));
+  }));
+
+router.post('/invites/:code/redeem', authorizePermission('CHANNEL_JOIN'), wrap(async (req, res) => {
+  const me = actor(req);
+  const conversation = await chat.redeemInvite(me.id, req.params.code!);
+  await announce(conversation.id, me.id,
+    `${me.name} joined via an invite link.`, { event: 'joined' });
+  await announceConversation(conversation.id);
+  res.json(ok({ conversation }));
+}));
+
+router.delete('/invites/:code', wrap(async (req, res) => {
+  const revoked = await chat.revokeInvite(actor(req).id, req.params.code!);
+  if (!revoked) return res.status(404).json(fail('No such invite.'));
+  res.json(ok({ revoked: true }));
+}));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Profiles and custom status
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/profile/:userId', authorizePermission('DIRECTORY_VIEW'), wrap(async (req, res) => {
+  const me = actor(req);
+  const profile = await chat.getProfile(me.id, req.params.userId!);
+  const online = await presenceFor([profile.id]);
+  res.json(ok({ profile: { ...profile, presence: online[profile.id] ?? 'offline' } }));
+}));
+
+router.put('/status', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, res) => {
+  const me = actor(req);
+  const body = req.body ?? {};
+  const profile = await chat.setStatus(me.id, {
+    emoji: typeof body.emoji === 'string' ? body.emoji : null,
+    text: typeof body.text === 'string' ? body.text : null,
+    expiresAt: typeof body.expiresAt === 'string' ? body.expiresAt : null,
+  });
+  res.json(ok({ profile }));
+}));
+
+router.patch('/profile', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, res) => {
+  const me = actor(req);
+  const body = req.body ?? {};
+  const profile = await chat.updateProfile(me.id, {
+    title: body.title === undefined ? undefined : (body.title ?? null),
+    pronouns: body.pronouns === undefined ? undefined : (body.pronouns ?? null),
+    timezone: body.timezone === undefined ? undefined : (body.timezone ?? null),
+  });
+  res.json(ok({ profile }));
+}));
+
 export default router;
+
+

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { getPool, snowflake } from '@tupo/db';
 import type { PoolClient } from 'pg';
 import {
@@ -492,11 +493,22 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
     const messageType: MessageType =
       input.type ?? (attachments.length && !body ? 'file' : 'text');
 
+    /*
+     * `expires_at` is set from the conversation's retention in the same
+     * INSERT (FR-MSG-19).
+     *
+     * Stamping it afterwards would leave a window in which a message in a
+     * disappearing conversation has no expiry — and if the process died in that
+     * window, it would keep none, silently and permanently.
+     */
     await client.query(
       `INSERT INTO messages
          (id, conversation_id, seq, sender_id, type, body, nonce,
-          thread_root_id, reply_to_id, attachments, metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          thread_root_id, reply_to_id, attachments, metadata, expires_at)
+       SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+              CASE WHEN c.retention_days IS NULL THEN NULL
+                   ELSE now() + (c.retention_days || ' days')::interval END
+         FROM conversations c WHERE c.id = $2`,
       [messageId, input.conversationId, seq, input.senderId, messageType,
        body || null, input.nonce, input.threadRootId ?? null, input.replyToId ?? null,
        JSON.stringify(attachmentJson), JSON.stringify(input.metadata ?? {})],
@@ -564,12 +576,23 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
       [input.conversationId, input.senderId, mentioned, messageType === 'system' ? 0 : 1],
     );
 
-    await client.query(
-      `UPDATE conversation_members
-          SET last_read_seq = $3, unread_count = 0, unread_mentions = 0, last_read_at = now()
-        WHERE conversation_id = $1 AND user_id = $2`,
-      [input.conversationId, input.senderId, seq],
-    );
+    /*
+     * The sender has, by definition, read up to their own message — except
+     * when the "message" is a system notice written on their behalf.
+     *
+     * "X joined the channel" is authored by X, and advancing their watermark
+     * for it threw away the read position of anyone *re*joining a channel: they
+     * came back to everything marked read instead of to where they left off.
+     * A system notice is not something anyone read.
+     */
+    if (messageType !== 'system') {
+      await client.query(
+        `UPDATE conversation_members
+            SET last_read_seq = $3, unread_count = 0, unread_mentions = 0, last_read_at = now()
+          WHERE conversation_id = $1 AND user_id = $2`,
+        [input.conversationId, input.senderId, seq],
+      );
+    }
 
     await client.query('COMMIT');
 
@@ -2030,4 +2053,1076 @@ export function inQuietHours(prefs: ChatPrefs, now = new Date()): boolean {
   return from < to
     ? minutes >= from && minutes < to
     : minutes >= from || minutes < to;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Search  (FR-SRCH)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface SearchFilters {
+  /** Restrict to one conversation. Omit to search everything the viewer can see. */
+  conversationId?: string;
+  fromUserId?: string;
+  /** ISO dates, inclusive. */
+  after?: string;
+  before?: string;
+  hasFile?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SearchHit {
+  message: WireMessage;
+  conversationId: string;
+  conversationName: string;
+  conversationType: ConversationType;
+  /** The matching text, with hits wrapped in the sentinels below. */
+  highlight: string;
+}
+
+/**
+ * Sentinels marking a match inside a highlight fragment.
+ *
+ * `ts_headline` wants to emit HTML. It must not: the client would then have to
+ * inject the string as markup, and the string contains message text, so that
+ * is a stored XSS with extra steps. These two characters cannot appear in a
+ * message body that reached us through the API, and the client splits on them
+ * to build React elements.
+ */
+export const HIGHLIGHT_START = '\u0002';
+export const HIGHLIGHT_END = '\u0003';
+
+/**
+ * Full-text search across everything the viewer may read.
+ *
+ * The access rule is a **join, not a filter**: rows come out of
+ * `conversation_members` for this user, so there is no ordering of clauses in
+ * which a message from a channel they are not in can appear. A search box that
+ * leaks one line of a private conversation has leaked the conversation.
+ *
+ * `websearch_to_tsquery` rather than `plainto_tsquery`: it understands quoted
+ * phrases and `-exclusions`, which is what people actually type into a search
+ * box, and unlike `to_tsquery` it does not throw on syntax it dislikes.
+ */
+export async function searchMessages(
+  viewerId: string, query: string, filters: SearchFilters = {},
+): Promise<{ hits: SearchHit[]; hasMore: boolean }> {
+  const term = (query ?? '').trim();
+  if (term.length < 2) return { hits: [], hasMore: false };
+
+  const limit = Math.min(Math.max(filters.limit ?? 25, 1), 50);
+  const offset = Math.max(filters.offset ?? 0, 0);
+
+  const params: unknown[] = [viewerId, term];
+  const where: string[] = [
+    'm.deleted_at IS NULL',
+    "m.type <> 'system'",
+    `to_tsvector('english', coalesce(m.body, '')) @@ websearch_to_tsquery('english', $2)`,
+  ];
+
+  const add = (value: unknown, clause: (i: number) => string) => {
+    params.push(value);
+    where.push(clause(params.length));
+  };
+
+  if (filters.conversationId) add(filters.conversationId, (i) => `m.conversation_id = $${i}`);
+  if (filters.fromUserId) add(filters.fromUserId, (i) => `m.sender_id = $${i}`);
+  if (filters.after) add(filters.after, (i) => `m.created_at >= $${i}::timestamptz`);
+  if (filters.before) add(filters.before, (i) => `m.created_at <= $${i}::timestamptz`);
+  if (filters.hasFile) where.push('jsonb_array_length(m.attachments) > 0');
+
+  params.push(HIGHLIGHT_START, HIGHLIGHT_END, limit + 1, offset);
+  const startParam = params.length - 3;
+  const endParam = params.length - 2;
+
+  const { rows } = await getPool().query<MessageRow & {
+    conversation_name: string | null; conversation_type: ConversationType;
+    peer_name: string | null; highlight: string;
+  }>(
+    `SELECT m.id, m.conversation_id, m.seq, m.type, m.body, m.sender_id, m.created_at,
+            m.edited_at, m.deleted_at, m.nonce, m.thread_root_id, m.reply_count,
+            m.thread_last_at, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_count,
+            m.forwarded_from, m.metadata, m.attachments,
+            u.name AS sender_name, u.avatar_url AS sender_avatar, u.role AS sender_role,
+            NULL::json AS reactions,
+            NULL::text AS reply_body, NULL::text AS reply_sender_id,
+            NULL::text AS reply_sender_name, false AS reply_deleted,
+            false AS mentions_me, false AS saved, '0'::text AS read_count,
+            c.name AS conversation_name, c.type AS conversation_type, peer.name AS peer_name,
+            ts_headline('english', coalesce(m.body, ''),
+                        websearch_to_tsquery('english', $2),
+                        'StartSel=' || $${startParam} || ', StopSel=' || $${endParam} ||
+                        ', MaxFragments=2, MaxWords=18, MinWords=5') AS highlight
+       FROM messages m
+       -- The access rule, as a join. Not a WHERE clause that could be reordered
+       -- away, and not a post-filter in application code.
+       JOIN conversation_members cm
+         ON cm.conversation_id = m.conversation_id
+        AND cm.user_id = $1
+        AND cm.left_at IS NULL
+       JOIN conversations c ON c.id = m.conversation_id AND c.deleted_at IS NULL
+       LEFT JOIN users u ON u.id = m.sender_id
+       LEFT JOIN LATERAL (
+         SELECT pu.name FROM conversation_members pm
+           JOIN users pu ON pu.id = pm.user_id
+          WHERE pm.conversation_id = c.id AND pm.user_id <> $1 AND pm.left_at IS NULL
+          LIMIT 1
+       ) peer ON c.type = 'dm'
+      WHERE ${where.join(' AND ')}
+      ORDER BY m.created_at DESC
+      LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params,
+  );
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+
+  return {
+    hits: page.map((r) => ({
+      message: toWireMessage(r, viewerId),
+      conversationId: r.conversation_id,
+      conversationName: r.conversation_type === 'dm'
+        ? (r.peer_name ?? 'Direct message')
+        : (r.conversation_name ?? 'Conversation'),
+      conversationType: r.conversation_type,
+      highlight: r.highlight,
+    })),
+    hasMore,
+  };
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Scheduled send  (FR-MSG-18)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface ScheduledMessage {
+  id: string;
+  conversationId: string;
+  conversationName: string;
+  body: string;
+  sendAt: string;
+  state: string;
+  error: string | null;
+}
+
+/** No point scheduling for the past, or for a year and a day away. */
+const MIN_SCHEDULE_MS = 30_000;
+const MAX_SCHEDULE_DAYS = 365;
+
+export async function scheduleMessage(
+  userId: string, conversationId: string,
+  body: string, sendAt: Date, attachments: string[] = [],
+): Promise<ScheduledMessage> {
+  const text = (body ?? '').trim();
+  if (!text && !attachments.length) throw new ChatError('A scheduled message cannot be empty.', 400);
+  if (text.length > MAX_MESSAGE_LENGTH) {
+    throw new ChatError(`A message may not exceed ${MAX_MESSAGE_LENGTH} characters.`, 400);
+  }
+
+  const at = sendAt.getTime();
+  if (!Number.isFinite(at)) throw new ChatError('That is not a valid time.', 400);
+  if (at < Date.now() + MIN_SCHEDULE_MS) {
+    throw new ChatError('Schedule it at least a minute from now, or just send it.', 400);
+  }
+  if (at > Date.now() + MAX_SCHEDULE_DAYS * 86_400_000) {
+    throw new ChatError('That is too far ahead to schedule.', 400);
+  }
+
+  const id = snowflake();
+  await getPool().query(
+    `INSERT INTO scheduled_messages
+       (id, conversation_id, sender_id, body, attachments, send_at, state)
+     VALUES ($1,$2,$3,$4,$5,$6,'pending')`,
+    [id, conversationId, userId, text, JSON.stringify(attachments), sendAt.toISOString()],
+  );
+
+  const created = (await listScheduled(userId)).find((r) => r.id === id);
+  if (!created) throw new ChatError('The scheduled message could not be read back.', 500);
+  return created;
+}
+
+export async function listScheduled(userId: string): Promise<ScheduledMessage[]> {
+  const { rows } = await getPool().query<{
+    id: string; conversation_id: string; body: string; send_at: string;
+    state: string; error: string | null; name: string | null;
+    type: string; peer_name: string | null;
+  }>(
+    `SELECT s.id, s.conversation_id, s.body, s.send_at, s.state, s.error,
+            c.name, c.type, peer.name AS peer_name
+       FROM scheduled_messages s
+       JOIN conversations c ON c.id = s.conversation_id
+       LEFT JOIN LATERAL (
+         SELECT pu.name FROM conversation_members pm
+           JOIN users pu ON pu.id = pm.user_id
+          WHERE pm.conversation_id = c.id AND pm.user_id <> $1 AND pm.left_at IS NULL
+          LIMIT 1
+       ) peer ON c.type = 'dm'
+      WHERE s.sender_id = $1 AND s.state = 'pending'
+      ORDER BY s.send_at ASC`,
+    [userId],
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    conversationId: r.conversation_id,
+    conversationName: r.type === 'dm' ? (r.peer_name ?? 'Direct message') : (r.name ?? 'Conversation'),
+    body: r.body,
+    sendAt: r.send_at,
+    state: r.state,
+    error: r.error,
+  }));
+}
+
+export async function cancelScheduled(userId: string, id: string): Promise<boolean> {
+  const { rowCount } = await getPool().query(
+    `UPDATE scheduled_messages SET state = 'cancelled'
+      WHERE id = $1 AND sender_id = $2 AND state = 'pending'`,
+    [id, userId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/**
+ * Claim messages that are due, atomically.
+ *
+ * `FOR UPDATE SKIP LOCKED` is what makes this safe to run from more than one
+ * worker: each claims a disjoint set rather than two workers both sending the
+ * same message. Flipping the state to `sending` in the same statement closes
+ * the window in which a second pass could pick up a row already in flight.
+ */
+export async function claimDueScheduled(limit = 20): Promise<Array<{
+  id: string; conversationId: string; senderId: string; body: string; attachments: string[];
+}>> {
+  const { rows } = await getPool().query<{
+    id: string; conversation_id: string; sender_id: string;
+    body: string; attachments: string[];
+  }>(
+    `UPDATE scheduled_messages s
+        SET state = 'sending'
+      WHERE s.id IN (
+        SELECT id FROM scheduled_messages
+         WHERE state = 'pending' AND send_at <= now()
+         ORDER BY send_at
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED
+      )
+      RETURNING s.id, s.conversation_id, s.sender_id, s.body, s.attachments`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    id: r.id, conversationId: r.conversation_id, senderId: r.sender_id,
+    body: r.body, attachments: r.attachments ?? [],
+  }));
+}
+
+export async function markScheduledSent(id: string, messageId: string): Promise<void> {
+  await getPool().query(
+    `UPDATE scheduled_messages SET state = 'sent', sent_message_id = $2 WHERE id = $1`,
+    [id, messageId]);
+}
+
+export async function markScheduledFailed(id: string, error: string): Promise<void> {
+  await getPool().query(
+    `UPDATE scheduled_messages SET state = 'failed', error = $2 WHERE id = $1`,
+    [id, error.slice(0, 500)]);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Polls  (FR-MSG-21)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface PollOption { id: string; text: string }
+
+export interface WirePoll {
+  id: string;
+  messageId: string;
+  question: string;
+  options: Array<PollOption & { votes: number; voters: string[] }>;
+  multiChoice: boolean;
+  anonymous: boolean;
+  closesAt: string | null;
+  closedAt: string | null;
+  createdBy: string;
+  totalVoters: number;
+  /** Option ids the viewer has chosen. */
+  myVotes: string[];
+}
+
+export const MAX_POLL_OPTIONS = 10;
+
+export async function createPoll(
+  userId: string, conversationId: string,
+  input: {
+    question: string; options: string[];
+    multiChoice?: boolean; anonymous?: boolean; closesAt?: string | null;
+  },
+): Promise<{ poll: WirePoll; message: WireMessage }> {
+  const question = (input.question ?? '').trim();
+  const options = (input.options ?? []).map((o) => String(o ?? '').trim()).filter(Boolean);
+
+  if (!question) throw new ChatError('A poll needs a question.', 400);
+  if (options.length < 2) throw new ChatError('A poll needs at least two options.', 400);
+  if (options.length > MAX_POLL_OPTIONS) {
+    throw new ChatError(`A poll may have at most ${MAX_POLL_OPTIONS} options.`, 400);
+  }
+
+  const structured: PollOption[] = options.map((text, i) => ({ id: `o${i}`, text }));
+
+  /*
+   * The poll rides on a real message.
+   *
+   * So it takes a seq, lands in the log in the right place, and can be replied
+   * to, pinned, forwarded and searched like anything else. A poll held outside
+   * the message stream is a poll that scrolls away from its own discussion.
+   */
+  const { message } = await sendMessage({
+    conversationId, senderId: userId, body: question,
+    nonce: `poll-${snowflake()}`, type: 'poll', system: true,
+  });
+
+  const pollId = snowflake();
+  await getPool().query(
+    `INSERT INTO polls
+       (id, conversation_id, message_id, created_by, question, options,
+        multi_choice, anonymous, closes_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [pollId, conversationId, message.id, userId, question, JSON.stringify(structured),
+     input.multiChoice === true, input.anonymous === true, input.closesAt ?? null],
+  );
+
+  const poll = await getPoll(userId, pollId);
+  if (!poll) throw new ChatError('The poll could not be read back.', 500);
+  return { poll, message };
+}
+
+export async function getPoll(viewerId: string, pollId: string): Promise<WirePoll | null> {
+  const { rows } = await getPool().query<{
+    id: string; message_id: string; question: string; options: PollOption[];
+    multi_choice: boolean; anonymous: boolean; closes_at: string | null;
+    closed_at: string | null; created_by: string;
+  }>('SELECT * FROM polls WHERE id = $1', [pollId]);
+  const p = rows[0];
+  if (!p) return null;
+
+  const { rows: votes } = await getPool().query<{ option_id: string; user_id: string }>(
+    'SELECT option_id, user_id FROM poll_votes WHERE poll_id = $1', [pollId]);
+
+  const byOption = new Map<string, string[]>();
+  for (const v of votes) {
+    const list = byOption.get(v.option_id) ?? [];
+    list.push(v.user_id);
+    byOption.set(v.option_id, list);
+  }
+
+  return {
+    id: p.id,
+    messageId: p.message_id,
+    question: p.question,
+    options: p.options.map((o) => {
+      const voters = byOption.get(o.id) ?? [];
+      return {
+        ...o,
+        votes: voters.length,
+        // An anonymous poll never puts the voter list on the wire. Hiding it in
+        // the UI while shipping it in the payload is not anonymity.
+        voters: p.anonymous ? [] : voters.slice(0, 20),
+      };
+    }),
+    multiChoice: p.multi_choice,
+    anonymous: p.anonymous,
+    closesAt: p.closes_at,
+    closedAt: p.closed_at,
+    createdBy: p.created_by,
+    totalVoters: new Set(votes.map((v) => v.user_id)).size,
+    myVotes: votes.filter((v) => v.user_id === viewerId).map((v) => v.option_id),
+  };
+}
+
+export async function getPollByMessage(
+  viewerId: string, messageId: string,
+): Promise<WirePoll | null> {
+  const { rows } = await getPool().query<{ id: string }>(
+    'SELECT id FROM polls WHERE message_id = $1', [messageId]);
+  return rows[0] ? getPoll(viewerId, rows[0].id) : null;
+}
+
+export async function votePoll(
+  userId: string, pollId: string, optionIds: string[],
+): Promise<WirePoll> {
+  const { rows } = await getPool().query<{
+    conversation_id: string; options: PollOption[]; multi_choice: boolean;
+    closed_at: string | null; closes_at: string | null;
+  }>(
+    `SELECT conversation_id, options, multi_choice, closed_at, closes_at
+       FROM polls WHERE id = $1`, [pollId]);
+  const poll = rows[0];
+  if (!poll) throw new ChatError('Poll not found.', 404);
+
+  await requireMembership(userId, poll.conversation_id);
+
+  if (poll.closed_at || (poll.closes_at && new Date(poll.closes_at).getTime() < Date.now())) {
+    throw new ChatError('This poll has closed.', 409);
+  }
+
+  const valid = new Set(poll.options.map((o) => o.id));
+  const chosen = [...new Set(optionIds)].filter((id) => valid.has(id));
+  if (!poll.multi_choice && chosen.length > 1) {
+    throw new ChatError('This poll allows one choice.', 400);
+  }
+
+  // Replaced rather than appended: changing your mind is the normal case, and a
+  // vote endpoint that only ever adds turns a single-choice poll into a
+  // multiple-choice one on the second click.
+  await getPool().query('DELETE FROM poll_votes WHERE poll_id = $1 AND user_id = $2',
+    [pollId, userId]);
+  for (const optionId of chosen) {
+    await getPool().query(
+      `INSERT INTO poll_votes (poll_id, user_id, option_id) VALUES ($1,$2,$3)
+       ON CONFLICT DO NOTHING`,
+      [pollId, userId, optionId]);
+  }
+
+  const updated = await getPoll(userId, pollId);
+  if (!updated) throw new ChatError('Poll not found.', 404);
+  return updated;
+}
+
+export async function closePoll(userId: string, pollId: string): Promise<WirePoll> {
+  const { rows } = await getPool().query<{ created_by: string; conversation_id: string }>(
+    'SELECT created_by, conversation_id FROM polls WHERE id = $1', [pollId]);
+  const poll = rows[0];
+  if (!poll) throw new ChatError('Poll not found.', 404);
+
+  const membership = await requireMembership(userId, poll.conversation_id);
+  if (poll.created_by !== userId && !canModerate(membership.role)) {
+    throw new ChatError('Only the person who made the poll can close it.', 403);
+  }
+
+  await getPool().query(
+    'UPDATE polls SET closed_at = now() WHERE id = $1 AND closed_at IS NULL', [pollId]);
+  const updated = await getPoll(userId, pollId);
+  if (!updated) throw new ChatError('Poll not found.', 404);
+  return updated;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Channel discovery  (FR-CHN-6)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface DiscoverableChannel {
+  id: string;
+  name: string;
+  topic: string | null;
+  description: string | null;
+  type: ConversationType;
+  memberCount: number;
+  isMember: boolean;
+  lastMessageAt: string | null;
+}
+
+/**
+ * Public channels a person could join.
+ *
+ * Private channels are absent, not greyed out. Listing a private channel as
+ * "you cannot join this" discloses that it exists and what it is called, which
+ * in a school is often the whole of the sensitive information — a channel named
+ * for a pupil under review does not need its contents read to do damage.
+ */
+export async function discoverChannels(
+  userId: string, opts: { query?: string; limit?: number } = {},
+): Promise<DiscoverableChannel[]> {
+  const spaceId = await defaultSpaceFor(userId);
+  const limit = Math.min(Math.max(opts.limit ?? 40, 1), 100);
+  const term = (opts.query ?? '').trim().toLowerCase();
+
+  const { rows } = await getPool().query<{
+    id: string; name: string | null; topic: string | null; description: string | null;
+    type: ConversationType; member_count: number; last_message_at: string | null;
+    is_member: boolean;
+  }>(
+    `SELECT c.id, c.name, c.topic, c.description, c.type, c.member_count, c.last_message_at,
+            EXISTS (
+              SELECT 1 FROM conversation_members m
+               WHERE m.conversation_id = c.id AND m.user_id = $1 AND m.left_at IS NULL
+            ) AS is_member
+       FROM conversations c
+      WHERE c.space_id = $2
+        AND c.type IN ('channel', 'announcement')
+        AND c.is_private = false
+        AND c.is_archived = false
+        AND c.deleted_at IS NULL
+        AND ($3 = '' OR lower(c.name) LIKE '%' || $3 || '%'
+                     OR lower(coalesce(c.topic, '')) LIKE '%' || $3 || '%')
+      ORDER BY c.member_count DESC, c.last_message_at DESC NULLS LAST
+      LIMIT $4`,
+    [userId, spaceId, term, limit],
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name ?? 'Untitled',
+    topic: r.topic,
+    description: r.description,
+    type: r.type,
+    memberCount: r.member_count,
+    isMember: r.is_member,
+    lastMessageAt: r.last_message_at,
+  }));
+}
+
+/**
+ * Join a public channel.
+ *
+ * Only public, non-archived ones. A private channel is joined by invitation or
+ * by an invite link, both of which go through `addMembersTo` with someone who
+ * had the right to extend it.
+ */
+export async function joinChannel(userId: string, conversationId: string): Promise<ConversationSummary> {
+  const { rows } = await getPool().query<{
+    type: ConversationType; is_private: boolean; is_archived: boolean;
+  }>(
+    `SELECT type, is_private, is_archived FROM conversations
+      WHERE id = $1 AND deleted_at IS NULL`,
+    [conversationId],
+  );
+  const c = rows[0];
+  if (!c) throw new ChatError('Channel not found.', 404);
+  if (c.type === 'dm' || c.type === 'group') {
+    throw new ChatError('That is not a channel you can join.', 403);
+  }
+  if (c.is_private) throw new ChatError('That channel is invite-only.', 403);
+  if (c.is_archived) throw new ChatError('That channel is archived.', 409);
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await addMembers(client, conversationId, [{ userId, role: 'member' }]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return getConversation(userId, conversationId);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Membership management  (FR-CHN-6)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** Add people to a channel. The caller must already be able to manage it. */
+export async function addMembersTo(
+  actorId: string, conversationId: string, userIds: string[],
+): Promise<{ added: string[]; memberCount: number }> {
+  const membership = await requireMembership(actorId, conversationId);
+  if (!canManage(membership.role)) {
+    throw new ChatError('You cannot add people to this conversation.', 403);
+  }
+  if (membership.isArchived) throw new ChatError('This conversation is archived.', 409);
+
+  const wanted = [...new Set(userIds)].filter(Boolean).slice(0, 200);
+  if (!wanted.length) throw new ChatError('Nobody to add.', 400);
+
+  // Only real, active accounts. An id that does not resolve is silently
+  // dropped rather than failing the whole batch — adding thirty people should
+  // not be undone by one stale id from a directory sync.
+  const { rows: valid } = await getPool().query<{ id: string }>(
+    `SELECT id FROM users WHERE id = ANY($1::text[]) AND status = 'active'`, [wanted]);
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await addMembers(client, conversationId, valid.map((v) => ({ id: v.id })).map(
+      (v) => ({ userId: v.id, role: 'member' as MemberRole })));
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return { added: valid.map((v) => v.id), memberCount: await memberCountOf(conversationId) };
+}
+
+/**
+ * Remove someone from a conversation.
+ *
+ * `left_at` rather than a delete: their read watermark, their messages' author
+ * link and the audit trail all survive. Rejoining reuses the row, so they do
+ * not come back to a channel they have read before with everything unread.
+ */
+export async function removeMember(
+  actorId: string, conversationId: string, targetId: string,
+): Promise<{ memberCount: number }> {
+  const membership = await requireMembership(actorId, conversationId);
+  const leaving = actorId === targetId;
+
+  if (!leaving && !canManage(membership.role)) {
+    throw new ChatError('You cannot remove people from this conversation.', 403);
+  }
+
+  const { rows } = await getPool().query<{ role: MemberRole }>(
+    `SELECT role FROM conversation_members
+      WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+    [conversationId, targetId],
+  );
+  const target = rows[0];
+  if (!target) throw new ChatError('They are not in this conversation.', 404);
+
+  // The owner cannot be removed by an admin, and cannot walk out leaving the
+  // channel ownerless. Transfer first.
+  if (target.role === 'owner') {
+    throw new ChatError(
+      leaving
+        ? 'Transfer ownership before you leave.'
+        : 'The owner cannot be removed. Ask them to transfer ownership first.',
+      409,
+    );
+  }
+
+  await getPool().query(
+    `UPDATE conversation_members SET left_at = now()
+      WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+    [conversationId, targetId],
+  );
+  await getPool().query(
+    `UPDATE conversations SET member_count = (
+       SELECT count(*) FROM conversation_members
+        WHERE conversation_id = $1 AND left_at IS NULL)
+     WHERE id = $1`,
+    [conversationId],
+  );
+
+  return { memberCount: await memberCountOf(conversationId) };
+}
+
+/** Promote or demote somebody within a channel (FR-CHN-4). */
+export async function setMemberRole(
+  actorId: string, conversationId: string, targetId: string, role: MemberRole,
+): Promise<void> {
+  const membership = await requireMembership(actorId, conversationId);
+  if (!canManage(membership.role)) {
+    throw new ChatError('You cannot change roles in this conversation.', 403);
+  }
+  if (role === 'owner') {
+    throw new ChatError('Use transfer ownership to make someone the owner.', 400);
+  }
+
+  const { rows } = await getPool().query<{ role: MemberRole }>(
+    `SELECT role FROM conversation_members
+      WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+    [conversationId, targetId],
+  );
+  if (!rows[0]) throw new ChatError('They are not in this conversation.', 404);
+  if (rows[0].role === 'owner') throw new ChatError('The owner’s role cannot be changed.', 409);
+
+  await getPool().query(
+    `UPDATE conversation_members SET role = $3
+      WHERE conversation_id = $1 AND user_id = $2`,
+    [conversationId, targetId, role],
+  );
+}
+
+/**
+ * Hand the channel to somebody else.
+ *
+ * One statement per side, in a transaction: a channel with two owners or none
+ * is worse than either outcome of the operation failing.
+ */
+export async function transferOwnership(
+  actorId: string, conversationId: string, targetId: string,
+): Promise<void> {
+  const membership = await requireMembership(actorId, conversationId);
+  if (membership.role !== 'owner') {
+    throw new ChatError('Only the owner can transfer ownership.', 403);
+  }
+  if (actorId === targetId) throw new ChatError('You already own this conversation.', 400);
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const { rowCount } = await client.query(
+      `UPDATE conversation_members SET role = 'owner'
+        WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+      [conversationId, targetId],
+    );
+    if (!rowCount) throw new ChatError('They are not in this conversation.', 404);
+    await client.query(
+      `UPDATE conversation_members SET role = 'admin'
+        WHERE conversation_id = $1 AND user_id = $2`,
+      [conversationId, actorId],
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Channel settings and archiving  (FR-CHN-3, FR-CHN-7)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export async function updateConversation(
+  actorId: string, conversationId: string,
+  patch: {
+    name?: string; topic?: string | null; description?: string | null;
+    iconEmoji?: string | null; avatarColor?: string | null; isPrivate?: boolean;
+  },
+): Promise<ConversationSummary> {
+  const membership = await requireMembership(actorId, conversationId);
+  if (!canManage(membership.role)) {
+    throw new ChatError('You cannot change this conversation’s settings.', 403);
+  }
+  if (membership.type === 'dm') {
+    throw new ChatError('A direct message has no settings to change.', 400);
+  }
+
+  const sets: string[] = [];
+  const params: unknown[] = [conversationId];
+  const set = (column: string, value: unknown) => {
+    params.push(value);
+    sets.push(`${column} = $${params.length}`);
+  };
+
+  if (patch.name !== undefined) {
+    const name = patch.name.trim();
+    if (!name) throw new ChatError('A channel needs a name.', 400);
+    set('name', name.slice(0, 80));
+    set('slug', slugify(name));
+  }
+  if (patch.topic !== undefined) set('topic', patch.topic?.slice(0, 200) ?? null);
+  if (patch.description !== undefined) set('description', patch.description?.slice(0, 1000) ?? null);
+  if (patch.iconEmoji !== undefined) set('icon_emoji', patch.iconEmoji?.slice(0, 16) ?? null);
+  if (patch.avatarColor !== undefined) set('avatar_color', patch.avatarColor?.slice(0, 32) ?? null);
+  // Public → private is allowed; private → public is not. Opening a channel
+  // retroactively publishes everything ever said in it to people who were never
+  // party to it, which is not a settings change, it is a disclosure.
+  if (patch.isPrivate === true) set('is_private', true);
+
+  if (!sets.length) return getConversation(actorId, conversationId);
+
+  await getPool().query(
+    `UPDATE conversations SET ${sets.join(', ')} WHERE id = $1`, params);
+  return getConversation(actorId, conversationId);
+}
+
+export async function setArchived(
+  actorId: string, conversationId: string, archived: boolean,
+): Promise<ConversationSummary> {
+  const membership = await requireMembership(actorId, conversationId);
+  if (!canManage(membership.role)) {
+    throw new ChatError('You cannot archive this conversation.', 403);
+  }
+  if (membership.type === 'dm') throw new ChatError('A direct message cannot be archived.', 400);
+
+  await getPool().query(
+    `UPDATE conversations
+        SET is_archived = $2,
+            archived_at = ${archived ? 'now()' : 'NULL'},
+            archived_by = ${archived ? '$3' : 'NULL'}
+      WHERE id = $1`,
+    archived ? [conversationId, true, actorId] : [conversationId, false],
+  );
+
+  return getConversation(actorId, conversationId);
+}
+
+/**
+ * Disappearing messages (FR-MSG-19).
+ *
+ * Sets the policy *and* back-dates it onto existing messages, because a policy
+ * that only applies to what is said next is not what anyone means by "this
+ * conversation keeps a week of history".
+ */
+export async function setRetention(
+  actorId: string, conversationId: string, days: number | null,
+): Promise<ConversationSummary> {
+  const membership = await requireMembership(actorId, conversationId);
+  if (!canManage(membership.role) && membership.type !== 'dm') {
+    throw new ChatError('You cannot change retention for this conversation.', 403);
+  }
+  if (days !== null && ![1, 7, 30, 90, 365].includes(days)) {
+    throw new ChatError('Choose 24 hours, 7 days, 30 days, 90 days or a year.', 400);
+  }
+
+  await getPool().query(
+    `UPDATE conversations
+        SET retention_days = $2, retention_set_by = $3, retention_set_at = now()
+      WHERE id = $1`,
+    [conversationId, days, actorId],
+  );
+
+  await getPool().query(
+    days === null
+      ? `UPDATE messages SET expires_at = NULL WHERE conversation_id = $1`
+      : `UPDATE messages SET expires_at = created_at + ($2 || ' days')::interval
+          WHERE conversation_id = $1`,
+    days === null ? [conversationId] : [conversationId, String(days)],
+  );
+
+  return getConversation(actorId, conversationId);
+}
+
+/** Stamp a new message with its conversation's retention, if it has one. */
+export async function applyRetention(conversationId: string, messageId: string): Promise<void> {
+  await getPool().query(
+    `UPDATE messages m
+        SET expires_at = m.created_at + (c.retention_days || ' days')::interval
+       FROM conversations c
+      WHERE c.id = m.conversation_id
+        AND m.conversation_id = $1 AND m.id = $2
+        AND c.retention_days IS NOT NULL`,
+    [conversationId, messageId],
+  );
+}
+
+/**
+ * Delete messages whose time is up.
+ *
+ * A hard delete, not a tombstone. A disappearing message that leaves "this
+ * message was deleted" behind has not disappeared — the fact of it, its author
+ * and its timing all survive, which is most of what the setting exists to
+ * remove.
+ */
+export async function sweepExpiredMessages(limit = 500): Promise<number> {
+  const { rows } = await getPool().query<{ id: string; conversation_id: string }>(
+    `SELECT id, conversation_id, created_at FROM messages
+      WHERE expires_at IS NOT NULL AND expires_at <= now()
+      LIMIT $1`,
+    [limit],
+  );
+  if (!rows.length) return 0;
+
+  const ids = rows.map((r) => r.id);
+  // The child tables carry message_id without a foreign key — `messages` is
+  // partitioned, so one is not possible — which means they are swept here
+  // rather than by a cascade.
+  for (const table of ['message_reactions', 'message_receipts', 'message_mentions',
+                       'message_saves', 'message_edits', 'message_attachments']) {
+    await getPool().query(`DELETE FROM ${table} WHERE message_id = ANY($1::text[])`, [ids]);
+  }
+  await getPool().query(
+    `DELETE FROM messages WHERE id = ANY($1::text[]) AND expires_at <= now()`, [ids]);
+
+  for (const conversationId of new Set(rows.map((r) => r.conversation_id))) {
+    await refreshPreview(conversationId);
+  }
+  return ids.length;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Invite links  (FR-CHN-6)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface InviteLink {
+  code: string;
+  conversationId: string;
+  conversationName: string;
+  expiresAt: string | null;
+  maxUses: number | null;
+  uses: number;
+}
+
+export async function createInvite(
+  actorId: string, conversationId: string,
+  opts: { expiresInHours?: number | null; maxUses?: number | null } = {},
+): Promise<InviteLink> {
+  const membership = await requireMembership(actorId, conversationId);
+  if (!canManage(membership.role)) {
+    throw new ChatError('You cannot invite people to this conversation.', 403);
+  }
+
+  // 128 bits from a CSPRNG. An invite code is a bearer credential for the
+  // duration of its life, and a guessable one is an open door.
+  const code = randomBytes(16).toString('base64url');
+  const expiresAt = opts.expiresInHours
+    ? new Date(Date.now() + Math.min(opts.expiresInHours, 24 * 30) * 3_600_000).toISOString()
+    : null;
+
+  await getPool().query(
+    `INSERT INTO conversation_invites
+       (id, conversation_id, code, created_by, expires_at, max_uses)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [snowflake(), conversationId, code, actorId, expiresAt,
+     opts.maxUses && opts.maxUses > 0 ? Math.min(opts.maxUses, 500) : null],
+  );
+
+  return {
+    code,
+    conversationId,
+    conversationName: membership.name ?? 'Conversation',
+    expiresAt,
+    maxUses: opts.maxUses ?? null,
+    uses: 0,
+  };
+}
+
+/**
+ * Redeem an invite.
+ *
+ * The use counter is incremented in the same statement that checks the limit,
+ * so two people redeeming the last use of a link at once cannot both get in.
+ */
+export async function redeemInvite(
+  userId: string, code: string,
+): Promise<ConversationSummary> {
+  const { rows } = await getPool().query<{ conversation_id: string }>(
+    `UPDATE conversation_invites
+        SET uses = uses + 1
+      WHERE code = $1
+        AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > now())
+        AND (max_uses IS NULL OR uses < max_uses)
+      RETURNING conversation_id`,
+    [code],
+  );
+  const invite = rows[0];
+  if (!invite) throw new ChatError('That invite link is no longer valid.', 404);
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await addMembers(client, invite.conversation_id, [{ userId, role: 'member' }]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return getConversation(userId, invite.conversation_id);
+}
+
+export async function revokeInvite(actorId: string, code: string): Promise<boolean> {
+  const { rows } = await getPool().query<{ conversation_id: string }>(
+    'SELECT conversation_id FROM conversation_invites WHERE code = $1', [code]);
+  if (!rows[0]) return false;
+
+  const membership = await requireMembership(actorId, rows[0].conversation_id);
+  if (!canManage(membership.role)) {
+    throw new ChatError('You cannot revoke invites for this conversation.', 403);
+  }
+
+  const { rowCount } = await getPool().query(
+    `UPDATE conversation_invites SET revoked_at = now()
+      WHERE code = $1 AND revoked_at IS NULL`, [code]);
+  return (rowCount ?? 0) > 0;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Profiles and custom status  (FR-USR-2, FR-USR-4)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+  role: string;
+  title: string | null;
+  pronouns: string | null;
+  timezone: string | null;
+  statusEmoji: string | null;
+  statusText: string | null;
+  statusExpiresAt: string | null;
+  /** Filled in from Redis by the route. */
+  presence: string;
+  /** The DM with this person, if one already exists. */
+  directConversationId: string | null;
+}
+
+export async function getProfile(viewerId: string, userId: string): Promise<UserProfile> {
+  const { rows } = await getPool().query<{
+    id: string; name: string; avatar_url: string | null; role: string;
+    title: string | null; pronouns: string | null; timezone: string | null;
+    status_emoji: string | null; status_text: string | null; status_expires_at: string | null;
+  }>(
+    `SELECT id, name, avatar_url, role, title, pronouns, timezone,
+            status_emoji, status_text, status_expires_at
+       FROM users WHERE id = $1 AND status = 'active'`,
+    [userId],
+  );
+  const u = rows[0];
+  if (!u) throw new ChatError('That person is not here.', 404);
+
+  // An expired status is not shown, even before the sweep has cleared it —
+  // the sweep is housekeeping, not the rule.
+  const expired = u.status_expires_at !== null
+    && new Date(u.status_expires_at).getTime() <= Date.now();
+
+  return {
+    id: u.id,
+    name: u.name,
+    avatarUrl: u.avatar_url,
+    role: u.role,
+    title: u.title,
+    pronouns: u.pronouns,
+    timezone: u.timezone,
+    statusEmoji: expired ? null : u.status_emoji,
+    statusText: expired ? null : u.status_text,
+    statusExpiresAt: expired ? null : u.status_expires_at,
+    presence: 'offline',
+    directConversationId: await findDirect(viewerId, userId),
+  };
+}
+
+export async function setStatus(
+  userId: string,
+  status: { emoji?: string | null; text?: string | null; expiresAt?: string | null },
+): Promise<UserProfile> {
+  await getPool().query(
+    `UPDATE users
+        SET status_emoji = $2, status_text = $3, status_expires_at = $4, updated_at = now()
+      WHERE id = $1`,
+    [userId,
+     status.emoji?.slice(0, 16) || null,
+     status.text?.slice(0, 100) || null,
+     status.expiresAt ?? null],
+  );
+  return getProfile(userId, userId);
+}
+
+export async function updateProfile(
+  userId: string, patch: { title?: string | null; pronouns?: string | null; timezone?: string | null },
+): Promise<UserProfile> {
+  const sets: string[] = [];
+  const params: unknown[] = [userId];
+  const set = (column: string, value: unknown) => {
+    params.push(value);
+    sets.push(`${column} = $${params.length}`);
+  };
+
+  if (patch.title !== undefined) set('title', patch.title?.slice(0, 80) || null);
+  if (patch.pronouns !== undefined) set('pronouns', patch.pronouns?.slice(0, 32) || null);
+  if (patch.timezone !== undefined) set('timezone', patch.timezone?.slice(0, 64) || null);
+
+  if (sets.length) {
+    await getPool().query(`UPDATE users SET ${sets.join(', ')} WHERE id = $1`, params);
+  }
+  return getProfile(userId, userId);
+}
+
+/** Clear statuses whose expiry has passed. Run by the worker. */
+export async function sweepExpiredStatuses(): Promise<number> {
+  const { rowCount } = await getPool().query(
+    `UPDATE users
+        SET status_emoji = NULL, status_text = NULL, status_expires_at = NULL
+      WHERE status_expires_at IS NOT NULL AND status_expires_at <= now()`,
+  );
+  return rowCount ?? 0;
+}
+
+/** Display names for a set of ids, in the order given. Used by system notices. */
+export async function namesOf(userIds: string[]): Promise<string[]> {
+  if (!userIds.length) return [];
+  const { rows } = await getPool().query<{ id: string; name: string }>(
+    'SELECT id, name FROM users WHERE id = ANY($1::text[])', [userIds]);
+  const byId = new Map(rows.map((r) => [r.id, r.name]));
+  return userIds.map((id) => byId.get(id) ?? 'Someone');
 }
