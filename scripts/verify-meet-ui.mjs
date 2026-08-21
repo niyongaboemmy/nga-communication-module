@@ -23,7 +23,7 @@ await import('node:fs').then((fs) => fs.mkdirSync(SHOTS, { recursive: true }));
 const env = Object.fromEntries(
   readFileSync(`${ROOT}/apps/api/.env`, 'utf8').split('\n')
     .filter((l) => l.includes('=') && !l.startsWith('#'))
-    .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim()]));
+    .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')]));
 
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
 const out = [];

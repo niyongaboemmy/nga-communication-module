@@ -22,7 +22,7 @@ function readEnv() {
     return Object.fromEntries(
       readFileSync(ENV_PATH, 'utf8').split('\n')
         .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
-        .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim()]),
+        .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')]),
     );
   } catch {
     return {};

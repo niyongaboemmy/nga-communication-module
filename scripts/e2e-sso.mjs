@@ -24,7 +24,7 @@ const REDIRECT = 'http://localhost:5194/sso/callback';
 const readEnv = (path) => Object.fromEntries(
   readFileSync(path, 'utf8').split('\n')
     .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
-    .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim()])
+    .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')])
 );
 
 const misEnv = readEnv('../nga_central_mis/backend/.env');
