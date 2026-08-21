@@ -9,3 +9,4 @@
  * with the hole in it.
  */
 export * from './service.js';
+export * from './notifications.js';

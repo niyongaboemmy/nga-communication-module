@@ -1,5 +1,5 @@
 {
-  "name": "@tupo/chat",
+  "name": "@tupo/notify",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,18 +13,14 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@tupo/db": "*",
     "@tupo/shared": "*",
-    "pg": "^8.13.1",
-    "@tupo/notify": "*"
+    "ioredis": "^5.4.2"
   },
   "devDependencies": {
-    "@types/pg": "^8.11.10",
-    "typescript": "^5.7.2",
-    "vitest": "^4.1.11"
+    "typescript": "^5.7.2"
   }
 }

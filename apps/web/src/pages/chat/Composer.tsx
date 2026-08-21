@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Paperclip, Smile, AtSign, Send, Mic, Lock, Archive } from 'lucide-react';
+import {
+  Paperclip, Smile, AtSign, Send, Mic, Lock, Archive, CloudOff, X, Quote,
+} from 'lucide-react';
 import { IconButton } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { MAX_MESSAGE_LENGTH } from '@tupo/shared';
 import { useChat } from './ChatProvider';
+import { EmojiPicker, rememberEmoji } from './EmojiPicker';
 import type { Conversation } from './types';
 
 /**
@@ -24,11 +27,14 @@ const MAX_ROWS_PX = 160;
 
 export const Composer: React.FC<{ conversation: Conversation }> = ({ conversation }) => {
   const { can } = usePermissions();
-  const { send, notifyTyping, draftFor, setDraft } = useChat();
+  const {
+    send, notifyTyping, draftFor, setDraft, connected, queued, replyTarget, setReplyTarget,
+  } = useChat();
   const ref = useRef<HTMLTextAreaElement>(null);
 
   const value = draftFor(conversation.id);
   const [touch, setTouch] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
 
   useEffect(() => {
     setTouch(window.matchMedia('(pointer: coarse)').matches);
@@ -54,6 +60,27 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
         || conversation.myRole === 'owner'
         || conversation.myRole === 'admin');
 
+  /**
+   * Insert at the caret, not at the end.
+   *
+   * Someone who has clicked back into the middle of a sentence to add an emoji
+   * means it to go there. Appending is the behaviour that makes people stop
+   * using the picker.
+   */
+  const insertAtCaret = useCallback((text: string) => {
+    const el = ref.current;
+    const current = value;
+    const start = el?.selectionStart ?? current.length;
+    const end = el?.selectionEnd ?? current.length;
+    const next = current.slice(0, start) + text + current.slice(end);
+    setDraft(conversation.id, next);
+    requestAnimationFrame(() => {
+      el?.focus();
+      const caret = start + text.length;
+      el?.setSelectionRange(caret, caret);
+    });
+  }, [value, conversation.id, setDraft]);
+
   const submit = useCallback(() => {
     const text = value.trim();
     if (!text) return;
@@ -61,11 +88,23 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
   }, [value, send]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Escape drops the quote rather than clearing what has been typed —
+    // clearing a half-written message with one key is unforgivable.
+    if (e.key === 'Escape' && replyTarget) {
+      e.preventDefault();
+      setReplyTarget(null);
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey && !touch) {
       e.preventDefault();
       submit();
     }
   };
+
+  // Choosing a message to answer is choosing to write; put the caret there.
+  useEffect(() => {
+    if (replyTarget && !touch) ref.current?.focus();
+  }, [replyTarget, touch]);
 
   // An archived conversation is read-only for everyone, whatever their role.
   if (conversation.isArchived) {
@@ -99,6 +138,24 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
 
   return (
     <div className="pb-safe shrink-0 border-t border-border-light bg-white px-2 py-2.5 sm:px-4 dark:border-border-dark/30 dark:bg-chrome-dark">
+      {/* FR-MSG-7: what you are answering, above what you are writing. */}
+      {replyTarget && (
+        <div className="mb-1.5 flex items-start gap-2 rounded-xl border-l-2 border-blue-500 bg-surface-light px-2.5 py-1.5 dark:bg-elevated-dark/60">
+          <Quote size={13} className="mt-0.5 shrink-0 text-blue-500" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] font-semibold text-text-primary-light dark:text-text-primary-dark">
+              Replying to {replyTarget.senderName}
+            </p>
+            <p className="truncate text-xs text-text-secondary-light dark:text-text-secondary-dark">
+              {replyTarget.body ?? 'Attachment'}
+            </p>
+          </div>
+          <IconButton label="Cancel reply" size="sm" onClick={() => setReplyTarget(null)}>
+            <X size={14} />
+          </IconButton>
+        </div>
+      )}
+
       <div
         className={`flex items-end gap-1.5 rounded-2xl border bg-surface-light px-1.5 py-1.5 transition-colors duration-150 focus-within:bg-white focus-within:ring-2 dark:bg-elevated-dark/60 dark:focus-within:bg-elevated-dark ${
           over
@@ -138,9 +195,22 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
         <IconButton label="Mention someone" className="hidden sm:grid">
           <AtSign size={18} />
         </IconButton>
-        <IconButton label="Insert emoji">
-          <Smile size={18} />
-        </IconButton>
+        <div className="relative">
+          <IconButton
+            label="Insert emoji"
+            active={emojiOpen}
+            onClick={() => setEmojiOpen((v) => !v)}
+          >
+            <Smile size={18} />
+          </IconButton>
+          {emojiOpen && (
+            <EmojiPicker
+              align="up"
+              onPick={(e) => { rememberEmoji(e); insertAtCaret(e); setEmojiOpen(false); }}
+              onClose={() => setEmojiOpen(false)}
+            />
+          )}
+        </div>
 
         {/* Send swaps to a mic when there is nothing to send — the button slot
             never sits there disabled and dead. */}
@@ -165,6 +235,19 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
           <kbd className="font-sans font-semibold">Enter</kbd> to send ·{' '}
           <kbd className="font-sans font-semibold">Shift + Enter</kbd> for a new line
         </p>
+        {/* Offline is stated plainly, with the promise the outbox actually
+            keeps: it will go, in order, when the connection returns. Saying
+            nothing here is what makes people retype a message they already
+            sent. */}
+        {!connected && (
+          <p className="flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+            <CloudOff size={11} />
+            {queued > 0
+              ? `Offline — ${queued} message${queued > 1 ? 's' : ''} will send when you reconnect`
+              : 'Offline — messages will send when you reconnect'}
+          </p>
+        )}
+
         {/* The counter appears only when it is about to matter. A permanent
             character count on every chat box is noise. */}
         {nearLimit && (

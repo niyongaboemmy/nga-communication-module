@@ -11,7 +11,7 @@ import { config } from './config.js';
 import { registerMeetNamespace } from './meet/namespace.js';
 import { ping as pingMeetDb, getPool as getMeetPool } from './meet/db.js';
 import { rooms as meetRooms } from './meet/state.js';
-import { registerChatHandlers } from './chat/handlers.js';
+import { registerChatHandlers, broadcastPresence } from './chat/handlers.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -138,6 +138,9 @@ io.on('connection', async (socket) => {
   if (redisReady) {
     await presence.set(`presence:${user.id}`, 'online', 'EX', PRESENCE_TTL_SECONDS);
   }
+  // Coming online is worth telling the people who can see it — otherwise the
+  // green dot only ever appears on a reload.
+  void broadcastPresence(io, user.id, 'online');
 
   // Chat rides the default namespace alongside presence: it is the baseline
   // traffic of the product, and it shares the per-user room with the shell.
@@ -155,9 +158,13 @@ io.on('connection', async (socket) => {
 
   socket.on('presence:set', async ({ status }, ack) => {
     if (redisReady) await presence.set(`presence:${user.id}`, status, 'EX', PRESENCE_TTL_SECONDS);
+    // The user's own other devices, so a status set on the phone shows on the
+    // laptop…
     socket.to(`user:${user.id}`).emit('presence:update', {
       userId: user.id, status, at: new Date().toISOString(),
     });
+    // …and everyone who actually renders this person's dot.
+    void broadcastPresence(io, user.id, status);
     if (typeof ack === 'function') ack({ ok: true });
   });
 
@@ -165,7 +172,10 @@ io.on('connection', async (socket) => {
     // Only clear presence when this was the user's last socket — a second tab
     // closing must not show them offline.
     const remaining = await io.in(`user:${user.id}`).fetchSockets();
-    if (remaining.length === 0 && redisReady) await presence.del(`presence:${user.id}`);
+    if (remaining.length === 0) {
+      if (redisReady) await presence.del(`presence:${user.id}`);
+      void broadcastPresence(io, user.id, 'offline');
+    }
   });
 });
 

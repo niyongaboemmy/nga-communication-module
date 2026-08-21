@@ -335,3 +335,145 @@ client refetches when told about something unfamiliar.
 
 The gate script buffered all output to the end, so its first hang produced an
 empty file and no clue. It now streams every check as it runs.
+
+---
+
+## 9. Phase 2 — delivered
+
+**Gate: 43/43 live checks, 51/51 Phase 1 checks (no regression), 32/32 browser
+checks, 9/9 workspaces typecheck and build, `npm audit` 0.**
+
+```
+npm run verify:chat        # 51 — the spine
+npm run verify:chat:live   # 43 — reactions, edits, deletions, notifications, presence, receipts
+npm run verify:chat:ui     # 32 — two real browsers, desktop + phone
+```
+
+### What was built
+
+| Area | Delivered |
+|---|---|
+| Reactions | Toggle semantics, per-emoji grouping, `mine` resolved per viewer, reactor names, live over the socket, one-tap quick reactions plus a picker |
+| Editing | Author-only, 24 h window, previous version archived to `message_edits`, mentions recomputed, sidebar preview follows the edit, in-place editor |
+| Deleting | Tombstone that keeps its `seq`, body and attachments stripped on the wire, moderator delete-any audit-logged, unread arithmetic recomputed, inline confirm |
+| Notifications | **`packages/notify`** extracted; `packages/chat/src/notifications.ts` holds the audience rules |
+| Presence | Broadcast to DM counterparts only, on connect, change and last-disconnect |
+| Receipts | `delivered` / `read` rows, reciprocal opt-out |
+| Rich text | Bold, italic, strike, inline code, fenced blocks, quotes, lists, links, mentions — tokenised into React elements, never HTML |
+| Emoji | Hand-rolled picker, keyword search, frequently-used, caret-aware insertion |
+| Offline | IndexedDB outbox, durable-before-optimistic, in-order flush, give-up after 5 attempts |
+
+### The notification rules
+
+Written down because this is the file that decides whether people leave
+notifications switched on, and every rule is there because its absence is a
+reason to mute the app:
+
+- Never notify anyone about their own action.
+- A DM always notifies — there is no reading of "all / mentions / none" under
+  which someone writing to you personally should be silent.
+- A channel message notifies only at level `all`.
+- A mention pierces `mentions`; it does **not** pierce `none`. Choosing
+  "nothing" has to mean nothing or the setting is a lie.
+- `@channel` / `@here` are not personal mentions. They reach `all`, and reach
+  `mentions` only if the sender holds `CHANNEL_ANNOUNCE` — otherwise one person
+  typing `@here` turns every muted channel back on for four hundred people.
+- A burst of fifteen messages refreshes one row rather than stacking fifteen.
+  The badge carries the count; the notification carries the fact.
+- `mutedUntil` wins over everything. "Mute for an hour" means an hour.
+
+Quiet hours and sound are applied client-side in Phase 5: the row should exist
+either way, so it is waiting in the morning. What gets suppressed is the
+interruption, not the record.
+
+### Why `packages/notify` exists now
+
+`notifyNewMessage` has to run on whichever path actually sent the message, and
+the normal path is the socket — so the realtime gateway needs it. The store
+lived in `apps/api/src/services/notificationService.ts` and Meet already used
+it. It moved to a package and `apps/api` imports it from there; Meet's call
+sites changed by one import line and nothing else.
+
+### Defects found this phase
+
+| Defect | Where |
+|---|---|
+| The edit textarea and the button that opens it shared the accessible name "Edit message" — a screen-reader user hears the same label twice with no way to tell them apart | Renamed the field to "Edit message text" |
+| The message transcript had no role of its own, so arriving messages were not announced and the pane could not be addressed independently | `role="log"` with `aria-relevant="additions"` — the correct role for a chat transcript, carrying an implicit polite live region |
+
+Both were surfaced by writing the browser assertions against **accessible
+names** rather than CSS selectors. A test that can only find an element by its
+class cannot tell you the element is unusable.
+
+### A test bug worth recording
+
+Four checks reported edit and delete as broken while the screenshot plainly
+showed both working. The cause was `locator.isVisible({ timeout })` — that
+method samples the DOM **once** and returns immediately; its `timeout` bounds
+resolving the selector, not waiting for the element. Every assertion following
+a network round trip was reading the page before the response arrived. Replaced
+with a `visible()` helper built on `waitFor`, and the false failures went away.
+
+The lesson generalises: an assertion that cannot wait will fail intermittently
+under load and be blamed on the feature.
+
+---
+
+## 10. Phase 3 — delivered
+
+**Gate: 35/35 structure checks, 47/47 browser checks, and 51/51 + 43/43 on the
+earlier phases with no regression. 9/9 workspaces typecheck and build.**
+
+```
+npm run verify:chat:threads   # 35 — threads, quotes, pins, saves, forwarding, permalinks
+npm run verify:chat:ui        # 47 — two real browsers
+```
+
+### What was built
+
+| Area | Delivered |
+|---|---|
+| Threads | Second-axis replies excluded from the main flow, one level deep, "also send to channel", participants auto-followed, dedicated pane repeating the root |
+| Quote reply | Denormalised quote block, tap-to-jump, survives deletion of the quoted message as a marked tombstone |
+| Pins | Per-conversation pinned list capped at 50, collapsible bar above the log, announced in the room |
+| Saved items | Personal cross-conversation list, membership re-checked on read, own pane |
+| Forwarding | Multi-target with per-target authorisation, attribution carried on the row, optional note |
+| Permalinks | `…/messages/:id/context` returns a window centred on the message; `jumpTo` reuses the loaded log when it can and flashes the target |
+
+### Decisions worth recording
+
+**Threads are one level deep.** Replying to a reply joins the same thread rather
+than nesting. Every product that has shipped threads landed here, because the
+second level is unreadable in a 400px column and the tree quickly stops
+describing the conversation.
+
+**Participation is the thread subscription.** A "follow" button people cannot
+see means threads notify nobody; notifying the whole channel means a thread is
+no quieter than the room, which is the one thing it exists to be. Whoever has
+written in it is the honest middle, and it is asserted both ways in the gate.
+
+**A forward out of a DM does not name the DM.** Attribution says who wrote it;
+disclosing *where* would leak who is talking to whom into a channel. Tested.
+
+**"Also send to channel" writes a second message** rather than moving the reply
+out of the thread, so the thread still reads as a thread afterwards.
+
+### Defects found this phase
+
+| Defect | Cause | Fix |
+|---|---|---|
+| **System notices were written but never broadcast** — "pinned a message" appeared only after a reload, which is exactly when it has stopped being useful | `chat.systemMessage` writes the row; each caller had to remember to emit, and the pin route did not | An `announce()` helper that writes *and* emits, so there is no longer a step to forget |
+| The hover toolbar for your own message rendered at the far **left** of a full-width row, half a screen from the bubble it acted on | `left-12` for `mine`, in a `flex-row-reverse` row | Anchored to the side the bubble is on: `right-14` / `left-14` |
+| `listSaved` was built by string-patching the shared `MESSAGE_SELECT` fragment — it compiled, ran, and would have broken silently at the next column rename | Convenience | Written out explicitly; the duplication is cheaper than the trap |
+
+One gate assertion was also wrong rather than the code: "pinning is permissioned"
+tested a Staff account, and Staff legitimately holds `MESSAGE_PIN`. Re-pointed at
+a Student, which is the role that does not, plus a follow-up asserting the
+refused action had no effect.
+
+### A note on the browser gate
+
+`getByRole(role, { name })` matches the accessible name as a **substring** by
+default, so `'Saved items'` also matched `'Remove from saved items'` on a
+message row. Passing `exact: true` where a name is a prefix of another is not
+optional.

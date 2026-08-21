@@ -8,6 +8,7 @@ import { TYPING_THROTTLE_MS } from '@tupo/shared';
 import { getSocket } from '../../lib/socket';
 import { useAuth } from '../../context/AuthContext';
 import * as chatApi from './api';
+import * as outbox from './outbox';
 
 /**
  * The chat store.
@@ -50,6 +51,31 @@ interface ChatValue {
     attachments?: string[]; type?: MessageType;
   }) => Promise<void>;
   retry: (nonce: string) => Promise<void>;
+  react: (messageId: string, emoji: string) => Promise<void>;
+
+  /** The message the composer is answering, if any (FR-MSG-7). */
+  replyTarget: WireMessage | null;
+  setReplyTarget: (m: WireMessage | null) => void;
+
+  /** The open thread, if any (FR-MSG-6). */
+  threadRootId: string | null;
+  threadMessages: WireMessage[];
+  threadLoading: boolean;
+  openThread: (rootId: string | null) => void;
+  sendThreadReply: (body: string, alsoSendToChannel: boolean) => Promise<void>;
+
+  pin: (messageId: string, pinned: boolean) => Promise<void>;
+  save: (messageId: string, saved: boolean) => Promise<void>;
+  forward: (messageId: string, conversationIds: string[], comment?: string) => Promise<void>;
+
+  /** Scroll a specific message into view, loading around it if needed. */
+  jumpTo: (messageId: string) => Promise<void>;
+  /** Set briefly after a jump so the target can flash. */
+  highlightedId: string | null;
+  edit: (messageId: string, body: string) => Promise<void>;
+  remove: (messageId: string) => Promise<void>;
+  /** Messages still waiting for a connection (FR-MSG-24). */
+  queued: number;
   notifyTyping: () => void;
   markReadTo: (seq: number) => void;
 
@@ -84,6 +110,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [typingByConv, setTypingByConv] = useState<Record<string, TypingUser[]>>({});
   const [connected, setConnected] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const [queued, setQueued] = useState(0);
+  const [replyTarget, setReplyTarget] = useState<WireMessage | null>(null);
+  const [threadRootId, setThreadRootId] = useState<string | null>(null);
+  const [threadMessages, setThreadMessages] = useState<WireMessage[]>([]);
+  const [threadLoading, setThreadLoading] = useState(false);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
 
   /* `activeId` is read inside socket handlers that are registered once. A ref
    * keeps them looking at the current value instead of the one captured when
@@ -177,6 +209,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (id) socket.emit('conversation:subscribe', { conversationIds: [id] });
       // Counters may have moved while we were away.
       void refresh();
+      // And anything typed while offline goes now, in the order it was typed.
+      void flushOutbox();
     };
     const onDisconnect = () => setConnected(false);
 
@@ -273,6 +307,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setDrafts((prev) => ({ ...prev, [conversationId]: { text: draft ?? '', savedAt: Date.now() } }));
     };
 
+    // Presence arrives per person, and the sidebar shows it per DM row, so it
+    // is applied to whichever conversation has that person as its counterpart.
+    const onPresence = ({ userId, status }: { userId: string; status: string }) => {
+      setConversations((prev) => prev.map((c) => (c.peer?.id === userId
+        ? { ...c, peer: { ...c.peer, presence: status } }
+        : c)));
+    };
+
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('message:new', onNew);
@@ -284,6 +326,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     socket.on('conversation:updated', onConversationUpdated);
     socket.on('conversation:prefs', onPrefs);
     socket.on('conversation:draft', onDraft);
+    socket.on('presence:update', onPresence);
     if (socket.connected) onConnect();
 
     return () => {
@@ -298,8 +341,54 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       socket.off('conversation:updated', onConversationUpdated);
       socket.off('conversation:prefs', onPrefs);
       socket.off('conversation:draft', onDraft);
+      socket.off('presence:update', onPresence);
     };
   }, [user, refresh]);
+
+  /**
+   * Send whatever was composed while offline (FR-MSG-24).
+   *
+   * Strictly in order, stopping at the first failure — delivering a later
+   * message before an earlier one is worse than being briefly behind. Each
+   * carries the nonce it was created with, so an entry that in fact reached the
+   * server before the connection dropped resolves to the message that already
+   * exists rather than posting a second copy.
+   */
+  const flushOutbox = useCallback(async () => {
+    const result = await outbox.flush(
+      async (entry) => {
+        try {
+          const r = await chatApi.sendMessage(entry.conversationId, {
+            body: entry.body, nonce: entry.nonce,
+            threadRootId: entry.threadRootId, replyToId: entry.replyToId,
+            attachments: entry.attachments,
+          });
+          if (entry.conversationId === activeIdRef.current) {
+            setMessages((prev) => reconcile(prev, r.message, entry.nonce));
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      (entry) => {
+        // Out of retries. Show it as failed on the message itself, where the
+        // retry button is, rather than dropping it silently.
+        setMessages((prev) => prev.map((m) => (m.nonce === entry.nonce
+          ? { ...m, delivery: 'failed' as const } : m)));
+      },
+    );
+    setQueued(result.remaining);
+  }, []);
+
+  // Anything left from a previous session goes as soon as the app is up.
+  useEffect(() => {
+    if (!user) return;
+    void outbox.pending().then((q) => setQueued(q.length));
+    const onOnline = () => { void flushOutbox(); };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [user, flushOutbox]);
 
   /** Join the room for whatever is open, and leave the one being left. */
   const setActiveId = useCallback((id: string | null) => {
@@ -311,11 +400,29 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (socket && id) socket.emit('conversation:subscribe', { conversationIds: [id] });
     activeIdRef.current = id;
     setActiveIdRaw(id);
+    // Answering a message in one channel and then switching would otherwise
+    // attach the quote to a conversation it does not belong to.
+    setReplyTarget(null);
+    setThreadRootId(null);
+    setThreadMessages([]);
   }, []);
 
   /* ────────────────────────────────────────────────────────────────────── *
    * Sending
    * ────────────────────────────────────────────────────────────────────── */
+
+  const draftFor = useCallback((id: string) => drafts[id]?.text ?? '', [drafts]);
+
+  const setDraft = useCallback((id: string, text: string) => {
+    setDrafts((prev) => ({ ...prev, [id]: { text, savedAt: Date.now() } }));
+    // Debounced to the server. A draft is worth persisting so it survives a
+    // reload and follows you to another device — but not on every keystroke.
+    clearTimeout(draftTimers.current[id]);
+    draftTimers.current[id] = setTimeout(() => {
+      void chatApi.saveDraft(id, text || null).catch(() => {});
+    }, 800);
+  }, []);
+
 
   const send = useCallback(async (input: {
     body: string; replyToId?: string | null; threadRootId?: string | null;
@@ -328,6 +435,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!body && !(input.attachments?.length)) return;
 
     const nonce = newNonce();
+    const replyToId = input.replyToId ?? replyTarget?.id ?? null;
     const optimistic: WireMessage = {
       id: `pending:${nonce}`,
       conversationId,
@@ -344,7 +452,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       reactions: [], attachments: [],
       threadRootId: input.threadRootId ?? null,
       replyCount: 0, threadLastAt: null,
-      replyTo: null,
+      replyTo: replyTarget && !input.replyToId
+        ? {
+            id: replyTarget.id, senderId: replyTarget.senderId,
+            senderName: replyTarget.senderName, body: replyTarget.body, deleted: false,
+          }
+        : null,
       pinnedAt: null, pinnedBy: null, saved: false, editedCount: 0,
       forwardedFrom: null, mentionsMe: false,
       delivery: 'pending', readCount: 0, metadata: {},
@@ -352,23 +465,44 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     setMessages((prev) => [...prev, optimistic]);
     setDraft(conversationId, '');
+    setReplyTarget(null);
 
     const payload = {
       conversationId, body, nonce,
       type: input.type, threadRootId: input.threadRootId ?? null,
-      replyToId: input.replyToId ?? null, attachments: input.attachments ?? [],
+      replyToId, attachments: input.attachments ?? [],
     };
 
-    const socket = getSocket();
-    const settle = (message: WireMessage) =>
+    /*
+     * Durable first, then optimistic.
+     *
+     * The entry is written to IndexedDB *before* the send is attempted, so a
+     * tab closed or crashed between typing and delivery still has the message
+     * on the next load. It is removed only when the server has acknowledged
+     * it — never on a timeout, because "I did not hear back" and "it did not
+     * arrive" are different things and only the nonce can tell them apart.
+     */
+    await outbox.enqueue({
+      nonce, conversationId, body,
+      replyToId,
+      threadRootId: input.threadRootId ?? null,
+      attachments: input.attachments ?? [],
+    });
+    void outbox.pending().then((q) => setQueued(q.length));
+
+    const settle = async (message: WireMessage) => {
+      await outbox.dequeue(nonce);
+      void outbox.pending().then((q) => setQueued(q.length));
       setMessages((prev) => reconcile(prev, message, nonce));
+    };
     const failed = () =>
       setMessages((prev) => prev.map((m) => (m.nonce === nonce
         ? { ...m, delivery: 'failed' as const } : m)));
 
+    const socket = getSocket();
     if (socket?.connected) {
       socket.emit('message:send', payload, (r) => {
-        if (r?.ok && r.message) settle(r.message);
+        if (r?.ok && r.message) void settle(r.message);
         else failed();
       });
       return;
@@ -378,11 +512,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // first wins and the other resolves to the same message.
     try {
       const r = await chatApi.sendMessage(conversationId, payload);
-      settle(r.message);
+      await settle(r.message);
     } catch {
       failed();
     }
-  }, [user]);
+  }, [user, setDraft, replyTarget]);
 
   const retry = useCallback(async (nonce: string) => {
     const failedMsg = messages.find((m) => m.nonce === nonce);
@@ -404,6 +538,168 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setMessages((prev) => prev.map((m) => (m.nonce === nonce
         ? { ...m, delivery: 'failed' as const } : m)));
     }
+  }, [messages]);
+
+  /* ────────────────────────────────────────────────────────────────────── *
+   * Reactions, edits, deletions
+   * ────────────────────────────────────────────────────────────────────── */
+
+  /**
+   * Toggle a reaction, optimistically.
+   *
+   * The pill has to move on the same frame as the click — a reaction that waits
+   * for a round trip feels broken in a way a message does not, because there is
+   * no "sending" state a person would accept for one tap. The server's
+   * authoritative counts replace this the moment they arrive, over the same
+   * `message:reaction` event everyone else receives.
+   */
+  const react = useCallback(async (messageId: string, emoji: string) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId || !user) return;
+
+    setMessages((prev) => prev.map((m) => {
+      if (m.id !== messageId) return m;
+      const existing = m.reactions.find((r) => r.emoji === emoji);
+      if (!existing) {
+        return { ...m, reactions: [...m.reactions, { emoji, count: 1, mine: true, userIds: [user.id] }] };
+      }
+      const count = existing.count + (existing.mine ? -1 : 1);
+      const reactions = count <= 0
+        ? m.reactions.filter((r) => r.emoji !== emoji)
+        : m.reactions.map((r) => (r.emoji === emoji
+          ? { ...r, count, mine: !r.mine } : r));
+      return { ...m, reactions };
+    }));
+
+    const socket = getSocket();
+    if (socket?.connected) {
+      socket.emit('message:react', { conversationId, messageId, emoji }, (r) => {
+        if (r?.ok && r.reactions) {
+          setMessages((prev) => prev.map((m) => (m.id === messageId
+            ? { ...m, reactions: r.reactions! } : m)));
+        }
+      });
+      return;
+    }
+    try {
+      const r = await chatApi.toggleReaction(conversationId, messageId, emoji);
+      setMessages((prev) => prev.map((m) => (m.id === messageId
+        ? { ...m, reactions: r.reactions } : m)));
+    } catch {
+      // Put it back. A reaction that silently did not stick is worse than one
+      // that visibly bounced.
+      void refresh();
+    }
+  }, [user, refresh]);
+
+  const edit = useCallback(async (messageId: string, body: string) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId) return;
+    const message = await chatApi.editMessage(conversationId, messageId, body);
+    setMessages((prev) => prev.map((m) => (m.id === messageId ? message : m)));
+  }, []);
+
+  const remove = useCallback(async (messageId: string) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId) return;
+    await chatApi.deleteMessage(conversationId, messageId);
+    // The socket broadcast tombstones it for everyone including us, but doing
+    // it here too means the row changes on the click rather than on the echo.
+    setMessages((prev) => prev.map((m) => (m.id === messageId
+      ? { ...m, deletedAt: new Date().toISOString(), body: null, attachments: [], reactions: [] }
+      : m)));
+  }, []);
+
+  /* ────────────────────────────────────────────────────────────────────── *
+   * Threads, pins, saves, forwarding, jumping
+   * ────────────────────────────────────────────────────────────────────── */
+
+  const openThread = useCallback((rootId: string | null) => {
+    setThreadRootId(rootId);
+    setThreadMessages([]);
+    if (!rootId) return;
+    const conversationId = activeIdRef.current;
+    if (!conversationId) return;
+
+    setThreadLoading(true);
+    // `thread` returns the root plus its replies — opening a thread without its
+    // root shows answers to a question you cannot see.
+    chatApi.listMessages(conversationId, { thread: rootId, limit: 100 })
+      .then((page) => setThreadMessages(page.messages))
+      .catch(() => setThreadMessages([]))
+      .finally(() => setThreadLoading(false));
+  }, []);
+
+  const sendThreadReply = useCallback(async (body: string, alsoSendToChannel: boolean) => {
+    const conversationId = activeIdRef.current;
+    const rootId = threadRootId;
+    if (!conversationId || !rootId || !body.trim()) return;
+
+    const nonce = newNonce();
+    const r = await chatApi.replyInThread(conversationId, rootId, {
+      body: body.trim(), nonce, alsoSendToChannel,
+    });
+    setThreadMessages((prev) => reconcile(prev, r.message, nonce));
+    // The parent's reply count moved; the main flow has to show it.
+    if (r.root) setMessages((prev) => prev.map((m) => (m.id === r.root!.id ? r.root! : m)));
+  }, [threadRootId]);
+
+  const pin = useCallback(async (messageId: string, pinned: boolean) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId) return;
+    const { message } = await chatApi.setPinned(conversationId, messageId, pinned);
+    setMessages((prev) => prev.map((m) => (m.id === messageId ? message : m)));
+  }, []);
+
+  const save = useCallback(async (messageId: string, saved: boolean) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId) return;
+    // Optimistic: saving is a private bookmark with no failure worth a spinner.
+    setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, saved } : m)));
+    try { await chatApi.setSaved(conversationId, messageId, saved); }
+    catch {
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, saved: !saved } : m)));
+    }
+  }, []);
+
+  const forward = useCallback(async (
+    messageId: string, conversationIds: string[], comment?: string,
+  ) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId) return;
+    await chatApi.forwardMessage(conversationId, messageId, conversationIds, comment);
+    await refresh();
+  }, [refresh]);
+
+  /**
+   * Bring a message into view, loading around it if it is not in the window.
+   *
+   * The already-loaded case is the common one — a quote-reply usually points a
+   * few lines up — and re-fetching there would replace the whole log and lose
+   * the reader's place for no reason.
+   */
+  const jumpTo = useCallback(async (messageId: string) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId) return;
+
+    const flash = () => {
+      setHighlightedId(messageId);
+      requestAnimationFrame(() => {
+        document.getElementById(`msg-${messageId}`)
+          ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+      // Long enough to notice, short enough not to become part of the design.
+      setTimeout(() => setHighlightedId((cur) => (cur === messageId ? null : cur)), 2200);
+    };
+
+    if (messages.some((m) => m.id === messageId)) { flash(); return; }
+
+    try {
+      const context = await chatApi.messageContext(conversationId, messageId);
+      setMessages(context.messages);
+      setHasMore(context.hasMore);
+      flash();
+    } catch { /* the message is gone; leave the reader where they are */ }
   }, [messages]);
 
   /* ────────────────────────────────────────────────────────────────────── *
@@ -438,18 +734,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     else void chatApi.markRead(id, seq).catch(() => {});
   }, [conversations]);
 
-  const draftFor = useCallback((id: string) => drafts[id]?.text ?? '', [drafts]);
-
-  const setDraft = useCallback((id: string, text: string) => {
-    setDrafts((prev) => ({ ...prev, [id]: { text, savedAt: Date.now() } }));
-    // Debounced to the server. A draft is worth persisting so it survives a
-    // reload and follows you to another device — but not on every keystroke.
-    clearTimeout(draftTimers.current[id]);
-    draftTimers.current[id] = setTimeout(() => {
-      void chatApi.saveDraft(id, text || null).catch(() => {});
-    }, 800);
-  }, []);
-
   const toggleStar = useCallback(async (id: string) => {
     const current = conversations.find((c) => c.id === id);
     if (!current) return;
@@ -477,7 +761,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     messages, messagesLoading, hasMore, loadingMore, loadOlder,
     typing: (activeId && typingByConv[activeId]) || [],
     connected,
-    send, retry, notifyTyping, markReadTo,
+    send, retry, react, edit, remove, notifyTyping, markReadTo, queued,
+    replyTarget, setReplyTarget,
+    threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
+    pin, save, forward, jumpTo, highlightedId,
     draftFor, setDraft, toggleStar, setNotificationLevel,
     totalUnread, refresh,
   };

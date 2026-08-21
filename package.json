@@ -32,7 +32,9 @@
     "verify:meet:history": "node scripts/verify-meet-history.mjs",
     "verify:meet:prejoin": "node scripts/verify-meet-prejoin.mjs",
     "verify:chat": "node scripts/verify-chat-core.mjs",
-    "verify:chat:ui": "node scripts/verify-chat-ui.mjs"
+    "verify:chat:ui": "node scripts/verify-chat-ui.mjs",
+    "verify:chat:live": "node scripts/verify-chat-live.mjs",
+    "verify:chat:threads": "node scripts/verify-chat-threads.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

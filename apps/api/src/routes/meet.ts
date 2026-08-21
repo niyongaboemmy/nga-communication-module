@@ -22,7 +22,7 @@ import { authorizePermission } from '../middleware/authorize.js';
 import { getIceServers, isTurnConfigured } from '../services/turnService.js';
 import * as sfu from '../services/cloudflareSfuService.js';
 import * as meet from '../services/meetService.js';
-import * as notifications from '../services/notificationService.js';
+import * as notifications from '@tupo/notify';
 import * as ai from '../services/meetAiService.js';
 import * as notes from '../services/meetNotesService.js';
 import { getProviderStatus, isAnyProviderConfigured } from '../services/aiProviders/index.js';

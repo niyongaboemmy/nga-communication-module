@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   Search, Plus, Hash, Megaphone, Star, ChevronRight, BellOff, Users, Filter, Lock, AtSign,
+  Bookmark,
 } from 'lucide-react';
 import { Avatar, IconButton, SearchInput, Skeleton, UnreadBadge, EmptyState } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -174,7 +175,7 @@ const RowSkeleton: React.FC = () => (
   </li>
 );
 
-export const ConversationList: React.FC = () => {
+export const ConversationList: React.FC<{ onOpenSaved?: () => void }> = ({ onOpenSaved }) => {
   const { can } = usePermissions();
   const {
     conversations, conversationsLoading, activeId, setActiveId, toggleStar, connected,
@@ -232,6 +233,11 @@ export const ConversationList: React.FC = () => {
             >
               <Filter size={15} />
             </IconButton>
+            {onOpenSaved && (
+              <IconButton label="Saved items" size="sm" onClick={onOpenSaved}>
+                <Bookmark size={15} />
+              </IconButton>
+            )}
             {canCreate && (
               <IconButton label="New conversation" size="sm" onClick={() => setCreating(true)}>
                 <Plus size={17} />

@@ -1,8 +1,8 @@
 import { getPool, snowflake } from '@tupo/db';
 import type { PoolClient } from 'pg';
 import {
-  DEFAULT_PAGE_SIZE, MAX_MESSAGE_LENGTH, MAX_PAGE_SIZE, MENTION_PATTERN,
-  BROADCAST_MENTION_PATTERN,
+  DEFAULT_PAGE_SIZE, EDIT_WINDOW_MS, MAX_MESSAGE_LENGTH, MAX_PAGE_SIZE,
+  MENTION_PATTERN, BROADCAST_MENTION_PATTERN,
 } from '@tupo/shared';
 import type {
   ConversationSummary, ConversationType, DeliveryState, MemberRole, MessagePage,
@@ -1238,4 +1238,682 @@ export async function totalUnread(userId: string): Promise<{ unread: number; men
     [userId],
   );
   return { unread: Number(rows[0]?.unread ?? 0), mentions: Number(rows[0]?.mentions ?? 0) };
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Reactions  (FR-MSG-5)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Emoji are stored as the literal grapheme, not a shortcode.
+ *
+ * A shortcode table is one more thing to keep in step with the picker, and the
+ * moment someone reacts with an emoji the table does not know about, the
+ * reaction is lost. The length cap is what stops the column being used as
+ * general-purpose storage: no legitimate emoji, including a flag or a
+ * multi-person family sequence with skin tones, exceeds it.
+ */
+const MAX_EMOJI_LENGTH = 64;
+
+export interface ReactionResult {
+  reactions: WireReaction[];
+  /** True when the click added one, false when it removed the viewer's own. */
+  added: boolean;
+}
+
+/**
+ * Toggle one person's reaction.
+ *
+ * Toggle rather than add/remove as separate calls: the client cannot know
+ * whether its view of "have I reacted" is current, and asking the database to
+ * decide removes a whole class of double-click race.
+ */
+export async function toggleReaction(
+  userId: string, conversationId: string, messageId: string, emoji: string,
+): Promise<ReactionResult> {
+  const clean = (emoji ?? '').trim();
+  if (!clean) throw new ChatError('An emoji is required.', 400);
+  if (clean.length > MAX_EMOJI_LENGTH) throw new ChatError('That is not an emoji.', 400);
+
+  // Reacting to a tombstone is meaningless, and letting it through would leave
+  // reactions hanging off a message with nothing to hang from.
+  const { rows: existing } = await getPool().query<{ id: string }>(
+    `SELECT id FROM messages
+      WHERE conversation_id = $1 AND id = $2 AND deleted_at IS NULL`,
+    [conversationId, messageId],
+  );
+  if (!existing[0]) throw new ChatError('Message not found.', 404);
+
+  const { rowCount } = await getPool().query(
+    `DELETE FROM message_reactions
+      WHERE message_id = $1 AND user_id = $2 AND emoji = $3`,
+    [messageId, userId, clean],
+  );
+
+  const added = (rowCount ?? 0) === 0;
+  if (added) {
+    await getPool().query(
+      `INSERT INTO message_reactions (message_id, conversation_id, user_id, emoji)
+       VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+      [messageId, conversationId, userId, clean],
+    );
+  }
+
+  return { reactions: await reactionsFor(messageId, userId), added };
+}
+
+export async function reactionsFor(messageId: string, viewerId: string): Promise<WireReaction[]> {
+  const { rows } = await getPool().query<{
+    emoji: string; count: string; mine: boolean; user_ids: string[];
+  }>(
+    `SELECT emoji,
+            count(*)::text AS count,
+            bool_or(user_id = $2) AS mine,
+            (array_agg(user_id ORDER BY created_at))[1:12] AS user_ids
+       FROM message_reactions
+      WHERE message_id = $1
+      GROUP BY emoji
+      ORDER BY count(*) DESC, emoji ASC`,
+    [messageId, viewerId],
+  );
+  return rows.map((r) => ({
+    emoji: r.emoji, count: Number(r.count), mine: r.mine, userIds: r.user_ids ?? [],
+  }));
+}
+
+/** Names behind a reaction pill — "Ada, Bosco and 3 others". */
+export async function reactorNames(messageId: string, emoji: string): Promise<string[]> {
+  const { rows } = await getPool().query<{ name: string }>(
+    `SELECT u.name FROM message_reactions r
+       JOIN users u ON u.id = r.user_id
+      WHERE r.message_id = $1 AND r.emoji = $2
+      ORDER BY r.created_at LIMIT 50`,
+    [messageId, emoji],
+  );
+  return rows.map((r) => r.name);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Editing  (FR-MSG-8)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Edit a message.
+ *
+ * Only the author, only within the window, and the previous body is archived
+ * first. "What did it say before they edited it" is a question a school will be
+ * asked, and the only time to answer it is before the row is overwritten.
+ *
+ * Mentions are recomputed: editing a message to add an @mention should notify
+ * the person mentioned, and editing one to remove a mention should stop that
+ * person's badge counting it.
+ */
+export async function editMessage(
+  userId: string, conversationId: string, messageId: string, newBody: string,
+): Promise<{ message: WireMessage; newlyMentioned: string[] }> {
+  const body = (newBody ?? '').trim();
+  if (!body) throw new ChatError('An edited message cannot be empty. Delete it instead.', 400);
+  if (body.length > MAX_MESSAGE_LENGTH) {
+    throw new ChatError(`A message may not exceed ${MAX_MESSAGE_LENGTH} characters.`, 400);
+  }
+
+  const client = await getPool().connect();
+  let newlyMentioned: string[] = [];
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query<{
+      sender_id: string; body: string | null; created_at: string;
+      deleted_at: string | null; type: MessageType; seq: string;
+    }>(
+      `SELECT sender_id, body, created_at, deleted_at, type, seq
+         FROM messages WHERE conversation_id = $1 AND id = $2
+         FOR UPDATE`,
+      [conversationId, messageId],
+    );
+    const row = rows[0];
+    if (!row) throw new ChatError('Message not found.', 404);
+    if (row.deleted_at) throw new ChatError('That message was deleted.', 409);
+    // Not even a moderator may edit someone else's words. Removing them is a
+    // moderation action; rewriting them is impersonation.
+    if (row.sender_id !== userId) throw new ChatError('You can only edit your own messages.', 403);
+    if (row.type === 'system') throw new ChatError('System messages cannot be edited.', 400);
+    if (Date.now() - new Date(row.created_at).getTime() > EDIT_WINDOW_MS) {
+      throw new ChatError('The edit window for this message has passed.', 409);
+    }
+
+    await client.query(
+      `INSERT INTO message_edits (id, message_id, editor_id, previous_body)
+       VALUES ($1,$2,$3,$4)`,
+      [snowflake(), messageId, userId, row.body],
+    );
+
+    await client.query(
+      `UPDATE messages
+          SET body = $3, edited_at = now(), edited_count = edited_count + 1
+        WHERE conversation_id = $1 AND id = $2`,
+      [conversationId, messageId, body],
+    );
+
+    // Recomputed rather than merged: the message says what it says now.
+    const before = await client.query<{ user_id: string }>(
+      'SELECT user_id FROM message_mentions WHERE message_id = $1', [messageId]);
+    const had = new Set(before.rows.map((r) => r.user_id));
+
+    await client.query('DELETE FROM message_mentions WHERE message_id = $1', [messageId]);
+    const { mentioned, broadcast } = await resolveMentions(client, conversationId, body, userId);
+    for (const uid of mentioned) {
+      await client.query(
+        `INSERT INTO message_mentions (message_id, conversation_id, user_id, kind, seq)
+         VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+        [messageId, conversationId, uid, broadcast ?? 'user', Number(row.seq)],
+      );
+    }
+    newlyMentioned = mentioned.filter((id) => !had.has(id));
+
+    // The sidebar preview has to follow the edit, or the list shows a sentence
+    // that no longer exists anywhere.
+    await client.query(
+      `UPDATE conversations
+          SET last_message_preview = $2
+        WHERE id = $1 AND last_seq = $3::bigint`,
+      [conversationId, previewOf(body, 0), row.seq],
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  const message = await getMessage(userId, conversationId, messageId);
+  if (!message) throw new ChatError('Message could not be read back.', 500);
+  return { message, newlyMentioned };
+}
+
+/** Every version of a message, newest first (FR-MSG-8). */
+export async function editHistory(
+  conversationId: string, messageId: string,
+): Promise<Array<{ body: string | null; at: string; editorName: string }>> {
+  const { rows } = await getPool().query<{
+    previous_body: string | null; edited_at: string; name: string;
+  }>(
+    `SELECT e.previous_body, e.edited_at, u.name
+       FROM message_edits e JOIN users u ON u.id = e.editor_id
+      WHERE e.message_id = $1 ORDER BY e.edited_at DESC`,
+    [messageId],
+  );
+  return rows.map((r) => ({ body: r.previous_body, at: r.edited_at, editorName: r.name }));
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Deleting  (FR-MSG-9)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface DeleteResult {
+  /** True when a moderator removed someone else's message — always audited. */
+  byModerator: boolean;
+  senderId: string;
+  seq: number;
+}
+
+/**
+ * Soft-delete a message.
+ *
+ * A tombstone, never a `DELETE`. The row keeps its sequence number, so the log
+ * does not silently reorder around the gap and every other member's read
+ * watermark still means what it meant. The body and attachments are cleared on
+ * the way out in `toWireMessage`, so a deleted message discloses nothing even
+ * though the row survives for moderation and legal export.
+ */
+export async function deleteMessage(
+  userId: string, conversationId: string, messageId: string,
+  opts: { canDeleteAny?: boolean; memberRole?: MemberRole } = {},
+): Promise<DeleteResult> {
+  const { rows } = await getPool().query<{
+    sender_id: string; deleted_at: string | null; type: MessageType; seq: string;
+  }>(
+    `SELECT sender_id, deleted_at, type, seq FROM messages
+      WHERE conversation_id = $1 AND id = $2`,
+    [conversationId, messageId],
+  );
+  const row = rows[0];
+  if (!row) throw new ChatError('Message not found.', 404);
+  if (row.deleted_at) throw new ChatError('That message is already deleted.', 409);
+  if (row.type === 'system') throw new ChatError('System messages cannot be deleted.', 400);
+
+  const mine = row.sender_id === userId;
+  const asModerator = !mine
+    && (opts.canDeleteAny === true || (opts.memberRole ? canModerate(opts.memberRole) : false));
+  if (!mine && !asModerator) {
+    throw new ChatError('You can only delete your own messages.', 403);
+  }
+
+  await getPool().query(
+    `UPDATE messages
+        SET deleted_at = now(), deleted_by = $3, body = NULL, attachments = '[]'::jsonb
+      WHERE conversation_id = $1 AND id = $2`,
+    [conversationId, messageId, userId],
+  );
+
+  // A deleted message must stop counting against anyone's badge, and must stop
+  // being a mention. Leaving either behind means a red dot pointing at a
+  // tombstone.
+  await getPool().query('DELETE FROM message_mentions WHERE message_id = $1', [messageId]);
+  await getPool().query('DELETE FROM message_reactions WHERE message_id = $1', [messageId]);
+  await getPool().query(
+    `UPDATE conversation_members m
+        SET unread_count = (
+              SELECT count(*) FROM messages x
+               WHERE x.conversation_id = m.conversation_id
+                 AND x.seq > m.last_read_seq AND x.sender_id <> m.user_id
+                 AND x.deleted_at IS NULL AND x.type <> 'system'),
+            unread_mentions = (
+              SELECT count(*) FROM message_mentions mm
+               WHERE mm.conversation_id = m.conversation_id
+                 AND mm.user_id = m.user_id AND mm.seq > m.last_read_seq)
+      WHERE m.conversation_id = $1 AND m.left_at IS NULL`,
+    [conversationId],
+  );
+
+  // If it was the latest message, the sidebar preview is now a lie.
+  await refreshPreview(conversationId);
+
+  return { byModerator: asModerator, senderId: row.sender_id, seq: Number(row.seq) };
+}
+
+/** Recompute the denormalised sidebar preview from the newest live message. */
+export async function refreshPreview(conversationId: string): Promise<void> {
+  await getPool().query(
+    `UPDATE conversations c
+        SET last_message_at = latest.created_at,
+            last_message_preview = COALESCE(latest.preview, ''),
+            last_message_sender = latest.sender_id
+       FROM (
+         SELECT m.created_at, m.sender_id,
+                CASE WHEN m.body IS NOT NULL THEN left(m.body, 200)
+                     WHEN jsonb_array_length(m.attachments) > 0 THEN '📎 Attachment'
+                     ELSE '' END AS preview
+           FROM messages m
+          WHERE m.conversation_id = $1 AND m.deleted_at IS NULL
+          ORDER BY m.seq DESC LIMIT 1
+       ) latest
+      WHERE c.id = $1`,
+    [conversationId],
+  );
+}
+
+/**
+ * Everyone who has a DM open with this person.
+ *
+ * Presence is only *displayed* against DM counterparts — a channel has no
+ * single presence, and no sidebar row shows one. So this is exactly the
+ * audience for a presence change, and broadcasting more widely would mean
+ * every member of every 400-person channel getting a packet each time someone
+ * switched tabs.
+ */
+export async function dmPeerIdsOf(userId: string): Promise<string[]> {
+  const { rows } = await getPool().query<{ user_id: string }>(
+    `SELECT DISTINCT peer.user_id
+       FROM conversation_members mine
+       JOIN conversations c ON c.id = mine.conversation_id AND c.type = 'dm'
+       JOIN conversation_members peer
+         ON peer.conversation_id = c.id AND peer.user_id <> mine.user_id
+      WHERE mine.user_id = $1 AND mine.left_at IS NULL AND peer.left_at IS NULL
+        AND c.deleted_at IS NULL`,
+    [userId],
+  );
+  return rows.map((r) => r.user_id);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Threads  (FR-MSG-6)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Reply in a thread.
+ *
+ * A thread is a second axis, not a nested message. The reply carries
+ * `thread_root_id` and is therefore excluded from the main channel flow by
+ * `listMessages` — which is the whole point: a side conversation about one
+ * message must not push forty unrelated lines past everyone else.
+ *
+ * `alsoSendToChannel` is the escape hatch Slack got right. Sometimes the
+ * conclusion of a thread belongs in the room, and forcing people to copy-paste
+ * it is how threads end up abandoned. It writes a *second* message in the main
+ * flow that quotes the reply, rather than moving the reply out of the thread,
+ * so the thread stays readable as a thread.
+ */
+export async function replyInThread(input: {
+  conversationId: string;
+  senderId: string;
+  threadRootId: string;
+  body: string;
+  nonce: string;
+  attachments?: string[];
+  alsoSendToChannel?: boolean;
+}): Promise<{ reply: SendResult; echo: SendResult | null; root: WireMessage | null }> {
+  const { rows } = await getPool().query<{ id: string; thread_root_id: string | null }>(
+    `SELECT id, thread_root_id FROM messages
+      WHERE conversation_id = $1 AND id = $2 AND deleted_at IS NULL`,
+    [input.conversationId, input.threadRootId],
+  );
+  const target = rows[0];
+  if (!target) throw new ChatError('That message is no longer there to reply to.', 404);
+
+  // Replying to a reply threads onto the same root rather than nesting. Chat
+  // threads are one level deep in every product that has shipped them, because
+  // the second level is unreadable in a column 400px wide.
+  const rootId = target.thread_root_id ?? target.id;
+
+  const reply = await sendMessage({
+    conversationId: input.conversationId,
+    senderId: input.senderId,
+    body: input.body,
+    nonce: input.nonce,
+    threadRootId: rootId,
+    attachments: input.attachments ?? [],
+  });
+
+  let echo: SendResult | null = null;
+  if (input.alsoSendToChannel && reply.created) {
+    echo = await sendMessage({
+      conversationId: input.conversationId,
+      senderId: input.senderId,
+      body: input.body,
+      nonce: `${input.nonce}-echo`,
+      replyToId: rootId,
+      metadata: { fromThread: rootId },
+    });
+  }
+
+  return {
+    reply,
+    echo,
+    root: await getMessage(input.senderId, input.conversationId, rootId),
+  };
+}
+
+/**
+ * Everyone who has written in a thread — its followers (FR-MSG-6).
+ *
+ * Participation *is* the subscription. Asking people to press a "follow" button
+ * they cannot see means threads notify nobody, and following everyone in the
+ * channel means threads notify everyone; the people who spoke are the honest
+ * middle.
+ */
+export async function threadParticipants(
+  conversationId: string, rootId: string,
+): Promise<string[]> {
+  const { rows } = await getPool().query<{ sender_id: string }>(
+    `SELECT DISTINCT sender_id FROM messages
+      WHERE conversation_id = $1 AND (id = $2 OR thread_root_id = $2)
+        AND deleted_at IS NULL AND type <> 'system'`,
+    [conversationId, rootId],
+  );
+  return rows.map((r) => r.sender_id);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Pins  (FR-MSG-11)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** How many messages may be pinned at once, before a pin list stops being one. */
+export const MAX_PINS = 50;
+
+export async function setPinned(
+  userId: string, conversationId: string, messageId: string, pinned: boolean,
+): Promise<WireMessage> {
+  if (pinned) {
+    const { rows: count } = await getPool().query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM messages
+        WHERE conversation_id = $1 AND pinned_at IS NOT NULL AND deleted_at IS NULL`,
+      [conversationId],
+    );
+    if (Number(count[0]?.n ?? 0) >= MAX_PINS) {
+      throw new ChatError(
+        `A conversation can hold ${MAX_PINS} pinned messages. Unpin something first.`, 409);
+    }
+  }
+
+  const { rowCount } = await getPool().query(
+    `UPDATE messages
+        SET pinned_at = ${pinned ? 'now()' : 'NULL'},
+            pinned_by = ${pinned ? '$3' : 'NULL'}
+      WHERE conversation_id = $1 AND id = $2 AND deleted_at IS NULL`,
+    pinned ? [conversationId, messageId, userId] : [conversationId, messageId],
+  );
+  if (!rowCount) throw new ChatError('Message not found.', 404);
+
+  const message = await getMessage(userId, conversationId, messageId);
+  if (!message) throw new ChatError('Message could not be read back.', 500);
+  return message;
+}
+
+export async function listPinned(
+  viewerId: string, conversationId: string,
+): Promise<WireMessage[]> {
+  const { rows } = await getPool().query<MessageRow>(
+    `${MESSAGE_SELECT}
+      WHERE m.conversation_id = $2 AND m.pinned_at IS NOT NULL AND m.deleted_at IS NULL
+      ORDER BY m.pinned_at DESC
+      LIMIT ${MAX_PINS}`,
+    [viewerId, conversationId],
+  );
+  const count = await memberCountOf(conversationId);
+  return rows.map((r) => toWireMessage(r, viewerId, count));
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Saved items  (FR-MSG-12)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export async function setSaved(
+  userId: string, conversationId: string, messageId: string, saved: boolean,
+): Promise<boolean> {
+  if (saved) {
+    await getPool().query(
+      `INSERT INTO message_saves (user_id, message_id, conversation_id)
+       VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+      [userId, messageId, conversationId],
+    );
+  } else {
+    await getPool().query(
+      `DELETE FROM message_saves WHERE user_id = $1 AND message_id = $2`,
+      [userId, messageId],
+    );
+  }
+  return saved;
+}
+
+/**
+ * A personal reading list, across every conversation.
+ *
+ * Each row carries where it came from, because a saved message with no context
+ * is a sentence you cannot act on. Membership is re-checked in the join: saving
+ * a message from a channel you later left must not keep it readable.
+ */
+export async function listSaved(
+  userId: string, limit = 50,
+): Promise<Array<{ message: WireMessage; conversationName: string; conversationType: string }>> {
+  /*
+   * Written out rather than composed from MESSAGE_SELECT.
+   *
+   * This query needs three extra columns and three extra joins, and bolting
+   * them onto the shared fragment by string substitution produced something
+   * that compiled, ran, and would break silently the next time a column was
+   * renamed. A saved-items list is read rarely; the duplication is cheaper than
+   * the trap.
+   */
+  const { rows } = await getPool().query<
+    MessageRow & {
+      conversation_name: string | null;
+      conversation_type: string;
+      peer_name: string | null;
+    }
+  >(
+    `SELECT m.id, m.conversation_id, m.seq, m.type, m.body, m.sender_id, m.created_at,
+            m.edited_at, m.deleted_at, m.nonce, m.thread_root_id, m.reply_count,
+            m.thread_last_at, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_count,
+            m.forwarded_from, m.metadata, m.attachments,
+            u.name AS sender_name, u.avatar_url AS sender_avatar, u.role AS sender_role,
+            (SELECT json_agg(json_build_object('emoji', r.emoji, 'user_id', r.user_id))
+               FROM message_reactions r WHERE r.message_id = m.id) AS reactions,
+            NULL::text AS reply_body, NULL::text AS reply_sender_id,
+            NULL::text AS reply_sender_name, false AS reply_deleted,
+            EXISTS (SELECT 1 FROM message_mentions mm
+                     WHERE mm.message_id = m.id AND mm.user_id = $1) AS mentions_me,
+            true AS saved,
+            '0'::text AS read_count,
+            c.name AS conversation_name, c.type AS conversation_type, peer.name AS peer_name
+       FROM message_saves ms
+       JOIN messages m ON m.id = ms.message_id AND m.conversation_id = ms.conversation_id
+       LEFT JOIN users u ON u.id = m.sender_id
+       JOIN conversations c ON c.id = m.conversation_id
+       -- Re-checked, not assumed: saving a message from a channel you later
+       -- left must not keep it readable.
+       JOIN conversation_members cm
+         ON cm.conversation_id = c.id AND cm.user_id = $1 AND cm.left_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT pu.name FROM conversation_members pm
+           JOIN users pu ON pu.id = pm.user_id
+          WHERE pm.conversation_id = c.id AND pm.user_id <> $1 AND pm.left_at IS NULL
+          LIMIT 1
+       ) peer ON c.type = 'dm'
+      WHERE ms.user_id = $1 AND m.deleted_at IS NULL AND c.deleted_at IS NULL
+      ORDER BY ms.created_at DESC
+      LIMIT $2`,
+    [userId, Math.min(Math.max(limit, 1), 100)],
+  );
+
+  return rows.map((r) => ({
+    message: toWireMessage(r, userId),
+    conversationName: r.conversation_type === 'dm'
+      ? (r.peer_name ?? 'Direct message')
+      : (r.conversation_name ?? 'Conversation'),
+    conversationType: r.conversation_type,
+  }));
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Forwarding  (FR-MSG-10)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Forward a message into other conversations, keeping attribution.
+ *
+ * The original author travels with it. Forwarding that strips attribution is
+ * how a message ends up quoted as the forwarder's own words — in a school, with
+ * something a pupil said, that is a safeguarding problem rather than an etiquette
+ * one.
+ *
+ * Each destination is authorised separately. Being a member of the source says
+ * nothing about the target.
+ */
+export async function forwardMessage(
+  userId: string, sourceConversationId: string, messageId: string,
+  targetConversationIds: string[], comment?: string,
+): Promise<Array<{ conversationId: string; result: SendResult }>> {
+  await requireMembership(userId, sourceConversationId);
+
+  const original = await getMessage(userId, sourceConversationId, messageId);
+  if (!original || original.deletedAt) throw new ChatError('Message not found.', 404);
+
+  const { rows: src } = await getPool().query<{ name: string | null; type: string }>(
+    'SELECT name, type FROM conversations WHERE id = $1', [sourceConversationId]);
+  // A DM's name is not disclosed to the destination: "forwarded from Ada Umutoni"
+  // in a channel would leak who is talking to whom.
+  const sourceName = src[0]?.type === 'dm' ? null : (src[0]?.name ?? null);
+
+  const out: Array<{ conversationId: string; result: SendResult }> = [];
+  for (const targetId of [...new Set(targetConversationIds)].slice(0, 20)) {
+    const membership = await requireMembership(userId, targetId);
+    if (membership.isArchived) continue;
+
+    if (comment?.trim()) {
+      await sendMessage({
+        conversationId: targetId, senderId: userId,
+        body: comment.trim(), nonce: `fwd-note-${snowflake()}`,
+      });
+    }
+
+    const result = await sendMessage({
+      conversationId: targetId,
+      senderId: userId,
+      body: original.body ?? '',
+      nonce: `fwd-${messageId}-${targetId}`,
+      type: original.type === 'system' ? 'text' : original.type,
+      attachments: original.attachments.map((a) => a.fileId),
+      // Attribution rides on the message itself, not on a convention in the
+      // body text that a client could choose not to render.
+      metadata: {
+        forwardedFrom: {
+          senderId: original.senderId,
+          senderName: original.senderName,
+          conversationName: sourceName,
+          messageId,
+          at: original.createdAt,
+        },
+      },
+      system: true,
+    });
+
+    await getPool().query(
+      `UPDATE messages SET forwarded_from = $3
+        WHERE conversation_id = $1 AND id = $2`,
+      [targetId, result.message.id, JSON.stringify({
+        senderId: original.senderId,
+        senderName: original.senderName,
+        conversationName: sourceName,
+      })],
+    );
+
+    out.push({ conversationId: targetId, result });
+  }
+
+  if (!out.length) throw new ChatError('Nowhere to forward that to.', 400);
+  return out;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Jump to a message  (FR-MSG-16)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A window of messages centred on one.
+ *
+ * What a permalink, a search result and a "jump to original" all need: the
+ * message plus enough either side to read it in context, in one round trip.
+ * Fetching the target and then paging backwards would show the message alone
+ * for a frame, which is exactly the jarring thing the affordance exists to
+ * avoid.
+ */
+export async function messageContext(
+  viewerId: string, conversationId: string, messageId: string, radius = 20,
+): Promise<{ messages: WireMessage[]; target: WireMessage; hasMore: boolean }> {
+  const { rows: found } = await getPool().query<{ seq: string; thread_root_id: string | null }>(
+    'SELECT seq, thread_root_id FROM messages WHERE conversation_id = $1 AND id = $2',
+    [conversationId, messageId],
+  );
+  if (!found[0]) throw new ChatError('Message not found.', 404);
+  const seq = Number(found[0].seq);
+  const span = Math.min(Math.max(radius, 5), 50);
+
+  const { rows } = await getPool().query<MessageRow>(
+    `${MESSAGE_SELECT}
+      WHERE m.conversation_id = $2
+        AND m.seq BETWEEN $3 AND $4
+        AND (m.thread_root_id IS NULL OR m.id = $5)
+      ORDER BY m.seq ASC`,
+    [viewerId, conversationId, seq - span, seq + span, messageId],
+  );
+
+  const count = await memberCountOf(conversationId);
+  const messages = rows.map((r) => toWireMessage(r, viewerId, count));
+  const target = messages.find((m) => m.id === messageId);
+  if (!target) throw new ChatError('Message not found.', 404);
+
+  return { messages, target, hasMore: seq - span > 1 };
 }

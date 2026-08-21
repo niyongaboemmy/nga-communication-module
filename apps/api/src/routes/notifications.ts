@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
-import * as notifications from '../services/notificationService.js';
+import * as notifications from '@tupo/notify';
 
 /**
  * Notifications.

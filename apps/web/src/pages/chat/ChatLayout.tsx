@@ -6,6 +6,8 @@ import { MessageThread } from './MessageThread';
 import { Composer } from './Composer';
 import { ContextPanel } from './ContextPanel';
 import { ChatProvider, useChat } from './ChatProvider';
+import { ThreadPanel } from './ThreadPanel';
+import { SavedItems } from './SavedItems';
 import * as chatApi from './api';
 import type { Member } from './types';
 
@@ -24,8 +26,11 @@ import type { Member } from './types';
  */
 
 const ChatWorkspace: React.FC = () => {
-  const { conversations, conversationsLoading, activeId, setActiveId, active } = useChat();
+  const {
+    conversations, conversationsLoading, activeId, setActiveId, active, threadRootId, openThread,
+  } = useChat();
   const [contextOpen, setContextOpen] = useState(false);
+  const [savedOpen, setSavedOpen] = useState(false);
   const [members, setMembers] = useState<Member[]>([]);
 
   /*
@@ -60,6 +65,10 @@ const ChatWorkspace: React.FC = () => {
     return () => { cancelled = true; };
   }, [activeId, contextOpen]);
 
+  // Opening a thread puts the details panel away rather than leaving it stacked
+  // behind, so closing the thread does not reveal a panel nobody asked for.
+  useEffect(() => { if (threadRootId) setContextOpen(false); }, [threadRootId]);
+
   // Escape closes the overlay context panel — the same key that closes every
   // other overlay in the app.
   useEffect(() => {
@@ -82,7 +91,7 @@ const ChatWorkspace: React.FC = () => {
         }`}
       >
         <div className="w-full min-w-0">
-          <ConversationList />
+          <ConversationList onOpenSaved={() => setSavedOpen(true)} />
         </div>
       </div>
 
@@ -108,8 +117,38 @@ const ChatWorkspace: React.FC = () => {
         </div>
       )}
 
-      {/* Pane 3 — context. Inline at xl, overlay below it. */}
-      {active && contextOpen && (
+      {/* Saved items — same slot as the other side panels. */}
+      {savedOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-70 bg-black/40 xl:hidden"
+            onClick={() => setSavedOpen(false)}
+            aria-hidden="true"
+          />
+          <div className="animate-panel-in-right fixed inset-y-0 right-0 z-80 w-96 max-w-[90vw] xl:static xl:z-auto xl:w-96">
+            <SavedItems onClose={() => setSavedOpen(false)} />
+          </div>
+        </>
+      )}
+
+      {/* Pane 3 — thread. It and the details panel occupy the same slot: two
+          side panels at once leaves the conversation itself too narrow to read,
+          so opening one closes the other. */}
+      {active && threadRootId && !savedOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-70 bg-black/40 xl:hidden"
+            onClick={() => openThread(null)}
+            aria-hidden="true"
+          />
+          <div className="animate-panel-in-right fixed inset-y-0 right-0 z-80 w-96 max-w-[90vw] xl:static xl:z-auto xl:w-96">
+            <ThreadPanel conversation={active} />
+          </div>
+        </>
+      )}
+
+      {/* Pane 3b — context. Inline at xl, overlay below it. */}
+      {active && contextOpen && !threadRootId && !savedOpen && (
         <>
           <div
             className="fixed inset-0 z-70 bg-black/40 xl:hidden"

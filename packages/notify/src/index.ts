@@ -1,8 +1,15 @@
-import { getPool } from '@tupo/db';
-import { snowflake } from '@tupo/db';
+import { getPool, snowflake } from '@tupo/db';
 import { Redis } from 'ioredis';
-import { config } from '../config.js';
 import type { AppNotification } from '@tupo/shared';
+
+/**
+ * Redis is read from the environment rather than an app's config object.
+ *
+ * This package is imported by tupo-api *and* tupo-realtime, and neither one's
+ * config module is the other's. Both already load `.env` at startup, and both
+ * point at the same Redis — the value is the same, the coupling is not.
+ */
+const redisUrl = () => process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/0';
 
 /**
  * Notifications.
@@ -24,7 +31,13 @@ import type { AppNotification } from '@tupo/shared';
 export type NotificationKind =
   | 'meet.live'        // a meeting you may join has started
   | 'meet.invited'     // you were invited to a scheduled meeting
-  | 'meet.ended';
+  | 'meet.ended'
+  | 'chat.dm'          // a direct message
+  | 'chat.mention'     // you were @-mentioned
+  | 'chat.message'     // a message in a conversation set to notify on all
+  | 'chat.thread'      // a reply in a thread you are following
+  | 'chat.reaction'    // someone reacted to something you wrote
+  | 'chat.invited';    // you were added to a channel or group
 
 export interface NotificationRow {
   id: string;
@@ -164,7 +177,7 @@ let publisher: Redis | null = null;
 function getPublisher(): Redis | null {
   if (publisher) return publisher;
   try {
-    publisher = new Redis(config.redisUrl, {
+    publisher = new Redis(redisUrl(), {
       lazyConnect: true,
       maxRetriesPerRequest: 1,
       // Without this a Redis outage turns every publish into a slow retry

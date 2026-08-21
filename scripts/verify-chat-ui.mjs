@@ -64,6 +64,22 @@ const seed = (u) => ({
   tupo_role_permissions: JSON.stringify({ keys: u.perms, name: u.roleName }),
 });
 
+/**
+ * Wait for a locator to become visible, and report a boolean.
+ *
+ * NOT `locator.isVisible({ timeout })`. That method samples the DOM once and
+ * returns immediately — its `timeout` bounds resolving the selector, not
+ * waiting for the element to appear. Using it for anything that follows a
+ * network round trip reads as "the feature is broken" when the truth is "the
+ * response had not arrived yet" — exactly the false failure it produced here
+ * for edit and delete, both of which were working the whole time.
+ */
+const visible = (locator, ms = 6000) =>
+  locator.waitFor({ state: 'visible', timeout: ms }).then(() => true).catch(() => false);
+
+const hidden = (locator, ms = 6000) =>
+  locator.waitFor({ state: 'hidden', timeout: ms }).then(() => true).catch(() => false);
+
 const BASE = 'http://localhost:5194';
 const browser = await chromium.launch();
 const alice = await makeUser('Ada Umutoni');
@@ -112,7 +128,7 @@ try {
   await A.page.locator('#composer').fill(text);
   await A.page.locator('#composer').press('Enter');
 
-  const aliceThread = A.page.locator('section[aria-label]');
+  const aliceThread = A.page.getByRole('log', { name: 'Messages' });
   await aliceThread.getByText(text).waitFor({ timeout: 5000 });
   check('the sender sees their own message immediately', true);
 
@@ -126,11 +142,11 @@ try {
   // tests the thing that actually has to work.
   const badge = B.page.getByLabel(/^\d+ unread/).first();
   check('the recipient gets an unread badge while looking elsewhere',
-    await badge.isVisible({ timeout: 6000 }).catch(() => false));
+    await visible(badge, 6000));
   await B.page.screenshot({ path: `${SHOTS}/02-bob-badge.png` });
 
   await bobRow.click();
-  const bobThread = B.page.locator('section[aria-label]');
+  const bobThread = B.page.getByRole('log', { name: 'Messages' });
   await bobThread.getByText(text).waitFor({ timeout: 8000 });
   check('the recipient can open it and read the message', true);
 
@@ -140,7 +156,7 @@ try {
   await B.page.locator('#composer').type('typing something', { delay: 30 });
   const typingLine = A.page.getByText(/is typing/);
   check('a typing indicator reaches the other person',
-    await typingLine.isVisible({ timeout: 6000 }).catch(() => false));
+    await visible(typingLine, 6000));
   await A.page.screenshot({ path: `${SHOTS}/03-alice-typing.png` });
 
   /* ── Reply back ───────────────────────────────────────────────────────── */
@@ -167,8 +183,7 @@ try {
   await A.page.reload({ waitUntil: 'networkidle' });
   await A.page.waitForTimeout(1200);
   check('history survives a reload',
-    await A.page.locator('section[aria-label]').getByText(text)
-      .isVisible({ timeout: 8000 }).catch(() => false));
+    await visible(A.page.getByRole('log', { name: 'Messages' }).getByText(text).first(), 8000));
 
   /* ── Drafts ───────────────────────────────────────────────────────────── */
 
@@ -181,6 +196,182 @@ try {
     (await A.page.locator('#composer').inputValue()) === 'an unfinished thought',
     await A.page.locator('#composer').inputValue());
   await A.page.locator('#composer').fill('');
+
+  /* ── Rich text ────────────────────────────────────────────────────────── */
+
+  const formatted = `**bold${randomBytes(2).toString('hex')}** and \`code\` and *italic*`;
+  await A.page.locator('#composer').fill(formatted);
+  await A.page.locator('#composer').press('Enter');
+
+  check('bold renders as bold, not as asterisks',
+    await visible(aliceThread.locator('strong', { hasText: /^bold/ }).first()));
+  check('inline code renders as code',
+    await visible(aliceThread.locator('code', { hasText: 'code' }).first()));
+
+  // The property this whole rendering path exists to guarantee: a message body
+  // must never become markup.
+  const xss = '<img src=x onerror="window.__pwned=1">';
+  await A.page.locator('#composer').fill(xss);
+  await A.page.locator('#composer').press('Enter');
+  const xssShown = await visible(aliceThread.getByText(xss).first());
+  check('a message body is never interpreted as HTML',
+    xssShown && (await A.page.evaluate(() => window.__pwned)) === undefined);
+
+  /* ── Reactions ────────────────────────────────────────────────────────── */
+
+  const reactTarget = `React to me — ${randomBytes(3).toString('hex')}`;
+  await B.page.locator('#composer').fill(reactTarget);
+  await B.page.locator('#composer').press('Enter');
+  const reactRow = aliceThread.locator('li', { hasText: reactTarget }).first();
+  await reactRow.waitFor({ timeout: 8000 });
+
+  await reactRow.hover();
+  await reactRow.getByRole('button', { name: 'React with 👍' }).click();
+  check('a one-tap reaction appears for the reactor',
+    await visible(reactRow.getByRole('button', { name: /^👍 1/ })));
+
+  const bobReactRow = bobThread.locator('li', { hasText: reactTarget }).first();
+  check('and reaches the other person live',
+    await visible(bobReactRow.getByRole('button', { name: /^👍 1/ })));
+
+  await reactRow.getByRole('button', { name: /^👍 1/ }).click();
+  check('clicking your own reaction removes it',
+    await hidden(reactRow.getByRole('button', { name: /^👍 \d/ })));
+
+  /* ── Emoji picker ─────────────────────────────────────────────────────── */
+
+  await A.page.getByRole('button', { name: 'Insert emoji' }).click();
+  const picker = A.page.getByRole('dialog', { name: 'Choose an emoji' });
+  check('the emoji picker opens', await visible(picker, 3000));
+  await A.page.getByLabel('Search emoji').fill('rocket');
+  await picker.getByRole('button', { name: '🚀' }).first().click();
+  check('picking an emoji inserts it into the composer',
+    (await A.page.locator('#composer').inputValue()).includes('🚀'),
+    await A.page.locator('#composer').inputValue());
+  await A.page.locator('#composer').fill('');
+
+  /* ── Edit and delete ──────────────────────────────────────────────────── */
+
+  const editable = `Edit me — ${randomBytes(3).toString('hex')}`;
+  await A.page.locator('#composer').fill(editable);
+  await A.page.locator('#composer').press('Enter');
+  const editRow = aliceThread.locator('li', { hasText: editable }).first();
+  await editRow.waitFor({ timeout: 8000 });
+
+  await editRow.hover();
+  await editRow.getByRole('button', { name: 'Edit message' }).click();
+  const editBox = A.page.getByLabel('Edit message text');
+  check('editing happens in place, not in a dialog', await visible(editBox, 3000));
+
+  await editBox.fill(`${editable} (fixed)`);
+  await editBox.press('Enter');
+  check('the edit lands and is marked as edited',
+    await visible(aliceThread.getByText('(edited)').first()));
+  check('and the other side sees the new text',
+    await visible(bobThread.getByText(`${editable} (fixed)`).first()));
+
+  // Bob must not be offered an edit control on someone else's message.
+  const bobViewOfAlice = bobThread.locator('li', { hasText: `${editable} (fixed)` }).first();
+  await bobViewOfAlice.hover();
+  check('no edit control is offered on someone else’s message',
+    (await bobViewOfAlice.getByRole('button', { name: 'Edit message' }).count()) === 0);
+
+  const editedRow = aliceThread.locator('li', { hasText: `${editable} (fixed)` }).first();
+  await editedRow.hover();
+  await editedRow.getByRole('button', { name: 'Delete message' }).click();
+  const confirmBox = A.page.getByRole('dialog', { name: 'Confirm deletion' });
+  check('deletion asks first', await visible(confirmBox, 3000));
+
+  await confirmBox.getByRole('button', { name: 'Delete' }).click();
+  check('a deleted message becomes a tombstone rather than vanishing',
+    await visible(aliceThread.getByText('This message was deleted').first()));
+  check('and the tombstone reaches the other person live',
+    await visible(bobThread.getByText('This message was deleted').first()));
+  await A.page.screenshot({ path: `${SHOTS}/06-alice-phase2.png` });
+
+  /* ── Quote reply ──────────────────────────────────────────────────────── */
+
+  const quotable = `Quote me — ${randomBytes(3).toString('hex')}`;
+  await B.page.locator('#composer').fill(quotable);
+  await B.page.locator('#composer').press('Enter');
+  const quotableRow = aliceThread.locator('li', { hasText: quotable }).first();
+  await quotableRow.waitFor({ timeout: 8000 });
+
+  await quotableRow.hover();
+  await quotableRow.getByRole('button', { name: 'Quote reply' }).click();
+  check('choosing to quote shows what is being answered above the composer',
+    await visible(A.page.getByText(/Replying to Bosco Rugema/)));
+
+  const answer = `Answered — ${randomBytes(3).toString('hex')}`;
+  await A.page.locator('#composer').fill(answer);
+  await A.page.locator('#composer').press('Enter');
+  const answerRow = aliceThread.locator('li', { hasText: answer }).first();
+  await answerRow.waitFor({ timeout: 8000 });
+  check('the sent message carries the quote block',
+    await visible(answerRow.getByRole('button', { name: new RegExp(quotable) })));
+  check('and the reply preview is cleared after sending',
+    (await A.page.getByText(/Replying to/).count()) === 0);
+
+  /* ── Threads ──────────────────────────────────────────────────────────── */
+
+  const threadRoot = `Thread root — ${randomBytes(3).toString('hex')}`;
+  await A.page.locator('#composer').fill(threadRoot);
+  await A.page.locator('#composer').press('Enter');
+  const rootRow = aliceThread.locator('li', { hasText: threadRoot }).first();
+  await rootRow.waitFor({ timeout: 8000 });
+
+  await rootRow.hover();
+  await rootRow.getByRole('button', { name: 'Reply in thread' }).click();
+  const threadPane = A.page.getByRole('complementary', { name: 'Thread' });
+  check('a thread opens in its own pane', await visible(threadPane, 4000));
+  check('and repeats the message it is about, so the subject is never off-screen',
+    await visible(threadPane.getByText(threadRoot).first()));
+
+  const threadReply = `In the thread — ${randomBytes(3).toString('hex')}`;
+  await A.page.locator('#thread-composer').fill(threadReply);
+  await A.page.locator('#thread-composer').press('Enter');
+  check('a thread reply appears in the thread',
+    await visible(threadPane.getByText(threadReply).first()));
+  check('and NOT in the main channel flow',
+    (await aliceThread.getByText(threadReply).count()) === 0);
+  check('while the parent gains a reply count',
+    await visible(aliceThread.getByRole('button', { name: /1 reply/ }).first()));
+
+  await A.page.screenshot({ path: `${SHOTS}/07-alice-thread.png` });
+  await threadPane.getByRole('button', { name: 'Close thread' }).click();
+  check('the thread closes', await hidden(threadPane, 3000));
+
+  /* ── Pin ──────────────────────────────────────────────────────────────── */
+
+  await rootRow.hover();
+  await rootRow.getByRole('button', { name: 'Pin message' }).click();
+  check('a pinned message is surfaced in a bar above the conversation',
+    await visible(A.page.getByRole('button', { name: new RegExp(threadRoot) }).first()));
+  check('and pinning is announced in the room',
+    await visible(aliceThread.getByText(/pinned a message/).first()));
+  await A.page.screenshot({ path: `${SHOTS}/08-alice-pinned.png` });
+
+  /* ── Save ─────────────────────────────────────────────────────────────── */
+
+  await rootRow.hover();
+  await rootRow.getByRole('button', { name: 'Save message' }).click();
+  await A.page.getByRole('button', { name: 'Saved items', exact: true }).click();
+  const savedPane = A.page.getByRole('complementary', { name: 'Saved items' });
+  check('saved items open in their own pane', await visible(savedPane, 4000));
+  check('and the saved message is listed with the conversation it came from',
+    await visible(savedPane.getByText(threadRoot).first()));
+  await savedPane.getByRole('button', { name: 'Close saved items' }).click();
+
+  /* ── Forward ──────────────────────────────────────────────────────────── */
+
+  await rootRow.hover();
+  await rootRow.getByRole('button', { name: 'Forward message' }).click();
+  const fwd = A.page.getByRole('dialog', { name: /Forward message/ });
+  check('the forward dialog opens', await visible(fwd, 4000));
+  check('and previews exactly what is about to be sent, and whose words they are',
+    await visible(fwd.getByText(threadRoot).first())
+      && await visible(fwd.getByText(/From You|From Ada Umutoni/).first()));
+  await fwd.getByRole('button', { name: 'Cancel' }).click();
 
   /* ── Responsive ───────────────────────────────────────────────────────── */
 

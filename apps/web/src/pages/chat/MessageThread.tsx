@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import {
   Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
-  RotateCcw, ChevronDown, FileText, MessageSquare, Lock,
+  RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
+  X, Bookmark, Forward, PinOff, Link2, Quote,
 } from 'lucide-react';
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -11,6 +12,11 @@ import { dayLabel, startsNewGroup, timeOf, formatBytes, firstUnreadId, typingLab
 import { useChat } from './ChatProvider';
 import { toPresence } from './types';
 import type { Conversation, Message } from './types';
+import { RichText } from './RichText';
+import { EmojiPicker } from './EmojiPicker';
+import { ForwardDialog } from './ForwardDialog';
+import { PinnedBar } from './PinnedBar';
+import { QUICK_REACTIONS, EDIT_WINDOW_MS } from '@tupo/shared';
 
 /**
  * The message pane: header, scrollback, composer slot.
@@ -129,57 +135,6 @@ const StatusIcon: React.FC<{ status: Message['delivery'] }> = ({ status }) => {
   }
 };
 
-/**
- * Render a message body.
- *
- * Mentions are stored as `<@id>` and resolved to a name here, so a person who
- * changes their name is not left with stale copies of the old one scattered
- * through history.
- *
- * Plain-text splitting, never `dangerouslySetInnerHTML`. Message bodies are
- * user input and this is exactly where a stored XSS would enter; React's own
- * escaping is the defence, so nothing may bypass it.
- */
-const Body: React.FC<{ text: string; names: Record<string, string>; meId?: string }> = (
-  { text, names, meId },
-) => {
-  const parts = useMemo(
-    () => text.split(/(<@[A-Za-z0-9_-]{1,64}>|@channel\b|@here\b|@everyone\b)/g),
-    [text],
-  );
-  return (
-    <>
-      {parts.map((part, i) => {
-        const m = /^<@([A-Za-z0-9_-]{1,64})>$/.exec(part);
-        if (m) {
-          const id = m[1]!;
-          const isMe = id === meId;
-          return (
-            <span
-              key={i}
-              className={`rounded px-1 font-medium ${
-                isMe
-                  ? 'bg-amber-200 text-amber-900 dark:bg-amber-500/30 dark:text-amber-200'
-                  : 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-              }`}
-            >
-              @{names[id] ?? 'someone'}
-            </span>
-          );
-        }
-        if (/^@(channel|here|everyone)$/.test(part)) {
-          return (
-            <span key={i} className="rounded bg-amber-200 px-1 font-medium text-amber-900 dark:bg-amber-500/30 dark:text-amber-200">
-              {part}
-            </span>
-          );
-        }
-        return <React.Fragment key={i}>{part}</React.Fragment>;
-      })}
-    </>
-  );
-};
-
 const MessageRow: React.FC<{
   message: Message;
   newGroup: boolean;
@@ -188,7 +143,29 @@ const MessageRow: React.FC<{
 }> = ({ message: m, newGroup, names, onRetry }) => {
   const { can } = usePermissions();
   const { user } = useAuth();
+  const {
+    react, edit, remove, pin, save, openThread, setReplyTarget, jumpTo, highlightedId,
+  } = useChat();
+  const [picking, setPicking] = useState(false);
+  const [forwarding, setForwarding] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const editRef = useRef<HTMLTextAreaElement>(null);
+
   const mine = m.senderId === user?.id;
+
+  useEffect(() => {
+    if (!editing) return;
+    const el = editRef.current;
+    if (!el) return;
+    el.focus();
+    // Caret at the end, not the start: an edit is nearly always an addition or
+    // a correction at the tail, and starting at position 0 means every edit
+    // begins with a keypress to get out of the way.
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [editing]);
 
   if (m.type === 'system') {
     return (
@@ -212,13 +189,28 @@ const MessageRow: React.FC<{
   }
 
   const failed = m.delivery === 'failed';
+  const pending = m.delivery === 'pending';
+  // Editing is the author's, within the window, and never on a message that has
+  // not landed yet — there is nothing on the server to edit.
+  const withinEditWindow = Date.now() - new Date(m.createdAt).getTime() < EDIT_WINDOW_MS;
+  const canEdit = mine && !pending && !failed && withinEditWindow && can('MESSAGE_EDIT_OWN');
+  const canDelete = (mine && can('MESSAGE_DELETE_OWN')) || can('MESSAGE_DELETE_ANY');
+
+  const submitEdit = async () => {
+    const next = draft.trim();
+    setEditing(false);
+    if (!next || next === (m.body ?? '')) return;
+    try { await edit(m.id, next); } catch { /* the row simply does not change */ }
+  };
 
   return (
     <li
       id={`msg-${m.id}`}
       className={`group relative flex gap-2.5 px-2 sm:px-4 ${newGroup ? 'mt-3' : 'mt-0.5'} ${
         mine ? 'flex-row-reverse' : ''
-      } ${m.mentionsMe ? 'bg-amber-50/60 dark:bg-amber-500/5' : ''}`}
+      } ${m.mentionsMe ? 'bg-amber-50/60 dark:bg-amber-500/5' : ''} ${
+        highlightedId === m.id ? 'animate-fade-in rounded-xl bg-blue-100/70 dark:bg-blue-500/15' : ''
+      }`}
     >
       {/* The gutter keeps its width when the avatar is hidden, so a grouped run
           stays aligned instead of stepping left. */}
@@ -243,55 +235,102 @@ const MessageRow: React.FC<{
           </div>
         )}
 
-        <div
-          className={`message-body px-3.5 py-2 text-sm ${
-            mine
-              ? 'bubble-out bg-blue-600 text-white'
-              : 'bubble-in border border-border-light bg-white text-text-primary-light dark:border-border-dark/40 dark:bg-elevated-dark dark:text-text-primary-dark'
-          } ${failed ? 'ring-1 ring-red-400' : ''} ${m.delivery === 'pending' ? 'opacity-75' : ''}`}
-        >
-          {/* Quote-reply context, rendered above the message it answers. */}
-          {m.replyTo && (
-            <a
-              href={`#msg-${m.replyTo.id}`}
-              className={`mb-1.5 block border-l-2 pl-2 text-xs ${
-                mine ? 'border-white/50 text-white/80' : 'border-blue-400 text-text-secondary-light dark:text-text-secondary-dark'
-              }`}
-            >
-              <span className="font-medium">{m.replyTo.senderName}</span>
-              <span className="ml-1 opacity-80">
-                {m.replyTo.deleted ? 'message deleted' : (m.replyTo.body ?? 'attachment')}
+        {editing ? (
+          /* Edit in place rather than in a modal. The surrounding conversation
+             is the context you are editing against, and a dialog hides it. */
+          <div className="w-full min-w-[16rem]">
+            <textarea
+              ref={editRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') { e.preventDefault(); setEditing(false); }
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void submitEdit(); }
+              }}
+              rows={Math.min((draft.match(/\n/g)?.length ?? 0) + 1, 8)}
+              aria-label="Edit message text"
+              className="w-full resize-none rounded-xl border border-blue-500 bg-white px-3 py-2 text-sm text-text-primary-light outline-none ring-2 ring-blue-500/20 dark:bg-elevated-dark dark:text-text-primary-dark"
+            />
+            <div className="mt-1 flex items-center gap-2 text-[11px]">
+              <button onClick={() => void submitEdit()} className="font-medium text-blue-600 hover:underline dark:text-blue-400">
+                Save
+              </button>
+              <button onClick={() => setEditing(false)} className="text-text-secondary-light hover:underline dark:text-text-secondary-dark">
+                Cancel
+              </button>
+              <span className="text-text-secondary-light/70 dark:text-text-secondary-dark/60">
+                Escape to cancel · Enter to save
               </span>
-            </a>
-          )}
+            </div>
+          </div>
+        ) : (
+          <div
+            className={`message-body px-3.5 py-2 text-sm ${
+              mine
+                ? 'bubble-out bg-blue-600 text-white'
+                : 'bubble-in border border-border-light bg-white text-text-primary-light dark:border-border-dark/40 dark:bg-elevated-dark dark:text-text-primary-dark'
+            } ${failed ? 'ring-1 ring-red-400' : ''} ${pending ? 'opacity-75' : ''}`}
+          >
+            {/* Quote-reply context, rendered above the message it answers. */}
+            {m.replyTo && (
+              /* Tappable, and it *jumps* rather than following an anchor: the
+                 original may not be loaded, in which case the surrounding page
+                 has to be fetched first (FR-MSG-7). */
+              <button
+                onClick={() => void jumpTo(m.replyTo!.id)}
+                className={`mb-1.5 block w-full truncate border-l-2 pl-2 text-left text-xs transition-opacity hover:opacity-80 ${
+                  mine ? 'border-white/50 text-white/80' : 'border-blue-400 text-text-secondary-light dark:text-text-secondary-dark'
+                }`}
+              >
+                <span className="font-medium">{m.replyTo.senderName}</span>
+                <span className="ml-1 opacity-80">
+                  {m.replyTo.deleted ? 'message deleted' : (m.replyTo.body ?? 'attachment')}
+                </span>
+              </button>
+            )}
 
-          {m.body && <Body text={m.body} names={names} meId={user?.id} />}
-          {m.editedAt && <span className="ml-1.5 text-[10px] opacity-70">(edited)</span>}
+            {/* FR-MSG-10: attribution travels with a forward, so it can never be
+                passed off as the forwarder's own words. */}
+            {m.forwardedFrom && (
+              <p className={`mb-1 flex items-center gap-1 text-[11px] italic ${mine ? 'text-white/75' : 'text-text-secondary-light dark:text-text-secondary-dark'}`}>
+                <Forward size={11} />
+                Forwarded from {m.forwardedFrom.senderName}
+                {m.forwardedFrom.conversationName ? ` in #${m.forwardedFrom.conversationName}` : ''}
+              </p>
+            )}
 
-          {m.attachments.map((a) => (
-            <a
-              key={a.fileId}
-              href={`/api/files/${a.fileId}/content`}
-              className={`mt-2 flex items-center gap-2.5 rounded-xl px-2.5 py-2 transition-colors duration-150 ${
-                mine ? 'bg-white/15 hover:bg-white/25' : 'bg-surface-light hover:bg-slate-100 dark:bg-card-dark/50 dark:hover:bg-card-dark'
-              }`}
-            >
-              <FileText size={18} className="shrink-0 opacity-80" />
-              <span className="min-w-0">
-                <span className="block truncate text-xs font-medium">{a.name}</span>
-                <span className="block text-[11px] opacity-70">{formatBytes(a.size)}</span>
+            {m.body && <RichText text={m.body} names={names} meId={user?.id} onDark={mine} />}
+            {m.editedAt && (
+              <span className="ml-1.5 text-[10px] opacity-70" title={`Edited ${timeOf(m.editedAt)}`}>
+                (edited)
               </span>
-            </a>
-          ))}
+            )}
 
-          {/* Ticks live inside the sender's own bubble — nobody needs delivery
-              state for a message they did not send. */}
-          {mine && (
-            <span className="ml-2 inline-flex translate-y-0.5 items-center">
-              <StatusIcon status={m.delivery} />
-            </span>
-          )}
-        </div>
+            {m.attachments.map((a) => (
+              <a
+                key={a.fileId}
+                href={`/api/files/${a.fileId}/content`}
+                className={`mt-2 flex items-center gap-2.5 rounded-xl px-2.5 py-2 transition-colors duration-150 ${
+                  mine ? 'bg-white/15 hover:bg-white/25' : 'bg-surface-light hover:bg-slate-100 dark:bg-card-dark/50 dark:hover:bg-card-dark'
+                }`}
+              >
+                <FileText size={18} className="shrink-0 opacity-80" />
+                <span className="min-w-0">
+                  <span className="block truncate text-xs font-medium">{a.name}</span>
+                  <span className="block text-[11px] opacity-70">{formatBytes(a.size)}</span>
+                </span>
+              </a>
+            ))}
+
+            {/* Ticks live inside the sender's own bubble — nobody needs delivery
+                state for a message they did not send. */}
+            {mine && (
+              <span className="ml-2 inline-flex translate-y-0.5 items-center">
+                <StatusIcon status={m.delivery} />
+              </span>
+            )}
+          </div>
+        )}
 
         {/* UX-1: a failure is never silent, and the retry sits on the message
             itself rather than in a toast that scrolls out of reach. */}
@@ -309,7 +348,8 @@ const MessageRow: React.FC<{
             {m.reactions.map((r) => (
               <button
                 key={r.emoji}
-                aria-label={`${r.emoji} ${r.count}`}
+                onClick={() => void react(m.id, r.emoji)}
+                aria-label={`${r.emoji} ${r.count}${r.mine ? ', including you' : ''}`}
                 aria-pressed={r.mine}
                 className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors duration-150 ${
                   r.mine
@@ -318,11 +358,14 @@ const MessageRow: React.FC<{
                 }`}
               >
                 <span>{r.emoji}</span>
-                <span className="tabular-nums font-medium">{r.count}</span>
+                <span className="font-medium tabular-nums">{r.count}</span>
               </button>
             ))}
             {m.replyCount > 0 && (
-              <button className="flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/25">
+              <button
+                onClick={() => openThread(m.id)}
+                className="flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/25"
+              >
                 <MessageSquare size={11} /> {m.replyCount} {m.replyCount === 1 ? 'reply' : 'replies'}
               </button>
             )}
@@ -330,19 +373,161 @@ const MessageRow: React.FC<{
         )}
       </div>
 
-      {/* UX-7: hover actions. Hidden until hover on pointer devices; on touch
-          the same menu is reached by long-press, which the `…` button also
-          opens, so nothing is unreachable without a mouse. */}
-      <div
-        className={`absolute -top-3 z-10 flex items-center gap-0.5 rounded-xl border border-border-light bg-white p-0.5 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
-          mine ? 'left-12' : 'right-4'
-        }`}
-      >
-        <IconButton label="Add reaction" size="sm"><SmilePlus size={15} /></IconButton>
-        <IconButton label="Reply in thread" size="sm"><Reply size={15} /></IconButton>
-        {can('MESSAGE_PIN') && <IconButton label="Pin message" size="sm"><Pin size={15} /></IconButton>}
-        <IconButton label="More actions" size="sm"><MoreHorizontal size={15} /></IconButton>
-      </div>
+      {/* UX-7: hover actions. Hidden until hover on pointer devices; the `…`
+          button opens the same set as a menu, so nothing is unreachable
+          without a mouse, and everything here is keyboard-focusable. */}
+      {!editing && !pending && (
+        <div
+          className={`absolute -top-3 z-10 flex items-center gap-0.5 rounded-xl border border-border-light bg-white p-0.5 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
+            /* Anchored to the side the bubble is actually on. `left-12` for an
+               own message put the toolbar at the far left of a full-width row,
+               half a screen away from the message it acted on — easy to miss,
+               and easy to hit for the wrong message. */
+            mine ? 'right-14' : 'left-14'
+          } ${picking || menuOpen ? 'opacity-100' : ''}`}
+        >
+          {/* One tap for the common few, the picker for everything else. Most
+              reactions are a thumbs-up; making that a two-step interaction is
+              the difference between people reacting and not. */}
+          {QUICK_REACTIONS.slice(0, 3).map((e) => (
+            <button
+              key={e}
+              onClick={() => void react(m.id, e)}
+              aria-label={`React with ${e}`}
+              className="hidden h-7 w-7 place-items-center rounded-lg text-base leading-none hover:bg-surface-light sm:grid dark:hover:bg-surface-dark"
+            >
+              {e}
+            </button>
+          ))}
+
+          <div className="relative">
+            <IconButton label="Add reaction" size="sm" onClick={() => setPicking((v) => !v)}>
+              <SmilePlus size={15} />
+            </IconButton>
+            {picking && (
+              <EmojiPicker
+                align="down"
+                onPick={(e) => { setPicking(false); void react(m.id, e); }}
+                onClose={() => setPicking(false)}
+              />
+            )}
+          </div>
+
+          <IconButton label="Quote reply" size="sm" onClick={() => setReplyTarget(m)}>
+            <Quote size={15} />
+          </IconButton>
+
+          <IconButton label="Reply in thread" size="sm" onClick={() => openThread(m.id)}>
+            <Reply size={15} />
+          </IconButton>
+
+          <IconButton
+            label={m.saved ? 'Remove from saved items' : 'Save message'}
+            size="sm"
+            active={m.saved}
+            onClick={() => void save(m.id, !m.saved)}
+          >
+            <Bookmark size={15} className={m.saved ? 'fill-current' : ''} />
+          </IconButton>
+
+          {can('MESSAGE_FORWARD') && (
+            <IconButton label="Forward message" size="sm" onClick={() => setForwarding(true)}>
+              <Forward size={15} />
+            </IconButton>
+          )}
+
+          {can('MESSAGE_PIN') && (
+            <IconButton
+              label={m.pinnedAt ? 'Unpin message' : 'Pin message'}
+              size="sm"
+              active={Boolean(m.pinnedAt)}
+              onClick={() => void pin(m.id, !m.pinnedAt)}
+            >
+              {m.pinnedAt ? <PinOff size={15} /> : <Pin size={15} />}
+            </IconButton>
+          )}
+
+          {canEdit && (
+            <IconButton
+              label="Edit message"
+              size="sm"
+              onClick={() => { setDraft(m.body ?? ''); setEditing(true); }}
+            >
+              <Pencil size={15} />
+            </IconButton>
+          )}
+
+          {canDelete && (
+            <div className="relative">
+              <IconButton label="Delete message" size="sm" onClick={() => setConfirmDelete(true)}>
+                <Trash2 size={15} />
+              </IconButton>
+              {confirmDelete && (
+                /* Confirmed inline, not with `window.confirm`. A native dialog
+                   blocks the whole tab — including the socket's own callbacks —
+                   and cannot be styled or dismissed by Escape consistently. */
+                <div
+                  role="dialog"
+                  aria-label="Confirm deletion"
+                  className="absolute right-0 top-full z-50 mt-1 w-56 rounded-xl border border-border-light bg-white p-3 shadow-xl dark:border-border-dark/50 dark:bg-elevated-dark"
+                >
+                  <p className="mb-2 text-xs text-text-primary-light dark:text-text-primary-dark">
+                    {mine ? 'Delete this message?' : "Delete someone else's message? This is recorded."}
+                  </p>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      onClick={() => setConfirmDelete(false)}
+                      className="rounded-lg px-2 py-1 text-xs text-text-secondary-light hover:bg-surface-light dark:text-text-secondary-dark dark:hover:bg-surface-dark"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => { setConfirmDelete(false); void remove(m.id); }}
+                      className="rounded-lg bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="relative">
+            <IconButton label="More actions" size="sm" onClick={() => setMenuOpen((v) => !v)}>
+              <MoreHorizontal size={15} />
+            </IconButton>
+            {menuOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-xl border border-border-light bg-white py-1 shadow-xl dark:border-border-dark/50 dark:bg-elevated-dark"
+                onMouseLeave={() => setMenuOpen(false)}
+              >
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    // A permalink is a route in this app, never an absolute URL
+                    // built from whatever origin the tab happens to be on.
+                    const url = `${window.location.origin}/app/chat/${m.conversationId}/${m.id}`;
+                    void navigator.clipboard?.writeText(url).catch(() => {});
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
+                >
+                  <Link2 size={13} /> Copy link to message
+                </button>
+                {m.editedCount > 0 && (
+                  <p className="px-3 py-1.5 text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
+                    Edited {m.editedCount} {m.editedCount === 1 ? 'time' : 'times'}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {forwarding && <ForwardDialog message={m} onClose={() => setForwarding(false)} />}
     </li>
   );
 };
@@ -474,6 +659,8 @@ export const MessageThread: React.FC<{
         contextOpen={contextOpen}
       />
 
+      <PinnedBar conversation={conversation} />
+
       <div className="relative min-h-0 flex-1">
         <div ref={scrollRef} className="h-full overflow-y-auto overscroll-contain py-4">
           <div ref={topSentinel} />
@@ -507,7 +694,11 @@ export const MessageThread: React.FC<{
               }
             />
           ) : (
-            <ul>
+            /* `role="log"` is the correct role for a chat transcript: it carries
+               an implicit polite live region, so a screen reader announces
+               arriving messages without the whole list being re-read, and it
+               gives the transcript a name of its own separate from the pane. */
+            <ul role="log" aria-label="Messages" aria-relevant="additions">
               {messages.map((m, i) => {
                 const day = dayLabel(m.createdAt);
                 const showDay = day !== lastDay;

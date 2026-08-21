@@ -10,6 +10,7 @@ import { config } from '../config.js';
 import * as chat from '@tupo/chat';
 import { ChatError } from '@tupo/chat';
 import { emitToConversation, emitToUsers } from '../services/chatRealtime.js';
+import { audit } from '../services/userService.js';
 
 /**
  * Chat REST.
@@ -70,6 +71,22 @@ async function presenceFor(userIds: string[]): Promise<Record<string, string>> {
     userIds.forEach((id, i) => { out[id] = values[i] ?? 'offline'; });
   } catch { /* everyone reads as offline */ }
   return out;
+}
+
+/**
+ * Write a system notice AND put it on the wire.
+ *
+ * `chat.systemMessage` only writes the row. Every caller then has to remember
+ * to broadcast it, and the one that forgets produces a notice nobody sees until
+ * they reload — which is precisely when a "pinned a message" line has stopped
+ * being useful. Wrapping the two together removes the chance to forget.
+ */
+async function announce(
+  conversationId: string, actorId: string, text: string,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  const message = await chat.systemMessage(conversationId, actorId, text, metadata);
+  if (message) emitToConversation(conversationId, 'message:new', { conversationId, message });
 }
 
 /**
@@ -187,7 +204,7 @@ router.post('/conversations', authorizePermission('CHANNEL_CREATE'), wrap(async 
     memberIds: Array.isArray(memberIds) ? memberIds.slice(0, 500) : [],
   });
 
-  await chat.systemMessage(conversation.id, me.id,
+  await announce(conversation.id, me.id,
     `${me.name} created this ${type === 'group' ? 'group' : 'channel'}.`,
     { event: 'created' });
 
@@ -342,7 +359,13 @@ router.post('/conversations/:id/messages', authorizePermission('MESSAGE_SEND'),
       metadata: metadata && typeof metadata === 'object' ? metadata : {},
     });
 
-    if (result.created) await fanOutNewMessage(id, result);
+    if (result.created) {
+      await fanOutNewMessage(id, result, {
+        name: membership.name ?? 'a conversation',
+        type: membership.type,
+        senderMayBroadcast: me.permissions.has('CHANNEL_ANNOUNCE'),
+      });
+    }
 
     res.status(result.created ? 201 : 200).json(ok({
       message: result.message, duplicate: !result.created,
@@ -359,10 +382,21 @@ router.post('/conversations/:id/messages', authorizePermission('MESSAGE_SEND'),
  */
 async function fanOutNewMessage(
   conversationId: string, result: chat.SendResult,
+  context: { name: string; type: string; senderMayBroadcast: boolean },
 ): Promise<void> {
   emitToConversation(conversationId, 'message:new', {
     conversationId, message: result.message,
   });
+
+  // Who gets *told*, as opposed to who gets the socket event, is a different
+  // question with different rules — see packages/chat/src/notifications.ts.
+  await chat.notifyNewMessage(result.message, {
+    conversationName: context.name,
+    conversationType: context.type,
+    mentionedUserIds: result.mentionedUserIds,
+    broadcast: result.broadcast,
+    senderMayBroadcast: context.senderMayBroadcast,
+  }).catch(() => { /* a missed notification must not fail the send */ });
 
   const members = await chat.memberIdsOf(conversationId);
   const others = members.filter((m) => m !== result.message.senderId);
@@ -398,5 +432,253 @@ router.post('/conversations/:id/read', wrap(async (req, res) => {
 
   res.json(ok(result));
 }));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Reactions, edits, deletions
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.post('/conversations/:id/messages/:messageId/reactions', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, messageId } = req.params as { id: string; messageId: string };
+  await chat.requireMembership(me.id, id);
+
+  const result = await chat.toggleReaction(me.id, id, messageId, String(req.body?.emoji ?? ''));
+  emitToConversation(id, 'message:reaction', {
+    conversationId: id, messageId, reactions: result.reactions,
+  });
+  res.json(ok(result));
+}));
+
+/** Who reacted with what — the hover card behind a reaction pill. */
+router.get('/conversations/:id/messages/:messageId/reactions', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, messageId } = req.params as { id: string; messageId: string };
+  await chat.requireMembership(me.id, id);
+  const emoji = String(req.query.emoji ?? '');
+  res.json(ok({ names: emoji ? await chat.reactorNames(messageId, emoji) : [] }));
+}));
+
+router.patch('/conversations/:id/messages/:messageId', authorizePermission('MESSAGE_EDIT_OWN'),
+  wrap(async (req, res) => {
+    const me = actor(req);
+    const { id, messageId } = req.params as { id: string; messageId: string };
+    const membership = await chat.requireMembership(me.id, id);
+    if (membership.isArchived) {
+      return res.status(409).json(fail('This conversation is archived.'));
+    }
+
+    const { message, newlyMentioned } = await chat.editMessage(
+      me.id, id, messageId, String(req.body?.body ?? ''),
+    );
+
+    emitToConversation(id, 'message:updated', { conversationId: id, message });
+    // Editing a message to add an @mention has to reach the person mentioned —
+    // otherwise "sorry, meant to tag you" silently never arrives.
+    if (newlyMentioned.length) {
+      await chat.notifyMention(message, newlyMentioned, membership.name ?? 'a conversation');
+    }
+    res.json(ok({ message }));
+  }));
+
+router.get('/conversations/:id/messages/:messageId/history', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, messageId } = req.params as { id: string; messageId: string };
+  await chat.requireMembership(me.id, id);
+  res.json(ok({ versions: await chat.editHistory(id, messageId) }));
+}));
+
+router.delete('/conversations/:id/messages/:messageId', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, messageId } = req.params as { id: string; messageId: string };
+  const membership = await chat.requireMembership(me.id, id);
+
+  const result = await chat.deleteMessage(me.id, id, messageId, {
+    canDeleteAny: me.permissions.has('MESSAGE_DELETE_ANY'),
+    memberRole: membership.role,
+  });
+
+  // Removing someone else's words is always on the record (FR-MSG-9). A
+  // moderation power with no trail is indistinguishable from censorship.
+  if (result.byModerator) {
+    await audit({
+      actorId: me.id,
+      action: 'chat.message.delete_other',
+      targetType: 'message',
+      targetId: messageId,
+      metadata: { conversationId: id, authorId: result.senderId, seq: result.seq },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+  }
+
+  emitToConversation(id, 'message:deleted', {
+    conversationId: id, messageId, deletedBy: me.id, byModerator: result.byModerator,
+  });
+
+  // Deleting a message changes everyone's unread arithmetic.
+  const members = await chat.memberIdsOf(id);
+  const counts = await chat.unreadFor(members, id);
+  for (const [userId, c] of Object.entries(counts)) {
+    emitToUsers([userId], 'conversation:unread', {
+      conversationId: id, unread: c.unread, unreadMentions: c.unreadMentions,
+      lastReadSeq: c.lastReadSeq,
+    });
+  }
+
+  res.json(ok({ deleted: true, byModerator: result.byModerator }));
+}));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Threads
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.post('/conversations/:id/messages/:messageId/replies',
+  authorizePermission('MESSAGE_SEND'), wrap(async (req, res) => {
+    const me = actor(req);
+    const { id, messageId } = req.params as { id: string; messageId: string };
+    const membership = await chat.requireMembership(me.id, id);
+    if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
+
+    const { body, nonce, attachments, alsoSendToChannel } = req.body ?? {};
+    if (!nonce) return res.status(400).json(fail('A nonce is required.'));
+
+    const { reply, echo, root } = await chat.replyInThread({
+      conversationId: id, senderId: me.id, threadRootId: messageId,
+      body: String(body ?? ''), nonce,
+      attachments: Array.isArray(attachments) ? attachments : [],
+      alsoSendToChannel: alsoSendToChannel === true,
+    });
+
+    if (reply.created) {
+      emitToConversation(id, 'thread:reply', {
+        conversationId: id, rootId: root?.id ?? messageId, message: reply.message,
+      });
+      // The parent's "N replies" affordance changed for everyone looking at the
+      // main flow, even those who never opened the thread.
+      if (root) emitToConversation(id, 'message:updated', { conversationId: id, message: root });
+
+      /*
+       * A thread reply notifies the people who have written in it.
+       *
+       * Participation is the subscription. A "follow" button people cannot see
+       * means threads notify nobody; notifying the whole channel means threads
+       * are no quieter than the room, which is the one thing they exist to be.
+       */
+      const followers = await chat.threadParticipants(id, root?.id ?? messageId);
+      await chat.notifyNewMessage(reply.message, {
+        conversationName: membership.name ?? 'a conversation',
+        conversationType: membership.type,
+        mentionedUserIds: [...new Set([...reply.mentionedUserIds, ...followers])],
+        broadcast: reply.broadcast,
+        senderMayBroadcast: me.permissions.has('CHANNEL_ANNOUNCE'),
+      }).catch(() => {});
+    }
+
+    if (echo?.created) {
+      await fanOutNewMessage(id, echo, {
+        name: membership.name ?? 'a conversation',
+        type: membership.type,
+        senderMayBroadcast: me.permissions.has('CHANNEL_ANNOUNCE'),
+      });
+    }
+
+    res.status(reply.created ? 201 : 200).json(ok({
+      message: reply.message, root, duplicate: !reply.created,
+    }));
+  }));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Pins
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/conversations/:id/pins', wrap(async (req, res) => {
+  const me = actor(req);
+  await chat.requireMembership(me.id, req.params.id!);
+  res.json(ok({ messages: await chat.listPinned(me.id, req.params.id!) }));
+}));
+
+router.post('/conversations/:id/messages/:messageId/pin',
+  authorizePermission('MESSAGE_PIN'), wrap(async (req, res) => {
+    const me = actor(req);
+    const { id, messageId } = req.params as { id: string; messageId: string };
+    await chat.requireMembership(me.id, id);
+
+    const pinned = req.body?.pinned !== false;
+    const message = await chat.setPinned(me.id, id, messageId, pinned);
+
+    emitToConversation(id, 'message:updated', { conversationId: id, message });
+    // A pin is a statement to the room, so the room is told in the log as well
+    // as in the pinned list — otherwise pinning is invisible to anyone not
+    // looking at the header.
+    await announce(id, me.id,
+      `${me.name} ${pinned ? 'pinned' : 'unpinned'} a message.`,
+      { event: pinned ? 'pinned' : 'unpinned', messageId });
+
+    res.json(ok({ message, pinned }));
+  }));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Saved items
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/saved', wrap(async (req, res) => {
+  const me = actor(req);
+  res.json(ok({ items: await chat.listSaved(me.id, Number(req.query.limit ?? 50)) }));
+}));
+
+router.post('/conversations/:id/messages/:messageId/save', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, messageId } = req.params as { id: string; messageId: string };
+  await chat.requireMembership(me.id, id);
+  const saved = req.body?.saved !== false;
+  await chat.setSaved(me.id, id, messageId, saved);
+  // Saving is personal, so only this person's other devices hear about it.
+  emitToUsers([me.id], 'message:updated', {
+    conversationId: id,
+    message: await chat.getMessage(me.id, id, messageId),
+  });
+  res.json(ok({ saved }));
+}));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Forwarding
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.post('/conversations/:id/messages/:messageId/forward',
+  authorizePermission('MESSAGE_FORWARD'), wrap(async (req, res) => {
+    const me = actor(req);
+    const { id, messageId } = req.params as { id: string; messageId: string };
+    const targets = Array.isArray(req.body?.conversationIds) ? req.body.conversationIds : [];
+    if (!targets.length) return res.status(400).json(fail('Choose where to forward it.'));
+
+    const results = await chat.forwardMessage(
+      me.id, id, messageId, targets, typeof req.body?.comment === 'string' ? req.body.comment : undefined,
+    );
+
+    for (const { conversationId, result } of results) {
+      const target = await chat.requireMembership(me.id, conversationId);
+      await fanOutNewMessage(conversationId, result, {
+        name: target.name ?? 'a conversation',
+        type: target.type,
+        senderMayBroadcast: me.permissions.has('CHANNEL_ANNOUNCE'),
+      });
+    }
+
+    res.json(ok({ forwarded: results.map((r) => r.conversationId) }));
+  }));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Permalinks and jump-to-message
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/conversations/:id/messages/:messageId/context',
+  authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+    const me = actor(req);
+    const { id, messageId } = req.params as { id: string; messageId: string };
+    await chat.requireMembership(me.id, id);
+    const radius = Number(req.query.radius ?? 20);
+    res.json(ok(await chat.messageContext(me.id, id, messageId,
+      Number.isFinite(radius) ? radius : 20)));
+  }));
 
 export default router;

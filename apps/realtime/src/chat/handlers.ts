@@ -108,9 +108,79 @@ export function registerChatHandlers(
         // Sending is the strongest possible signal that you are not typing.
         await clearTyping(p.conversationId);
         await fanOutMessage(io, p.conversationId, result);
+
+        // The socket is the normal send path, so it is the path that has to
+        // raise notifications. Fail-soft: a notification that did not fire is a
+        // missed buzz, whereas throwing here would lose a delivered message.
+        await chat.notifyNewMessage(result.message, {
+          conversationName: membership.name ?? 'a conversation',
+          conversationType: membership.type,
+          mentionedUserIds: result.mentionedUserIds,
+          broadcast: result.broadcast,
+          senderMayBroadcast: chat.canManage(membership.role),
+        }).catch(() => {});
       }
     } catch (err) {
       ack?.({ ok: false, error: err instanceof ChatError ? err.message : 'Message could not be sent.' });
+    }
+  });
+
+  /* ── Reactions, edits, deletions ──────────────────────────────────────── */
+
+  socket.on('message:react', async (p, ack) => {
+    try {
+      await chat.requireMembership(user.id, p.conversationId);
+      const { reactions } = await chat.toggleReaction(
+        user.id, p.conversationId, p.messageId, p.emoji,
+      );
+      ack?.({ ok: true, reactions });
+      // Everyone in the room, including the reactor: their own optimistic pill
+      // is replaced by the authoritative counts rather than added to them.
+      io.to(conversationRoom(p.conversationId)).emit('message:reaction', {
+        conversationId: p.conversationId, messageId: p.messageId, reactions,
+      });
+    } catch (err) {
+      ack?.({ ok: false, error: err instanceof ChatError ? err.message : 'Could not react.' });
+    }
+  });
+
+  socket.on('message:edit', async (p, ack) => {
+    try {
+      const membership = await chat.requireMembership(user.id, p.conversationId);
+      const { message, newlyMentioned } = await chat.editMessage(
+        user.id, p.conversationId, p.messageId, p.body,
+      );
+      ack?.({ ok: true, message });
+      io.to(conversationRoom(p.conversationId)).emit('message:updated', {
+        conversationId: p.conversationId, message,
+      });
+      if (newlyMentioned.length) {
+        await chat.notifyMention(message, newlyMentioned, membership.name ?? 'a conversation')
+          .catch(() => {});
+      }
+    } catch (err) {
+      ack?.({ ok: false, error: err instanceof ChatError ? err.message : 'Could not edit.' });
+    }
+  });
+
+  socket.on('message:delete', async (p, ack) => {
+    try {
+      const membership = await chat.requireMembership(user.id, p.conversationId);
+      // The socket handshake carries no platform permissions — only the JWT's
+      // claims — so moderation here rests on the channel role. A holder of
+      // MESSAGE_DELETE_ANY who is not a channel moderator uses the REST route,
+      // which can see the full permission set.
+      const result = await chat.deleteMessage(user.id, p.conversationId, p.messageId, {
+        memberRole: membership.role,
+      });
+      ack?.({ ok: true });
+      io.to(conversationRoom(p.conversationId)).emit('message:deleted', {
+        conversationId: p.conversationId, messageId: p.messageId,
+        deletedBy: user.id, byModerator: result.byModerator,
+      });
+      await pushUnread(io, p.conversationId);
+    } catch (err) {
+      ack?.({ ok: false, error: err instanceof ChatError ? err.message : 'Could not delete.' });
     }
   });
 
@@ -226,12 +296,50 @@ export async function fanOutMessage(
   io.to(conversationRoom(conversationId)).emit('message:new', {
     conversationId, message: result.message,
   });
+  await pushUnread(io, conversationId, result.message.senderId);
+}
 
+/**
+ * Tell the people who display this person's presence that it changed.
+ *
+ * Addressed to the `user:` room of each DM counterpart rather than broadcast:
+ * presence is rendered against DM rows and nowhere else, so a wider fan-out
+ * would be a packet per channel member per tab switch, delivered to a UI with
+ * nowhere to put it.
+ */
+export async function broadcastPresence(
+  io: ChatServer, userId: string, status: string,
+): Promise<void> {
+  try {
+    const peers = await chat.dmPeerIdsOf(userId);
+    if (!peers.length) return;
+    const at = new Date().toISOString();
+    for (const peerId of peers) {
+      io.to(userRoom(peerId)).emit('presence:update', {
+        userId, status: status as never, at,
+      });
+    }
+  } catch {
+    // Presence is decoration. It must never take a connection down with it.
+  }
+}
+
+/**
+ * Send every member their own current counters.
+ *
+ * Called after anything that changes the arithmetic — a new message, a
+ * deletion. Per-user because the numbers differ per user, and to the `user:`
+ * room because the people who most need it are the ones without the
+ * conversation open.
+ */
+async function pushUnread(
+  io: ChatServer, conversationId: string, exceptUserId?: string,
+): Promise<void> {
   const members = await chat.memberIdsOf(conversationId);
-  const others = members.filter((id) => id !== result.message.senderId);
-  if (!others.length) return;
+  const targets = exceptUserId ? members.filter((id) => id !== exceptUserId) : members;
+  if (!targets.length) return;
 
-  const counts = await chat.unreadFor(others, conversationId);
+  const counts = await chat.unreadFor(targets, conversationId);
   for (const [userId, c] of Object.entries(counts)) {
     io.to(userRoom(userId)).emit('conversation:unread', {
       conversationId, unread: c.unread, unreadMentions: c.unreadMentions,
