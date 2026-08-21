@@ -1,0 +1,107 @@
+name: Deploy Tupo to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Two deploys writing the same directory would race on npm ci and pm2 reload.
+# Queue them instead, and never cancel one midway — a half-rsynced tree is a
+# broken deployment, not a skipped one.
+concurrency:
+  group: deploy-tupo
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This repository is PRIVATE and the EC2 host holds no GitHub credential,
+      # so the host cannot `git pull` the way the public nga-task-mentor repo
+      # does. The runner — which is already authenticated for this checkout —
+      # pushes the tree over rsync instead. That also keeps deploy keys off the
+      # shared box entirely.
+      - name: Authorise SSH to the host
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync source to the host
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        # --delete keeps the host from accumulating files deleted in git, but
+        # everything --exclude'd is protected from that deletion too. Those
+        # exclusions are load-bearing:
+        #   .env            per-host credentials, generated on the box, never in git
+        #   node_modules    reinstalled below; rsyncing it would be enormous
+        #   apps/files/storage  user uploads under the local storage driver
+        #   dist            rebuilt below
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes" \
+            --exclude '.git' \
+            --exclude 'node_modules' \
+            --exclude '.env' \
+            --exclude 'apps/files/storage' \
+            --exclude 'dist' \
+            --exclude '.meet-ui-shots' \
+            --exclude '.chat-ui-shots' \
+            ./ "$EC2_USER@$EC2_HOST:/opt/apps/nga-communication-module/"
+
+      - name: Build, migrate and reload
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" 'bash -euo pipefail -s' <<'REMOTE'
+            cd /opt/apps/nga-communication-module
+
+            npm ci --no-audit --no-fund
+
+            # NOTE: deliberately no `npm prune --omit=dev`. Unlike the MIS and
+            # TaskMentor, Tupo needs devDependencies at deploy time — vite
+            # builds the web bundle and the migration runner is tsx. Pruning
+            # here is what breaks `npm run db:migrate` on the MIS box.
+            npm run build
+
+            # Migrations are idempotent (each file is recorded once applied),
+            # so running them on every deploy is safe and means a schema change
+            # never has to be remembered as a manual step.
+            npm run db:migrate
+
+            # reload, not restart: pm2 replaces the processes without dropping
+            # the listening socket, so an in-flight request is not killed.
+            pm2 reload ecosystem.config.cjs --update-env
+            pm2 save
+          REMOTE
+
+      - name: Verify the deployment is serving
+        run: |
+          set -e
+          # pm2 has only just replaced the processes, so poll rather than
+          # sampling once — a single probe would report a restart as an outage.
+          for probe in api realtime files worker; do
+            for attempt in $(seq 1 10); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+                "https://tupo.amashuri.com/svc/$probe/health" || echo 000)
+              [ "$code" = "200" ] && break
+              sleep 3
+            done
+            echo "$probe -> HTTP $code"
+            [ "$code" = "200" ] || { echo "::error::$probe is not healthy after deploy"; exit 1; }
+          done
+          # The realtime gateway answers on its own hostname, so a failure that
+          # only affects that vhost cannot hide behind the API being up.
+          curl -sf --max-time 20 \
+            "https://tupo-live.amashuri.com/socket.io/?EIO=4&transport=polling" > /dev/null \
+            || { echo "::error::realtime gateway did not complete a handshake"; exit 1; }
+          echo "All services healthy."

@@ -1917,3 +1917,117 @@ export async function messageContext(
 
   return { messages, target, hasMore: seq - span > 1 };
 }
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Per-user chat preferences  (FR-USR-8)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface ChatPrefs {
+  readReceipts: boolean;
+  enterToSend: boolean;
+  desktopNotifications: boolean;
+  sound: boolean;
+  defaultLevel: NotificationLevel;
+  /** Local minutes from midnight. Null on either side means no quiet hours. */
+  quietFromMinute: number | null;
+  quietToMinute: number | null;
+  timezone: string | null;
+  showPresence: boolean;
+}
+
+const DEFAULT_PREFS: ChatPrefs = {
+  readReceipts: true,
+  enterToSend: true,
+  desktopNotifications: true,
+  sound: true,
+  defaultLevel: 'all',
+  quietFromMinute: null,
+  quietToMinute: null,
+  timezone: null,
+  showPresence: true,
+};
+
+export async function getPrefs(userId: string): Promise<ChatPrefs> {
+  const { rows } = await getPool().query<{
+    read_receipts: boolean; enter_to_send: boolean; desktop_notifications: boolean;
+    sound: boolean; default_level: NotificationLevel;
+    quiet_from_minute: number | null; quiet_to_minute: number | null;
+    timezone: string | null; show_presence: boolean;
+  }>('SELECT * FROM user_chat_prefs WHERE user_id = $1', [userId]);
+
+  const r = rows[0];
+  // Absent means default, not missing. A user who has never opened settings has
+  // preferences; they are simply the ones nobody changed.
+  if (!r) return { ...DEFAULT_PREFS };
+
+  return {
+    readReceipts: r.read_receipts,
+    enterToSend: r.enter_to_send,
+    desktopNotifications: r.desktop_notifications,
+    sound: r.sound,
+    defaultLevel: r.default_level,
+    quietFromMinute: r.quiet_from_minute,
+    quietToMinute: r.quiet_to_minute,
+    timezone: r.timezone,
+    showPresence: r.show_presence,
+  };
+}
+
+export async function setPrefs(
+  userId: string, patch: Partial<ChatPrefs>,
+): Promise<ChatPrefs> {
+  const current = await getPrefs(userId);
+  const next = { ...current, ...patch };
+
+  // Quiet hours are stored as minutes-from-midnight rather than a UTC range so
+  // a change of timezone does not silently move somebody's evening.
+  const minute = (v: number | null | undefined) =>
+    (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1440) ? Math.floor(v) : null;
+
+  await getPool().query(
+    `INSERT INTO user_chat_prefs
+       (user_id, read_receipts, enter_to_send, desktop_notifications, sound,
+        default_level, quiet_from_minute, quiet_to_minute, timezone, show_presence, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+     ON CONFLICT (user_id) DO UPDATE SET
+       read_receipts = EXCLUDED.read_receipts,
+       enter_to_send = EXCLUDED.enter_to_send,
+       desktop_notifications = EXCLUDED.desktop_notifications,
+       sound = EXCLUDED.sound,
+       default_level = EXCLUDED.default_level,
+       quiet_from_minute = EXCLUDED.quiet_from_minute,
+       quiet_to_minute = EXCLUDED.quiet_to_minute,
+       timezone = EXCLUDED.timezone,
+       show_presence = EXCLUDED.show_presence,
+       updated_at = now()`,
+    [userId, next.readReceipts, next.enterToSend, next.desktopNotifications, next.sound,
+     NOTIFICATION_LEVELS_SET.has(next.defaultLevel) ? next.defaultLevel : 'all',
+     minute(next.quietFromMinute), minute(next.quietToMinute),
+     next.timezone ?? null, next.showPresence],
+  );
+
+  return getPrefs(userId);
+}
+
+const NOTIFICATION_LEVELS_SET = new Set<string>(['all', 'mentions', 'none']);
+
+/**
+ * Is this moment inside the user's quiet hours?
+ *
+ * Evaluated against local minutes, and it wraps: 22:00 → 07:00 is a range that
+ * crosses midnight, which is what quiet hours almost always are. Getting the
+ * wrap wrong means the setting works only for people who sleep during the
+ * afternoon.
+ *
+ * This suppresses the *interruption*, never the record. The notification row is
+ * written either way, so it is waiting in the morning.
+ */
+export function inQuietHours(prefs: ChatPrefs, now = new Date()): boolean {
+  const { quietFromMinute: from, quietToMinute: to } = prefs;
+  if (from === null || to === null || from === to) return false;
+
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  return from < to
+    ? minutes >= from && minutes < to
+    : minutes >= from || minutes < to;
+}

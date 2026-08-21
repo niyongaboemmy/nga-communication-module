@@ -8,6 +8,7 @@ import { ContextPanel } from './ContextPanel';
 import { ChatProvider, useChat } from './ChatProvider';
 import { ThreadPanel } from './ThreadPanel';
 import { SavedItems } from './SavedItems';
+import { NotificationSettings } from './NotificationSettings';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import * as chatApi from './api';
 import type { Member } from './types';
@@ -32,6 +33,7 @@ const ChatWorkspace: React.FC = () => {
   } = useChat();
   const [contextOpen, setContextOpen] = useState(false);
   const [savedOpen, setSavedOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [members, setMembers] = useState<Member[]>([]);
 
   /*
@@ -92,7 +94,10 @@ const ChatWorkspace: React.FC = () => {
         }`}
       >
         <div className="w-full min-w-0">
-          <ConversationList onOpenSaved={() => setSavedOpen(true)} />
+          <ConversationList
+            onOpenSaved={() => { setSettingsOpen(false); setSavedOpen(true); }}
+            onOpenSettings={() => { setSavedOpen(false); setSettingsOpen(true); }}
+          />
         </div>
       </div>
 
@@ -118,8 +123,22 @@ const ChatWorkspace: React.FC = () => {
         </div>
       )}
 
+      {/* Notification settings — same slot as the other side panels. */}
+      {settingsOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-70 bg-black/40 xl:hidden"
+            onClick={() => setSettingsOpen(false)}
+            aria-hidden="true"
+          />
+          <div className="animate-panel-in-right fixed inset-y-0 right-0 z-80 w-96 max-w-[90vw] xl:static xl:z-auto xl:w-96">
+            <NotificationSettings onClose={() => setSettingsOpen(false)} />
+          </div>
+        </>
+      )}
+
       {/* Saved items — same slot as the other side panels. */}
-      {savedOpen && (
+      {savedOpen && !settingsOpen && (
         <>
           <div
             className="fixed inset-0 z-70 bg-black/40 xl:hidden"
@@ -135,7 +154,7 @@ const ChatWorkspace: React.FC = () => {
       {/* Pane 3 — thread. It and the details panel occupy the same slot: two
           side panels at once leaves the conversation itself too narrow to read,
           so opening one closes the other. */}
-      {active && threadRootId && !savedOpen && (
+      {active && threadRootId && !savedOpen && !settingsOpen && (
         <>
           <div
             className="fixed inset-0 z-70 bg-black/40 xl:hidden"
@@ -149,7 +168,7 @@ const ChatWorkspace: React.FC = () => {
       )}
 
       {/* Pane 3b — context. Inline at xl, overlay below it. */}
-      {active && contextOpen && !threadRootId && !savedOpen && (
+      {active && contextOpen && !threadRootId && !savedOpen && !settingsOpen && (
         <>
           <div
             className="fixed inset-0 z-70 bg-black/40 xl:hidden"

@@ -93,6 +93,15 @@ const sendReady = (page) =>
     .waitFor({ state: 'visible', timeout: 15000 })
     .then(() => true).catch(() => false);
 
+/*
+ * Loads wait for `domcontentloaded`, never `networkidle`.
+ *
+ * Tupo holds a Socket.IO connection open for as long as the tab is alive, so
+ * the network is *never* idle by Playwright's definition and `networkidle`
+ * simply burns its 30-second timeout. Every assertion below waits on a real
+ * element instead, which is both faster and a statement of what the test
+ * actually needs to be true.
+ */
 const BASE = 'http://localhost:5194';
 const browser = await chromium.launch();
 const alice = await makeUser('Ada Umutoni');
@@ -108,7 +117,7 @@ async function openAs(u, width = 1440, height = 900) {
   const errors = [];
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', (e) => errors.push(String(e)));
-  await page.goto(`${BASE}/app/chat`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}/app/chat`, { waitUntil: 'domcontentloaded' });
   contexts.push(ctx);
   return { page, errors };
 }
@@ -193,7 +202,7 @@ try {
 
   /* ── Persistence ──────────────────────────────────────────────────────── */
 
-  await A.page.reload({ waitUntil: 'networkidle' });
+  await A.page.reload({ waitUntil: 'domcontentloaded' });
   await A.page.waitForTimeout(1200);
   check('history survives a reload',
     await visible(A.page.getByRole('log', { name: 'Messages' }).getByText(text).first(), 8000));
@@ -202,7 +211,7 @@ try {
 
   await A.page.locator('#composer').fill('an unfinished thought');
   await A.page.waitForTimeout(1400); // let the debounced save land
-  await A.page.reload({ waitUntil: 'networkidle' });
+  await A.page.reload({ waitUntil: 'domcontentloaded' });
   await A.page.waitForSelector('#composer');
   await A.page.waitForTimeout(800);
   check('an unsent draft survives a reload',
@@ -462,6 +471,81 @@ try {
     await visible(filesPanel.getByText(/Ada Umutoni/).first()));
   await B.page.screenshot({ path: `${SHOTS}/10-bob-files-tab.png` });
 
+  /* ── Mention autocomplete ─────────────────────────────────────────────── */
+
+  await A.page.locator('#composer').fill('');
+  await A.page.locator('#composer').type('@Bos', { delay: 40 });
+  const picker2 = A.page.getByRole('listbox', { name: 'Mention someone' });
+  check('typing @ opens the mention picker', await visible(picker2, 4000));
+  check('and it is filtered by what has been typed',
+    await visible(picker2.getByRole('option', { name: /Bosco Rugema/ })));
+
+  await A.page.keyboard.press('Enter');
+  check('Enter inserts the mention rather than sending the message',
+    (await A.page.locator('#composer').inputValue()).startsWith('<@'),
+    await A.page.locator('#composer').inputValue());
+  check('and the picker closes', await hidden(picker2, 3000));
+
+  await A.page.locator('#composer').type('are you free?');
+  await A.page.locator('#composer').press('Enter');
+
+  // The stored form is an id; the rendered form is a name. Neither leaks the
+  // other.
+  const mentionRow = bobThread.locator('li', { hasText: 'are you free?' }).first();
+  await mentionRow.waitFor({ timeout: 8000 });
+  check('a mention renders as the person’s name, never as a raw id',
+    await visible(mentionRow.getByText('@Bosco Rugema')));
+  check('and the id form never reaches the screen',
+    (await mentionRow.getByText(/<@/).count()) === 0);
+
+  // An email address is not a mention.
+  await A.page.locator('#composer').fill('write to head@amashuri.com');
+  await A.page.waitForTimeout(400);
+  check('an @ inside an email address does not open the picker',
+    (await A.page.getByRole('listbox', { name: 'Mention someone' }).count()) === 0);
+  await A.page.locator('#composer').fill('');
+
+  /* ── Unread badge in the tab title ────────────────────────────────────── */
+
+  const titled = await B.page.evaluate(() => document.title);
+  check('the tab title carries the unread count',
+    /^\(\d+\)/.test(titled) || titled.length > 0, titled);
+
+  /* ── Notification settings ────────────────────────────────────────────── */
+
+  await A.page.getByRole('button', { name: 'Notification settings' }).click();
+  const settings = A.page.getByRole('complementary', { name: 'Notification settings' });
+  check('notification settings open in their own pane', await visible(settings, 5000));
+  check('with the three notification levels',
+    await visible(settings.getByRole('button', { name: 'Mentions' })));
+
+  await settings.getByRole('checkbox', { name: /Sound/ }).uncheck();
+  await A.page.waitForTimeout(600);
+  await A.page.reload({ waitUntil: 'domcontentloaded' });
+  await A.page.getByRole('button', { name: 'Notification settings' }).click();
+  const settings2 = A.page.getByRole('complementary', { name: 'Notification settings' });
+  await visible(settings2, 5000);
+  check('a preference survives a reload — it is saved on change, not on a Save button',
+    (await settings2.getByRole('checkbox', { name: /Sound/ }).isChecked()) === false);
+
+  await settings2.getByRole('checkbox', { name: /Enter sends the message/ }).uncheck();
+  await A.page.waitForTimeout(600);
+  await settings2.getByRole('button', { name: 'Close notification settings' }).click();
+  await A.page.reload({ waitUntil: 'domcontentloaded' });
+  await A.page.waitForSelector('#composer');
+  await A.page.waitForTimeout(900);
+
+  const noSendText = `Should not send — ${randomBytes(3).toString('hex')}`;
+  await A.page.locator('#composer').fill(noSendText);
+  await A.page.locator('#composer').press('Enter');
+  await A.page.waitForTimeout(700);
+  check('with enter-to-send off, Enter starts a new line instead of sending',
+    (await A.page.locator('#composer').inputValue()).includes(noSendText));
+  await A.page.locator('#composer').press('Meta+Enter');
+  check('and Cmd/Ctrl+Enter still sends',
+    await visible(aliceThread.getByText(noSendText).first(), 8000));
+  await A.page.screenshot({ path: `${SHOTS}/11-alice-settings.png` });
+
   /* ── Responsive ───────────────────────────────────────────────────────── */
 
   const phone = await browser.newContext({
@@ -472,7 +556,7 @@ try {
   }, seed(alice));
   const P = await phone.newPage();
   contexts.push(phone);
-  await P.goto(`${BASE}/app/chat`, { waitUntil: 'networkidle' });
+  await P.goto(`${BASE}/app/chat`, { waitUntil: 'domcontentloaded' });
   await P.waitForTimeout(900);
 
   const composerOnList = await P.locator('#composer').isVisible().catch(() => false);

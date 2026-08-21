@@ -9,6 +9,10 @@ import { MAX_MESSAGE_LENGTH } from '@tupo/shared';
 import { useChat } from './ChatProvider';
 import { EmojiPicker, rememberEmoji } from './EmojiPicker';
 import { useUploads, MAX_ATTACHMENTS } from './useUploads';
+import { MentionAutocomplete, findMentionQuery } from './MentionAutocomplete';
+import type { MentionQuery } from './MentionAutocomplete';
+import * as chatApi from './api';
+import type { WireMember } from '@tupo/shared';
 import { VoiceRecorder, canRecordVoice } from './VoiceRecorder';
 import { formatBytes } from './data';
 import type { Conversation } from './types';
@@ -33,6 +37,7 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
   const { can } = usePermissions();
   const {
     send, notifyTyping, draftFor, setDraft, connected, queued, replyTarget, setReplyTarget,
+    enterToSend,
   } = useChat();
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -41,6 +46,8 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [recording, setRecording] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [mention, setMention] = useState<MentionQuery | null>(null);
+  const [members, setMembers] = useState<WireMember[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const tray = useUploads();
 
@@ -67,6 +74,42 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
         || can('CHANNEL_ANNOUNCE')
         || conversation.myRole === 'owner'
         || conversation.myRole === 'admin');
+
+  /*
+   * The member list backs the @ picker.
+   *
+   * Fetched once per conversation rather than per keystroke: a channel's
+   * membership does not change while someone is typing a name, and a request
+   * per character would be a request per character.
+   */
+  useEffect(() => {
+    if (!can('MESSAGE_SEND')) return;
+    let cancelled = false;
+    chatApi.listMembers(conversation.id)
+      .then((rows) => { if (!cancelled) setMembers(rows); })
+      .catch(() => { if (!cancelled) setMembers([]); });
+    return () => { cancelled = true; };
+  }, [conversation.id, can]);
+
+  /** Re-evaluate whether the caret sits inside an `@…` token. */
+  const syncMention = useCallback((text: string, caret: number) => {
+    setMention(findMentionQuery(text, caret));
+  }, []);
+
+  /** Replace the `@…` token under the caret with the chosen mention. */
+  const applyMention = useCallback((replacement: string) => {
+    if (!mention) return;
+    const el = ref.current;
+    const caret = el?.selectionStart ?? value.length;
+    const next = value.slice(0, mention.start) + replacement + value.slice(caret);
+    setDraft(conversation.id, next);
+    setMention(null);
+    requestAnimationFrame(() => {
+      el?.focus();
+      const pos = mention.start + replacement.length;
+      el?.setSelectionRange(pos, pos);
+    });
+  }, [mention, value, conversation.id, setDraft]);
 
   /**
    * Insert at the caret, not at the end.
@@ -110,7 +153,19 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
       setReplyTarget(null);
       return;
     }
-    if (e.key === 'Enter' && !e.shiftKey && !touch) {
+    /*
+     * Enter sends on a pointer device, unless the user has said otherwise.
+     *
+     * On touch it never sends: there is no Shift key on a phone keyboard, so
+     * Enter has to be the only way to start a new line and the button has to be
+     * the only way to send.
+     */
+    if (e.key === 'Enter' && !e.shiftKey && !touch && enterToSend) {
+      e.preventDefault();
+      submit();
+    }
+    // With enter-to-send off, ⌘/Ctrl+Enter is still the fast path.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       submit();
     }
@@ -292,7 +347,7 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
       )}
 
       <div
-        className={`flex items-end gap-1.5 rounded-2xl border bg-surface-light px-1.5 py-1.5 transition-colors duration-150 focus-within:bg-white focus-within:ring-2 dark:bg-elevated-dark/60 dark:focus-within:bg-elevated-dark ${
+        className={`relative flex items-end gap-1.5 rounded-2xl border bg-surface-light px-1.5 py-1.5 transition-colors duration-150 focus-within:bg-white focus-within:ring-2 dark:bg-elevated-dark/60 dark:focus-within:bg-elevated-dark ${
           over
             ? 'border-red-400 focus-within:border-red-500 focus-within:ring-red-500/20'
             : 'border-border-light focus-within:border-blue-500 focus-within:ring-blue-500/20 dark:border-border-dark/50'
@@ -327,10 +382,22 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
           value={value}
           onChange={(e) => {
             setDraft(conversation.id, e.target.value);
+            syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
             // Throttled inside the provider — one event per keystroke would be
             // thousands of packets for a fact that is true for six seconds.
             if (e.target.value) notifyTyping();
           }}
+          onKeyUp={(e) => {
+            // Arrow keys and clicks move the caret without changing the text,
+            // and the picker has to follow it out of the token.
+            const el = e.currentTarget;
+            syncMention(el.value, el.selectionStart ?? el.value.length);
+          }}
+          onClick={(e) => {
+            const el = e.currentTarget;
+            syncMention(el.value, el.selectionStart ?? el.value.length);
+          }}
+          onBlur={() => setMention(null)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           placeholder={
@@ -341,7 +408,17 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
           className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-1 py-2 text-sm leading-relaxed text-text-primary-light outline-none placeholder:text-text-secondary-light/80 dark:text-text-primary-dark dark:placeholder:text-text-secondary-dark/70"
         />
 
-        <IconButton label="Mention someone" className="hidden sm:grid">
+        <IconButton
+          label="Mention someone"
+          className="hidden sm:grid"
+          onClick={() => {
+            insertAtCaret('@');
+            requestAnimationFrame(() => {
+              const el = ref.current;
+              if (el) syncMention(el.value, el.selectionStart ?? el.value.length);
+            });
+          }}
+        >
           <AtSign size={18} />
         </IconButton>
         <div className="relative">
@@ -360,6 +437,16 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
             />
           )}
         </div>
+
+        {mention && (
+          <MentionAutocomplete
+            members={members}
+            query={mention}
+            onPick={applyMention}
+            onDismiss={() => setMention(null)}
+            allowBroadcast={conversation.type !== 'dm'}
+          />
+        )}
 
         {/* Send swaps to a mic when there is nothing to send — the button slot
             never sits there disabled and dead. */}
@@ -382,8 +469,17 @@ export const Composer: React.FC<{ conversation: Conversation }> = ({ conversatio
 
       <div className="mt-1 flex items-center justify-between gap-2 px-2">
         <p className="hidden text-[11px] text-text-secondary-light/80 md:block dark:text-text-secondary-dark/70">
-          <kbd className="font-sans font-semibold">Enter</kbd> to send ·{' '}
-          <kbd className="font-sans font-semibold">Shift + Enter</kbd> for a new line
+          {enterToSend ? (
+            <>
+              <kbd className="font-sans font-semibold">Enter</kbd> to send ·{' '}
+              <kbd className="font-sans font-semibold">Shift + Enter</kbd> for a new line
+            </>
+          ) : (
+            <>
+              <kbd className="font-sans font-semibold">⌘/Ctrl + Enter</kbd> to send ·{' '}
+              <kbd className="font-sans font-semibold">Enter</kbd> for a new line
+            </>
+          )}
         </p>
         {/* Offline is stated plainly, with the promise the outbox actually
             keeps: it will go, in order, when the connection returns. Saying

@@ -446,6 +446,18 @@ router.post('/conversations/:id/messages/:messageId/reactions', wrap(async (req,
   emitToConversation(id, 'message:reaction', {
     conversationId: id, messageId, reactions: result.reactions,
   });
+
+  // Only on adding one. Un-reacting is not an event anyone needs telling about,
+  // and notifying on both halves of a toggle would double every mis-click.
+  if (result.added) {
+    const message = await chat.getMessage(me.id, id, messageId);
+    if (message) {
+      await chat.notifyReaction(
+        id, message, me.id, me.name, String(req.body?.emoji ?? ''),
+      ).catch(() => {});
+    }
+  }
+
   res.json(ok(result));
 }));
 
@@ -680,5 +692,49 @@ router.get('/conversations/:id/messages/:messageId/context',
     res.json(ok(await chat.messageContext(me.id, id, messageId,
       Number.isFinite(radius) ? radius : 20)));
   }));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Preferences and badges
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/prefs', wrap(async (req, res) => {
+  res.json(ok({ prefs: await chat.getPrefs(actor(req).id) }));
+}));
+
+router.patch('/prefs', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, res) => {
+  const me = actor(req);
+  const body = req.body ?? {};
+
+  // Whitelisted field by field. A settings endpoint that spreads the request
+  // body into an update is one typo away from being a way to set anything.
+  const patch: Parameters<typeof chat.setPrefs>[1] = {};
+  const bool = (k: string) => (typeof body[k] === 'boolean' ? body[k] as boolean : undefined);
+  const num = (k: string) => (typeof body[k] === 'number' || body[k] === null
+    ? body[k] as number | null : undefined);
+
+  if (bool('readReceipts') !== undefined) patch.readReceipts = bool('readReceipts');
+  if (bool('enterToSend') !== undefined) patch.enterToSend = bool('enterToSend');
+  if (bool('desktopNotifications') !== undefined) patch.desktopNotifications = bool('desktopNotifications');
+  if (bool('sound') !== undefined) patch.sound = bool('sound');
+  if (bool('showPresence') !== undefined) patch.showPresence = bool('showPresence');
+  if (num('quietFromMinute') !== undefined) patch.quietFromMinute = num('quietFromMinute');
+  if (num('quietToMinute') !== undefined) patch.quietToMinute = num('quietToMinute');
+  if (typeof body.timezone === 'string') patch.timezone = body.timezone.slice(0, 64);
+  if (NOTIFICATION_LEVELS.includes(body.defaultLevel)) {
+    patch.defaultLevel = body.defaultLevel as NotificationLevel;
+  }
+
+  res.json(ok({ prefs: await chat.setPrefs(me.id, patch) }));
+}));
+
+/**
+ * The badge on the Chat icon in the rail.
+ *
+ * One number for the whole module, so the shell does not have to load every
+ * conversation to know whether to show a dot.
+ */
+router.get('/unread', wrap(async (req, res) => {
+  res.json(ok(await chat.totalUnread(actor(req).id)));
+}));
 
 export default router;

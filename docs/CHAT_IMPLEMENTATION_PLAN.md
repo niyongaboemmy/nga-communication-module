@@ -549,3 +549,56 @@ another.
 One more test-side lesson: send is deliberately disabled while an attachment is
 uploading, so pressing Enter immediately after choosing a file is a no-op. The
 gate now waits for the same condition a person would.
+
+---
+
+## 12. Phase 5 — delivered
+
+**Gate: 28/28 notification checks (green first run), 73/73 browser checks, and
+51 + 43 + 35 + 42 on the earlier phases with no regression. 9/9 workspaces
+typecheck and build, `npm audit` 0.**
+
+```
+npm run verify:chat:notifications   # 28 — mentions, broadcasts, reactions, prefs, quiet hours
+npm run verify:chat:ui              # 73 — two real browsers
+```
+
+### What was built
+
+| Area | Delivered |
+|---|---|
+| Mention autocomplete | `@` picker over live membership, keyboard-first (↑↓ / Enter / Tab / Esc), `@here` and `@channel` offered only to people who may actually use them |
+| Mention storage | `<@id>` on the wire, resolved to a name at render — a name change leaves no stale copies |
+| Reaction notifications | Author only, never for your own, never on un-reacting, and never piercing "mentions only" |
+| Delivery | `ChatNotificationBridge` above the router: toast, sound, system notification, tab-title count |
+| Preferences | Level, desktop, sound, quiet hours, read receipts, presence, enter-to-send — saved on change |
+| Quiet hours | Local minutes-from-midnight, wrapping midnight correctly |
+| Badges | One `/api/chat/unread` number for the rail; conversations set to "nothing" excluded |
+
+### Two decisions worth recording
+
+**The bridge lives above the router.** A notification whose entire purpose is to
+reach you while you are elsewhere cannot be mounted inside the module it is
+about. Mounted in `/app/chat` it would fire only for people already reading
+their messages.
+
+**Quiet hours suppress the interruption, never the record.** The row is written
+either way, counts towards the badge either way, and is waiting in the morning.
+Only the sound and the desktop notification are withheld. The gate asserts
+exactly this: a message sent during quiet hours still produces a notification
+row and still moves the badge.
+
+**A settings write is whitelisted field by field.** Not spread. The gate posts
+`{ role: 'admin', user_id: <someone else> }` at the endpoint and then asserts
+the user's role is untouched — a settings route that spreads its body is one
+typo from being a privilege-escalation path.
+
+### Defects found this phase
+
+| Defect | Cause | Fix |
+|---|---|---|
+| The browser gate's page loads timed out after this phase | Every load used `waitUntil: 'networkidle'`, and Tupo holds a Socket.IO connection open for the life of the tab — the network is never idle, so each reload burned its full 30-second timeout | All loads switched to `domcontentloaded` plus an explicit wait on a real element. Confirmed with a request probe that there was no runaway-request loop first, rather than assuming |
+
+`networkidle` had worked by luck up to Phase 4, when the socket happened to
+connect after the load settled. It is the wrong condition for any application
+with a persistent connection, and it fails intermittently rather than honestly.

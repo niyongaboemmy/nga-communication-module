@@ -35,7 +35,8 @@
     "verify:chat:ui": "node scripts/verify-chat-ui.mjs",
     "verify:chat:live": "node scripts/verify-chat-live.mjs",
     "verify:chat:threads": "node scripts/verify-chat-threads.mjs",
-    "verify:chat:files": "node scripts/verify-chat-files.mjs"
+    "verify:chat:files": "node scripts/verify-chat-files.mjs",
+    "verify:chat:notifications": "node scripts/verify-chat-notifications.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

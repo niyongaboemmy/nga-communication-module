@@ -168,3 +168,49 @@ function previewFor(m: WireMessage): string {
   if (m.attachments.length > 1) return `📎 ${m.attachments.length} attachments`;
   return 'Sent a message';
 }
+
+/**
+ * Someone reacted to something you wrote.
+ *
+ * Deliberately the quietest notification in the system, and the only one with
+ * no "all / mentions / none" reading that makes it loud:
+ *
+ *  - Only the **author** of the message is told. A reaction is a reply to one
+ *    person, not an event in the room.
+ *  - Never for your own reaction to your own message.
+ *  - It respects `none` and a live mute like everything else, and it does not
+ *    pierce "mentions only" — a thumbs-up is not a mention, and treating it as
+ *    one is how a channel becomes unmutable.
+ *  - One row per message, so ten people reacting to the same post is one
+ *    notification with the latest name on it rather than ten.
+ */
+export async function notifyReaction(
+  conversationId: string,
+  message: { id: string; senderId: string },
+  reactorId: string,
+  reactorName: string,
+  emoji: string,
+): Promise<boolean> {
+  if (message.senderId === reactorId) return false;
+
+  const { rows } = await getPool().query<Recipient>(
+    `SELECT user_id, notification, muted_until
+       FROM conversation_members
+      WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+    [conversationId, message.senderId],
+  );
+  const author = rows[0];
+  if (!author) return false;
+  if (author.notification !== 'all') return false;
+  if (author.muted_until && new Date(author.muted_until).getTime() > Date.now()) return false;
+
+  await notifyAndPush([author.user_id], {
+    kind: 'chat.reaction',
+    title: `${reactorName} reacted ${emoji}`,
+    body: null,
+    link: `/app/chat/${conversationId}`,
+    subjectType: 'message',
+    subjectId: message.id,
+  });
+  return true;
+}

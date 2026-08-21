@@ -7,6 +7,7 @@ import type {
 import { TYPING_THROTTLE_MS } from '@tupo/shared';
 import { getSocket } from '../../lib/socket';
 import { useAuth } from '../../context/AuthContext';
+import { apiGet } from '../../lib/api';
 import * as chatApi from './api';
 import * as outbox from './outbox';
 
@@ -86,6 +87,8 @@ interface ChatValue {
   setNotificationLevel: (id: string, level: NotificationLevel) => Promise<void>;
 
   totalUnread: number;
+  /** Whether Enter sends, from the user's own preferences (FR-USR-8). */
+  enterToSend: boolean;
   refresh: () => Promise<void>;
 }
 
@@ -116,6 +119,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [threadMessages, setThreadMessages] = useState<WireMessage[]>([]);
   const [threadLoading, setThreadLoading] = useState(false);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [enterToSend, setEnterToSend] = useState(true);
 
   /* `activeId` is read inside socket handlers that are registered once. A ref
    * keeps them looking at the current value instead of the one captured when
@@ -154,6 +158,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => { if (user) void refresh(); }, [user, refresh]);
+
+  // One preference reaches this far: whether Enter sends. The rest are read by
+  // the notification bridge, which is where they are acted on.
+  useEffect(() => {
+    if (!user) return;
+    apiGet<{ prefs: { enterToSend: boolean } }>('/api/chat/prefs')
+      .then((r) => setEnterToSend(r.data!.prefs.enterToSend))
+      .catch(() => {});
+  }, [user]);
 
   /** Load the newest page whenever the open conversation changes. */
   useEffect(() => {
@@ -766,7 +779,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
     pin, save, forward, jumpTo, highlightedId,
     draftFor, setDraft, toggleStar, setNotificationLevel,
-    totalUnread, refresh,
+    totalUnread, refresh, enterToSend,
   };
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;

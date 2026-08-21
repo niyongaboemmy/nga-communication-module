@@ -5,6 +5,7 @@ import { MeetCallProvider } from './context/MeetCallContext';
 import { NotificationProvider } from './context/NotificationContext';
 import { MiniCall } from './components/meet/MiniCall';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ChatNotificationBridge } from './context/ChatNotificationBridge';
 import { usePermissions } from './hooks/usePermissions';
 import { SignIn } from './pages/SignIn';
 import { SsoCallback } from './pages/SsoCallback';
@@ -110,6 +111,13 @@ export const App: React.FC = () => (
             able to take the sidebar and the conversation down with it. */}
         <ErrorBoundary fallback={null}>
           <MiniCall />
+        </ErrorBoundary>
+
+        {/* Above <Routes> so a message reaches you while you are in Meet, Mail,
+            or anywhere else — a notification that only fires on the page it
+            came from is not a notification. */}
+        <ErrorBoundary fallback={null}>
+          <ChatNotificationBridge />
         </ErrorBoundary>
       </MeetCallProvider>
       </NotificationProvider>
