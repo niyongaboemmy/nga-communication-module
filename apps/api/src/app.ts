@@ -7,6 +7,9 @@ import healthRoutes from './routes/health.js';
 import rolesPermissionsRoutes from './routes/rolesPermissions.js';
 import usersRoutes from './routes/users.js';
 import auditRoutes from './routes/audit.js';
+import meetRoutes from './routes/meet.js';
+import notificationRoutes from './routes/notifications.js';
+import chatRoutes from './routes/chat.js';
 
 /**
  * The Express app with no side effects — no database init, no listen — so
@@ -30,6 +33,9 @@ app.use('/api/sso', ssoRoutes);
 app.use('/api/roles-permissions', rolesPermissionsRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/audit', auditRoutes);
+app.use('/api/meet', meetRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/chat', chatRoutes);
 
 app.use((_req, res) => res.status(404).json(fail('Not found')));
 

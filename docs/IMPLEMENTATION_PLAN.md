@@ -46,7 +46,7 @@ nga-communication-module/
 │   ├── db/                      # Drizzle schema + migrations + pool
 │   └── config/                  # shared tsconfig base
 ├── infra/
-│   ├── docker/docker-compose.yml    # postgres · redis · minio · meilisearch · livekit
+│   ├── docker/docker-compose.yml    # postgres · redis · minio · meilisearch
 │   └── nginx/tupo.conf              # modelled on deploy/nginx-tendo.conf
 └── docs/
     ├── TUPO_SRS.md
@@ -193,13 +193,15 @@ Delivered on top of the Phase 0 skeleton, modelled on `nga-discipline-attendance
 
 **Permissions are resolved from the database on every request, never read from the token.** A role change therefore lands on the user's very next request rather than at their next login — proven by an end-to-end test that demotes a live session and watches the same token go 200 → 403 → 200.
 
-### Catalog — 58 permissions in 12 categories
+### Catalog — 60 permissions in 12 categories
+
+*(58 at Phase 0.5; Phase 3 added `MEET_TRANSCRIBE` and `MEET_AI_USE`.)*
 
 | Category | Permissions | Category | Permissions |
 |---|---|---|---|
 | Messaging | 9 | Moderation & Safety | 4 |
 | Channels & Groups | 7 | Administration | 9 |
-| Meetings | 7 | Roles & Permissions | 2 |
+| Meetings | 9 | Roles & Permissions | 2 |
 | Files | 5 | Directory & Presence | 3 |
 | Feed & Posts | 5 | Notifications | 1 |
 | Mail | 5 | Account Settings | 1 |
@@ -212,9 +214,9 @@ Defined once in `packages/shared/src/permissions.ts` and seeded idempotently by 
 |---|---|---|---|
 | Student | STUDENT | 19 | **No `DM_START`.** A safeguarding default (SRS FR-USR-6), enforced by its own test so it cannot be silently changed. |
 | Parent | PARENT | 19 | May contact staff. |
-| Staff | STAFF | 34 | Runs channels, meetings, announcements. |
-| Moderator | STAFF | 38 | Adds the moderation queue, `MESSAGE_DELETE_ANY`, audit access. |
-| Admin | ADMIN | 58 | Everything. |
+| Staff | STAFF | 36 | Runs channels, meetings, announcements. |
+| Moderator | STAFF | 40 | Adds the moderation queue, `MESSAGE_DELETE_ANY`, audit access. |
+| Admin | ADMIN | 60 | Everything. |
 
 ### Enforcement
 
@@ -282,7 +284,7 @@ Driven by `npm run e2e` against the real MIS on :5001 — the genuine chain
 | Tupo exchanges the code and issues its own session | ✅ |
 | Tupo mirrors the MIS identity | ✅ |
 | Tupo derives an RBAC role from MIS permissions | ✅ Admin |
-| Tupo returns its own 58-permission set, not the MIS's 72 | ✅ |
+| Tupo returns its own 60-permission set, not the MIS's 72 | ✅ |
 | The MIS token is never exposed to the browser | ✅ |
 | Permissions actually gate the API | ✅ |
 | A replayed authorization code is rejected | ✅ 401 |

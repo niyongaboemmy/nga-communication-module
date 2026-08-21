@@ -144,7 +144,7 @@ Requirements below were derived from a structured review of the four reference p
 
 1. **Database.** PostgreSQL plus Redis is the proven default for chat at institutional scale; MongoDB adds nothing over it for message data (you lose joins and still need Redis for pub/sub), and ScyllaDB/Cassandra only pays for itself past the ~10⁸-messages-and-growing point that made Discord migrate. For a single-institution deployment on EC2, **PostgreSQL 17 with monthly partitioning on the messages table is the correct choice**, and it leaves a clean migration path if volumes ever justify a wide-column store.
 2. **Realtime transport.** Socket.IO with the Redis adapter is the fastest correct path — it gives rooms, namespaces, acknowledgements and automatic reconnection for free. Its known weakness is broadcast amplification: at very large fleets, instances discard most of the pub/sub traffic they receive. Tupo mitigates this from day one by **sharding pub/sub channels per conversation** rather than broadcasting globally, so growth does not require re-architecture.
-3. **Media server.** LiveKit (Go, built on Pion) now has the momentum and ships a complete platform — auth tokens, recording (Egress), server SDKs, adaptive simulcast — whereas mediasoup gives more control at the price of building all of that yourself. Published LiveKit benchmarks put a 16-core node at ~150 publishers/150 subscribers of 720p at 85% CPU. **Capacity scales with subscribed tracks, not rooms**, which is the number the sizing in §14 is based on.
+3. **Media server.** The self-hosted SFUs (LiveKit, mediasoup, Janus) were evaluated first and all carry the same cost: a stateful, UDP-heavy, publicly-addressed server that must be sized, monitored and scaled by hand — for one institution, the single heaviest operational item in the stack. **Cloudflare Realtime is selected instead**: the same SFU semantics reached over an HTTPS API, on Cloudflare's anycast network, with no server to run and the TURN service Tupo already uses sitting alongside it. **Capacity scales with subscribed tracks, not rooms** — which is why the demand-driven subscription in §5.3 is what actually sets the ceiling in §14, not the number of people in the meeting.
 4. **Encryption.** For group E2EE, MLS (RFC 9420) has superseded per-pair Double Ratchet fan-out: Signal's group handling is O(N) per membership change, while MLS's ratchet tree is O(log N), and it now has real production deployments. Tupo therefore does **not** build a bespoke group crypto scheme — v1 ships transport + at-rest encryption with server-side keys, and Phase 6 adopts an MLS library.
 5. **Files.** The correct pipeline is: client → presigned direct upload to object storage (never through the API process) → completion webhook → async worker for scanning, thumbnails and transcoding → signed short-lived delivery URL. `tus` is the standard for resumable uploads over poor connections, which matters on Rwandan mobile networks.
 6. **Search.** PostgreSQL full-text search cannot do typo tolerance well enough for user-facing message search. Meilisearch or Typesense both beat it decisively below ~50M documents at modest RAM cost. **Meilisearch is selected** for its lower operational surface.
@@ -241,8 +241,8 @@ Tupo is a **modular monorepo of small services**, not a distributed microservice
 | `tupo-realtime` | Node 22 + Socket.IO + TS | WebSocket gateway: connection registry, presence, live delivery, typing, receipts, signalling relay | Concurrent connections — horizontal |
 | `tupo-files` | Node 22 + Express + TS | Upload orchestration, presigned URLs, tus endpoint, metadata, quotas, signed delivery, previews | I/O + storage |
 | `tupo-worker` | Node 22 + BullMQ + TS | Async jobs: fan-out, notifications, mail send, virus scan, thumbnails, transcode, search indexing, retention sweeps | Queue depth |
-| `tupo-sfu` | LiveKit (Go binary) | WebRTC media routing, simulcast, recording egress | Subscribed tracks — vertical then horizontal |
-| `coturn` | C binary | STUN/TURN NAT traversal | Relayed bandwidth |
+| Cloudflare Realtime SFU | Managed (no deployment) | WebRTC media routing, simulcast | Subscribed tracks — absorbed by Cloudflare |
+| Cloudflare Realtime TURN | Managed (no deployment) | STUN/TURN NAT traversal | Relayed bandwidth |
 
 ### 4.2 Deployment topology
 
@@ -337,9 +337,18 @@ Chosen for built-in rooms, namespaces, acknowledgements, automatic reconnection 
 
 *Rejected:* raw `uWebSockets.js` (faster, but every feature above becomes bespoke code — revisit only if profiling proves Socket.IO is the bottleneck); managed Ably/Pusher (violates C-3 data-control constraint).
 
-### 5.3 Media — **LiveKit (SFU) + coturn**, with WebRTC signalling patterned on the TaskMentor proctoring module
+### 5.3 Media — **Cloudflare Realtime (SFU + TURN)**, with WebRTC signalling patterned on the TaskMentor proctoring module
 
-LiveKit is selected over mediasoup and Janus because it ships the whole platform — JWT-scoped room tokens, adaptive simulcast and dynacast, server SDKs, and **Egress** for composite recording — where mediasoup would require building token issuance, recording and client SDKs by hand, and Janus's C-plugin model fits SIP bridging rather than a greenfield product.
+Cloudflare Realtime is selected over the self-hosted SFUs (LiveKit, mediasoup, Janus). All four route media competently; the difference is what has to be operated. A self-hosted SFU is a stateful server on a public IP with a wide UDP range, sized against a CPU curve, scaled by hand and monitored as its own tier — for a single-institution deployment, the heaviest thing in the stack by some margin. Cloudflare Realtime offers the same primitives (sessions, published and pulled tracks, simulcast) behind an HTTPS API on an anycast network, with nothing to deploy, and the TURN service Tupo already borrows from TaskMentor's proctoring module is part of the same product.
+
+Two consequences follow, and both are load-bearing:
+
+- **The app secret never reaches the browser.** Cloudflare authenticates with one long-lived app secret, so every SFU call is proxied through `POST /api/meet/:id/sfu`, which authorises the caller against the meeting first and refuses a track name that does not belong to the calling participant.
+- **There is no server-side recording.** Cloudflare Realtime routes tracks; it does not composite them, and there is no Egress equivalent. Recording is therefore made in the host's browser — the stage drawn onto a canvas, all audio mixed through one `AudioContext`, `MediaRecorder` on top, uploaded to the file service under `meetings/<id>/`. Its limits are real and are stated in the UI: it captures what the host could see, and it stops if the host leaves.
+
+Capacity comes from **demand-driven subscription** rather than from the media server: a client pulls audio for everyone publishing but video only for the tiles actually on screen (25 or so), which is what makes a 500-person meeting a bounded amount of traffic per participant instead of a quadratic one.
+
+Where no media server is configured at all, Meet falls back to a peer-to-peer mesh capped at 4 participants, so the module works with no media infrastructure whatsoever.
 
 The **signalling and session-lifecycle patterns are lifted directly from TaskMentor's proctoring module**, which already proved this shape in production: a server-issued opaque session token, a WebSocket channel per session (`/api/proctoring/ws/session/:token`), typed events with severity, and a live monitoring dashboard fed by the same stream. Tupo reuses that model: `meet_sessions` ≙ `proctoring_sessions`, `meet_events` ≙ `proctoring_events`, and the host console is the analogue of the live proctoring dashboard.
 
@@ -361,7 +370,7 @@ Files never transit `tupo-api`. The client asks `tupo-files` for an upload ticke
 | Rich text | TipTap | Already in the NGA stack; mentions, code blocks, math |
 | Forms & validation | React Hook Form + Zod (schemas shared with backend) | One source of truth for contracts |
 | Offline | Dexie (IndexedDB) + Workbox service worker | Read history offline, queue outbound messages |
-| Media | `livekit-client` SDK | Matching the SFU |
+| Media | Browser `RTCPeerConnection` directly | Cloudflare Realtime is an HTTPS API, not an SDK; perfect negotiation is ~200 lines and adds no bundle weight |
 | Motion | Framer Motion | Already in the NGA stack |
 | i18n | `i18next` | English · Kinyarwanda · French |
 | Charts | Recharts | Admin analytics, consistent with MIS |
@@ -726,7 +735,7 @@ CREATE INDEX ON files (checksum, space_id);
 CREATE TABLE meetings (
   id               BIGINT PRIMARY KEY,
   conversation_id  BIGINT,                         -- NULL for standalone meetings
-  room_name        TEXT NOT NULL UNIQUE,           -- LiveKit room
+  room_name        TEXT NOT NULL UNIQUE,           -- media room identity
   join_code        TEXT NOT NULL UNIQUE,
   title            TEXT,
   host_id          BIGINT NOT NULL,
@@ -821,7 +830,7 @@ Files
 
 Meet
   POST   /meetings                           { conversation_id?, title, scheduled_start? }
-  GET    /meetings/:id                       POST /meetings/:id/token   → LiveKit JWT
+  GET    /meetings/:id                       POST /meetings/:id/token   → transport + SFU endpoint
   POST   /meetings/:id/admit                 { user_id }
   POST   /meetings/:id/recording/start|stop
   POST   /meetings/:id/end
@@ -909,11 +918,11 @@ Search / notifications / admin
 ```
    Participant A                Participant B                 Participant C
         │  (1) POST /meetings/:id/token                             │
-        └──────────────► tupo-api ── issues scoped LiveKit JWT ──────┘
+        └──────────────► tupo-api ── authorises, proxies to the SFU ──┘
                              │  (room, identity, canPublish, canSubscribe, TTL 4h)
                              ▼
    ┌───────────────────────────────────────────────────────────────┐
-   │                     tupo-sfu (LiveKit)                        │
+   │              Cloudflare Realtime SFU (managed)                │
    │  publish 1 stream ▲   forward N streams ▼  simulcast layers   │
    └───────────────────────────────────────────────────────────────┘
                  ▲                                  │
@@ -924,7 +933,7 @@ Search / notifications / admin
    lobby knocks, host commands, raise-hand, in-meeting chat, reactions.
 ```
 
-**Division of responsibility.** LiveKit owns *media* (ICE, DTLS-SRTP, simulcast, bandwidth estimation, recording). `tupo-realtime` owns *application state* (who is in the lobby, who is co-host, hand-raise order, chat). Keeping these apart means a media-server restart does not lose meeting state, and application features do not require touching WebRTC internals.
+**Division of responsibility.** Cloudflare Realtime owns *media* (ICE, DTLS-SRTP, simulcast, bandwidth estimation). `tupo-realtime` owns *application state* (who is in the lobby, who is co-host, hand-raise order, chat). Keeping these apart means a media-server restart does not lose meeting state, and application features do not require touching WebRTC internals.
 
 ### 10.2 Reuse of the TaskMentor proctoring model
 
@@ -958,7 +967,7 @@ Where proctoring is required *during* a Tupo-hosted assessment, the two systems 
 
 ### 10.4 Capacity model
 
-Load is a function of **subscribed tracks**, not participants. In a meeting of N participants all publishing camera and microphone, the SFU forwards roughly `N × (N−1)` video subscriptions plus the same in audio. Published LiveKit benchmarks place a 16-vCPU node at roughly 150 publishers with 150 subscribers of 720p at ~85% CPU.
+Load is a function of **subscribed tracks**, not participants. In a meeting of N participants all publishing camera and microphone, a naive client pulls `N − 1` video streams and the SFU forwards `N × (N−1)` of them — quadratic, and the reason large meetings collapse. Tupo does not do that: a client subscribes to audio for everyone publishing but video only for the tiles on screen, so per-participant traffic is bounded by the grid size (~25) rather than by attendance. Cloudflare absorbs the forwarding side, so there is no node CPU curve to size against.
 
 Tupo therefore enforces, and the UI communicates, the following limits:
 
@@ -966,7 +975,7 @@ Tupo therefore enforces, and the UI communicates, the following limits:
 |---|---|---|
 | Standard class/staff meeting | 100 video participants | Grid renders only the top 25 by active-speaker; the rest are audio + avatar, so subscription count stays bounded |
 | Large assembly | 300 audio-only + up to 5 video publishers | "Webinar mode" — presenters publish, audience subscribes |
-| Concurrent meetings per SFU node | Bounded by total tracks, monitored in Grafana | Autoscale by adding SFU nodes behind LiveKit's built-in distributed mode |
+| Concurrent meetings | Bounded by Cloudflare's per-app limits, not by Tupo hardware | No action — the SFU tier scales on Cloudflare's side |
 
 ---
 
@@ -1107,7 +1116,7 @@ Tupo therefore enforces, and the UI communicates, the following limits:
 | Concurrent meetings | 20 rooms / 400 participants | Add SFU nodes; capacity measured in tracks |
 | Storage year 1 | 2 TB | Object storage scales independently |
 
-Scaling procedure is documented as a runbook: add stateless `tupo-api`/`tupo-realtime` instances behind the load balancer; add SFU nodes to the LiveKit cluster; move Redis to a replicated pair; promote the PostgreSQL replica if read load dominates.
+Scaling procedure is documented as a runbook: add stateless `tupo-api`/`tupo-realtime` instances behind the load balancer; move Redis to a replicated pair; promote the PostgreSQL replica if read load dominates.
 
 ### 13.3 Availability & reliability
 
@@ -1156,7 +1165,7 @@ Scaling procedure is documented as a runbook: add stateless `tupo-api`/`tupo-rea
 
 | Environment | Purpose | Footprint |
 |---|---|---|
-| Local | Development | Docker Compose: Postgres, Redis, MinIO, Meilisearch, LiveKit, ClamAV |
+| Local | Development | Docker Compose: Postgres, Redis, MinIO, Meilisearch, ClamAV. Media uses the real Cloudflare Realtime app — there is nothing to run locally |
 | Staging | Integration & UAT, MIS staging SSO | Single `t3.large` running all services |
 | Production | Live | See topology below |
 
@@ -1168,7 +1177,6 @@ Scaling procedure is documented as a runbook: add stateless `tupo-api`/`tupo-rea
 | **worker-1** | `t3.medium` | `tupo-worker`, ClamAV, FFmpeg, Meilisearch | CPU-bursty, isolated from request latency |
 | **data-1** | `m6i.large` + 200 GB gp3 | PostgreSQL 17 primary, Redis 7 | Encrypted EBS, automated snapshots |
 | **data-2** | `t3.medium` + 200 GB gp3 | PostgreSQL streaming replica | Promotion target; also serves analytics reads |
-| **sfu-1** | `c6i.4xlarge` (16 vCPU) | LiveKit + coturn | Elastic IP, UDP 50000–60000, TCP/TLS 443 fallback; scale out by adding nodes |
 | **Storage** | S3 (or MinIO on EBS) | Files, recordings, backups | Lifecycle rules → Infrequent Access after 90 days |
 
 Estimated steady-state cost at this footprint is roughly **US$450–700/month** including storage and egress, dominated by the SFU node — which can be stopped outside teaching hours if meetings are timetabled.
@@ -1180,7 +1188,6 @@ Estimated steady-state cost at this footprint is roughly **US$450–700/month** 
 | 443 | TCP | Nginx/ALB — HTTPS + WSS | Public |
 | 443 | TCP/TLS | coturn TURNS fallback | Public |
 | 3478 | UDP/TCP | STUN/TURN | Public |
-| 7880/7881 | TCP | LiveKit signalling | Public via Nginx |
 | 50000–60000 | UDP | SFU media | Public |
 | 5190–5194 | TCP | api · realtime · files · worker · web (behind nginx) | localhost only |
 | 5432 / 6379 | TCP | PostgreSQL / Redis | VPC security group only |
@@ -1272,7 +1279,7 @@ push → GitHub Actions
 | Integration | Vitest + Supertest + Testcontainers | Every API endpoint, including negative authorization cases |
 | Realtime | Socket.IO client harness | Ordering, gap recovery, idempotent retry, multi-device sync, reconnect storms |
 | E2E | Playwright | Login → send → receive across two browser contexts; thread; upload; join meeting; feed post |
-| Media | LiveKit load-test CLI + headless Chrome peers | 100-participant room; degradation ladder; TURN-only path with UDP blocked |
+| Media | Headless Chrome peers driven by Playwright | Two-peer media proven by measured inbound bytes; degradation ladder; TURN-only path with UDP blocked |
 | Load | k6 | 2,000 concurrent sockets; 200 messages/s sustained; 500 concurrent uploads |
 | Security | OWASP ZAP, `npm audit`, SAST, external pentest | No high findings open at launch |
 | Accessibility | axe-core in CI + manual screen-reader pass (NVDA, VoiceOver) | Zero critical violations |
@@ -1289,7 +1296,7 @@ push → GitHub Actions
 | **0 — Foundations** | 3 weeks | Monorepo, CI/CD, Docker Compose, Postgres schema + migrations, MIS SSO login, design system, app shell | A user can log in with MIS credentials and see an empty, themed, deployed shell |
 | **1 — Core chat** | 6 weeks | DMs, groups, channels, messages, threads, reactions, mentions, presence, typing, receipts, unreads, offline queue, realtime layer | Two users exchange messages reliably across devices; all §13.1 latency targets met |
 | **2 — Files** | 3 weeks | `tupo-files`, resumable upload, scanning, thumbnails, previews, quotas, files browser | 5 GB file uploads, survives a network drop, is scanned and previewable |
-| **3 — Meet (core)** | 5 weeks | LiveKit + coturn, instant and scheduled meetings, lobby, screen share, host controls, recording, attendance export | 50-participant meeting held end-to-end with recording and attendance export |
+| **3 — Meet (core)** | 5 weeks | Cloudflare Realtime SFU + TURN, instant and scheduled meetings, lobby, screen share, host controls, recording, attendance export | 50-participant meeting held end-to-end with recording and attendance export |
 | **4 — Feed & Mail** | 5 weeks | Pages, posts, comments, reactions, polls, moderation; mailbox, distribution lists, bulk announcements, templates | An institution-wide announcement reaches every user by feed, mail and push |
 | **5 — Search, notifications, admin** | 4 weeks | Meilisearch integration, notification centre, web push, digests, admin console, audit log, analytics, retention | Admin can search, moderate, export, and set retention; push arrives on mobile PWA |
 | **6 — Hardening & launch** | 4 weeks | Load testing, pentest, accessibility audit, i18n completion, DR rehearsal, runbooks, training, pilot with one cohort | Pentest high findings closed; pilot cohort signs off; DR restore rehearsed |
@@ -1316,7 +1323,7 @@ push → GitHub Actions
 | R9 | E2EE expected by stakeholders but not delivered in v1 | Medium | Medium | Stated plainly in §12.3 and in user-facing copy; MLS scheduled and budgeted in Phase 7 |
 | R10 | Low adoption because staff keep using WhatsApp | Medium | High | Migrate real workflows first (class channels, announcements, attendance evidence), run training in Phase 6, integrate notifications from TaskMentor so Tupo is where the work already arrives |
 | R11 | Socket.IO broadcast amplification at scale | Low | Medium | Per-conversation pub/sub sharding and a session registry from day one; `uWebSockets.js` migration path documented |
-| R12 | Key-person dependency on WebRTC knowledge | Medium | Medium | LiveKit chosen partly to reduce bespoke WebRTC code; runbooks and ADRs required; two engineers trained on the media stack |
+| R12 | Key-person dependency on WebRTC knowledge | Medium | Medium | A managed SFU removes the server-operations half of the problem, but the client-side negotiation is ours; runbooks and ADRs required; two engineers trained on the media stack |
 
 ---
 
@@ -1378,9 +1385,10 @@ CLAMAV_HOST=worker-1
 CLAMAV_PORT=3310
 
 # ── tupo-sfu / meet ───────────────────────────────────────
-LIVEKIT_URL=wss://meet.tupo.amashuri.com
-LIVEKIT_API_KEY=***
-LIVEKIT_API_SECRET=***
+CLOUDFLARE_REALTIME_APP_ID=***
+CLOUDFLARE_REALTIME_APP_SECRET=***
+CLOUDFLARE_TURN_TOKEN_ID=***
+CLOUDFLARE_TURN_API_TOKEN=***
 TURN_URLS=turn:turn.tupo.amashuri.com:3478,turns:turn.tupo.amashuri.com:443
 TURN_SHARED_SECRET=***
 
@@ -1397,7 +1405,6 @@ VAPID_PRIVATE_KEY=***
 # ── tupo-web ──────────────────────────────────────────────
 VITE_API_URL=https://tupo.amashuri.com/api/v1
 VITE_SOCKET_URL=wss://tupo.amashuri.com
-VITE_LIVEKIT_URL=wss://meet.tupo.amashuri.com
 VITE_MIS_LOGIN_URL=https://mis.amashuri.com/login
 VITE_SSO_CLIENT_ID=***
 ```
@@ -1420,7 +1427,6 @@ nga-communication-module/
 ├── infra/
 │   ├── docker/              # Dockerfiles + compose files
 │   ├── nginx/
-│   ├── livekit/             # livekit.yaml, coturn.conf
 │   └── runbooks/
 ├── docs/
 │   ├── TUPO_SRS.md          # this document
@@ -1463,10 +1469,10 @@ nga-communication-module/
 
 **WebRTC media servers**
 - [Best Open Source WebRTC Media Servers (SFU) 2026 — BlogGeek.me](https://bloggeek.me/webrtc-tools/media-servers-oss/)
-- [LiveKit vs mediasoup vs Janus (2026) — Trembit](https://trembit.com/blog/choosing-the-right-sfu-janus-vs-mediasoup-vs-livekit-for-telemedicine-platforms/)
+- [Cloudflare Realtime SFU — API reference](https://developers.cloudflare.com/realtime/https-api/)
+- [Cloudflare Realtime TURN](https://developers.cloudflare.com/realtime/turn/)
 - [Choosing an SFU: mediasoup, Janus, LiveKit, Jitsi, Pion — Fora Soft](https://www.forasoft.com/learn/video-streaming/articles-streaming/sfu-comparison-mediasoup-janus-livekit-jitsi-pion)
-- [Self-Hosting LiveKit in Production: 2026 Ops Guide](https://fazliev.com/blog/livekit-production-guide)
-- [Self-Hosted LiveKit: Production Architecture — Prodinit](https://prodinit.com/blog/self-hosted-livekit-production-guide)
+- [Perfect negotiation — MDN](https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Perfect_negotiation)
 - [WebRTC TURN scaling: coturn vs Cloudflare (2026) — Callsphere](https://callsphere.ai/blog/vw3e-webrtc-turn-scaling-coturn-vs-cloudflare-2026)
 
 **Encryption**

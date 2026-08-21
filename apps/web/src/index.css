@@ -184,3 +184,245 @@ table td, table th, .tabular-nums { font-variant-numeric: tabular-nums; }
 .dark .skeleton::after {
   background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.06), transparent);
 }
+
+/* ------------------------------------------------------------------ *
+ * Motion — Meet
+ *
+ * Meetings are the one place in Tupo where things appear and disappear
+ * constantly: people join, hands go up, reactions fly, panels slide. Motion
+ * here is not decoration — it is what makes a change legible instead of a
+ * sudden reflow you have to re-read.
+ *
+ * Every duration is short. Anything over ~250ms in a live call reads as lag,
+ * because the user is already waiting on the network.
+ * ------------------------------------------------------------------ */
+
+@keyframes tupo-tile-in {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes tupo-reaction-float {
+  0%   { opacity: 0; transform: translateY(12px) scale(0.7); }
+  15%  { opacity: 1; transform: translateY(0) scale(1.15); }
+  30%  { transform: translateY(-4px) scale(1); }
+  80%  { opacity: 1; transform: translateY(-52px) scale(1); }
+  100% { opacity: 0; transform: translateY(-76px) scale(0.9); }
+}
+
+@keyframes tupo-toast-in {
+  from { opacity: 0; transform: translateX(16px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes tupo-toast-out {
+  from { opacity: 1; transform: none; max-height: 8rem; }
+  to   { opacity: 0; transform: translateX(16px); max-height: 0; }
+}
+
+/* A hand goes up once and then stays up. The attention-getting part is the
+   arrival, so the pulse runs three times and stops rather than looping — a
+   permanent animation in a participant list is exhausting to sit next to. */
+@keyframes tupo-hand-raise {
+  0%, 100% { transform: none; }
+  20%      { transform: rotate(-14deg) scale(1.15); }
+  40%      { transform: rotate(10deg) scale(1.1); }
+  60%      { transform: rotate(-6deg) scale(1.05); }
+}
+
+@keyframes tupo-rec-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+/* The ring around whoever is talking. Deliberately slow and low-contrast: a
+   fast pulse on the active speaker is the single most distracting thing a
+   video UI can do. */
+@keyframes tupo-speaking-ring {
+  0%, 100% { outline: 2px solid rgb(52 211 153 / 0.85); outline-offset: 0; }
+  50%      { outline: 4px solid rgb(52 211 153 / 0.35); outline-offset: 0; }
+}
+
+@keyframes tupo-mini-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.92); }
+  to   { opacity: 1; transform: none; }
+}
+
+.animate-tile-in       { animation: tupo-tile-in 220ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.animate-reaction      { animation: tupo-reaction-float 4s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.animate-toast-in      { animation: tupo-toast-in 200ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.animate-toast-out     { animation: tupo-toast-out 180ms ease-in both; }
+.animate-hand-raise    { animation: tupo-hand-raise 700ms ease-in-out 3; }
+.animate-rec-pulse     { animation: tupo-rec-pulse 1.6s ease-in-out infinite; }
+.animate-speaking-ring { animation: tupo-speaking-ring 1.8s ease-in-out infinite; }
+.animate-mini-in       { animation: tupo-mini-in 260ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+
+/**
+ * Respect the system setting.
+ *
+ * Not `animation: none` — that makes elements whose starting state is
+ * `opacity: 0` (everything using `both`) invisible forever. Collapsing the
+ * duration instead runs each animation to its final frame immediately, so the
+ * UI is static but complete.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* The toast's time-remaining bar. Scaled rather than animating `width`, so it
+   runs on the compositor and cannot cause layout on a page already busy
+   decoding video. */
+@keyframes tupo-toast-progress {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
+
+/* ============================================================
+   Meet — surface language
+   ------------------------------------------------------------
+   Meet is the one part of Tupo that runs full-bleed and dark for
+   an hour at a time, so it earns a slightly richer vocabulary
+   than a page of tables: translucency, one accent gradient, and
+   and depth carried by tint and hairlines — never by a shadow.
+
+   These are utilities, not per-component styles. Anything here
+   is meant to be reused; nothing here hard-codes a component.
+   Motion collapses to a single frame under prefers-reduced-motion
+   via the global rule above, so none of it needs its own guard.
+   ============================================================ */
+
+@theme {
+  /* Decelerating, slightly overshooting. The difference between a
+     panel that appears and one that arrives. */
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* --- Glass -------------------------------------------------- */
+/* Saturation is the half people forget: blur alone reads as fog,
+   blur plus saturate reads as glass over something colourful. */
+.tupo-glass {
+  background: rgb(16 24 39 / 0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgb(255 255 255 / 0.08);
+}
+.tupo-glass-light {
+  background: rgb(255 255 255 / 0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgb(255 255 255 / 0.6);
+}
+
+/* The top edge, brightened.
+   With no shadows anywhere, a translucent panel has to separate from what is
+   behind it some other way. A lighter top hairline is enough: it is how a real
+   edge catches light, and it costs no depth. */
+.tupo-sheen { border-top-color: rgb(255 255 255 / 0.18); }
+
+/* --- Reaction on hover -------------------------------------- */
+/* Movement and a brighter edge, rather than a shadow. The lift still reads as
+   "this is pickable" — it was never the shadow doing that work. */
+.tupo-lift {
+  transition:
+    transform var(--duration-micro) var(--ease-spring),
+    border-color var(--duration-micro) ease-out,
+    background-color var(--duration-micro) ease-out;
+}
+.tupo-lift:hover { transform: translateY(-2px); }
+.tupo-lift:active { transform: translateY(0); }
+
+/* Buttons want the press to be felt, not just seen. */
+.tupo-press { transition: transform var(--duration-micro) var(--ease-spring); }
+.tupo-press:active { transform: scale(0.94); }
+
+/* --- Accent ------------------------------------------------- */
+/* Buttons use a solid accent, never a gradient: a gradient on a control reads
+   as decoration, and at small sizes it muddies the label it sits behind. */
+.tupo-gradient-text {
+  background-image: linear-gradient(135deg, #3b82f6 0%, #6366f1 50%, #8b5cf6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* --- Aurora ------------------------------------------------- */
+/* A soft colour field behind the page. Blurred far past the point of
+   being a recognisable shape, so it reads as light in the room
+   rather than as decoration.
+   
+   The two themes need genuinely different amounts of it. On a dark
+   screen the colour is what stops the page reading as a black void.
+   On a light one the same values tint the entire working surface
+   blue — every white card sits on a coloured ground and the result
+   looks less like a product and more like a template. So light gets
+   a whisper: enough to lift the corners, not enough to notice. */
+.tupo-aurora { position: relative; isolation: isolate; }
+/* Fixed to the viewport, not to the content column.
+ 
+   Anchored to the container it was only as wide as the centred `max-w-7xl`
+   page, which left the margins flat and made the field read as a panel rather
+   than as light in the room. Fixed also settles the scrollbar it used to
+   cause: an oversized *absolute* child counts toward scroll width, a fixed one
+   does not, so the overhang the blur needs costs nothing. */
+.tupo-aurora::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(40% 45% at 15% 20%, rgb(37 99 235 / 0.07) 0%, transparent 70%),
+    radial-gradient(35% 40% at 85% 15%, rgb(99 102 241 / 0.05) 0%, transparent 70%);
+  filter: blur(80px);
+  animation: tupo-aurora-drift 26s ease-in-out infinite alternate;
+}
+/* Some surfaces are dark whatever the app theme is — the device check and the
+   full-screen room states are immersive by design. They need the dark values
+   even when the rest of the app is light, so the strength follows the
+   *surface* rather than the theme. */
+.dark .tupo-aurora::before,
+.tupo-aurora-on-dark::before {
+  background:
+    radial-gradient(40% 45% at 20% 25%, rgb(37 99 235 / 0.14) 0%, transparent 70%),
+    radial-gradient(35% 40% at 80% 20%, rgb(139 92 246 / 0.10) 0%, transparent 70%),
+    radial-gradient(45% 45% at 60% 85%, rgb(14 165 233 / 0.08) 0%, transparent 70%);
+  filter: blur(70px);
+}
+
+/* The immersive surfaces keep a little more of the field than the app does —
+   there the colour is the only thing between the page and a black void — but
+   only a little. This is the screen you sit on before a lesson, and it should
+   settle rather than glow. */
+.tupo-aurora-on-dark::before {
+  background:
+    radial-gradient(38% 42% at 18% 18%, rgb(37 99 235 / 0.13) 0%, transparent 72%),
+    radial-gradient(34% 38% at 82% 16%, rgb(139 92 246 / 0.09) 0%, transparent 72%),
+    radial-gradient(42% 42% at 62% 88%, rgb(14 165 233 / 0.07) 0%, transparent 72%);
+  filter: blur(90px);
+}
+@keyframes tupo-aurora-drift {
+  from { transform: translate3d(-2%, -1%, 0) scale(1); }
+  to   { transform: translate3d(3%, 2%, 0) scale(1.08); }
+}
+
+/* --- Live ---------------------------------------------------- */
+/* An expanding ring rather than a blink: it reads as "ongoing"
+   instead of "alert", which is the actual meaning. */
+@keyframes tupo-live-pulse {
+  0%   { outline: 0 solid rgb(239 68 68 / 0.55); outline-offset: 0; }
+  70%  { outline: 9px solid rgb(239 68 68 / 0); outline-offset: 0; }
+  100% { outline: 0 solid rgb(239 68 68 / 0); outline-offset: 0; }
+}
+.tupo-live-dot { animation: tupo-live-pulse 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+
+/* --- Level meter --------------------------------------------- */
+/* Segmented, because a continuous bar at low input looks broken
+   while discrete segments plainly read as "one lit, working". */
+.tupo-meter-seg {
+  transition: background-color 90ms linear, opacity 90ms linear;
+}

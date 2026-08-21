@@ -1,49 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { Conversation, Member, Message } from './types';
-import { PLACEHOLDER_CONVERSATIONS, PLACEHOLDER_MEMBERS, PLACEHOLDER_MESSAGES } from './placeholderData';
+import type { ConversationSummary, WireMessage } from '@tupo/shared';
 
 /**
- * The single seam between the chat UI and its data.
+ * Presentation helpers for the chat log.
  *
- * Today it resolves the Phase 0 placeholder content after a short delay so the
- * skeleton states (UX-4) are real and reviewable rather than dead code. In
- * Phase 1 the bodies become `apiGet('/api/conversations')` and a Socket.IO
- * subscription; the signatures do not change, so no component is touched.
+ * Phase 0 also kept the placeholder data layer here. That is gone: conversations
+ * and messages now come from `ChatProvider`, which owns the API calls and the
+ * socket. What is left is the formatting and grouping logic, which is pure and
+ * belongs nowhere near a fetch.
  */
-
-const LOAD_MS = 350;
-
-export function useConversations(): { conversations: Conversation[]; loading: boolean } {
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    const t = setTimeout(() => setLoading(false), LOAD_MS);
-    return () => clearTimeout(t);
-  }, []);
-  return { conversations: loading ? [] : PLACEHOLDER_CONVERSATIONS, loading };
-}
-
-export function useMessages(conversationId: string | null): { messages: Message[]; loading: boolean } {
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    setLoading(true);
-    const t = setTimeout(() => setLoading(false), LOAD_MS);
-    return () => clearTimeout(t);
-  }, [conversationId]);
-
-  const messages = useMemo(
-    () => (!conversationId || loading ? [] : PLACEHOLDER_MESSAGES[conversationId] ?? []),
-    [conversationId, loading],
-  );
-  return { messages, loading };
-}
-
-export function useMembers(conversationId: string | null): Member[] {
-  return conversationId ? PLACEHOLDER_MEMBERS : [];
-}
-
-/* ------------------------------------------------------------------ *
- * Formatting
- * ------------------------------------------------------------------ */
 
 /** "14:32" — the timestamp beside a message, in the viewer's own locale. */
 export const timeOf = (iso: string) =>
@@ -78,9 +42,67 @@ export function shortStamp(iso: string): string {
  */
 export const GROUPING_WINDOW_MS = 5 * 60_000;
 
-export function startsNewGroup(msg: Message, prev: Message | undefined): boolean {
-  if (!prev || prev.system || msg.system) return true;
-  if (prev.authorId !== msg.authorId) return true;
-  if (dayLabel(prev.at) !== dayLabel(msg.at)) return true;
-  return new Date(msg.at).getTime() - new Date(prev.at).getTime() > GROUPING_WINDOW_MS;
+export function startsNewGroup(msg: WireMessage, prev: WireMessage | undefined): boolean {
+  if (!prev) return true;
+  if (prev.type === 'system' || msg.type === 'system') return true;
+  if (prev.senderId !== msg.senderId) return true;
+  // A quoted reply always starts its own block: the quote block above it needs
+  // room, and hanging it under someone else's avatar reads as their words.
+  if (msg.replyTo) return true;
+  if (dayLabel(prev.createdAt) !== dayLabel(msg.createdAt)) return true;
+  return new Date(msg.createdAt).getTime() - new Date(prev.createdAt).getTime() > GROUPING_WINDOW_MS;
 }
+
+/** Bytes as something a person can read: "84 KB", "1.2 MB". */
+export function formatBytes(bytes: number): string {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const n = bytes / 1024 ** i;
+  return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
+/**
+ * Where the "new messages" divider goes.
+ *
+ * The first message the viewer has not read, provided they have read *something*
+ * — the divider is meaningless above the very first message of a conversation
+ * you have never opened, where everything is new and nothing is "since last
+ * time".
+ */
+export function firstUnreadId(
+  messages: WireMessage[], lastReadSeq: number, myUserId: string,
+): string | null {
+  if (!lastReadSeq) return null;
+  const first = messages.find(
+    (m) => m.seq > lastReadSeq && m.senderId !== myUserId && m.type !== 'system',
+  );
+  return first?.id ?? null;
+}
+
+/** "Aline is typing" · "Aline and Jean-Paul are typing" · "3 people are typing". */
+export function typingLabel(names: string[]): string {
+  if (names.length === 0) return '';
+  if (names.length === 1) return `${names[0]} is typing`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} are typing`;
+  return `${names.length} people are typing`;
+}
+
+/** How the sidebar groups conversations (FR-CHN-10). */
+export type SidebarSection = 'starred' | 'channels' | 'groups' | 'direct';
+
+export function sectionOf(c: ConversationSummary): SidebarSection {
+  if (c.isStarred) return 'starred';
+  if (c.type === 'dm') return 'direct';
+  if (c.type === 'group') return 'groups';
+  return 'channels';
+}
+
+export const SECTION_LABEL: Record<SidebarSection, string> = {
+  starred: 'Starred',
+  channels: 'Channels',
+  groups: 'Groups',
+  direct: 'Direct messages',
+};
+
+export const SECTION_ORDER: SidebarSection[] = ['starred', 'channels', 'groups', 'direct'];

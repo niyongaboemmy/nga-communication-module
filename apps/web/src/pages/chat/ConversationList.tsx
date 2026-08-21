@@ -1,11 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import {
-  Search, Plus, Hash, Megaphone, Star, ChevronRight, BellOff, Users, Filter,
+  Search, Plus, Hash, Megaphone, Star, ChevronRight, BellOff, Users, Filter, Lock, AtSign,
 } from 'lucide-react';
 import { Avatar, IconButton, SearchInput, Skeleton, UnreadBadge, EmptyState } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
-import { shortStamp } from './data';
+import { useAuth } from '../../context/AuthContext';
+import { shortStamp, sectionOf, SECTION_LABEL, SECTION_ORDER } from './data';
+import type { SidebarSection } from './data';
+import { useChat } from './ChatProvider';
+import { toPresence } from './types';
 import type { Conversation } from './types';
+import { NewConversationDialog } from './NewConversationDialog';
 
 /**
  * The conversation list — the middle pane on desktop, the whole screen on a
@@ -25,12 +30,16 @@ const Row: React.FC<{
   conversation: Conversation;
   active: boolean;
   onSelect: (id: string) => void;
-}> = ({ conversation: c, active, onSelect }) => {
+  onToggleStar: (id: string) => void;
+}> = ({ conversation: c, active, onSelect, onToggleStar }) => {
+  const { user } = useAuth();
   const unread = c.unread > 0;
-  const Icon = c.kind === 'dm' ? null : KIND_ICON[c.kind];
+  const muted = c.notification === 'none' || Boolean(c.mutedUntil);
+  const Icon = c.type === 'dm' ? null : KIND_ICON[c.type];
+  const mine = c.lastMessage?.senderId && c.lastMessage.senderId === user?.id;
 
   return (
-    <li>
+    <li className="group/row relative">
       <button
         onClick={() => onSelect(c.id)}
         aria-current={active ? 'true' : undefined}
@@ -40,17 +49,24 @@ const Row: React.FC<{
             : 'hover:bg-surface-light dark:hover:bg-surface-dark'
         }`}
       >
-        {c.kind === 'dm' ? (
-          <Avatar name={c.name} src={c.avatarUrl} size={38} presence={c.presence} />
+        {c.type === 'dm' ? (
+          <Avatar
+            name={c.name}
+            src={c.avatarUrl ?? undefined}
+            size={38}
+            presence={toPresence(c.peer?.presence)}
+          />
         ) : (
           <span
             className={`grid h-[38px] w-[38px] shrink-0 place-items-center rounded-xl ${
-              c.kind === 'announcement'
+              c.type === 'announcement'
                 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
                 : 'bg-slate-100 text-slate-500 dark:bg-card-dark/60 dark:text-slate-300'
             }`}
           >
-            {Icon && <Icon size={18} />}
+            {c.iconEmoji
+              ? <span className="text-base leading-none">{c.iconEmoji}</span>
+              : Icon && <Icon size={18} />}
           </span>
         )}
 
@@ -65,7 +81,12 @@ const Row: React.FC<{
             >
               {c.name}
             </span>
-            {c.muted && <BellOff size={12} className="shrink-0 text-text-secondary-light/70 dark:text-text-secondary-dark/70" />}
+            {c.isPrivate && c.type !== 'dm' && (
+              <Lock size={11} className="shrink-0 text-text-secondary-light/70 dark:text-text-secondary-dark/70" />
+            )}
+            {muted && (
+              <BellOff size={12} className="shrink-0 text-text-secondary-light/70 dark:text-text-secondary-dark/70" />
+            )}
             {c.lastMessage && (
               <span className="ml-auto shrink-0 text-[11px] tabular-nums text-text-secondary-light dark:text-text-secondary-dark">
                 {shortStamp(c.lastMessage.at)}
@@ -81,15 +102,40 @@ const Row: React.FC<{
                   : 'text-text-secondary-light dark:text-text-secondary-dark'
               }`}
             >
-              {c.lastMessage
-                ? `${c.lastMessage.author === 'You' ? 'You: ' : ''}${c.lastMessage.preview}`
-                : 'No messages yet'}
+              {c.draft
+                ? <span className="text-amber-600 dark:text-amber-400">Draft: {c.draft}</span>
+                : c.lastMessage
+                  ? `${mine ? 'You: ' : c.type !== 'dm' && c.lastMessage.senderName ? `${c.lastMessage.senderName.split(' ')[0]}: ` : ''}${c.lastMessage.preview}`
+                  : 'No messages yet'}
             </span>
-            <span className="ml-auto shrink-0">
-              <UnreadBadge count={c.unread} mention={c.mention} />
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              {/* A mention is called out on its own: on a muted channel it is
+                  the one thing that still deserves attention. */}
+              {c.unreadMentions > 0 && (
+                <span
+                  className="grid h-4 w-4 place-items-center rounded-full bg-red-500 text-white"
+                  title={`${c.unreadMentions} mention${c.unreadMentions > 1 ? 's' : ''}`}
+                >
+                  <AtSign size={10} />
+                </span>
+              )}
+              <UnreadBadge count={muted && c.unreadMentions === 0 ? 0 : c.unread} mention={c.unreadMentions > 0} />
             </span>
           </span>
         </span>
+      </button>
+
+      {/* Star sits outside the row button — a button inside a button is invalid
+          HTML and the inner one stops working in Safari. */}
+      <button
+        onClick={(e) => { e.stopPropagation(); onToggleStar(c.id); }}
+        aria-label={c.isStarred ? `Unstar ${c.name}` : `Star ${c.name}`}
+        aria-pressed={c.isStarred}
+        className={`absolute right-1 top-1 grid h-6 w-6 place-items-center rounded-md text-text-secondary-light transition-opacity duration-150 hover:bg-black/5 focus:opacity-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-text-secondary-dark dark:hover:bg-white/10 ${
+          c.isStarred ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100'
+        }`}
+      >
+        <Star size={12} className={c.isStarred ? 'fill-amber-400 text-amber-400' : ''} />
       </button>
     </li>
   );
@@ -128,29 +174,33 @@ const RowSkeleton: React.FC = () => (
   </li>
 );
 
-export const ConversationList: React.FC<{
-  conversations: Conversation[];
-  loading: boolean;
-  activeId: string | null;
-  onSelect: (id: string) => void;
-}> = ({ conversations, loading, activeId, onSelect }) => {
+export const ConversationList: React.FC = () => {
   const { can } = usePermissions();
+  const {
+    conversations, conversationsLoading, activeId, setActiveId, toggleStar, connected,
+  } = useChat();
   const [query, setQuery] = useState('');
   const [unreadOnly, setUnreadOnly] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return conversations.filter((c) => {
-      if (unreadOnly && c.unread === 0) return false;
+      if (unreadOnly && c.unread === 0 && c.unreadMentions === 0) return false;
       if (!q) return true;
-      return c.name.toLowerCase().includes(q) || (c.topic ?? '').toLowerCase().includes(q);
+      return c.name.toLowerCase().includes(q)
+        || (c.topic ?? '').toLowerCase().includes(q)
+        || (c.lastMessage?.preview ?? '').toLowerCase().includes(q);
     });
   }, [conversations, query, unreadOnly]);
 
-  const starred = filtered.filter((c) => c.starred);
-  const channels = filtered.filter((c) => !c.starred && (c.kind === 'channel' || c.kind === 'announcement'));
-  const groups = filtered.filter((c) => !c.starred && c.kind === 'group');
-  const dms = filtered.filter((c) => !c.starred && c.kind === 'dm');
+  const grouped = useMemo(() => {
+    const out: Record<SidebarSection, Conversation[]> = {
+      starred: [], channels: [], groups: [], direct: [],
+    };
+    for (const c of filtered) out[sectionOf(c)].push(c);
+    return out;
+  }, [filtered]);
 
   const canCreate = can(['CHANNEL_CREATE', 'DM_START']);
 
@@ -158,8 +208,19 @@ export const ConversationList: React.FC<{
     <div className="flex h-full min-h-0 flex-col bg-white dark:bg-chrome-dark">
       <div className="shrink-0 border-b border-border-light px-3 py-3 dark:border-border-dark/30">
         <div className="mb-2.5 flex items-center justify-between gap-2">
-          <h2 className="text-base font-bold tracking-tight text-text-primary-light dark:text-text-primary-dark">
+          <h2 className="flex items-center gap-2 text-base font-bold tracking-tight text-text-primary-light dark:text-text-primary-dark">
             Chat
+            {/* A quiet dot rather than a banner. Losing the socket degrades
+                chat to "messages arrive when you reload"; that is worth
+                showing, but not worth a bar across the top of the screen. */}
+            {!connected && (
+              <span
+                className="h-1.5 w-1.5 rounded-full bg-amber-500"
+                title="Reconnecting — new messages may be delayed"
+                role="status"
+                aria-label="Reconnecting"
+              />
+            )}
           </h2>
           <div className="flex items-center gap-0.5">
             <IconButton
@@ -172,7 +233,7 @@ export const ConversationList: React.FC<{
               <Filter size={15} />
             </IconButton>
             {canCreate && (
-              <IconButton label="New conversation" size="sm">
+              <IconButton label="New conversation" size="sm" onClick={() => setCreating(true)}>
                 <Plus size={17} />
               </IconButton>
             )}
@@ -189,7 +250,7 @@ export const ConversationList: React.FC<{
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
-        {loading ? (
+        {conversationsLoading ? (
           <ul aria-busy="true" aria-label="Loading conversations">
             {Array.from({ length: 7 }, (_, i) => <RowSkeleton key={i} />)}
           </ul>
@@ -202,42 +263,29 @@ export const ConversationList: React.FC<{
                 ? 'Try a channel name, a person, or part of a topic.'
                 : unreadOnly
                   ? 'You are all caught up.'
-                  : 'Channels you are added to will appear here.'
+                  : canCreate
+                    ? 'Start one with the + button above.'
+                    : 'Channels you are added to will appear here.'
             }
           />
         ) : (
-          <>
-            {starred.length > 0 && (
-              <Section title="Starred" count={starred.length}>
-                {starred.map((c) => (
-                  <Row key={c.id} conversation={c} active={c.id === activeId} onSelect={onSelect} />
-                ))}
-              </Section>
-            )}
-            {channels.length > 0 && (
-              <Section title="Channels" count={channels.length}>
-                {channels.map((c) => (
-                  <Row key={c.id} conversation={c} active={c.id === activeId} onSelect={onSelect} />
-                ))}
-              </Section>
-            )}
-            {groups.length > 0 && (
-              <Section title="Groups" count={groups.length}>
-                {groups.map((c) => (
-                  <Row key={c.id} conversation={c} active={c.id === activeId} onSelect={onSelect} />
-                ))}
-              </Section>
-            )}
-            {dms.length > 0 && (
-              <Section title="Direct messages" count={dms.length}>
-                {dms.map((c) => (
-                  <Row key={c.id} conversation={c} active={c.id === activeId} onSelect={onSelect} />
-                ))}
-              </Section>
-            )}
-          </>
+          SECTION_ORDER.map((section) => grouped[section].length > 0 && (
+            <Section key={section} title={SECTION_LABEL[section]} count={grouped[section].length}>
+              {grouped[section].map((c) => (
+                <Row
+                  key={c.id}
+                  conversation={c}
+                  active={c.id === activeId}
+                  onSelect={setActiveId}
+                  onToggleStar={toggleStar}
+                />
+              ))}
+            </Section>
+          ))
         )}
       </div>
+
+      {creating && <NewConversationDialog onClose={() => setCreating(false)} />}
     </div>
   );
 };

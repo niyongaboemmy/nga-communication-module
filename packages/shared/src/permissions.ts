@@ -66,6 +66,8 @@ export const PERMISSIONS: PermissionDefinition[] = [
   { key: 'MEET_RECORD', category: PERMISSION_CATEGORIES.MEET, description: 'Record a meeting.' },
   { key: 'MEET_SCREENSHARE', category: PERMISSION_CATEGORIES.MEET, description: 'Share your screen during a meeting.' },
   { key: 'MEET_ATTENDANCE_VIEW', category: PERMISSION_CATEGORIES.MEET, description: 'View and export meeting attendance.' },
+  { key: 'MEET_TRANSCRIBE', category: PERMISSION_CATEGORIES.MEET, description: 'Turn on live captions and the meeting transcript.' },
+  { key: 'MEET_AI_USE', category: PERMISSION_CATEGORIES.MEET, description: 'Invite the AI notetaker and generate summaries, minutes and action items.' },
 
   // ── Files ────────────────────────────────────────────────────────────────
   { key: 'FILE_UPLOAD', category: PERMISSION_CATEGORIES.FILES, description: 'Upload files and attachments.' },
@@ -160,6 +162,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'DM_START', 'MESSAGE_PIN', 'MESSAGE_SCHEDULE',
     'CHANNEL_JOIN', 'CHANNEL_CREATE', 'CHANNEL_MANAGE', 'CHANNEL_MEMBERS_MANAGE', 'CHANNEL_ANNOUNCE',
     'MEET_START', 'MEET_SCHEDULE', 'MEET_HOST_CONTROLS', 'MEET_RECORD', 'MEET_SCREENSHARE', 'MEET_ATTENDANCE_VIEW',
+    'MEET_TRANSCRIBE', 'MEET_AI_USE',
     'FEED_COMMENT', 'FEED_POST',
     'MAIL_SEND',
     'DIRECTORY_VIEW',
@@ -169,7 +172,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     ...BASELINE,
     'DM_START', 'MESSAGE_PIN', 'MESSAGE_DELETE_ANY',
     'CHANNEL_JOIN', 'CHANNEL_CREATE', 'CHANNEL_MANAGE', 'CHANNEL_MEMBERS_MANAGE', 'CHANNEL_ARCHIVE', 'CHANNEL_ANNOUNCE',
-    'MEET_START', 'MEET_SCHEDULE', 'MEET_HOST_CONTROLS', 'MEET_SCREENSHARE',
+    'MEET_START', 'MEET_SCHEDULE', 'MEET_HOST_CONTROLS', 'MEET_SCREENSHARE', 'MEET_TRANSCRIBE', 'MEET_AI_USE',
     'FEED_COMMENT', 'FEED_POST',
     'MAIL_SEND',
     'MODERATION_QUEUE_VIEW', 'MODERATION_ACT',

@@ -3,10 +3,15 @@ import express from 'express';
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { Redis } from 'ioredis';
+import type { AppNotification } from '@tupo/shared';
 import jwt from 'jsonwebtoken';
 import { PRESENCE_TTL_SECONDS } from '@tupo/shared';
 import type { ClientToServerEvents, ServerToClientEvents, SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
+import { registerMeetNamespace } from './meet/namespace.js';
+import { ping as pingMeetDb, getPool as getMeetPool } from './meet/db.js';
+import { rooms as meetRooms } from './meet/state.js';
+import { registerChatHandlers } from './chat/handlers.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -28,10 +33,68 @@ const subClient = pubClient.duplicate();
 const presence = pubClient.duplicate();
 let redisReady = false;
 
+/**
+ * The channel tupo-api publishes notifications on.
+ *
+ * The API owns durability (it writes the row); this gateway owns delivery. A
+ * separate subscriber connection is used rather than the adapter's, because
+ * a client in subscriber mode can issue no other commands.
+ */
+const NOTIFY_CHANNEL = 'tupo:notify';
+const notifySub = pubClient.duplicate();
+
+/**
+ * The channel tupo-api publishes chat fan-out on.
+ *
+ * The API handles everything that is not a plain send — pins, reactions from
+ * the REST path, preference changes made on another device — and those still
+ * have to reach open sockets. Rather than the API holding its own Socket.IO
+ * client, it names the rooms and this gateway does the delivery, exactly as it
+ * already does for notifications.
+ */
+const CHAT_CHANNEL = 'tupo:chat';
+const chatSub = pubClient.duplicate();
+
 async function connectRedis(): Promise<void> {
   try {
     await Promise.all([pubClient.connect(), subClient.connect(), presence.connect()]);
     io.adapter(createAdapter(pubClient, subClient));
+
+    await notifySub.connect();
+    await notifySub.subscribe(NOTIFY_CHANNEL);
+    notifySub.on('message', (_channel, payload) => {
+      try {
+        const { userIds, notification } = JSON.parse(payload) as {
+          userIds: string[]; notification: AppNotification;
+        };
+        // Delivery is per-user-room, so a notification reaches every device
+        // that person has open and nobody else's.
+        for (const id of userIds ?? []) {
+          io.to(`user:${id}`).emit('notification:new', notification);
+        }
+      } catch {
+        // A malformed message must not take the gateway down with it.
+      }
+    });
+
+    await chatSub.connect();
+    await chatSub.subscribe(CHAT_CHANNEL);
+    chatSub.on('message', (_channel, payload) => {
+      try {
+        const { rooms, event, payload: data, exceptSocketId } = JSON.parse(payload) as {
+          rooms: string[]; event: string; payload: unknown; exceptSocketId?: string;
+        };
+        if (!Array.isArray(rooms) || !event) return;
+        const target = exceptSocketId ? io.except(exceptSocketId) : io;
+        // Rooms are named by the publisher, which is our own API — the payload
+        // is not client-controlled, so relaying it verbatim is safe.
+        (target.to(rooms) as unknown as { emit: (e: string, d: unknown) => void })
+          .emit(event, data);
+      } catch {
+        // A malformed relay message must not take the gateway down with it.
+      }
+    });
+
     redisReady = true;
     console.log('[realtime] redis adapter attached');
   } catch (err) {
@@ -60,6 +123,14 @@ io.use((socket, next) => {
   }
 });
 
+/**
+ * Meet lives in its own namespace rather than on the default one. A meeting
+ * generates far more traffic than presence does — captions, speaking state,
+ * SDP — and keeping it separate means none of it is broadcast to sockets that
+ * only asked for chat presence.
+ */
+const meetNsp = registerMeetNamespace(io);
+
 io.on('connection', async (socket) => {
   const user = socket.data.user as SessionClaims;
   await socket.join(`user:${user.id}`);
@@ -67,6 +138,10 @@ io.on('connection', async (socket) => {
   if (redisReady) {
     await presence.set(`presence:${user.id}`, 'online', 'EX', PRESENCE_TTL_SECONDS);
   }
+
+  // Chat rides the default namespace alongside presence: it is the baseline
+  // traffic of the product, and it shares the per-user room with the shell.
+  registerChatHandlers(io, socket, redisReady ? presence : null);
 
   socket.emit('connection:ready', {
     userId: user.id,
@@ -97,6 +172,10 @@ io.on('connection', async (socket) => {
 app.get('/health', async (_req, res) => {
   const checks: Record<string, string> = { socketio: 'ok' };
   let healthy = true;
+  checks.meetDb = (await pingMeetDb()) ? 'ok' : 'unreachable';
+  // A gateway that cannot reach the database can still relay a call but cannot
+  // record attendance, so it is degraded rather than healthy.
+  if (checks.meetDb !== 'ok') healthy = false;
   try {
     if (redisReady) { await presence.ping(); checks.redis = 'ok'; }
     else { checks.redis = 'unavailable (single-instance mode)'; }
@@ -109,6 +188,7 @@ app.get('/health', async (_req, res) => {
     status: healthy ? 'healthy' : 'degraded',
     checks,
     connections: io.engine.clientsCount,
+    meet: { rooms: meetRooms.size, sockets: meetNsp.sockets.size },
     uptime: Math.round(process.uptime()),
     date: new Date().toISOString(),
   });
@@ -123,6 +203,7 @@ const shutdown = async (signal: string) => {
   console.log(`\n[realtime] ${signal} received — telling clients to reconnect elsewhere`);
   io.emit('system:reconnect_required', { reason: 'server shutting down' });
   io.close();
+  await getMeetPool().end().catch(() => {});
   server.close(() => process.exit(0));
 };
 process.on('SIGINT', () => void shutdown('SIGINT'));

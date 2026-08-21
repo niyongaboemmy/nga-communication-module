@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import { getPool, pingDb, snowflake, closeDb } from '@tupo/db';
-import { ok, fail } from '@tupo/shared';
+import { ok, fail, MEETING_FOLDER_PATTERN } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
 import { createStorageDriver } from './storage/driver.js';
@@ -35,7 +35,7 @@ function requireSession(req: express.Request, res: express.Response, next: expre
  */
 app.post('/api/files/tickets', requireSession, async (req, res) => {
   const user = (req as FileRequest).user!;
-  const { name, size, mime } = req.body ?? {};
+  const { name, size, mime, folder } = req.body ?? {};
 
   if (!name || typeof name !== 'string') return res.status(400).json(fail('A file name is required.'));
   if (typeof size !== 'number' || size <= 0) return res.status(400).json(fail('A positive file size is required.'));
@@ -43,11 +43,21 @@ app.post('/api/files/tickets', requireSession, async (req, res) => {
     return res.status(413).json(fail(`Files may not exceed ${Math.floor(config.maxFileSizeBytes / 1024 / 1024)} MB.`));
   }
 
+  // A caller may ask for a folder, but only one that matches a known shape.
+  // `meetings/<id>` is the only form accepted today, so a recording lands with
+  // the rest of its meeting's media — and a client still cannot write to an
+  // arbitrary path, which is the whole reason the key is server-generated.
+  if (folder !== undefined && (typeof folder !== 'string' || !MEETING_FOLDER_PATTERN.test(folder))) {
+    return res.status(400).json(fail('That is not a folder this service will write to.'));
+  }
+
   const id = snowflake();
   const now = new Date();
   // Server-generated key — the client never influences the storage path.
   const safeName = name.replace(/[^\w.\-]/g, '_').slice(0, 120);
-  const key = `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${id}/${safeName}`;
+  const key = folder
+    ? `${folder}/${id}/${safeName}`
+    : `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${id}/${safeName}`;
 
   await getPool().query(
     `INSERT INTO files (id, owner_id, storage_driver, storage_key, original_name, mime_type, size_bytes, status)

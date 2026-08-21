@@ -3,6 +3,7 @@ import express from 'express';
 import { Queue, Worker, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { pingDb } from '@tupo/db';
+import { runMeetWrapUp, type MeetWrapUpData } from './jobs/meetWrapUp.js';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -32,6 +33,15 @@ const worker = new Worker(
         processed++;
         lastJobAt = new Date().toISOString();
         return { ok: true, at: lastJobAt, echo: job.data };
+
+      // Post-meeting minutes, action items, chapters and lesson follow-up.
+      // Slow (four model calls) and not worth making anyone wait for, which is
+      // exactly what the queue is for.
+      case 'meet:wrap-up': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runMeetWrapUp(job.data as MeetWrapUpData);
+      }
       default:
         // Fail loudly rather than silently dropping work we don't recognise.
         throw new Error(`Unknown job type: ${job.name}`);

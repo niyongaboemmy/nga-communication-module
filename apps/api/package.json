@@ -12,13 +12,18 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
     "@tupo/db": "*",
     "@tupo/shared": "*",
+    "bullmq": "^5.81.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "ioredis": "^5.11.1",
     "jsonwebtoken": "^9.0.2",
-    "zod": "^3.24.1"
+    "openai": "^4.104.0",
+    "zod": "^3.24.1",
+    "@tupo/chat": "*"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

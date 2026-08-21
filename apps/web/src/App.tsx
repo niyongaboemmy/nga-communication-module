@@ -1,12 +1,21 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { MeetCallProvider } from './context/MeetCallContext';
+import { NotificationProvider } from './context/NotificationContext';
+import { MiniCall } from './components/meet/MiniCall';
 import { usePermissions } from './hooks/usePermissions';
 import { SignIn } from './pages/SignIn';
 import { SsoCallback } from './pages/SsoCallback';
 import { PendingAccess } from './pages/PendingAccess';
 import { AppShell, ComingSoon } from './pages/AppShell';
 import { ChatLayout } from './pages/chat/ChatLayout';
+import { MeetHome } from './pages/meet/MeetHome';
+import { Scheduler } from './pages/meet/Scheduler';
+import { MeetHistory } from './pages/meet/MeetHistory';
+import { MeetingRoom } from './pages/meet/MeetingRoom';
+import { MeetingSummary } from './pages/meet/MeetingSummary';
+import { GuestMeeting } from './pages/meet/GuestMeeting';
 import { SystemStatus } from './pages/SystemStatus';
 import { RolesPermissions } from './pages/admin/RolesPermissions';
 import { Users } from './pages/admin/Users';
@@ -44,28 +53,59 @@ const RequirePermission: React.FC<{ anyOf: string[]; children: React.ReactNode }
 export const App: React.FC = () => (
   <AuthProvider>
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<SignIn />} />
-        <Route path="/sso/callback" element={<SsoCallback />} />
-        <Route path="/app" element={<Protected><AppShell /></Protected>}>
-          <Route index element={<Navigate to="/app/chat" replace />} />
-          <Route path="chat" element={<ChatLayout />} />
-          <Route path="feed" element={<ComingSoon module="Feed" phase="Phase 4" />} />
-          <Route path="files" element={<ComingSoon module="Files" phase="Phase 2" />} />
-          <Route path="meet" element={<ComingSoon module="Meet" phase="Phase 3" />} />
-          <Route path="mail" element={<ComingSoon module="Mail" phase="Phase 4" />} />
+      {/* Notifications wrap the call, not the other way round: the call raises
+          them, and the toast stack must outlive any route that triggered it. */}
+      <NotificationProvider>
+      {/*
+        The active call lives ABOVE <Routes>. React Router unmounts a route
+        component when you leave it, and unmounting the meeting would close the
+        peer connections — so someone who nipped into Chat would come back to a
+        dead room. Holding it here lets the call outlive the route, and gives
+        the floating mini-call something to render.
+      */}
+      <MeetCallProvider>
+        <Routes>
+          <Route path="/" element={<SignIn />} />
+          <Route path="/sso/callback" element={<SsoCallback />} />
+          {/* The one route a person with no NGA account can reach. */}
+          <Route path="/meet/:idOrCode" element={<GuestMeeting />} />
+          <Route path="/app" element={<Protected><AppShell /></Protected>}>
+            <Route index element={<Navigate to="/app/chat" replace />} />
+            <Route path="chat" element={<ChatLayout />} />
+            <Route path="feed" element={<ComingSoon module="Feed" phase="Phase 4" />} />
+            <Route path="files" element={<ComingSoon module="Files" phase="Phase 2" />} />
+          {/* Meet. The room is its own full-height screen inside the shell;
+              `new` is declared before `:idOrCode` so it is not read as a code. */}
+            <Route path="meet" element={
+              <RequirePermission anyOf={['MEET_JOIN']}><MeetHome /></RequirePermission>} />
+            <Route path="meet/new" element={
+              <RequirePermission anyOf={['MEET_SCHEDULE']}><Scheduler /></RequirePermission>} />
+            {/* Above `meet/:id`, or "history" is read as a meeting id. */}
+            <Route path="meet/history" element={
+              <RequirePermission anyOf={['MEET_JOIN']}><MeetHistory /></RequirePermission>} />
+            <Route path="meet/:id/summary" element={
+              <RequirePermission anyOf={['MEET_JOIN']}><MeetingSummary /></RequirePermission>} />
+            <Route path="meet/:idOrCode" element={
+              <RequirePermission anyOf={['MEET_JOIN']}><MeetingRoom /></RequirePermission>} />
+            <Route path="mail" element={<ComingSoon module="Mail" phase="Phase 4" />} />
 
-          <Route path="admin/users" element={
-            <RequirePermission anyOf={['USERS_VIEW', 'USERS_MANAGE']}><Users /></RequirePermission>} />
-          <Route path="admin/roles" element={
-            <RequirePermission anyOf={['ROLES_PERMISSIONS_VIEW', 'ROLES_PERMISSIONS_MANAGE']}><RolesPermissions /></RequirePermission>} />
-          <Route path="admin/audit" element={
-            <RequirePermission anyOf={['AUDIT_VIEW']}><AuditLog /></RequirePermission>} />
-          <Route path="system" element={
-            <RequirePermission anyOf={['SYSTEM_HEALTH_VIEW']}><SystemStatus /></RequirePermission>} />
-        </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+            <Route path="admin/users" element={
+              <RequirePermission anyOf={['USERS_VIEW', 'USERS_MANAGE']}><Users /></RequirePermission>} />
+            <Route path="admin/roles" element={
+              <RequirePermission anyOf={['ROLES_PERMISSIONS_VIEW', 'ROLES_PERMISSIONS_MANAGE']}><RolesPermissions /></RequirePermission>} />
+            <Route path="admin/audit" element={
+              <RequirePermission anyOf={['AUDIT_VIEW']}><AuditLog /></RequirePermission>} />
+            <Route path="system" element={
+              <RequirePermission anyOf={['SYSTEM_HEALTH_VIEW']}><SystemStatus /></RequirePermission>} />
+          </Route>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+
+        {/* Rendered outside <Routes> on purpose: it must survive every
+            navigation, and it portals to document.body so no page can clip it. */}
+        <MiniCall />
+      </MeetCallProvider>
+      </NotificationProvider>
     </BrowserRouter>
   </AuthProvider>
 );

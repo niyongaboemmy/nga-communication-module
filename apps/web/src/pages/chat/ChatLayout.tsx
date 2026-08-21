@@ -1,11 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { MessagesSquare } from 'lucide-react';
 import { EmptyState } from '../../components/ui';
 import { ConversationList } from './ConversationList';
 import { MessageThread } from './MessageThread';
 import { Composer } from './Composer';
 import { ContextPanel } from './ContextPanel';
-import { useConversations, useMembers, useMessages } from './data';
+import { ChatProvider, useChat } from './ChatProvider';
+import * as chatApi from './api';
+import type { Member } from './types';
 
 /**
  * Chat, three panes (SRS §15.1).
@@ -19,33 +21,44 @@ import { useConversations, useMembers, useMessages } from './data';
  * hiding the other with CSS. Two reasons: an off-screen `display:none` pane
  * still gets tab focus and screen-reader attention on some engines, and a phone
  * should not be paying to render a 34-row list behind an open conversation.
- *
- * Selection lives here rather than in the URL for now. Phase 1 gives
- * conversations real ids and this becomes `/app/chat/:conversationId`, which is
- * what makes a conversation linkable and the browser Back button work — the
- * `select`/`clear` handlers below are already the only two places that change
- * it, so that swap is local to this file.
  */
 
-export const ChatLayout: React.FC = () => {
-  const { conversations, loading } = useConversations();
-  const [activeId, setActiveId] = useState<string | null>(null);
+const ChatWorkspace: React.FC = () => {
+  const { conversations, conversationsLoading, activeId, setActiveId, active } = useChat();
   const [contextOpen, setContextOpen] = useState(false);
+  const [members, setMembers] = useState<Member[]>([]);
 
-  const active = conversations.find((c) => c.id === activeId) ?? null;
-  const { messages, loading: messagesLoading } = useMessages(activeId);
-  const members = useMembers(activeId);
-
-  // On a wide screen an empty right-hand pane is wasted space, so open the
-  // first conversation automatically. On a phone that would rob the user of the
-  // list they came for, so it stays on the list until they choose.
+  /*
+   * On a wide screen an empty right-hand pane is wasted space, so open the
+   * first conversation automatically. On a phone that would rob the user of the
+   * list they came for, so it stays on the list until they choose.
+   *
+   * It fires on the *initial load only*, and the latch is set the moment that
+   * load finishes — even when it finished with nothing to open. Latching on
+   * "we opened something" instead leaves the effect armed for an empty
+   * account, so the first DM anyone sends them rips them out of whatever they
+   * were doing, opens itself, and marks itself read. Reading someone's message
+   * has to be something the reader did, not something that happened to them.
+   */
+  const autoOpened = useRef(false);
   useEffect(() => {
-    if (activeId || loading || conversations.length === 0) return;
+    if (autoOpened.current || conversationsLoading) return;
+    autoOpened.current = true;
+    if (activeId || conversations.length === 0) return;
     const first = conversations[0];
-    if (first && window.matchMedia('(min-width: 768px)').matches) {
-      setActiveId(first.id);
-    }
-  }, [activeId, loading, conversations]);
+    if (first && window.matchMedia('(min-width: 768px)').matches) setActiveId(first.id);
+  }, [activeId, conversationsLoading, conversations, setActiveId]);
+
+  // Members are only needed when the details panel is actually open — a channel
+  // of 400 is a real payload, and the sidebar never shows it.
+  useEffect(() => {
+    if (!activeId || !contextOpen) return;
+    let cancelled = false;
+    chatApi.listMembers(activeId)
+      .then((m) => { if (!cancelled) setMembers(m); })
+      .catch(() => { if (!cancelled) setMembers([]); });
+    return () => { cancelled = true; };
+  }, [activeId, contextOpen]);
 
   // Escape closes the overlay context panel — the same key that closes every
   // other overlay in the app.
@@ -68,13 +81,8 @@ export const ChatLayout: React.FC = () => {
           showListOnMobile ? 'flex' : 'hidden md:flex'
         }`}
       >
-        <div className="w-full">
-          <ConversationList
-            conversations={conversations}
-            loading={loading}
-            activeId={activeId}
-            onSelect={setActiveId}
-          />
+        <div className="w-full min-w-0">
+          <ConversationList />
         </div>
       </div>
 
@@ -82,8 +90,6 @@ export const ChatLayout: React.FC = () => {
       {active ? (
         <MessageThread
           conversation={active}
-          messages={messages}
-          loading={messagesLoading}
           onBack={() => setActiveId(null)}
           onToggleContext={() => setContextOpen((o) => !o)}
           contextOpen={contextOpen}
@@ -94,8 +100,10 @@ export const ChatLayout: React.FC = () => {
         <div className="hidden min-h-0 min-w-0 flex-1 place-items-center bg-surface-light md:grid dark:bg-background-dark">
           <EmptyState
             icon={<MessagesSquare size={22} />}
-            title="Pick a conversation"
-            hint="Choose a channel or a person on the left to start reading."
+            title={conversationsLoading ? 'Loading your conversations' : 'Pick a conversation'}
+            hint={conversationsLoading
+              ? 'One moment.'
+              : 'Choose a channel or a person on the left to start reading.'}
           />
         </div>
       )}
@@ -108,13 +116,21 @@ export const ChatLayout: React.FC = () => {
             onClick={() => setContextOpen(false)}
             aria-hidden="true"
           />
-          <div
-            className="animate-panel-in-right fixed inset-y-0 right-0 z-80 w-80 max-w-[85vw] shadow-2xl xl:static xl:z-auto xl:w-80 xl:shadow-none"
-          >
-            <ContextPanel conversation={active} members={members} onClose={() => setContextOpen(false)} />
+          <div className="animate-panel-in-right fixed inset-y-0 right-0 z-80 w-80 max-w-[85vw] xl:static xl:z-auto xl:w-80">
+            <ContextPanel
+              conversation={active}
+              members={members}
+              onClose={() => setContextOpen(false)}
+            />
           </div>
         </>
       )}
     </div>
   );
 };
+
+export const ChatLayout: React.FC = () => (
+  <ChatProvider>
+    <ChatWorkspace />
+  </ChatProvider>
+);

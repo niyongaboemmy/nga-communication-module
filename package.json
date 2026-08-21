@@ -2,7 +2,7 @@
   "name": "tupo",
   "version": "0.1.0",
   "private": true,
-  "description": "Tupo — NGA unified communication platform (chat, meet, files, mail, feed)",
+  "description": "Tupo \u2014 NGA unified communication platform (chat, meet, files, mail, feed)",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -23,10 +23,20 @@
     "clean": "rm -rf apps/*/dist packages/*/dist apps/web/dist",
     "preflight": "node scripts/preflight.mjs",
     "verify": "node scripts/verify.mjs",
-    "e2e": "node scripts/e2e-sso.mjs"
+    "e2e": "node scripts/e2e-sso.mjs",
+    "verify:meet": "node scripts/verify-meet.mjs",
+    "verify:meet:ui": "node scripts/verify-meet-ui.mjs",
+    "meet:check-sfu": "node scripts/check-sfu.mjs",
+    "meet:create-sfu": "node scripts/create-sfu-app.mjs",
+    "verify:notifications": "node scripts/verify-notifications.mjs",
+    "verify:meet:history": "node scripts/verify-meet-history.mjs",
+    "verify:meet:prejoin": "node scripts/verify-meet-prejoin.mjs",
+    "verify:chat": "node scripts/verify-chat-core.mjs",
+    "verify:chat:ui": "node scripts/verify-chat-ui.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "playwright": "^1.60.0"
   }
 }

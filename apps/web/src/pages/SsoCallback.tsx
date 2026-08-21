@@ -49,7 +49,7 @@ export const SsoCallback: React.FC = () => {
 
   return (
     <div className="min-h-full grid place-items-center bg-slate-50 px-4 dark:bg-background-dark">
-      <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm dark:border-border-dark dark:bg-chrome-dark">
+      <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 text-center  dark:border-border-dark dark:bg-chrome-dark">
         {!error ? (
           <>
             <div className="mx-auto mb-5 h-8 w-8 animate-spin rounded-full border-2 border-slate-200 border-t-brand-500" />

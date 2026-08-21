@@ -29,6 +29,37 @@ export const config = {
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
   adminEmails: (process.env.ADMIN_EMAILS ?? '')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+  /* ---- Meet (SRS §10) ------------------------------------------------ *
+   * All optional. With none of it set, Meet still works: meetings run on the
+   * peer-to-peer transport with Google STUN, which is enough on an
+   * unrestricted network and is what makes the module testable on a laptop. */
+
+  /** Cloudflare Realtime TURN — the same credentials TaskMentor's proctoring
+   *  module uses. Without TURN, WebRTC fails on any network that blocks UDP,
+   *  which describes most school networks. */
+  cloudflareTurnTokenId: process.env.CLOUDFLARE_TURN_TOKEN_ID ?? '',
+  cloudflareTurnApiToken: process.env.CLOUDFLARE_TURN_API_TOKEN ?? '',
+
+  /**
+   * Cloudflare Realtime SFU — the media server Tupo uses.
+   *
+   * Create a Realtime app in the Cloudflare dashboard (Realtime → SFU) and
+   * paste its App ID and secret. Unlike a self-hosted SFU there is nothing to
+   * run: no container, no UDP port range, no TURN companion. Without these two
+   * values meetings fall back to peer-to-peer and are capped at four people.
+   */
+  cloudflareRealtimeAppId: process.env.CLOUDFLARE_REALTIME_APP_ID ?? '',
+  cloudflareRealtimeAppSecret: process.env.CLOUDFLARE_REALTIME_APP_SECRET ?? '',
+
+
+  /** Where the realtime gateway lives, for server-initiated meeting events. */
+  realtimeInternalUrl: process.env.REALTIME_INTERNAL_URL ?? 'http://127.0.0.1:5191',
+  /** Shared secret for API → realtime calls. Defaults to the session secret so
+   *  a single-secret dev setup works, but is separable in production. */
+  realtimeInternalSecret: process.env.REALTIME_INTERNAL_SECRET ?? process.env.JWT_SECRET ?? DEFAULT_JWT_SECRET,
+
+  redisUrl: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/0',
 };
 
 // Fail fast rather than sign production sessions with a public secret.

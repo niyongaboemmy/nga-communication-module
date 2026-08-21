@@ -75,7 +75,7 @@ const RailLink: React.FC<{ entry: NavEntry; badge?: number }> = ({ entry, badge 
               `hidden` on touch widths where hover does not exist. */}
           <span
             role="tooltip"
-            className="pointer-events-none absolute left-full z-60 ml-3 hidden whitespace-nowrap rounded-lg bg-slate-900 px-2 py-1 text-xs font-medium text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 md:block dark:bg-card-dark"
+            className="pointer-events-none absolute left-full z-60 ml-3 hidden whitespace-nowrap rounded-lg bg-slate-900 px-2 py-1 text-xs font-medium text-white opacity-0  transition-opacity duration-150 group-hover:opacity-100 md:block dark:bg-card-dark"
           >
             {label}
           </span>
@@ -244,7 +244,7 @@ const UserMenu: React.FC = () => {
       {open && (
         <div
           role="menu"
-          className="animate-pop absolute right-0 z-60 mt-2 w-60 origin-top-right rounded-2xl border border-border-light bg-white p-1.5 shadow-xl shadow-slate-900/5 dark:border-border-dark/50 dark:bg-elevated-dark dark:shadow-black/40"
+          className="animate-pop absolute right-0 z-60 mt-2 w-60 origin-top-right rounded-2xl border border-border-light bg-white p-1.5   dark:border-border-dark/50 dark:bg-elevated-dark dark:"
         >
           <div className="flex items-center gap-3 rounded-xl px-2.5 py-2.5">
             <Avatar name={user.name} src={user.avatarUrl} size={38} />
@@ -351,7 +351,7 @@ export const AppShell: React.FC = () => {
         {/* Pages own their own scrolling. Chat sizes itself to `h-full` and
             never overflows this container; the admin pages are ordinary
             documents and scroll here. */}
-        <main className="min-w-0 flex-1 overflow-y-auto bg-surface-light dark:bg-background-dark">
+        <main data-app-scroll className="min-w-0 flex-1 overflow-y-auto bg-surface-light dark:bg-background-dark">
           <Outlet />
         </main>
       </div>
