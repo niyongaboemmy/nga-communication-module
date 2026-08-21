@@ -17,7 +17,7 @@ import pg from 'pg';
 import { readFileSync } from 'node:fs';
 const env = Object.fromEntries(readFileSync('apps/api/.env','utf8').split('\n')
   .filter(l => l.includes('=') && !l.trimStart().startsWith('#'))
-  .map(l => [l.slice(0,l.indexOf('=')).trim(), l.slice(l.indexOf('=')+1).trim()]));
+  .map(l => [l.slice(0,l.indexOf('=')).trim(), l.slice(l.indexOf('=')+1).trim().replace(/^["']|["']$/g, '')]));
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
 const pass=[],fail=[]; const check=(n,ok,d='')=>{(ok?pass:fail).push(`${ok?'✅':'❌'} ${n}${d?`  — ${d}`:''}`);console.log(`${ok?'✅':'❌'} ${n}${d?`  — ${d}`:''}`);};
 
