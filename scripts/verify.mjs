@@ -11,6 +11,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import { io } from 'socket.io-client';
+import { Queue } from 'bullmq';
+import { Redis } from 'ioredis';
 
 const env = Object.fromEntries(
   readFileSync('apps/api/.env', 'utf8').split('\n')
@@ -55,13 +57,22 @@ try {
 
   // ---- V7: Redis → BullMQ → worker
   const before = (await (await fetch('http://localhost:5193/health')).json()).processed;
-  await fetch('http://localhost:5193/dev/heartbeat', { method: 'POST' });
+  // Enqueue straight into BullMQ rather than through the worker's
+  // /dev/heartbeat helper. That route answers 404 whenever NODE_ENV is
+  // production -- by design -- so driving the check through it reported a
+  // failing job rail on every real deployment while the rail was fine.
+  const queueRedis = new Redis(env.REDIS_QUEUE_URL ?? 'redis://127.0.0.1:6379/1',
+    { maxRetriesPerRequest: null });
+  const jobQueue = new Queue('tupo-jobs', { connection: queueRedis });
+  await jobQueue.add('heartbeat', { at: new Date().toISOString() });
   let after = before;
   for (let i = 0; i < 20 && after === before; i++) {
     await new Promise((r) => setTimeout(r, 250));
     after = (await (await fetch('http://localhost:5193/health')).json()).processed;
   }
   check('worker processes a queued job', after > before, `processed ${before} → ${after}`);
+  await jobQueue.close();
+  await queueRedis.quit();
 
   // ---- V8: file upload round-trip with checksum comparison
   const payload = Buffer.from(`tupo phase 0 verification ${new Date().toISOString()}\n`.repeat(64));
