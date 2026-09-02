@@ -84,6 +84,16 @@ export class CloudflareTransport implements MediaTransport {
   /** participantId → their publishing session, learned from the roster. */
   private readonly sessions = new Map<string, string>();
   /**
+   * Who is presenting right now, learned from `meet:presenting`.
+   *
+   * A screen share is a track the SFU only forwards on request, exactly like a
+   * camera — but unlike a camera it has no tile of its own reporting visibility,
+   * so nothing in the visibility-driven path would ever pull it. Without this
+   * set the share is announced on the socket (the banner appears) and not one
+   * frame is ever subscribed to: the stage stays empty.
+   */
+  private readonly presenting = new Set<string>();
+  /**
    * The last set of visible tiles.
    *
    * Kept because subscription is driven by two independent things: which tiles
@@ -249,6 +259,19 @@ export class CloudflareTransport implements MediaTransport {
       this.socket.off(event, handler as (...args: unknown[]) => void);
     }
     this.handlers.length = 0;
+  }
+
+  /**
+   * Told by the room who is presenting, so their screen track is pulled the
+   * same way a visible camera is. Re-runs the subscription immediately: nothing
+   * else would, since the stage has nothing new to say about visibility.
+   */
+  setPresenting(participantId: string, on: boolean): void {
+    if (participantId === this.init.participantId) return;
+    if (on === this.presenting.has(participantId)) return;
+    if (on) this.presenting.add(participantId);
+    else this.presenting.delete(participantId);
+    void this.setSubscriptions(this.lastVisible);
   }
 
   /** Seeded from the roster the socket already delivered on join. */
@@ -450,10 +473,17 @@ export class CloudflareTransport implements MediaTransport {
           toAdd.push({ location: 'remote', sessionId, trackName: micName });
         }
 
-        // A screen share is why people are in the meeting; it is never dropped
-        // for being off-screen.
+        // A screen share is why people are in the meeting; it is pulled as soon
+        // as the room says this participant is presenting, and never dropped for
+        // being off-screen. (It has no tile of its own to report visibility, so
+        // the presenting set is the only thing that can trigger this.)
         const screenName = sfuTrackName(participantId, 'screen');
-        if (this.subscriptions.has(screenName)) wanted.add(screenName);
+        if (this.presenting.has(participantId)) {
+          wanted.add(screenName);
+          if (!this.subscriptions.has(screenName)) {
+            toAdd.push({ location: 'remote', sessionId, trackName: screenName });
+          }
+        }
 
         const quality = wantVideo.get(participantId);
         if (!quality) continue;

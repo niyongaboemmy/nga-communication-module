@@ -264,10 +264,16 @@ export function useMeetRoom(
       recording: boolean; transcribing: boolean; aiPresent: boolean;
       spotlightId: string | null; startedAt: string | null;
     }) => {
+      // Someone may already be presenting when we arrive — `meet:presenting` is
+      // only emitted on the change, so a late joiner has to read it off the
+      // roster or the stage stays empty until the presenter toggles again.
+      const presenter = p.participants.find((x) => x.screenSharing) ?? null;
       patch(() => ({
         phase: p.you.state === 'active' ? 'active' : 'lobby',
         you: p.you,
         participants: p.participants,
+        presenterId: presenter?.id ?? null,
+        presenterName: presenter?.name ?? null,
         lobby: p.lobby,
         settings: parseMeetSettings(p.settings),
         chat: p.chat,
@@ -402,6 +408,10 @@ export function useMeetRoom(
       const transport = transportRef.current;
       if (transport instanceof MeshTransport) {
         transport.setScreenStreamId(p.participantId, p.presenting ? p.screenStreamId ?? null : null);
+      } else if (transport instanceof CloudflareTransport) {
+        // The SFU only forwards a track when asked, and a screen share has no
+        // tile of its own to ask on its behalf — so the transport is told here.
+        transport.setPresenting(p.participantId, p.presenting);
       }
       patch((s) => {
         if (p.presenting) {
@@ -600,6 +610,17 @@ export function useMeetRoom(
         // Without it the first view of a meeting subscribes to nothing.
         if (lastVisibleRef.current.length) {
           void transport.setSubscriptions(lastVisibleRef.current);
+        }
+
+        // Tell the fresh transport about a share that was already running when
+        // we joined — the socket announced it before the transport existed.
+        for (const p of stateRef.current?.participants ?? []) {
+          if (!p.screenSharing || p.id === ticket.participantId) continue;
+          if (transport instanceof MeshTransport) {
+            transport.setScreenStreamId(p.id, p.screenStreamId ?? null);
+          } else if (transport instanceof CloudflareTransport) {
+            transport.setPresenting(p.id, true);
+          }
         }
 
         // Tell the room what we arrived with, so the roster is not showing

@@ -59,6 +59,10 @@ const browser = await chromium.launch({
   args: [
     '--use-fake-ui-for-media-stream',
     '--use-fake-device-for-media-stream',
+    // getDisplayMedia has no fake picker the way getUserMedia does; without a
+    // source named here it rejects in headless Chromium, and the screen-share
+    // checks below could never run.
+    '--auto-select-desktop-capture-source=Entire screen',
     '--autoplay-policy=no-user-gesture-required',
     // This run drives two browser contexts at once, and Chromium suspends
     // video decoding in whichever page is not in the foreground. Without these
@@ -601,7 +605,51 @@ try {
     await picker.getByRole('button', { name: /A browser tab/ }).isVisible());
   check('and an option to bring the audio',
     await picker.getByText(/Share audio too/).isVisible());
-  await hostP.page.keyboard.press('Escape');
+
+  // ---- the share actually reaches the other side ----
+  // Regression guard: the share used to be announced (banner appears) while no
+  // frame ever arrived — on mesh a glare on the added screen track dropped it
+  // for the polite peer, on the SFU nothing ever pulled it. Both ends must see
+  // real pixels, not just the "is presenting" label.
+  await picker.getByRole('button', { name: /Your entire screen/ }).click();
+  await hostP.page.waitForTimeout(2500);
+  await hostP.page.screenshot({ path: `${SHOTS}/24b-sharing-host.png` });
+
+  check('the room shows the host as presenting',
+    await pupilP.page.getByText(/presenting|is sharing/i).first().isVisible().catch(() => false)
+    || await pupilP.page.locator('video.object-contain').first().isVisible().catch(() => false));
+
+  await pupilP.page.bringToFront();
+  // The shared surface renders letterboxed — object-contain — which is set only
+  // when the tile has a real screenStream attached. That class painting frames
+  // is the whole assertion.
+  const screenPredicate = () => {
+    const v = document.querySelector('video.object-contain');
+    if (!v) return false;
+    const tracks = v.srcObject?.getVideoTracks?.() ?? [];
+    return v.videoWidth > 0 && tracks.some((t) => t.readyState === 'live' && !t.muted);
+  };
+  const pupilSeesScreen = await pupilP.page
+    .waitForFunction(screenPredicate, null, { timeout: 25000 })
+    .then(() => true).catch(() => false);
+  await pupilP.page.screenshot({ path: `${SHOTS}/24c-sharing-pupil.png` });
+  const screenDiag = await pupilP.page.evaluate(() => {
+    const v = document.querySelector('video.object-contain');
+    const tracks = v?.srcObject?.getVideoTracks?.() ?? [];
+    return { found: !!v, w: v?.videoWidth ?? 0,
+      tracks: tracks.map((t) => `${t.readyState}${t.muted ? '/muted' : ''}`) };
+  });
+  check('the pupil actually sees the shared screen, not just the banner',
+    pupilSeesScreen, JSON.stringify(screenDiag));
+
+  // Stopping the share must clear it everywhere.
+  await hostP.page.bringToFront();
+  await hostP.page.getByRole('button', { name: /Stop presenting|Stop sharing/i }).first()
+    .click().catch(() => {});
+  await pupilP.page.waitForTimeout(2500);
+  check('stopping the share removes it from the other side',
+    await pupilP.page.locator('video.object-contain').count() === 0
+    || !await pupilP.page.locator('video.object-contain').first().isVisible().catch(() => true));
   await hostP.page.waitForTimeout(400);
 
   // ---- the mini call: navigate away, stay in the meeting ----

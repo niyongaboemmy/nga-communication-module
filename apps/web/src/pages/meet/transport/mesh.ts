@@ -440,8 +440,15 @@ export class MeshTransport implements MediaTransport {
     for (const [id, peer] of this.peers) {
       try {
         // Added on its own MediaStream so the receiver can identify it by id.
+        // addTrack fires `negotiationneeded`, and this side then offers — the
+        // side that added the track must be the one that offers, so the new
+        // screen m-section is in the offer. Asking the *peer* to renegotiate
+        // instead (as this used to) made both ends offer at once: on that
+        // collision the polite end rolls its own offer back, and if the polite
+        // end was the sharer it discarded the very m-section that carries the
+        // screen — the share was announced on the socket but no frames ever
+        // reached the other side. Half of all shares, split on participant id.
         peer.screenSender = peer.pc.addTrack(track, stream);
-        this.socket.emit('meet:mesh:renegotiate', { to: id });
       } catch (err) {
         this.init.events.onError(`Could not share to ${id}: ${describe(err)}`);
       }
