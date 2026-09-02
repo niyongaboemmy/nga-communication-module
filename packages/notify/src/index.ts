@@ -37,7 +37,9 @@ export type NotificationKind =
   | 'chat.message'     // a message in a conversation set to notify on all
   | 'chat.thread'      // a reply in a thread you are following
   | 'chat.reaction'    // someone reacted to something you wrote
-  | 'chat.invited';    // you were added to a channel or group
+  | 'chat.invited'     // you were added to a channel or group
+  | 'mail.received'    // a mail message landed in your inbox
+  | 'mail.campaign';   // a bulk send you scheduled finished
 
 export interface NotificationRow {
   id: string;

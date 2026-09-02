@@ -7,3 +7,4 @@ export * from './meet.js';
 export * from './meetEvents.js';
 export * from './chat.js';
 export * from './chatEvents.js';
+export * from './mail.js';

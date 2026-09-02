@@ -10,6 +10,7 @@ import auditRoutes from './routes/audit.js';
 import meetRoutes from './routes/meet.js';
 import notificationRoutes from './routes/notifications.js';
 import chatRoutes from './routes/chat.js';
+import mailRoutes from './routes/mail.js';
 
 /**
  * The Express app with no side effects — no database init, no listen — so
@@ -36,6 +37,7 @@ app.use('/api/audit', auditRoutes);
 app.use('/api/meet', meetRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/mail', mailRoutes);
 
 app.use((_req, res) => res.status(404).json(fail('Not found')));
 

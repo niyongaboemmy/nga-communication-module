@@ -24,6 +24,11 @@ import { SystemStatus } from './pages/SystemStatus';
 import { RolesPermissions } from './pages/admin/RolesPermissions';
 import { Users } from './pages/admin/Users';
 import { AuditLog } from './pages/admin/AuditLog';
+import { MailLayout } from './pages/mail/MailLayout';
+import { MailTemplates } from './pages/mail/MailTemplates';
+import { MailLists } from './pages/mail/MailLists';
+import { MailCampaigns } from './pages/mail/MailCampaigns';
+import { MailSettings } from './pages/mail/MailSettings';
 import { EmptyState } from './components/ui';
 
 /** Requires a Tupo session, which requires MIS sign-in. */
@@ -99,7 +104,21 @@ export const App: React.FC = () => (
               <RequirePermission anyOf={['MEET_JOIN']}><MeetingSummary /></RequirePermission>} />
             <Route path="meet/:idOrCode" element={
               <RequirePermission anyOf={['MEET_JOIN']}><MeetingRoom /></RequirePermission>} />
-            <Route path="mail" element={<ComingSoon module="Mail" phase="Phase 4" />} />
+            {/* Mail. `t/:threadId` renders the same layout so a thread is a
+                linkable URL; campaigns/lists/templates are permission-gated
+                sub-screens. */}
+            <Route path="mail" element={
+              <RequirePermission anyOf={['MAIL_READ']}><MailLayout /></RequirePermission>} />
+            <Route path="mail/t/:threadId" element={
+              <RequirePermission anyOf={['MAIL_READ']}><MailLayout /></RequirePermission>} />
+            <Route path="mail/campaigns" element={
+              <RequirePermission anyOf={['MAIL_BULK_SEND', 'MAIL_APPROVE']}><MailCampaigns /></RequirePermission>} />
+            <Route path="mail/lists" element={
+              <RequirePermission anyOf={['MAIL_LIST_MANAGE']}><MailLists /></RequirePermission>} />
+            <Route path="mail/templates" element={
+              <RequirePermission anyOf={['MAIL_TEMPLATE_MANAGE']}><MailTemplates /></RequirePermission>} />
+            <Route path="mail/settings" element={
+              <RequirePermission anyOf={['MAIL_READ']}><MailSettings /></RequirePermission>} />
 
             <Route path="admin/users" element={
               <RequirePermission anyOf={['USERS_VIEW', 'USERS_MANAGE']}><Users /></RequirePermission>} />

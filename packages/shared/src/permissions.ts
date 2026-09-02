@@ -89,6 +89,8 @@ export const PERMISSIONS: PermissionDefinition[] = [
   { key: 'MAIL_BULK_SEND', category: PERMISSION_CATEGORIES.MAIL, description: 'Send to distribution lists and bulk announcements.' },
   { key: 'MAIL_TEMPLATE_MANAGE', category: PERMISSION_CATEGORIES.MAIL, description: 'Create and edit reusable mail templates.' },
   { key: 'MAIL_LIST_MANAGE', category: PERMISSION_CATEGORIES.MAIL, description: 'Manage distribution lists.' },
+  { key: 'MAIL_APPROVE', category: PERMISSION_CATEGORIES.MAIL, description: 'Approve bulk sends that reach more than 200 recipients.' },
+  { key: 'MAIL_AI_USE', category: PERMISSION_CATEGORIES.MAIL, description: 'Use the AI writing assistant for drafting, replying, summarising and planning mail.' },
 
   // ── Directory ────────────────────────────────────────────────────────────
   { key: 'DIRECTORY_VIEW', category: PERMISSION_CATEGORIES.DIRECTORY, description: 'Search the people directory.' },
@@ -164,7 +166,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'MEET_START', 'MEET_SCHEDULE', 'MEET_HOST_CONTROLS', 'MEET_RECORD', 'MEET_SCREENSHARE', 'MEET_ATTENDANCE_VIEW',
     'MEET_TRANSCRIBE', 'MEET_AI_USE',
     'FEED_COMMENT', 'FEED_POST',
-    'MAIL_SEND',
+    'MAIL_SEND', 'MAIL_TEMPLATE_MANAGE', 'MAIL_AI_USE',
     'DIRECTORY_VIEW',
   ],
 
@@ -174,7 +176,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'CHANNEL_JOIN', 'CHANNEL_CREATE', 'CHANNEL_MANAGE', 'CHANNEL_MEMBERS_MANAGE', 'CHANNEL_ARCHIVE', 'CHANNEL_ANNOUNCE',
     'MEET_START', 'MEET_SCHEDULE', 'MEET_HOST_CONTROLS', 'MEET_SCREENSHARE', 'MEET_TRANSCRIBE', 'MEET_AI_USE',
     'FEED_COMMENT', 'FEED_POST',
-    'MAIL_SEND',
+    'MAIL_SEND', 'MAIL_BULK_SEND', 'MAIL_TEMPLATE_MANAGE', 'MAIL_LIST_MANAGE', 'MAIL_APPROVE', 'MAIL_AI_USE',
     'MODERATION_QUEUE_VIEW', 'MODERATION_ACT',
     'FILE_DELETE_ANY',
     'USERS_VIEW', 'AUDIT_VIEW',

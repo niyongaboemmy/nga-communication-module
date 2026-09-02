@@ -24,7 +24,8 @@
     "openai": "^4.104.0",
     "zod": "^3.24.1",
     "@tupo/chat": "*",
-    "@tupo/notify": "*"
+    "@tupo/notify": "*",
+    "@tupo/mail": "*"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

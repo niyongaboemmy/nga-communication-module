@@ -25,7 +25,7 @@ import { getPool } from '@tupo/db';
  * request.
  */
 
-export type AccessReason = 'owner' | 'conversation' | 'denied' | 'missing';
+export type AccessReason = 'owner' | 'conversation' | 'mail' | 'denied' | 'missing';
 
 export interface AccessDecision {
   allowed: boolean;
@@ -77,6 +77,26 @@ export async function canReadFile(userId: string, fileId: string): Promise<Acces
       viaConversationId: viaConversation[0].conversation_id,
     };
   }
+
+  /*
+   * Mail attachments (FR-MAIL-3). The sender of the message it is attached to,
+   * or any of its recipients whose mailbox copy still exists, may read it. Same
+   * principle as the conversation grant: attachment is the grant, being on the
+   * message is the check — there is no capability token in the URL.
+   */
+  const { rows: viaMail } = await getPool().query(
+    `SELECT 1
+       FROM mail_attachments a
+       JOIN mail_messages m ON m.id = a.message_id
+      WHERE a.file_id = $1
+        AND (m.from_user_id = $2
+             OR EXISTS (SELECT 1 FROM mail_recipients r
+                         WHERE r.message_id = m.id AND r.user_id = $2 AND NOT r.is_hidden))
+      LIMIT 1`,
+    [fileId, userId],
+  );
+  if (viaMail[0]) return { allowed: true, reason: 'mail' };
+
   return { allowed: false, reason: 'denied' };
 }
 

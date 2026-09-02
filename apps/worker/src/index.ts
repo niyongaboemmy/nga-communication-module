@@ -7,6 +7,7 @@ import { runMeetWrapUp, type MeetWrapUpData } from './jobs/meetWrapUp.js';
 import { runScheduledMessages } from './jobs/scheduledMessages.js';
 import { runChatSweeps } from './jobs/chatSweeps.js';
 import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
+import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './jobs/mail.js';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -72,6 +73,29 @@ const worker = new Worker(
         );
       }
 
+      // Mail — SMTP delivery, bulk campaigns, distribution-list sync, and the
+      // periodic sweep that catches scheduled sends and anything missed.
+      case 'mail:send': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runMailSend(job.data as { messageId: string });
+      }
+      case 'mail:campaign': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runMailCampaign(job.data as { campaignId: string });
+      }
+      case 'mail:list-sync': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runMailListSync(job.data as { listId: string });
+      }
+      case 'mail:sweep': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runMailSweeps();
+      }
+
       default:
         // Fail loudly rather than silently dropping work we don't recognise.
         throw new Error(`Unknown job type: ${job.name}`);
@@ -111,6 +135,18 @@ queue.add('chat:sweep', {}, {
   removeOnComplete: 10,
   removeOnFail: 10,
 }).catch((err) => console.error('[worker] could not register the chat sweep:', err.message));
+/**
+ * The mail sweep, every 30 seconds. Promotes scheduled sends whose time has
+ * come (FR-MAIL-10), dispatches any SMTP the immediate job missed, runs due
+ * campaigns, and periodically re-syncs the derived distribution lists.
+ */
+queue.add('mail:sweep', {}, {
+  jobId: 'mail-sweep',
+  repeat: { every: 30_000 },
+  removeOnComplete: 20,
+  removeOnFail: 20,
+}).catch((err) => console.error('[worker] could not register the mail sweep:', err.message));
+
 worker.on('ready', () => console.log('[worker] connected to redis, waiting for jobs'));
 
 const app = express();
