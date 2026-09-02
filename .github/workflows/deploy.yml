@@ -78,6 +78,12 @@ jobs:
             # never has to be remembered as a manual step.
             npm run db:migrate
 
+            # Re-seed the RBAC catalog and the institutional spaces. Also
+            # idempotent: new permission keys and system-role grants land
+            # automatically instead of silently failing to take effect until
+            # someone remembers to seed by hand. Custom roles are never touched.
+            npm run db:seed
+
             # reload, not restart: pm2 replaces the processes without dropping
             # the listening socket, so an in-flight request is not killed.
             pm2 reload ecosystem.config.cjs --update-env
