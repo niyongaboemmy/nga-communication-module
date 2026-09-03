@@ -14,7 +14,7 @@
   "scripts": {
     "dev": "npm run preflight && concurrently -n api,realtime,files,worker,web -c blue,magenta,yellow,gray,green \"npm run dev -w @tupo/api\" \"npm run dev -w @tupo/realtime\" \"npm run dev -w @tupo/files\" \"npm run dev -w @tupo/worker\" \"npm run dev -w @tupo/web\"",
     "dev:backend": "concurrently -n api,realtime,files,worker -c blue,magenta,yellow,gray \"npm run dev -w @tupo/api\" \"npm run dev -w @tupo/realtime\" \"npm run dev -w @tupo/files\" \"npm run dev -w @tupo/worker\"",
-    "build": "npm run build -w @tupo/shared && npm run build -w @tupo/db && npm run build -w @tupo/notify && npm run build -w @tupo/chat && npm run build -w @tupo/mail && npm run build -w @tupo/api && npm run build -w @tupo/realtime && npm run build -w @tupo/files && npm run build -w @tupo/worker && npm run build -w @tupo/web",
+    "build": "npm run build -w @tupo/shared && npm run build -w @tupo/db && npm run build -w @tupo/notify && npm run build -w @tupo/chat && npm run build -w @tupo/mail && npm run build -w @tupo/feed && npm run build -w @tupo/api && npm run build -w @tupo/realtime && npm run build -w @tupo/files && npm run build -w @tupo/worker && npm run build -w @tupo/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "db:migrate": "npm run migrate -w @tupo/db",
@@ -40,7 +40,9 @@
     "verify:chat:power": "node scripts/verify-chat-power.mjs",
     "verify:chat:admin": "node scripts/verify-chat-admin.mjs",
     "verify:mail": "node scripts/verify-mail.mjs",
-    "verify:mail:ui": "node scripts/verify-mail-ui.mjs"
+    "verify:mail:ui": "node scripts/verify-mail-ui.mjs",
+    "verify:feed": "node scripts/verify-feed.mjs",
+    "verify:feed:ui": "node scripts/verify-feed-ui.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

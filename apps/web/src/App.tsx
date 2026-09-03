@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { MeetCallProvider } from './context/MeetCallContext';
 import { NotificationProvider } from './context/NotificationContext';
@@ -30,6 +30,14 @@ import { MailLists } from './pages/mail/MailLists';
 import { MailCampaigns } from './pages/mail/MailCampaigns';
 import { MailSettings } from './pages/mail/MailSettings';
 import { EmptyState } from './components/ui';
+import { FeedProvider } from './pages/feed/FeedProvider';
+import { FeedHome } from './pages/feed/FeedHome';
+import { PageProfile, PageDirectory, PageInsights } from './pages/feed/PageScreens';
+import { SavedPosts, PostPermalink, ModerationQueue } from './pages/feed/Screens';
+
+const FeedProviderLayout: React.FC = () => (
+  <FeedProvider><Outlet /></FeedProvider>
+);
 
 /** Requires a Tupo session, which requires MIS sign-in. */
 const Protected: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -89,7 +97,17 @@ export const App: React.FC = () => (
           <Route path="/app" element={<Protected><AppShell /></Protected>}>
             <Route index element={<Navigate to="/app/chat" replace />} />
             <Route path="chat" element={<ChatLayout />} />
-            <Route path="feed" element={<ComingSoon module="Feed" phase="Phase 4" />} />
+            <Route path="feed" element={
+              <RequirePermission anyOf={['FEED_VIEW']}><FeedProviderLayout /></RequirePermission>}>
+              <Route index element={<FeedHome />} />
+              <Route path="saved" element={<SavedPosts />} />
+              <Route path="pages" element={<PageDirectory />} />
+              <Route path="pages/:id/insights" element={<PageInsights />} />
+              <Route path="p/:slug" element={<PageProfile />} />
+              <Route path="post/:id" element={<PostPermalink />} />
+              <Route path="moderation" element={
+                <RequirePermission anyOf={['MODERATION_QUEUE_VIEW']}><ModerationQueue /></RequirePermission>} />
+            </Route>
             <Route path="files" element={<ComingSoon module="Files" phase="Phase 2" />} />
           {/* Meet. The room is its own full-height screen inside the shell;
               `new` is declared before `:idOrCode` so it is not read as a code. */}

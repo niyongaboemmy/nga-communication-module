@@ -1,0 +1,58 @@
+/* Feed-specific motion. Everything here is decorative and is disabled under
+   prefers-reduced-motion (see the media query at the end). */
+
+@keyframes feed-card-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.99); }
+  to   { opacity: 1; transform: none; }
+}
+.feed-card-in { animation: feed-card-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes feed-reaction-pop {
+  0%   { opacity: 0; transform: translateY(6px) scale(0.4); }
+  60%  { opacity: 1; transform: translateY(-2px) scale(1.15); }
+  100% { opacity: 1; transform: none; }
+}
+.feed-reaction-pop { animation: feed-reaction-pop 240ms cubic-bezier(0.22, 1.4, 0.5, 1) both; }
+
+@keyframes feed-emoji-fly {
+  0%   { opacity: 0; transform: translateY(0) scale(0.6) rotate(0deg); }
+  15%  { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-90px) scale(1.5) rotate(var(--spin, 12deg)); }
+}
+.feed-emoji-fly { animation: feed-emoji-fly 900ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes feed-bar-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.feed-bar-grow { animation: feed-bar-grow 520ms cubic-bezier(0.22, 1, 0.36, 1) both; transform-origin: left; }
+
+@keyframes feed-count-tick {
+  0% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+  100% { transform: translateY(0); }
+}
+.feed-count-tick { animation: feed-count-tick 260ms ease-out both; }
+
+@keyframes feed-shimmer { 100% { transform: translateX(100%); } }
+.feed-skeleton { position: relative; overflow: hidden; }
+.feed-skeleton::after {
+  content: ''; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.14), transparent);
+  animation: feed-shimmer 1.6s infinite;
+}
+
+@keyframes feed-live-ping {
+  0% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.5); }
+  100% { box-shadow: 0 0 0 8px rgba(37, 99, 235, 0); }
+}
+.feed-live-ping { animation: feed-live-ping 1.8s ease-out infinite; }
+
+.feed-hl-scroll { scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }
+.feed-hl-scroll > * { scroll-snap-align: start; }
+.feed-hl-scroll::-webkit-scrollbar { display: none; }
+
+.feed-reaction-picker { transform-origin: bottom left; }
+
+@media (prefers-reduced-motion: reduce) {
+  .feed-card-in, .feed-reaction-pop, .feed-emoji-fly, .feed-bar-grow,
+  .feed-count-tick, .feed-live-ping { animation: none !important; }
+  .feed-skeleton::after { animation: none; }
+}

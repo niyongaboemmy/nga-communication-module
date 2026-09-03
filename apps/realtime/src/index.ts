@@ -12,6 +12,7 @@ import { registerMeetNamespace } from './meet/namespace.js';
 import { ping as pingMeetDb, getPool as getMeetPool } from './meet/db.js';
 import { rooms as meetRooms } from './meet/state.js';
 import { registerChatHandlers, broadcastPresence } from './chat/handlers.js';
+import { registerFeedHandlers } from './feed/handlers.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -145,6 +146,7 @@ io.on('connection', async (socket) => {
   // Chat rides the default namespace alongside presence: it is the baseline
   // traffic of the product, and it shares the per-user room with the shell.
   registerChatHandlers(io, socket, redisReady ? presence : null);
+  registerFeedHandlers(io, socket);
 
   socket.emit('connection:ready', {
     userId: user.id,

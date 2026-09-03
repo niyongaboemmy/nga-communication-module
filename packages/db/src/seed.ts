@@ -33,6 +33,36 @@ async function seed(): Promise<void> {
     console.log(res.rowCount ? `  ✅ created space '${space.slug}'` : `  ⏭  space '${space.slug}' exists`);
   }
 
+  // Starter feed pages (FR-FEED-1). Idempotent by slug. The first Admin user,
+  // if one exists yet, becomes the owner; otherwise the page is unclaimed and
+  // an administrator can add themselves as owner later.
+  const { rows: adminRows } = await pool.query<{ id: string }>(
+    `SELECT id FROM users WHERE role = 'admin' ORDER BY created_at LIMIT 1`,
+  );
+  const ownerId = adminRows[0]?.id ?? null;
+  const PAGES = [
+    { slug: 'nga-official', name: 'NGA Official', kind: 'official', audience: 'everyone', verified: true, mandatory: true, accent: '#2563eb', bio: 'Official announcements from Nyanza Green Academy.' },
+    { slug: 'academics', name: 'Academics & Exams', kind: 'official', audience: 'everyone', verified: true, mandatory: false, accent: '#7c3aed', bio: 'Timetables, exam news, results and study resources.' },
+    { slug: 'sports-clubs', name: 'Sports & Clubs', kind: 'club', audience: 'everyone', verified: false, mandatory: false, accent: '#0d9488', bio: 'Fixtures, results, and everything the clubs are up to.' },
+  ];
+  for (const p of PAGES) {
+    const res = await pool.query(
+      `INSERT INTO feed_pages (id, slug, name, bio, kind, audience, verified, mandatory, accent, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ON CONFLICT (lower(slug)) WHERE deleted_at IS NULL DO NOTHING
+       RETURNING id`,
+      [snowflake(), p.slug, p.name, p.bio, p.kind, p.audience, p.verified, p.mandatory, p.accent, ownerId],
+    );
+    if (res.rowCount && ownerId) {
+      await pool.query(
+        `INSERT INTO feed_page_editors (page_id, user_id, role, added_by) VALUES ($1,$2,'owner',$2)
+         ON CONFLICT DO NOTHING`,
+        [res.rows[0]!.id, ownerId],
+      );
+    }
+    console.log(res.rowCount ? `  ✅ created page '${p.slug}'` : `  ⏭  page '${p.slug}' exists`);
+  }
+
   const rbac = await seedRbac(pool);
   console.log(`  ✅ ${rbac.permissions} permissions across ${CATEGORY_COUNT} categories`);
   console.log(`  ✅ ${rbac.roles} system roles with their permission sets`);

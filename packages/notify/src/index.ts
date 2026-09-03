@@ -39,7 +39,13 @@ export type NotificationKind =
   | 'chat.reaction'    // someone reacted to something you wrote
   | 'chat.invited'     // you were added to a channel or group
   | 'mail.received'    // a mail message landed in your inbox
-  | 'mail.campaign';   // a bulk send you scheduled finished
+  | 'mail.campaign'    // a bulk send you scheduled finished
+  | 'feed.published'   // a page you follow (with notify on) published a post
+  | 'feed.announcement'// an announcement post from a page you follow
+  | 'feed.comment'     // someone commented on your post
+  | 'feed.reply'       // someone replied to your comment
+  | 'feed.reaction'    // someone reacted to your post or comment
+  | 'feed.mention';    // you were @-mentioned in a post or comment
 
 export interface NotificationRow {
   id: string;

@@ -18,7 +18,8 @@
     "express": "^4.21.2",
     "ioredis": "^5.4.2",
     "@tupo/chat": "*",
-    "@tupo/mail": "*"
+    "@tupo/mail": "*",
+    "@tupo/feed": "*"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
