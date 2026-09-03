@@ -130,7 +130,9 @@ router.post('/compose', wrap(async (req, res) => {
   });
 
   if (!result.draft) {
-    await enqueueMailSend(result.messageId);
+    // A scheduled message is left for the worker's sweep, which promotes it and
+    // dispatches its email once its time comes; only send now for an immediate one.
+    if (!result.scheduled) await enqueueMailSend(result.messageId);
     await audit({ actorId: me.id, action: result.scheduled ? 'mail.schedule' : 'mail.send', targetType: 'mail_message', targetId: result.messageId });
   }
   res.status(201).json(ok(result));

@@ -112,13 +112,18 @@ export async function deliverSmtp(
 
   const { rows: msg } = await pool.query<{
     from_name: string; from_address: string; subject: string; body_html: string; body_text: string;
-    is_draft: boolean;
+    is_draft: boolean; scheduled_at: string | null;
   }>(
-    `SELECT from_name, from_address, subject, body_html, body_text, is_draft
+    `SELECT from_name, from_address, subject, body_html, body_text, is_draft, scheduled_at
        FROM mail_messages WHERE id = $1`, [messageId],
   );
   const m = msg[0];
   if (!m || m.is_draft) return { sent: 0, failed: 0, skipped: 0 };
+  // A scheduled message's email must not go out before its time — the sweep
+  // picks it up once `scheduled_at` has passed.
+  if (m.scheduled_at && new Date(m.scheduled_at).getTime() > Date.now()) {
+    return { sent: 0, failed: 0, skipped: 0 };
+  }
 
   const { rows: recipients } = await pool.query<{
     id: string; address: string; name: string;

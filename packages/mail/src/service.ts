@@ -22,6 +22,7 @@ import type {
   MailThreadView, MailLabel, MailboxCounts, MailRecipientDelivery, MailAttachment,
 } from '@tupo/shared';
 import { MailError } from './errors.js';
+import { internalEmailDelivery } from './config.js';
 import { htmlToText, snippetOf, isEmailAddress } from './render.js';
 import { deliverInApp, isSuppressed, recordEvent } from './delivery.js';
 
@@ -57,14 +58,22 @@ async function resolveRecipients(
 ): Promise<ResolvedRecipient[]> {
   const out: ResolvedRecipient[] = [];
   const seen = new Set<string>();
+  const instanceEmailDefault = internalEmailDelivery();
+
+  // An internal recipient gets an SMTP copy when the instance default is on and
+  // they have not opted out — or when they have opted in regardless. `copies`
+  // is NULL when the user has never touched mail settings.
+  const wantsEmail = (copies: boolean | null): boolean =>
+    copies === null ? instanceEmailDefault : copies;
+
   for (const raw of inputs ?? []) {
     const value = raw.trim();
     if (!value) continue;
 
     if (value.startsWith('userId:')) {
       const id = value.slice(7);
-      const { rows } = await db.query<{ id: string; name: string; email: string; copies: boolean }>(
-        `SELECT u.id, u.name, u.email, COALESCE(p.email_copies, false) AS copies
+      const { rows } = await db.query<{ id: string; name: string; email: string; copies: boolean | null }>(
+        `SELECT u.id, u.name, u.email, p.email_copies AS copies
            FROM users u LEFT JOIN mail_prefs p ON p.user_id = u.id
           WHERE u.id = $1 AND u.status = 'active'`, [id],
       );
@@ -74,7 +83,7 @@ async function resolveRecipients(
       if (seen.has(key)) continue;
       seen.add(key);
       out.push({ kind, userId: u.id, address: u.email || `${u.id}@tupo.local`, name: u.name, channel: 'in_app' });
-      if (u.copies && isEmailAddress(u.email)) {
+      if (wantsEmail(u.copies) && isEmailAddress(u.email)) {
         out.push({ kind, userId: u.id, address: u.email, name: u.name, channel: 'smtp' });
       }
       continue;
@@ -82,15 +91,21 @@ async function resolveRecipients(
 
     if (!isEmailAddress(value)) throw new MailError(`Not a valid address: ${value}`, 400);
     const addr = value.toLowerCase();
-    // An address that belongs to a Tupo user routes in-app, not out to SMTP.
-    const { rows } = await db.query<{ id: string; name: string }>(
-      `SELECT id, name FROM users WHERE lower(email) = $1 AND status = 'active' LIMIT 1`, [addr],
+    // An address that belongs to a Tupo user routes in-app; it also gets a real
+    // email when the instance default (or that user's preference) calls for it.
+    const { rows } = await db.query<{ id: string; name: string; copies: boolean | null }>(
+      `SELECT u.id, u.name, p.email_copies AS copies
+         FROM users u LEFT JOIN mail_prefs p ON p.user_id = u.id
+        WHERE lower(u.email) = $1 AND u.status = 'active' LIMIT 1`, [addr],
     );
     const key = `a:${addr}`;
     if (seen.has(key)) continue;
     seen.add(key);
     if (rows[0]) {
       out.push({ kind, userId: rows[0].id, address: addr, name: rows[0].name, channel: 'in_app' });
+      if (wantsEmail(rows[0].copies)) {
+        out.push({ kind, userId: rows[0].id, address: addr, name: rows[0].name, channel: 'smtp' });
+      }
     } else {
       out.push({ kind, userId: null, address: addr, name: value.split('@')[0] ?? value, channel: 'smtp' });
     }
@@ -118,11 +133,16 @@ export async function getPrefs(userId: string): Promise<MailPrefs> {
        FROM mail_prefs WHERE user_id = $1`, [userId],
   );
   const p = rows[0];
+  const instanceDefault = internalEmailDelivery();
   return {
     displayName: p?.display_name ?? null,
     signatureHtml: p?.signature_html ?? '',
     signatureEnabled: p?.signature_enabled ?? false,
-    emailCopies: p?.email_copies ?? false,
+    // The effective value: an explicit preference, or the instance default.
+    emailCopies: p?.email_copies ?? instanceDefault,
+    // Whether real-email delivery is switched on for this deployment at all —
+    // when false, the per-user toggle does nothing and the UI says so.
+    emailDeliveryAvailable: instanceDefault,
   };
 }
 
@@ -437,21 +457,34 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
 
     let deliverySummary: MailMessageView['deliverySummary'];
     if (isSender && !m.is_draft) {
+      // Counted per *person*, not per delivery row: someone who gets both an
+      // in-app copy and an email is one recipient, "delivered" once both land,
+      // "failed" if either bounces. So "28/30" means 28 people are reached.
       const { rows: agg } = await db.query<Record<string, string>>(
-        `SELECT count(*)::text total,
-                count(*) FILTER (WHERE delivery_status = 'queued')::text queued,
-                count(*) FILTER (WHERE delivery_status = 'sent')::text sent,
-                count(*) FILTER (WHERE delivery_status = 'delivered')::text delivered,
-                count(*) FILTER (WHERE delivery_status = 'bounced')::text bounced,
-                count(*) FILTER (WHERE delivery_status = 'failed')::text failed,
-                count(*) FILTER (WHERE delivery_status = 'suppressed')::text suppressed
-           FROM mail_recipients WHERE message_id = $1`,
+        `WITH per_person AS (
+           SELECT coalesce(user_id, lower(address)) AS who,
+                  CASE
+                    WHEN bool_or(delivery_status IN ('bounced','failed')) THEN 'failed'
+                    WHEN bool_or(delivery_status = 'suppressed') AND bool_and(delivery_status IN ('suppressed','delivered','sent')) THEN 'suppressed'
+                    WHEN bool_and(delivery_status = 'delivered') THEN 'delivered'
+                    WHEN bool_or(delivery_status IN ('delivered','sent')) THEN 'sent'
+                    ELSE 'queued' END AS state
+             FROM mail_recipients WHERE message_id = $1
+            GROUP BY coalesce(user_id, lower(address))
+         )
+         SELECT count(*)::text total,
+                count(*) FILTER (WHERE state = 'queued')::text queued,
+                count(*) FILTER (WHERE state = 'sent')::text sent,
+                count(*) FILTER (WHERE state = 'delivered')::text delivered,
+                count(*) FILTER (WHERE state = 'failed')::text failed,
+                count(*) FILTER (WHERE state = 'suppressed')::text suppressed
+           FROM per_person`,
         [m.id],
       );
       const a = agg[0]!;
       deliverySummary = {
         total: +a.total!, queued: +a.queued!, sent: +a.sent!, delivered: +a.delivered!,
-        bounced: +a.bounced!, failed: +a.failed!, suppressed: +a.suppressed!,
+        bounced: 0, failed: +a.failed!, suppressed: +a.suppressed!,
       };
     }
 

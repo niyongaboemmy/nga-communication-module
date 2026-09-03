@@ -18,7 +18,8 @@ import {
 } from '@tupo/shared';
 import type { MailCampaignPayload, MailCampaignView, MailPerson } from '@tupo/shared';
 import { MailError } from './errors.js';
-import { renderMerge, htmlToText, snippetOf } from './render.js';
+import { internalEmailDelivery } from './config.js';
+import { renderMerge, htmlToText, snippetOf, isEmailAddress } from './render.js';
 import { getPrefs } from './service.js';
 import { deliverInApp } from './delivery.js';
 import { deliverSmtp } from './delivery.js';
@@ -127,23 +128,30 @@ export interface ResolvedCampaignRecipient {
   address: string;
   name: string;
   mergeVars: Record<string, string>;
+  /** Internal recipient who should also receive a real email. */
+  alsoEmail?: boolean;
 }
 
 export async function resolveCampaignRecipients(campaign: MailCampaignView): Promise<ResolvedCampaignRecipient[]> {
   const byAddress = new Map<string, ResolvedCampaignRecipient>();
+  const instanceEmailDefault = internalEmailDelivery();
 
   if (campaign.listIds.length) {
     const { rows } = await getPool().query<{
       address: string; user_id: string | null; name: string; merge_vars: Record<string, string>;
+      copies: boolean | null;
     }>(
-      `SELECT DISTINCT ON (lower(address)) address, user_id, name, merge_vars
-         FROM mail_list_members
-        WHERE list_id = ANY($1::text[])`,
+      `SELECT DISTINCT ON (lower(m.address)) m.address, m.user_id, m.name, m.merge_vars,
+              p.email_copies AS copies
+         FROM mail_list_members m
+         LEFT JOIN mail_prefs p ON p.user_id = m.user_id
+        WHERE m.list_id = ANY($1::text[])`,
       [campaign.listIds],
     );
     for (const r of rows) {
       byAddress.set(r.address.toLowerCase(), {
         userId: r.user_id, address: r.address.toLowerCase(), name: r.name, mergeVars: r.merge_vars ?? {},
+        alsoEmail: !!r.user_id && (r.copies === null ? instanceEmailDefault : r.copies),
       });
     }
   }
@@ -359,8 +367,6 @@ async function materialiseCampaignMessage(
 
   const threadId = snowflake();
   const messageId = snowflake();
-  const recipientId = snowflake();
-  const channel = r.userId ? 'in_app' : 'smtp';
 
   await db.query(
     `INSERT INTO mail_threads (id, subject, subject_normalized, created_by, last_message_at, last_sender_id, last_sender_name, last_snippet, message_count)
@@ -375,34 +381,54 @@ async function materialiseCampaignMessage(
     [messageId, threadId, from.userId, from.name, from.address, subject, bodyHtml, bodyText,
      snippetOf(bodyHtml, bodyText), campaign.id],
   );
-  await db.query(
-    `INSERT INTO mail_recipients
-       (id, message_id, thread_id, kind, user_id, address, name, merge_vars, channel, delivery_status)
-     VALUES ($1,$2,$3,'to',$4,$5,$6,$7::jsonb,$8,'queued')`,
-    [recipientId, messageId, threadId, r.userId, r.address, r.name, JSON.stringify(r.mergeVars), channel],
-  );
+
+  // In-app for an internal recipient, SMTP for an external one — plus an SMTP
+  // copy for an internal recipient who should also get a real email.
+  const channels: Array<'in_app' | 'smtp'> = r.userId ? ['in_app'] : ['smtp'];
+  if (r.userId && r.alsoEmail && isEmailAddress(r.address)) channels.push('smtp');
+
+  for (const channel of channels) {
+    await db.query(
+      `INSERT INTO mail_recipients
+         (id, message_id, thread_id, kind, user_id, address, name, merge_vars, channel, delivery_status)
+       VALUES ($1,$2,$3,'to',$4,$5,$6,$7::jsonb,$8,'queued')`,
+      [snowflake(), messageId, threadId, r.userId, r.address, r.name, JSON.stringify(r.mergeVars), channel],
+    );
+  }
   return messageId;
 }
 
 export async function rollupCampaignCounts(id: string): Promise<{
   total: number; queued: number; sent: number; delivered: number; bounced: number; failed: number; suppressed: number;
 }> {
+  // Per recipient (one personalised message each), collapsing that recipient's
+  // in-app + email delivery rows into a single outcome.
   const { rows } = await getPool().query<Record<string, string>>(
-    `SELECT count(*)::text total,
-            count(*) FILTER (WHERE r.delivery_status IN ('queued','sending'))::text queued,
-            count(*) FILTER (WHERE r.delivery_status = 'sent')::text sent,
-            count(*) FILTER (WHERE r.delivery_status = 'delivered')::text delivered,
-            count(*) FILTER (WHERE r.delivery_status = 'bounced')::text bounced,
-            count(*) FILTER (WHERE r.delivery_status = 'failed')::text failed,
-            count(*) FILTER (WHERE r.delivery_status = 'suppressed')::text suppressed
-       FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id
-      WHERE m.campaign_id = $1`,
+    `WITH per_msg AS (
+       SELECT m.id,
+              CASE
+                WHEN bool_or(r.delivery_status IN ('bounced','failed')) THEN 'failed'
+                WHEN bool_or(r.delivery_status = 'suppressed') AND bool_and(r.delivery_status IN ('suppressed','delivered','sent')) THEN 'suppressed'
+                WHEN bool_and(r.delivery_status = 'delivered') THEN 'delivered'
+                WHEN bool_or(r.delivery_status IN ('delivered','sent')) THEN 'sent'
+                ELSE 'queued' END AS state
+         FROM mail_messages m JOIN mail_recipients r ON r.message_id = m.id
+        WHERE m.campaign_id = $1
+        GROUP BY m.id
+     )
+     SELECT count(*)::text total,
+            count(*) FILTER (WHERE state = 'queued')::text queued,
+            count(*) FILTER (WHERE state = 'sent')::text sent,
+            count(*) FILTER (WHERE state = 'delivered')::text delivered,
+            count(*) FILTER (WHERE state = 'failed')::text failed,
+            count(*) FILTER (WHERE state = 'suppressed')::text suppressed
+       FROM per_msg`,
     [id],
   );
   const a = rows[0]!;
   return {
     total: +a.total!, queued: +a.queued!, sent: +a.sent!, delivered: +a.delivered!,
-    bounced: +a.bounced!, failed: +a.failed!, suppressed: +a.suppressed!,
+    bounced: 0, failed: +a.failed!, suppressed: +a.suppressed!,
   };
 }
 

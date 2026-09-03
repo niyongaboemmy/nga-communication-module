@@ -224,7 +224,10 @@ export interface MailPrefs {
   displayName: string | null;
   signatureHtml: string;
   signatureEnabled: boolean;
+  /** Whether mail to this user is also delivered as a real email. */
   emailCopies: boolean;
+  /** Read-only: whether this deployment has real-email delivery switched on. */
+  emailDeliveryAvailable?: boolean;
 }
 
 export interface MailboxCounts {

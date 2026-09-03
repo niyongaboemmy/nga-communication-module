@@ -19,6 +19,7 @@ import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
+import { startSmtpSink } from './lib/smtp-sink.mjs';
 
 const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
@@ -67,16 +68,19 @@ const cleanup = async () => {
   await pool.query(`DELETE FROM mail_suppressions WHERE address LIKE 'mailtest-%' OR address LIKE '%@nowhere.invalid'`);
 };
 
-let ada, ben, sam, admin;
+let ada, ben, sam, admin, sink;
+const emailOn = (env.MAIL_INTERNAL_EMAIL ?? '').toLowerCase() === 'on';
+const smtpPort = Number(readFileSync('apps/worker/.env', 'utf8').match(/^SMTP_PORT=(\d+)/m)?.[1] ?? 0);
 
 try {
   await cleanup();
+  if (emailOn && smtpPort) sink = await startSmtpSink(smtpPort).catch(() => null);
   ada = await makeUser('Mail Ada');
   ben = await makeUser('Mail Ben');
   sam = await makeUser('Mail Sam', 'Student');
   admin = await makeUser('Mail Admin', 'Admin');
 
-  /* ── 1. compose → in-app delivery ─────────────────────────────────────── */
+  /* ── 1. compose → delivery ───────────────────────────────────────────── */
   step('Ada sends Ben a message');
   const subject = `Verify ${randomBytes(3).toString('hex')}`;
   const sent = await api('/api/mail/compose', ada.token, {
@@ -87,10 +91,25 @@ try {
   const threadId = sent.data?.threadId;
 
   const { rows: rcpt } = await pool.query(
-    `SELECT channel, delivery_status FROM mail_recipients WHERE message_id = $1`, [sent.data?.messageId]);
-  check('recipient row is in-app and delivered (no SMTP)',
-    rcpt[0]?.channel === 'in_app' && rcpt[0]?.delivery_status === 'delivered',
-    `${rcpt[0]?.channel}/${rcpt[0]?.delivery_status}`);
+    `SELECT id, channel, delivery_status FROM mail_recipients WHERE message_id = $1 ORDER BY channel`, [sent.data?.messageId]);
+  const inApp = rcpt.find((r) => r.channel === 'in_app');
+  const smtp = rcpt.find((r) => r.channel === 'smtp');
+  check('in-app copy is delivered', inApp?.delivery_status === 'delivered', `${inApp?.delivery_status}`);
+
+  if (emailOn) {
+    check('internal recipient also gets a real-email delivery row', !!smtp, `${rcpt.map((r) => r.channel).join(',')}`);
+    if (sink) {
+      // The worker's mail:send job + sweep deliver the SMTP copy.
+      for (let i = 0; i < 20 && !sink.received.some((m) => m.to.includes(ben.email)); i++) await sleep(1000);
+      const got = sink.received.find((m) => m.to.includes(ben.email));
+      check('the email reaches the SMTP relay', !!got, got ? `to ${got.to[0]}` : 'not received');
+      check('the email carries the subject', !!got && got.data.includes(subject));
+      const { rows: s2 } = await pool.query(`SELECT delivery_status FROM mail_recipients WHERE id = $1`, [smtp?.id]);
+      check('the SMTP row is marked delivered', s2[0]?.delivery_status === 'delivered', s2[0]?.delivery_status);
+    }
+  } else {
+    check('internal recipient is in-app only (email delivery off)', !smtp);
+  }
 
   step("Ben's inbox");
   const benInbox = await api('/api/mail/threads?folder=inbox', ben.token);
@@ -145,18 +164,23 @@ try {
   check('schedule returns scheduled:true', sch.data?.scheduled === true);
   const schList = await api('/api/mail/threads?folder=scheduled', ada.token);
   check('appears in Ada’s Scheduled', schList.data?.threads?.some((t) => t.threadId === sch.data?.threadId));
+  await sleep(2500); // give the worker sweep a chance to (wrongly) fire
   const { rows: schRcpt } = await pool.query(
     `SELECT count(*)::int n FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id
       WHERE m.id = $1 AND r.delivery_status = 'delivered'`, [sch.data?.messageId]);
-  check('not delivered yet', schRcpt[0].n === 0);
+  check('nothing delivered before the scheduled time (in-app or email)', schRcpt[0].n === 0, `${schRcpt[0].n} delivered`);
+  if (sink) check('no email sent for a not-yet-due scheduled message',
+    !sink.received.some((m) => m.data.includes(sch.data?.threadId ?? 'nomatch')));
   const cancel = await api(`/api/mail/messages/${sch.data?.messageId}/cancel`, ada.token, { method: 'POST' });
   check('cancel scheduled succeeds', cancel.status === 200);
 
   /* ── 5. delivery tracking (FR-MAIL-8) ───────────────────────────────── */
   step('Ada inspects per-recipient delivery');
   const del = await api(`/api/mail/messages/${sent.data.messageId}/delivery`, ada.token);
-  check('delivery lists the recipient with events', del.data?.recipients?.length === 1
-    && del.data.recipients[0].events.length >= 2, JSON.stringify(del.data?.recipients?.[0]?.status));
+  check('delivery lists every recipient channel with events',
+    (del.data?.recipients?.length ?? 0) === (emailOn ? 2 : 1)
+    && del.data.recipients.every((r) => r.events.length >= 2),
+    del.data?.recipients?.map((r) => `${r.channel}:${r.status}`).join(' '));
   const benDel = await api(`/api/mail/messages/${sent.data.messageId}/delivery`, ben.token);
   check('a non-sender cannot read delivery', benDel.status === 404);
 
@@ -179,27 +203,47 @@ try {
   check('Sam (Student) cannot reach the AI assistant',
     (await api('/api/mail/ai/subject', sam.token, { method: 'POST', body: { bodyText: 'x' } })).status === 403);
 
+  // The public AI providers are genuinely flaky (quota, transient 5xx). Retry
+  // an AI call a couple of times before calling it a real failure.
+  const aiRetry = async (fn, ok) => {
+    let last;
+    for (let i = 0; i < 3; i++) {
+      last = await fn();
+      if (ok(last)) return last;
+      await sleep(1500);
+    }
+    return last;
+  };
+
   if (aiOn) {
-    const draft = await api('/api/mail/ai/compose', ada.token, {
-      method: 'POST',
-      body: { action: 'draft', instruction: 'Tell parents the library will be closed this Friday for stocktaking.' },
-    });
+    const draft = await aiRetry(
+      () => api('/api/mail/ai/compose', ada.token, {
+        method: 'POST',
+        body: { action: 'draft', instruction: 'Tell parents the library will be closed this Friday for stocktaking.' },
+      }),
+      (r) => r.status === 200 && /<p>/i.test(r.data?.html ?? ''));
     check('AI drafts an HTML body', draft.status === 200 && /<p>/i.test(draft.data?.html ?? '') && !!draft.data?.providerUsed,
       draft.data?.providerUsed);
     check('AI draft is sanitised (no script tags)', !/<script/i.test(draft.data?.html ?? ''));
 
-    const improve = await api('/api/mail/ai/compose', ada.token, {
-      method: 'POST', body: { action: 'grammar', currentText: 'the libary will be close on friday' },
-    });
+    const improve = await aiRetry(
+      () => api('/api/mail/ai/compose', ada.token, {
+        method: 'POST', body: { action: 'grammar', currentText: 'the libary will be close on friday' },
+      }),
+      (r) => r.status === 200 && (r.data?.html ?? '').length > 0);
     check('AI grammar-fix returns a revised body', improve.status === 200 && (improve.data?.html ?? '').length > 0);
 
-    const subj = await api('/api/mail/ai/subject', ada.token, {
-      method: 'POST', body: { bodyText: 'The library will be closed this Friday for stocktaking. It reopens Monday.' },
-    });
+    const subj = await aiRetry(
+      () => api('/api/mail/ai/subject', ada.token, {
+        method: 'POST', body: { bodyText: 'The library will be closed this Friday for stocktaking. It reopens Monday.' },
+      }),
+      (r) => r.status === 200 && Array.isArray(r.data?.suggestions) && r.data.suggestions.length > 0);
     check('AI suggests subject lines', subj.status === 200 && Array.isArray(subj.data?.suggestions) && subj.data.suggestions.length > 0,
       JSON.stringify(subj.data?.suggestions?.[0]));
 
-    const sumRes = await api('/api/mail/ai/summarize', ben.token, { method: 'POST', body: { threadId } });
+    const sumRes = await aiRetry(
+      () => api('/api/mail/ai/summarize', ben.token, { method: 'POST', body: { threadId } }),
+      (r) => r.status === 200 && typeof r.data?.summary === 'string' && r.data.summary.length > 0);
     check('AI summarises a thread the reader is in', sumRes.status === 200 && typeof sumRes.data?.summary === 'string');
     const sumOutsider = await api('/api/mail/ai/summarize', admin.token, { method: 'POST', body: { threadId } });
     check('AI summary refuses a thread the caller is not in', sumOutsider.status === 404);
@@ -311,6 +355,7 @@ try {
   console.error(err);
 } finally {
   await cleanup();
+  if (sink) await sink.close().catch(() => {});
   await pool.end();
 }
 

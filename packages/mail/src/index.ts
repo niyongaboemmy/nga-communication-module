@@ -6,6 +6,7 @@
  * for delivering a message lives here so it cannot differ between the two.
  */
 export * from './errors.js';
+export * from './config.js';
 export * from './render.js';
 export * from './smtp.js';
 export * from './delivery.js';

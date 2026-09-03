@@ -13,7 +13,7 @@ export const MailSettings: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  useEffect(() => { api.getPrefs().then(setPrefs).catch(() => setPrefs({ displayName: null, signatureHtml: '', signatureEnabled: false, emailCopies: false })); }, []);
+  useEffect(() => { api.getPrefs().then(setPrefs).catch(() => setPrefs({ displayName: null, signatureHtml: '', signatureEnabled: false, emailCopies: false, emailDeliveryAvailable: false })); }, []);
 
   if (!prefs) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
@@ -47,11 +47,16 @@ export const MailSettings: React.FC = () => {
         </div>
 
         <label className="flex items-start gap-2 text-sm">
-          <input type="checkbox" checked={prefs.emailCopies} onChange={(e) => setPrefs({ ...prefs, emailCopies: e.target.checked })} className="mt-0.5 accent-blue-600" />
+          <input type="checkbox" checked={prefs.emailCopies}
+            disabled={prefs.emailDeliveryAvailable === false}
+            onChange={(e) => setPrefs({ ...prefs, emailCopies: e.target.checked })}
+            className="mt-0.5 accent-blue-600 disabled:opacity-40" />
           <span>
-            <span className="font-medium">Also email me a copy</span>
+            <span className="font-medium">Deliver mail to my email inbox too</span>
             <span className="block text-xs text-text-secondary-light dark:text-text-secondary-dark">
-              Internal mail is delivered in-app by default. Turn this on to also receive an SMTP copy at your address.
+              {prefs.emailDeliveryAvailable === false
+                ? 'This deployment delivers institutional mail in-app only. Real-email delivery is switched off by the administrator.'
+                : 'On by default — mail addressed to you also arrives as a normal email at your address. Uncheck to receive it in Tupo only.'}
             </span>
           </span>
         </label>
