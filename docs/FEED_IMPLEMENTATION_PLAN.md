@@ -277,6 +277,11 @@ sweep registers alongside the mail one).
 | `npm run verify:feed:ui` (Playwright) | ✅ **9/9** — compose, react, comment, directory, page profile, mobile, no horizontal overflow; screenshots in `.feed-ui-shots/` |
 | `npm run typecheck` / `npm run build` (all 11 workspaces) | ✅ zero errors |
 
-**Not done from here:** production deploy to the two Tupo subdomain hosts —
-needs EC2 access and is outward-facing. Run §9 steps 1–6 on the runner when
-ready.
+**Deployed 4 September 2026** — live at https://tupo.amashuri.com. Pushed by
+hand over the pem key (rsync → `npm ci && npm run build && db:migrate &&
+db:seed && pm2 reload` on the EC2 box), since the work sits on branch
+`feat/feed-phase-4` rather than `main`. `0017`/`0018` applied to `tupo_prod`,
+3 starter pages seeded, all four services 200, realtime handshake OK, and
+`node scripts/verify-feed.mjs` passes **17/17** on the box. Merge
+`feat/feed-phase-4` → `main` so the deploy Action and the repo of record catch
+up.
