@@ -25,7 +25,7 @@ import { getPool } from '@tupo/db';
  * request.
  */
 
-export type AccessReason = 'owner' | 'conversation' | 'mail' | 'denied' | 'missing';
+export type AccessReason = 'owner' | 'conversation' | 'mail' | 'feed' | 'denied' | 'missing';
 
 export interface AccessDecision {
   allowed: boolean;
@@ -96,6 +96,34 @@ export async function canReadFile(userId: string, fileId: string): Promise<Acces
     [fileId, userId],
   );
   if (viaMail[0]) return { allowed: true, reason: 'mail' };
+
+  /*
+   * Feed media (FR-FEED-2). A page avatar or cover, or an image/video/document
+   * carried by a *published, non-deleted* post or one of its comments, is
+   * readable by anyone who can see the feed — which is every signed-in user
+   * (FEED_VIEW is a baseline permission). The feed list itself is
+   * audience-filtered; a stray image URL leaking one audience band to another
+   * is not a safeguarding hole the way a conversation attachment would be, so
+   * the check here is deliberately coarse: "is this file on something that is
+   * actually published".
+   */
+  const { rows: viaFeed } = await getPool().query(
+    `SELECT 1 WHERE
+       EXISTS (SELECT 1 FROM feed_pages fp
+                WHERE fp.deleted_at IS NULL
+                  AND (fp.avatar_file_id = $1 OR fp.cover_file_id = $1))
+    OR EXISTS (SELECT 1 FROM feed_posts p, jsonb_array_elements(p.media) m
+                WHERE p.deleted_at IS NULL AND p.status = 'published'
+                  AND m->>'fileId' = $1)
+    OR EXISTS (SELECT 1 FROM feed_comments c
+                JOIN feed_posts p ON p.id = c.post_id
+                CROSS JOIN LATERAL jsonb_array_elements(c.media) m
+                WHERE c.deleted_at IS NULL AND p.deleted_at IS NULL
+                  AND m->>'fileId' = $1)
+      LIMIT 1`,
+    [fileId],
+  );
+  if (viaFeed[0]) return { allowed: true, reason: 'feed' };
 
   return { allowed: false, reason: 'denied' };
 }

@@ -69,6 +69,15 @@ export function emitToUsers(userIds: string[], event: string, payload: unknown):
   relay({ rooms: [...new Set(userIds)].filter(Boolean).map((id) => `user:${id}`), event, payload });
 }
 
+/**
+ * Emit to arbitrary room names. Used by Feed, whose rooms (`feedpost:<id>`) are
+ * not conversations. Rooms are named by us, never by a client, so relaying the
+ * payload verbatim is safe.
+ */
+export function emitToRooms(rooms: string[], event: string, payload: unknown, exceptSocketId?: string): void {
+  relay({ rooms, event, payload, exceptSocketId });
+}
+
 export async function closeChatRealtime(): Promise<void> {
   await publisher?.quit().catch(() => {});
   publisher = null;

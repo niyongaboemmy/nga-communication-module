@@ -25,7 +25,8 @@
     "zod": "^3.24.1",
     "@tupo/chat": "*",
     "@tupo/notify": "*",
-    "@tupo/mail": "*"
+    "@tupo/mail": "*",
+    "@tupo/feed": "*"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

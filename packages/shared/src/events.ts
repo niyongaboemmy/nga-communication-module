@@ -5,8 +5,9 @@
  * events are declared here so Phase 1 has the contract waiting.
  */
 import type { ChatClientToServerEvents, ChatServerToClientEvents } from './chatEvents.js';
+import type { FeedClientToServerEvents, FeedServerToClientEvents } from './feedEvents.js';
 
-export interface ServerToClientEvents extends ChatServerToClientEvents {
+export interface ServerToClientEvents extends ChatServerToClientEvents, FeedServerToClientEvents {
   'connection:ready': (p: { userId: string; socketId: string; serverTime: string }) => void;
   'presence:update': (p: { userId: string; status: PresenceStatus; at: string }) => void;
   'pong': (p: { at: string }) => void;
@@ -34,7 +35,7 @@ export interface AppNotification {
   createdAt: string;
 }
 
-export interface ClientToServerEvents extends ChatClientToServerEvents {
+export interface ClientToServerEvents extends ChatClientToServerEvents, FeedClientToServerEvents {
   'ping': (ack: (p: { at: string }) => void) => void;
   'presence:set': (p: { status: PresenceStatus }, ack: (p: { ok: boolean }) => void) => void;
 }

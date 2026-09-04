@@ -8,6 +8,7 @@ import { runScheduledMessages } from './jobs/scheduledMessages.js';
 import { runChatSweeps } from './jobs/chatSweeps.js';
 import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
 import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './jobs/mail.js';
+import { runFeedSweeps } from './jobs/feed.js';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -96,6 +97,13 @@ const worker = new Worker(
         return runMailSweeps();
       }
 
+      // Feed — publish scheduled posts whose time has come (FR-FEED-4).
+      case 'feed:sweep': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runFeedSweeps();
+      }
+
       default:
         // Fail loudly rather than silently dropping work we don't recognise.
         throw new Error(`Unknown job type: ${job.name}`);
@@ -146,6 +154,17 @@ queue.add('mail:sweep', {}, {
   removeOnComplete: 20,
   removeOnFail: 20,
 }).catch((err) => console.error('[worker] could not register the mail sweep:', err.message));
+
+/**
+ * The feed sweep, every 30 seconds — the same cadence as mail's, and for the
+ * same reason: "publish at 08:00" should visibly be 08:00.
+ */
+queue.add('feed:sweep', {}, {
+  jobId: 'feed-sweep',
+  repeat: { every: 30_000 },
+  removeOnComplete: 20,
+  removeOnFail: 20,
+}).catch((err) => console.error('[worker] could not register the feed sweep:', err.message));
 
 worker.on('ready', () => console.log('[worker] connected to redis, waiting for jobs'));
 
