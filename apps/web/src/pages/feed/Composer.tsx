@@ -93,7 +93,7 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
   const canSubmit =
     Boolean(pageId) && !busy && !media.some((m) => !m.fileId && !m.error) &&
     (body.trim().length > 0 || media.some((m) => m.fileId) ||
-      (tool === 'poll' && pollQ.trim() && pollOptions.filter((o) => o.trim()).length >= 2) ||
+      (tool === 'poll' && pollQ.trim() && pollOptions.filter((o) => o.trim()).length >= FEED_LIMITS.MIN_POLL_OPTIONS) ||
       (tool === 'event' && evt.title.trim() && evt.startsAt));
 
   const reset = () => {
@@ -104,18 +104,31 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
   const submit = async (mode: 'published' | 'draft') => {
     if (!canSubmit) return;
     setBusy(true); setError(null);
-    const payload: Omit<ComposePostPayload, 'pageId'> = {
-      body: body.trim(),
-      media: media.filter((m) => m.fileId).map((m) => ({ fileId: m.fileId!, kind: m.kind, name: m.name, w: m.w ?? null, h: m.h ?? null })),
-      audience,
-      type: isAnnouncement ? 'announcement' : 'standard',
-      status: scheduleAt ? 'scheduled' : mode,
-      scheduledAt: scheduleAt ? new Date(scheduleAt).toISOString() : null,
-    };
-    if (tool === 'poll') payload.poll = { question: pollQ.trim(), options: pollOptions.map((o) => o.trim()).filter(Boolean), multi: pollMulti };
-    if (tool === 'event') payload.event = { title: evt.title.trim(), startsAt: new Date(evt.startsAt).toISOString(), location: evt.location.trim() || null };
-
     try {
+      const validPoll = tool === 'poll' && pollQ.trim() && pollOptions.map((o) => o.trim()).filter(Boolean).length >= FEED_LIMITS.MIN_POLL_OPTIONS;
+      // `datetime-local` gives a parseable string or '' — never garbage — but
+      // an empty one must never reach `new Date().toISOString()` (throws) just
+      // because the user opened the Event tool and typed body text instead of
+      // filling it in. Same story for the schedule picker below.
+      const eventDate = tool === 'event' && evt.startsAt ? new Date(evt.startsAt) : null;
+      const validEvent = tool === 'event' && evt.title.trim() && eventDate && !Number.isNaN(eventDate.getTime());
+      const scheduleDate = scheduleAt ? new Date(scheduleAt) : null;
+      const validSchedule = scheduleDate && !Number.isNaN(scheduleDate.getTime());
+
+      const payload: Omit<ComposePostPayload, 'pageId'> = {
+        body: body.trim(),
+        media: media.filter((m) => m.fileId).map((m) => ({ fileId: m.fileId!, kind: m.kind, name: m.name, w: m.w ?? null, h: m.h ?? null })),
+        audience,
+        type: isAnnouncement ? 'announcement' : 'standard',
+        status: validSchedule ? 'scheduled' : mode,
+        scheduledAt: validSchedule ? scheduleDate!.toISOString() : null,
+      };
+      // A half-filled poll/event the user abandoned in favour of plain text
+      // must not be sent — an incomplete one would either 400 on the server
+      // or (for the event's date) throw before this even reaches the network.
+      if (validPoll) payload.poll = { question: pollQ.trim(), options: pollOptions.map((o) => o.trim()).filter(Boolean), multi: pollMulti };
+      if (validEvent) payload.event = { title: evt.title.trim(), startsAt: eventDate!.toISOString(), location: evt.location.trim() || null };
+
       if (editing) {
         const updated = await api.editPost(editing.id, {
           body: payload.body, media: payload.media, audience: payload.audience,

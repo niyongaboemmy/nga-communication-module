@@ -190,13 +190,18 @@ const CommentNode: React.FC<{
 const InlineEdit: React.FC<{ initial: string; onSave: (v: string) => Promise<void>; onCancel: () => void }> = ({ initial, onSave, onCancel }) => {
   const [v, setV] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canSave = v.trim().length > 0 && !busy;
   return (
     <div className="mt-1">
       <textarea value={v} onChange={(e) => setV(e.target.value)} rows={2} autoFocus
         className="w-full resize-none rounded-lg border border-border-light bg-white px-2 py-1 text-sm dark:border-border-dark/60 dark:bg-elevated-dark" />
+      {error && <p className="mt-1 text-xs font-medium text-red-600 dark:text-red-400">{error}</p>}
       <div className="mt-1 flex gap-2 text-xs">
-        <button disabled={busy} onClick={async () => { setBusy(true); try { await onSave(v.trim()); } finally { setBusy(false); } }}
-          className="font-semibold text-blue-600 hover:underline dark:text-blue-400">Save</button>
+        <button disabled={!canSave} onClick={async () => {
+          setBusy(true); setError(null);
+          try { await onSave(v.trim()); } catch (e) { setError(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
+        }} className="font-semibold text-blue-600 hover:underline disabled:opacity-40 dark:text-blue-400">Save</button>
         <button onClick={onCancel} className="text-text-secondary-light dark:text-text-secondary-dark">Cancel</button>
       </div>
     </div>

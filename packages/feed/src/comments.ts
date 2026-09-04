@@ -10,6 +10,11 @@ import type { AddCommentPayload, FeedCommentView, FeedMediaItem, FeedPerson, Fee
 import { FEED_LIMITS, FEED_REACTIONS } from '@tupo/shared';
 import { FeedError } from './errors.js';
 import { type FeedActor, can, clampLimit, decodeCursor, encodeCursor } from './common.js';
+import { resolveMedia } from './posts.js';
+
+/** Comments carry far less media than a post — Facebook allows one attachment;
+ * this is deliberately roomier but still nowhere near a post's MAX_MEDIA. */
+const MAX_COMMENT_MEDIA = 4;
 
 interface CommentRow {
   id: string;
@@ -122,10 +127,15 @@ export async function addComment(
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    // Never trust client-supplied media straight into a table the `feed`
+    // file-access grant treats as world-readable — resolve it the same way a
+    // post's media is resolved, so a fileId must actually belong to this
+    // actor and be a finished upload.
+    const media = await resolveMedia(client, payload.media, actor.id, MAX_COMMENT_MEDIA);
     await client.query(
       `INSERT INTO feed_comments (id, post_id, parent_id, author_id, body, media)
        VALUES ($1,$2,$3,$4,$5,$6)`,
-      [id, postId, parentId, actor.id, body, JSON.stringify((payload.media ?? []).slice(0, 4))],
+      [id, postId, parentId, actor.id, body, JSON.stringify(media)],
     );
     if (parentId) {
       await client.query(

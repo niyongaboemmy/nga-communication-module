@@ -7,6 +7,7 @@ import {
 import type { FeedPostView, FeedReaction } from '@tupo/shared';
 import { FEED_REACTION_META } from '@tupo/shared';
 import { Avatar } from '../../components/ui';
+import { useNotify } from '../../context/NotificationContext';
 import { useFeed } from './FeedProvider';
 import { MediaGallery } from './MediaGallery';
 import { PollBlock, EventBlock } from './PollEventBlocks';
@@ -28,6 +29,9 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   post, openComments = false, permalink = false,
 }) => {
   const { react, toggleBookmark, currentUserId } = useFeed();
+  // Renamed on the way in: `confirm` from useNotify is a toast, not the
+  // native confirm() dialog the Delete-post handler below still needs.
+  const { confirm: toastConfirm, notify } = useNotify();
   const [showComments, setShowComments] = useState(openComments);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [burst, setBurst] = useState<{ emoji: string; seed: number } | null>(null);
@@ -66,11 +70,17 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
 
   const share = async () => {
     const url = `${location.origin}/app/feed/post/${post.id}`;
-    try {
-      if (navigator.share) await navigator.share({ url, title: `${post.page.name} on Tupo` });
-      else await navigator.clipboard.writeText(url);
-      await api.sharePost(post.id);
-    } catch { /* dismissed */ }
+    if (navigator.share) {
+      // The OS share sheet is its own feedback — cancelling it (the common
+      // case for the rejection here) needs no toast on top of it.
+      try { await navigator.share({ url, title: `${post.page.name} on Tupo` }); } catch { return; }
+    } else {
+      // Unlike the share sheet, a clipboard write is invisible — with no
+      // confirmation this looked exactly like the button doing nothing.
+      try { await navigator.clipboard.writeText(url); } catch { notify({ title: 'Could not copy the link', tone: 'error' }); return; }
+      toastConfirm('Link copied');
+    }
+    void api.sharePost(post.id).catch(() => {});
   };
 
   const clamp = !expanded && post.body.length > 360;
@@ -111,10 +121,22 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
           {menu && (
             <div className="animate-pop absolute right-0 top-full z-30 mt-1 w-52 rounded-xl bg-white p-1 shadow-[0_12px_28px_rgba(0,0,0,0.2)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10" onMouseLeave={() => setMenu(false)}>
               <MenuItem icon={<Bookmark size={16} className={post.bookmarked ? 'fill-current text-blue-600' : ''} />} label={post.bookmarked ? 'Remove from saved' : 'Save post'} onClick={() => { void toggleBookmark(post.id); setMenu(false); }} />
-              <MenuItem icon={<Link2 size={16} />} label="Copy link" onClick={() => { void navigator.clipboard.writeText(`${location.origin}/app/feed/post/${post.id}`); setMenu(false); }} />
+              <MenuItem icon={<Link2 size={16} />} label="Copy link" onClick={() => {
+                setMenu(false);
+                navigator.clipboard.writeText(`${location.origin}/app/feed/post/${post.id}`)
+                  .then(() => toastConfirm('Link copied'))
+                  .catch(() => notify({ title: 'Could not copy the link', tone: 'error' }));
+              }} />
               {post.canEdit && <MenuItem icon={<Pencil size={16} />} label="Edit post" onClick={() => { setMenu(false); window.dispatchEvent(new CustomEvent('feed:edit', { detail: post.id })); }} />}
-              {post.canEdit && <MenuItem icon={<EyeOff size={16} />} label="Move to drafts" onClick={() => { void api.unpublishPost(post.id); setMenu(false); }} />}
-              {(post.canEdit || post.canModerate) && <MenuItem danger icon={<Trash2 size={16} />} label="Delete post" onClick={() => { if (confirm('Delete this post?')) void api.deletePost(post.id); setMenu(false); }} />}
+              {post.canEdit && <MenuItem icon={<EyeOff size={16} />} label="Move to drafts" onClick={() => {
+                setMenu(false);
+                api.unpublishPost(post.id).catch(() => notify({ title: 'Could not move this post to drafts', tone: 'error' }));
+              }} />}
+              {(post.canEdit || post.canModerate) && <MenuItem danger icon={<Trash2 size={16} />} label="Delete post" onClick={() => {
+                setMenu(false);
+                if (!window.confirm('Delete this post?')) return;
+                api.deletePost(post.id).catch(() => notify({ title: 'Could not delete this post', tone: 'error' }));
+              }} />}
               {post.author.id !== currentUserId && <MenuItem icon={<Flag size={16} />} label="Report post" onClick={() => { setMenu(false); window.dispatchEvent(new CustomEvent('feed:report', { detail: { type: 'post', id: post.id } })); }} />}
             </div>
           )}

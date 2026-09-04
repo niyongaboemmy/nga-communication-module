@@ -13,11 +13,16 @@ export const PollBlock: React.FC<{ postId: string; poll: FeedPollView }> = ({ po
 
   const choose = async (i: number) => {
     if (poll.closed || busy) return;
-    setBusy(true);
     const next = poll.multi
       ? (poll.myVotes.includes(i) ? poll.myVotes.filter((x) => x !== i) : [...poll.myVotes, i])
       : [i];
-    try { await vote(postId, next.length ? next : [i]); } finally { setBusy(false); }
+    // The server has no "clear my vote" — choices can't be empty. Unchecking
+    // the last option in a multi-select poll must leave the vote as it is
+    // rather than silently resending the option the click just tried to
+    // remove, which looked like the click had done nothing at all.
+    if (!next.length) return;
+    setBusy(true);
+    try { await vote(postId, next); } finally { setBusy(false); }
   };
 
   return (

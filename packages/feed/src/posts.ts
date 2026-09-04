@@ -52,10 +52,21 @@ interface PostRow {
  * Validation helpers
  * ────────────────────────────────────────────────────────────────────────── */
 
-async function resolveMedia(
+/**
+ * Validate and re-derive `media` server-side — never trust what the client
+ * sent beyond the fileId and its display size hints (FR-FEED-2).
+ *
+ * `trustedIds` is for edits: a fileId already attached to the post being
+ * edited is exempt from the ownership check, because the actor editing it
+ * (a page admin/moderator) is very often not the original uploader — the
+ * attachment was already accepted onto this post once, by its actual owner,
+ * and re-sending it back unchanged is not a new grant of access to anything.
+ */
+export async function resolveMedia(
   client: PoolClient, media: FeedMediaItem[] | undefined, ownerId: string,
+  limit: number = FEED_LIMITS.MAX_MEDIA, trustedIds?: ReadonlySet<string>,
 ): Promise<FeedMediaItem[]> {
-  const items = (media ?? []).slice(0, FEED_LIMITS.MAX_MEDIA);
+  const items = (media ?? []).slice(0, limit);
   if (!items.length) return [];
   const ids = items.map((m) => m.fileId).filter(Boolean);
   const { rows } = await client.query<{ id: string; owner_id: string; status: string; mime_type: string; original_name: string; size_bytes: string }>(
@@ -66,8 +77,13 @@ async function resolveMedia(
   return items.map((m) => {
     const f = byId.get(m.fileId);
     if (!f) throw new FeedError('An attachment could not be found.', 400);
-    if (f.owner_id !== ownerId) throw new FeedError('An attachment is not yours to post.', 403);
-    if (f.status !== 'ready' && f.status !== 'pending') throw new FeedError('An attachment failed to upload.', 409);
+    if (f.owner_id !== ownerId && !trustedIds?.has(f.id)) throw new FeedError('An attachment is not yours to post.', 403);
+    // 'pending' means the upload's bytes have not actually landed yet — the
+    // client only ever has a fileId to send once its own upload PUT resolved,
+    // so a 'pending' file here means someone attached a ticket they never
+    // finished uploading, which would 409 for every viewer forever. Reject it
+    // now, while the author can still fix it, rather than at read time.
+    if (f.status !== 'ready') throw new FeedError('An attachment failed to upload.', 409);
     const kind: FeedMediaItem['kind'] =
       f.mime_type.startsWith('image/') ? 'image' : f.mime_type.startsWith('video/') ? 'video' : 'document';
     return {
@@ -290,7 +306,8 @@ export async function editPost(actor: FeedActor, postId: string, patch: EditPost
     if (patch.body !== undefined) { params.push(patch.body.slice(0, FEED_LIMITS.POST_BODY_MAX)); sets.push(`body = $${params.length}`); }
     if (patch.format !== undefined) { params.push(patch.format === 'rich' ? 'rich' : 'plain'); sets.push(`format = $${params.length}`); }
     if (patch.media !== undefined) {
-      const media = await resolveMedia(client, patch.media, actor.id);
+      const existingIds = new Set((post.media ?? []).map((m) => m.fileId));
+      const media = await resolveMedia(client, patch.media, actor.id, FEED_LIMITS.MAX_MEDIA, existingIds);
       params.push(JSON.stringify(media)); sets.push(`media = $${params.length}`);
     }
     if (patch.linkPreview !== undefined) { params.push(patch.linkPreview ? JSON.stringify(patch.linkPreview) : null); sets.push(`link_preview = $${params.length}`); }
@@ -506,7 +523,14 @@ export async function hydratePosts(actor: FeedActor, postIds: string[]): Promise
       uniqueReach: p.unique_reach,
       bookmarked: p.bookmarked,
       canComment,
-      canEdit: isAuthor || isPageAdmin,
+      // Matches what the PATCH/publish/unpublish routes actually enforce
+      // (authorizePermission('FEED_POST') ahead of the per-post ownership
+      // check in loadForWrite) — being listed as a page editor is not enough
+      // on its own; an admin can add anyone as an editor regardless of their
+      // role's permissions, and without this the UI would offer Edit/Delete
+      // to someone the server then 403s. canModerate (below) is the separate,
+      // FEED_POST-independent path for actually removing content.
+      canEdit: (isAuthor || isPageAdmin) && can(actor, 'FEED_POST'),
       canModerate,
       createdAt: p.created_at,
     });
