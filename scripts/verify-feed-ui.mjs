@@ -69,9 +69,9 @@ try {
   await page.goto(`${BASE}/app/feed`, { waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('networkidle').catch(() => {});
 
-  check('composer pill renders', await page.getByText(/Share something with your/i).first().waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false));
+  check('composer pill renders', await page.getByText(/What's on your mind/i).first().waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false));
 
-  await page.getByText(/Share something with your/i).first().click();
+  await page.getByText(/What's on your mind/i).first().click();
   check('composer expands', await page.getByRole('heading', { name: 'Create post' }).isVisible({ timeout: 4000 }).catch(() => false));
   const bodyText = `Playwright says hello 👋 ${randomBytes(2).toString('hex')} #tupo`;
   await page.getByPlaceholder('What would you like to share?').fill(bodyText);
@@ -86,8 +86,8 @@ try {
   // Comment
   await page.getByRole('button', { name: /Comment/ }).first().click();
   await page.getByPlaceholder('Write a comment…').first().fill('First! 🎉');
-  await page.getByRole('button', { name: /^Post$/ }).last().click().catch(() => {});
-  await page.waitForTimeout(1000);
+  await page.getByPlaceholder('Write a comment…').first().press('Enter');
+  await page.waitForTimeout(1200);
   check('comment posts', await page.getByText('First! 🎉').first().isVisible().catch(() => false));
 
   await page.screenshot({ path: `${SHOTS}/feed-home-light.png`, fullPage: true });
@@ -112,7 +112,7 @@ try {
   await m.addInitScript((kv) => { for (const [k, v] of Object.entries(kv)) localStorage.setItem(k, v); }, seed(ada));
   const mp = await m.newPage();
   await mp.goto(`${BASE}/app/feed`, { waitUntil: 'networkidle' });
-  check('feed renders on a phone viewport', await mp.getByText(/Share something with your/i).first().isVisible({ timeout: 10000 }).catch(() => false));
+  check('feed renders on a phone viewport', await mp.getByText(/What's on your mind/i).first().isVisible({ timeout: 10000 }).catch(() => false));
   check('no horizontal overflow on mobile', await mp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
   await mp.screenshot({ path: `${SHOTS}/feed-mobile.png`, fullPage: true });
 

@@ -93,31 +93,32 @@ const Lightbox: React.FC<{ items: FeedMediaItem[]; index: number; onClose: () =>
   );
 };
 
-export const MediaGallery: React.FC<{ media: FeedMediaItem[] }> = ({ media }) => {
+export const MediaGallery: React.FC<{ media: FeedMediaItem[]; bleed?: boolean }> = ({ media, bleed = false }) => {
   const [lightbox, setLightbox] = useState<number | null>(null);
   if (!media.length) return null;
 
   const visual = media.filter((m) => m.kind !== 'document');
   const docs = media.filter((m) => m.kind === 'document');
   const open = (m: FeedMediaItem) => setLightbox(visual.indexOf(m));
+  const round = bleed ? '' : 'rounded-xl';
 
   const grid = (() => {
     if (visual.length === 0) return null;
-    if (visual.length === 1) return <Tile item={visual[0]!} onOpen={() => open(visual[0]!)} className="max-h-[32rem] w-full rounded-xl" />;
+    if (visual.length === 1) return <Tile item={visual[0]!} onOpen={() => open(visual[0]!)} className={`max-h-[36rem] w-full ${round}`} />;
     if (visual.length === 2) return (
-      <div className="grid grid-cols-2 gap-1 overflow-hidden rounded-xl">
+      <div className={`grid grid-cols-2 gap-1 overflow-hidden ${round}`}>
         {visual.map((m) => <Tile key={m.fileId} item={m} onOpen={() => open(m)} className="aspect-square" />)}
       </div>
     );
     if (visual.length === 3) return (
-      <div className="grid grid-cols-2 gap-1 overflow-hidden rounded-xl">
+      <div className={`grid grid-cols-2 gap-1 overflow-hidden ${round}`}>
         <Tile item={visual[0]!} onOpen={() => open(visual[0]!)} className="row-span-2 h-full" />
         <Tile item={visual[1]!} onOpen={() => open(visual[1]!)} className="aspect-[4/3]" />
         <Tile item={visual[2]!} onOpen={() => open(visual[2]!)} className="aspect-[4/3]" />
       </div>
     );
     return (
-      <div className="grid grid-cols-2 gap-1 overflow-hidden rounded-xl">
+      <div className={`grid grid-cols-2 gap-1 overflow-hidden ${round}`}>
         {visual.slice(0, 4).map((m, idx) => (
           <Tile key={m.fileId} item={m} onOpen={() => open(m)} className="aspect-square"
             overlay={idx === 3 && visual.length > 4 ? visual.length - 4 : undefined} />
@@ -127,9 +128,13 @@ export const MediaGallery: React.FC<{ media: FeedMediaItem[] }> = ({ media }) =>
   })();
 
   return (
-    <div className="mt-3 space-y-2">
+    <div className={bleed ? 'space-y-1' : 'mt-3 space-y-2'}>
       {grid}
-      {docs.map((d) => <Tile key={d.fileId} item={d} onOpen={() => {}} />)}
+      {docs.length > 0 && (
+        <div className={bleed ? 'space-y-2 px-3 pt-2 sm:px-4' : 'space-y-2'}>
+          {docs.map((d) => <Tile key={d.fileId} item={d} onOpen={() => {}} />)}
+        </div>
+      )}
       {lightbox !== null && <Lightbox items={visual} index={lightbox} onClose={() => setLightbox(null)} />}
     </div>
   );

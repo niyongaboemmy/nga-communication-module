@@ -74,43 +74,72 @@ export function renderRichText(text: string): React.ReactNode[] {
   return nodes;
 }
 
-/* ── Reaction picker — hover / long-press to open, staggered pop-in. ──── */
+/* ── Reaction picker — the Facebook pill: big faces that balloon on hover,
+      each with a label bubble, staggered spring entrance. ───────────────── */
 
 export const ReactionPicker: React.FC<{
   onPick: (r: FeedReaction) => void;
   onClose: () => void;
-  anchorClassName?: string;
-}> = ({ onPick, onClose }) => {
+  align?: 'left' | 'center';
+}> = ({ onPick, onClose, align = 'left' }) => {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const away = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
+    const away = (e: PointerEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
     const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('mousedown', away);
+    document.addEventListener('pointerdown', away);
     document.addEventListener('keydown', esc);
-    return () => { document.removeEventListener('mousedown', away); document.removeEventListener('keydown', esc); };
+    return () => { document.removeEventListener('pointerdown', away); document.removeEventListener('keydown', esc); };
   }, [onClose]);
   return (
     <div
       ref={ref}
       role="menu"
       aria-label="Pick a reaction"
-      className="feed-reaction-picker animate-pop absolute bottom-full left-0 z-30 mb-2 flex items-center gap-1 rounded-full border border-border-light bg-white p-1.5 shadow-xl dark:border-border-dark/60 dark:bg-elevated-dark"
+      onMouseLeave={onClose}
+      className={`feed-picker-in absolute bottom-full z-40 mb-1.5 flex items-center gap-0.5 rounded-full bg-white px-1.5 py-1 shadow-[0_12px_28px_rgba(0,0,0,0.2),0_2px_4px_rgba(0,0,0,0.1)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10 ${
+        align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
+      }`}
     >
       {FEED_REACTIONS.map((r, i) => (
         <button
           key={r}
           role="menuitem"
-          title={FEED_REACTION_META[r].label}
+          aria-label={FEED_REACTION_META[r].label}
           onClick={() => onPick(r)}
-          className="feed-reaction-pop grid h-9 w-9 place-items-center rounded-full text-xl transition-transform duration-150 hover:-translate-y-1 hover:scale-125"
-          style={{ animationDelay: `${i * 28}ms` }}
+          className="feed-face-in group relative grid h-10 w-10 origin-bottom place-items-center rounded-full text-[26px] leading-none transition-transform duration-150 ease-out hover:z-10 hover:-translate-y-2.5 hover:scale-[1.45]"
+          style={{ animationDelay: `${i * 30}ms` }}
         >
           <span aria-hidden>{FEED_REACTION_META[r].emoji}</span>
+          <span className="pointer-events-none absolute bottom-full mb-1 rounded-md bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold text-white opacity-0 transition-opacity group-hover:opacity-100 dark:bg-black">
+            {FEED_REACTION_META[r].label}
+          </span>
         </button>
       ))}
     </div>
   );
 };
+
+/**
+ * The overlapping colour-coded reaction circles Facebook shows next to the
+ * count — a real blue thumb / red heart disc, not a bare emoji.
+ */
+export const ReactionBubbles: React.FC<{ reactions: FeedReaction[]; size?: number }> = ({ reactions, size = 18 }) => (
+  <span className="flex" style={{ marginRight: reactions.length ? 4 : 0 }}>
+    {reactions.map((r, i) => (
+      <span
+        key={r}
+        className="grid place-items-center rounded-full ring-2 ring-white dark:ring-card-dark"
+        style={{
+          width: size, height: size, fontSize: size * 0.62,
+          background: FEED_REACTION_META[r].tint,
+          marginLeft: i ? -size * 0.32 : 0, zIndex: reactions.length - i,
+        }}
+      >
+        <span aria-hidden style={{ filter: 'saturate(1.3)' }}>{FEED_REACTION_META[r].emoji}</span>
+      </span>
+    ))}
+  </span>
+);
 
 /** A short burst of emoji floating up from the button when a reaction lands. */
 export const EmojiBurst: React.FC<{ emoji: string; seed: number }> = ({ emoji, seed }) => (
@@ -131,12 +160,32 @@ export const EmojiBurst: React.FC<{ emoji: string; seed: number }> = ({ emoji, s
   </span>
 );
 
-export function usePressToOpen(onOpen: () => void) {
-  const timer = useRef<number | undefined>(undefined);
+/**
+ * Facebook's "hover the Like button and the reactions appear" — with a short
+ * intent delay on desktop so a passing cursor doesn't trigger it, and a
+ * long-press on touch.
+ */
+export function usePressToOpen(onOpen: () => void, onLeaveClose?: () => void) {
+  const enter = useRef<number | undefined>(undefined);
+  const press = useRef<number | undefined>(undefined);
+  const clear = () => { window.clearTimeout(enter.current); window.clearTimeout(press.current); };
   return {
-    onMouseEnter: onOpen,
-    onTouchStart: () => { timer.current = window.setTimeout(onOpen, 350); },
-    onTouchEnd: () => window.clearTimeout(timer.current),
-    onTouchMove: () => window.clearTimeout(timer.current),
+    onMouseEnter: () => { clear(); enter.current = window.setTimeout(onOpen, 320); },
+    onMouseLeave: () => { clear(); onLeaveClose?.(); },
+    onTouchStart: () => { clear(); press.current = window.setTimeout(onOpen, 380); },
+    onTouchEnd: clear,
+    onTouchMove: clear,
   };
 }
+
+/** Double-tap / double-click handler that also passes the pointer position. */
+export function useDoubleTap(onDouble: (x: number, y: number) => void) {
+  const last = useRef(0);
+  return (e: React.MouseEvent) => {
+    const now = Date.now();
+    if (now - last.current < 300) { onDouble(e.clientX, e.clientY); last.current = 0; }
+    else last.current = now;
+  };
+}
+
+export const firstName = (name: string) => name.trim().split(/\s+/)[0] || name;

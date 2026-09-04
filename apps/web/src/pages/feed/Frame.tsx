@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   Sparkles, Bookmark, ShieldAlert, LayoutGrid, Newspaper, Megaphone, TrendingUp,
@@ -15,24 +15,59 @@ import { useFeed } from './FeedProvider';
 import * as api from './api';
 import './feed.css';
 
-/** The responsive 3-column frame shared by every Feed screen. */
+/**
+ * The Facebook shell: an edge-to-edge grey canvas with a fixed-width feed
+ * column visually centred, and sticky sidebars pinned to the window edges that
+ * drop away as the viewport narrows.
+ *
+ *   < 1100px   right rail hidden
+ *   <  980px   left rail hidden, feed centred, cards go full-bleed on phones
+ */
 export const FeedFrame: React.FC<{ left?: React.ReactNode; right?: React.ReactNode; children: React.ReactNode }> = ({
   left, right, children,
 }) => (
-  <div className="mx-auto flex w-full max-w-[1180px] gap-5 px-3 py-4 sm:px-4">
-    {left && <aside className="hidden w-60 shrink-0 lg:block"><div className="sticky top-4 space-y-4">{left}</div></aside>}
-    <main className="min-w-0 flex-1">{children}</main>
-    {right && <aside className="hidden w-72 shrink-0 xl:block"><div className="sticky top-4 space-y-4">{right}</div></aside>}
+  <div className="feed-canvas w-full">
+    <div className="mx-auto flex w-full justify-center gap-0 sm:gap-4 sm:px-4 sm:py-5 lg:max-w-[1280px] lg:justify-between lg:gap-5 xl:max-w-[1400px]">
+      {left && (
+        <aside className="feed-rail hidden w-[264px] shrink-0 self-start lg:block xl:w-[300px]">
+          <div className="sticky top-5 max-h-[calc(100dvh-92px)] space-y-3 overflow-y-auto overflow-x-hidden pb-6 pr-1">{left}</div>
+        </aside>
+      )}
+      <main className="w-full min-w-0 max-w-[600px] shrink-0 sm:mx-auto">{children}</main>
+      {right && (
+        <aside className="feed-rail hidden w-[264px] shrink-0 self-start xl:block xl:w-[300px]">
+          <div className="sticky top-5 max-h-[calc(100dvh-92px)] space-y-3 overflow-y-auto overflow-x-hidden pb-6 pl-1">{right}</div>
+        </aside>
+      )}
+    </div>
   </div>
 );
+
+/** Auto-loads the next page when the reader nears the bottom (FB infinite scroll). */
+export const LoadMoreSentinel: React.FC<{ onHit: () => void; disabled?: boolean }> = ({ onHit, disabled }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const cb = useRef(onHit);
+  cb.current = onHit;
+  useEffect(() => {
+    if (disabled || !ref.current) return;
+    const io = new IntersectionObserver((e) => { if (e[0]?.isIntersecting) cb.current(); }, { rootMargin: '800px' });
+    io.observe(ref.current);
+    return () => io.disconnect();
+  }, [disabled]);
+  return (
+    <div ref={ref} className="flex justify-center py-6" aria-hidden>
+      {!disabled && <span className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />}
+    </div>
+  );
+};
 
 const RailPageRow: React.FC<{ page: FeedPageSummary }> = ({ page }) => {
   const avatar = useMediaUrl(page.avatarFileId);
   return (
-    <Link to={`/app/feed/p/${page.slug}`} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm transition-colors hover:bg-surface-light dark:hover:bg-card-dark/50">
-      <Avatar name={page.name} src={avatar} size={28} />
+    <Link to={`/app/feed/p/${page.slug}`} className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm transition-colors hover:bg-black/5 dark:hover:bg-white/5">
+      <Avatar name={page.name} src={avatar} size={30} />
       <span className="min-w-0 flex-1 truncate font-medium text-text-primary-light dark:text-text-primary-dark">{page.name}</span>
-      {page.verified && <BadgeCheck size={13} className="text-blue-500" />}
+      {page.verified && <BadgeCheck size={13} className="shrink-0 text-blue-500" />}
     </Link>
   );
 };
@@ -41,26 +76,30 @@ export const LeftRail: React.FC<{ following: FeedPageSummary[] }> = ({ following
   const { can } = usePermissions();
   const { pathname, search } = useLocation();
   const active = (p: string) => pathname + search === p;
-  const Item: React.FC<{ to: string; icon: React.ReactNode; label: string }> = ({ to, icon, label }) => (
-    <Link to={to} className={`flex items-center gap-3 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors ${
-      active(to) ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/25 dark:text-blue-300' : 'text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-card-dark/50'
-    }`}>{icon} {label}</Link>
+  const Item: React.FC<{ to: string; icon: React.ReactNode; label: string; tint?: string }> = ({ to, icon, label, tint }) => (
+    <Link to={to} className={`flex items-center gap-3 rounded-lg px-2 py-2 text-[15px] font-medium transition-colors ${
+      active(to) ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/25 dark:text-blue-300' : 'text-text-primary-light hover:bg-black/5 dark:text-text-primary-dark dark:hover:bg-white/5'
+    }`}>
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full" style={{ background: tint ?? 'var(--color-surface-light)' }}>{icon}</span>
+      {label}
+    </Link>
   );
   return (
     <>
-      <nav className="rounded-xl border border-border-light bg-card-light p-1.5 dark:border-border-dark/40 dark:bg-elevated-dark/40">
-        <Item to="/app/feed" icon={<Newspaper size={17} />} label="Home" />
-        <Item to="/app/feed?filter=following" icon={<TrendingUp size={17} />} label="Following" />
-        <Item to="/app/feed?filter=announcements" icon={<Megaphone size={17} />} label="Announcements" />
-        <Item to="/app/feed/saved" icon={<Bookmark size={17} />} label="Saved" />
-        <Item to="/app/feed/pages" icon={<LayoutGrid size={17} />} label="All pages" />
-        {can(['MODERATION_QUEUE_VIEW']) && <Item to="/app/feed/moderation" icon={<ShieldAlert size={17} />} label="Moderation" />}
+      <nav className="space-y-0.5">
+        <Item to="/app/feed" icon={<Newspaper size={19} className="text-blue-600" />} label="Home" tint="#e7f0ff" />
+        <Item to="/app/feed?filter=following" icon={<TrendingUp size={19} className="text-emerald-600" />} label="Following" tint="#e6f6ee" />
+        <Item to="/app/feed?filter=announcements" icon={<Megaphone size={19} className="text-orange-600" />} label="Announcements" tint="#fdeee0" />
+        <Item to="/app/feed/saved" icon={<Bookmark size={19} className="text-violet-600" />} label="Saved" tint="#efe9fb" />
+        <Item to="/app/feed/pages" icon={<LayoutGrid size={19} className="text-sky-600" />} label="Pages" tint="#e4f2fb" />
+        {can(['MODERATION_QUEUE_VIEW']) && <Item to="/app/feed/moderation" icon={<ShieldAlert size={19} className="text-rose-600" />} label="Moderation" tint="#fce8ec" />}
       </nav>
       {following.length > 0 && (
-        <div className="rounded-xl border border-border-light bg-card-light p-2 dark:border-border-dark/40 dark:bg-elevated-dark/40">
-          <p className="px-2 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wide text-text-secondary-light dark:text-text-secondary-dark">Your pages</p>
-          {following.slice(0, 8).map((p) => <RailPageRow key={p.id} page={p} />)}
-        </div>
+        <>
+          <div className="mx-2 my-1 border-t border-black/10 dark:border-white/10" />
+          <p className="px-2 pb-1 text-[13px] font-semibold text-text-secondary-light dark:text-text-secondary-dark">Your pages</p>
+          <div className="space-y-0.5">{following.slice(0, 10).map((p) => <div key={p.id} className="flex"><RailPageRow page={p} /></div>)}</div>
+        </>
       )}
     </>
   );
@@ -71,15 +110,18 @@ export const RightRail: React.FC<{ suggestions: FeedPageSummary[]; onFollow: (id
   return (
     <>
       {suggestions.length > 0 && (
-        <div className="rounded-xl border border-border-light bg-card-light p-3 dark:border-border-dark/40 dark:bg-elevated-dark/40">
-          <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-text-secondary-light dark:text-text-secondary-dark">
-            <Sparkles size={13} /> Discover pages
-          </p>
-          <div className="space-y-2">
-            {suggestions.slice(0, 5).map((p) => (
-              <div key={p.id} className="flex items-center gap-2">
+        <div>
+          <div className="mb-1 flex items-center justify-between px-2">
+            <p className="flex items-center gap-1.5 text-[15px] font-semibold text-text-secondary-light dark:text-text-secondary-dark">
+              <Sparkles size={15} /> Suggested pages
+            </p>
+            <Link to="/app/feed/pages" className="text-[13px] font-medium text-blue-600 hover:underline dark:text-blue-400">See all</Link>
+          </div>
+          <div className="space-y-0.5">
+            {suggestions.slice(0, 6).map((p) => (
+              <div key={p.id} className="flex items-center gap-1">
                 <RailPageRow page={p} />
-                <button onClick={() => onFollow(p.id)} className="ml-auto shrink-0 rounded-full border border-blue-500 px-2.5 py-1 text-[11px] font-semibold text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/20">
+                <button onClick={() => onFollow(p.id)} className="shrink-0 rounded-md bg-blue-50 px-2.5 py-1.5 text-[13px] font-semibold text-blue-600 transition-colors hover:bg-blue-100 dark:bg-blue-900/25 dark:text-blue-300 dark:hover:bg-blue-900/40">
                   Follow
                 </button>
               </div>
@@ -88,11 +130,11 @@ export const RightRail: React.FC<{ suggestions: FeedPageSummary[]; onFollow: (id
         </div>
       )}
       {can(['FEED_PAGE_MANAGE']) && (
-        <Link to="/app/feed/pages" className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-border-light p-3 text-sm font-semibold text-text-secondary-light transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-border-dark/50 dark:text-text-secondary-dark">
+        <Link to="/app/feed/pages" className="flex items-center justify-center gap-2 rounded-lg border border-dashed border-black/15 p-3 text-sm font-semibold text-text-secondary-light transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-white/15 dark:text-text-secondary-dark">
           <Plus size={16} /> Create a page
         </Link>
       )}
-      <p className="px-3 text-[11px] leading-relaxed text-text-secondary-light/80 dark:text-text-secondary-dark/70">
+      <p className="px-2 text-[12px] leading-relaxed text-text-secondary-light/80 dark:text-text-secondary-dark/70">
         Tupo Feed · Nyanza Green Academy. Be kind, stay on topic, and report anything that breaks the rules.
       </p>
     </>
@@ -173,18 +215,18 @@ export const EditPostMount: React.FC<{ pages: FeedPageSummary[] }> = ({ pages })
 
 /** Skeleton shown while the first page loads. */
 export const PostSkeleton: React.FC = () => (
-  <div className="feed-skeleton rounded-2xl border border-border-light bg-card-light p-4 dark:border-border-dark/40 dark:bg-elevated-dark/40">
+  <div className="feed-card feed-skeleton p-4">
     <div className="flex gap-3">
-      <div className="h-10 w-10 rounded-full bg-slate-200 dark:bg-card-dark" />
-      <div className="flex-1 space-y-2">
-        <div className="h-3 w-1/3 rounded bg-slate-200 dark:bg-card-dark" />
-        <div className="h-2.5 w-1/4 rounded bg-slate-200 dark:bg-card-dark" />
+      <div className="h-10 w-10 rounded-full bg-black/10 dark:bg-white/10" />
+      <div className="flex-1 space-y-2 pt-1">
+        <div className="h-3 w-1/3 rounded bg-black/10 dark:bg-white/10" />
+        <div className="h-2.5 w-1/4 rounded bg-black/10 dark:bg-white/10" />
       </div>
     </div>
     <div className="mt-4 space-y-2">
-      <div className="h-3 w-full rounded bg-slate-200 dark:bg-card-dark" />
-      <div className="h-3 w-4/5 rounded bg-slate-200 dark:bg-card-dark" />
-      <div className="h-48 w-full rounded-xl bg-slate-200 dark:bg-card-dark" />
+      <div className="h-3 w-full rounded bg-black/10 dark:bg-white/10" />
+      <div className="h-3 w-4/5 rounded bg-black/10 dark:bg-white/10" />
+      <div className="mt-3 h-56 w-full rounded-lg bg-black/10 dark:bg-white/10" />
     </div>
   </div>
 );

@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Heart, CornerDownRight, MoreHorizontal, Trash2, Pencil, Flag } from 'lucide-react';
+import { CornerDownRight, MoreHorizontal, Trash2, Pencil, Flag, SendHorizontal } from 'lucide-react';
 import type { FeedCommentView, FeedPostView } from '@tupo/shared';
 import { Avatar, Spinner } from '../../components/ui';
+import { useAuth } from '../../context/AuthContext';
 import { useFeed } from './FeedProvider';
 import { relativeTime, renderRichText } from './lib';
 import * as api from './api';
@@ -54,23 +55,23 @@ export const Comments: React.FC<Props> = ({ post, autoFocus }) => {
   }), [onCommentEvent, post.id]);
 
   return (
-    <div className="border-t border-border-light px-4 py-3 dark:border-border-dark/40">
+    <div className="border-t border-black/[0.08] px-3 py-2.5 sm:px-4 dark:border-white/[0.06]">
       {post.canComment && <CommentComposer postId={post.id} autoFocus={autoFocus} onAdded={(c) => setItems((p) => p.some((x) => x.id === c.id) ? p : [...p, c])} />}
+      {(items.length > 0 || cursor) && (
+        <button onClick={() => cursor && void load(false)} className="mt-2 text-[13px] font-semibold text-text-secondary-light hover:underline dark:text-text-secondary-dark">
+          {cursor ? 'View more comments' : 'Most relevant'}
+        </button>
+      )}
       {loading ? (
         <div className="py-4 text-center"><Spinner /></div>
       ) : (
-        <ul className="mt-3 space-y-3">
+        <ul className="mt-2 space-y-3">
           {items.map((c) => (
             <CommentNode key={c.id} comment={c} postId={post.id} canComment={post.canComment} currentUserId={currentUserId}
               onLocalReplyAdded={(reply) => setItems((prev) => prev.map((x) => x.id === c.id
                 ? { ...x, replyCount: x.replyCount + 1, replies: [...(x.replies ?? []), reply] } : x))} />
           ))}
         </ul>
-      )}
-      {cursor && (
-        <button onClick={() => void load(false)} className="mt-3 text-xs font-semibold text-blue-600 hover:underline dark:text-blue-400">
-          View more comments
-        </button>
       )}
     </div>
   );
@@ -110,29 +111,36 @@ const CommentNode: React.FC<{
   const remaining = comment.replyCount - replies.length;
 
   return (
-    <li className="flex gap-2">
-      <Avatar name={comment.author.name} src={comment.author.avatarUrl ?? undefined} size={depth ? 26 : 32} />
+    <li className={`flex gap-2 ${depth ? 'feed-reply-thread' : ''}`}>
+      <Avatar name={comment.author.name} src={comment.author.avatarUrl ?? undefined} size={depth ? 28 : 32} />
       <div className="min-w-0 flex-1">
-        <div className="group inline-block max-w-full rounded-2xl bg-surface-light px-3 py-2 dark:bg-card-dark/50">
-          <p className="flex items-center gap-1.5 text-xs">
-            <span className="font-semibold text-text-primary-light dark:text-text-primary-dark">{comment.author.name}</span>
-            {comment.author.roleName && <span className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark">· {comment.author.roleName}</span>}
-          </p>
-          {editing ? (
-            <InlineEdit initial={body} onCancel={() => setEditing(false)} onSave={async (v) => {
-              const updated = await api.editComment(comment.id, v);
-              setBody(updated.body); setEditing(false);
-            }} />
-          ) : (
-            <p className="whitespace-pre-wrap break-words text-sm text-text-primary-light dark:text-text-primary-dark">{renderRichText(body)}</p>
+        <div className="relative inline-block max-w-full">
+          <div className="rounded-2xl bg-black/[0.05] px-3 py-2 dark:bg-white/[0.06]">
+            <p className="flex items-center gap-1.5 text-[13px] leading-tight">
+              <span className="font-semibold text-text-primary-light hover:underline dark:text-text-primary-dark">{comment.author.name}</span>
+              {comment.author.roleName && <span className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark">{comment.author.roleName}</span>}
+            </p>
+            {editing ? (
+              <InlineEdit initial={body} onCancel={() => setEditing(false)} onSave={async (v) => {
+                const updated = await api.editComment(comment.id, v);
+                setBody(updated.body); setEditing(false);
+              }} />
+            ) : (
+              <p className="whitespace-pre-wrap break-words text-[15px] leading-snug text-text-primary-light dark:text-text-primary-dark">{renderRichText(body)}</p>
+            )}
+          </div>
+          {count > 0 && (
+            <span className="absolute -bottom-2 right-1 flex items-center gap-0.5 rounded-full bg-white px-1 py-0.5 text-[11px] font-medium text-text-secondary-light shadow-sm ring-1 ring-black/5 dark:bg-elevated-dark dark:text-text-secondary-dark dark:ring-white/10">
+              <span className="grid h-3.5 w-3.5 place-items-center rounded-full bg-blue-500 text-[8px]">👍</span>{count}
+            </span>
           )}
         </div>
-        <div className="mt-1 flex items-center gap-3 pl-1 text-[11px] font-semibold text-text-secondary-light dark:text-text-secondary-dark">
-          <button onClick={toggleLike} className={`flex items-center gap-1 transition-colors hover:text-rose-500 ${liked ? 'text-rose-500' : ''}`}>
-            <Heart size={12} className={liked ? 'fill-rose-500' : ''} /> {count > 0 ? count : 'Like'}
+        <div className="mt-1.5 flex items-center gap-3 pl-1 text-[12px] font-semibold text-text-secondary-light dark:text-text-secondary-dark">
+          <button onClick={toggleLike} className={`transition-colors hover:underline ${liked ? 'text-blue-600 dark:text-blue-400' : ''}`}>
+            Like
           </button>
           {canComment && depth === 0 && (
-            <button onClick={() => setReplying((v) => !v)} className="hover:text-blue-600 dark:hover:text-blue-400">Reply</button>
+            <button onClick={() => setReplying((v) => !v)} className="hover:underline">Reply</button>
           )}
           <span className="font-normal">{relativeTime(comment.createdAt)}{comment.editedAt ? ' · edited' : ''}</span>
           {(comment.canEdit || comment.canModerate) && (
@@ -158,17 +166,17 @@ const CommentNode: React.FC<{
 
         {!showReplies && comment.replyCount > 0 && (
           <button onClick={() => (replies.length ? setShowReplies(true) : void loadMoreReplies())}
-            className="mt-1.5 flex items-center gap-1 pl-1 text-[11px] font-semibold text-blue-600 hover:underline dark:text-blue-400">
-            <CornerDownRight size={11} /> {comment.replyCount} {comment.replyCount === 1 ? 'reply' : 'replies'}
+            className="mt-1.5 flex items-center gap-1.5 pl-1 text-[13px] font-semibold text-text-secondary-light hover:underline dark:text-text-secondary-dark">
+            <CornerDownRight size={13} /> {comment.replyCount} {comment.replyCount === 1 ? 'reply' : 'replies'}
           </button>
         )}
         {showReplies && (
-          <ul className="mt-2 space-y-2">
+          <ul className="mt-2.5 ml-3 space-y-3">
             {replies.map((r) => (
               <CommentNode key={r.id} comment={r} postId={postId} canComment={canComment} currentUserId={currentUserId} onLocalReplyAdded={onLocalReplyAdded} depth={depth + 1} />
             ))}
             {remaining > 0 && (
-              <button onClick={() => void loadMoreReplies()} className="pl-1 text-[11px] font-semibold text-blue-600 hover:underline dark:text-blue-400">
+              <button onClick={() => void loadMoreReplies()} className="pl-1 text-[13px] font-semibold text-text-secondary-light hover:underline dark:text-text-secondary-dark">
                 View {remaining} more {remaining === 1 ? 'reply' : 'replies'}
               </button>
             )}
@@ -199,10 +207,17 @@ const CommentComposer: React.FC<{
   postId: string; parentId?: string; compact?: boolean; autoFocus?: boolean;
   onAdded: (c: FeedCommentView) => void;
 }> = ({ postId, parentId, compact, autoFocus, onAdded }) => {
+  const { user } = useAuth();
   const [v, setV] = useState('');
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { if (autoFocus) ref.current?.focus(); }, [autoFocus]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }, [v]);
 
   const submit = async () => {
     const body = v.trim();
@@ -212,27 +227,32 @@ const CommentComposer: React.FC<{
       const c = await api.addComment(postId, body, parentId);
       onAdded(c);
       setV('');
+      if (ref.current) ref.current.style.height = 'auto';
     } finally { setBusy(false); }
   };
 
   return (
-    <div className={`flex items-end gap-2 ${compact ? '' : 'mt-1'}`}>
-      <textarea
-        ref={ref}
-        value={v}
-        onChange={(e) => setV(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void submit(); }}
-        placeholder={parentId ? 'Write a reply…' : 'Write a comment…'}
-        rows={1}
-        className="max-h-32 min-h-[2.25rem] flex-1 resize-none rounded-2xl border border-border-light bg-surface-light px-3 py-2 text-sm text-text-primary-light outline-none focus:border-blue-400 dark:border-border-dark/60 dark:bg-card-dark/50 dark:text-text-primary-dark"
-      />
-      <button
-        onClick={() => void submit()}
-        disabled={!v.trim() || busy}
-        className="shrink-0 rounded-full bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-opacity disabled:opacity-40"
-      >
-        Post
-      </button>
+    <div className={`flex items-start gap-2 ${compact ? '' : 'mt-1'}`}>
+      <Avatar name={user?.name ?? '?'} src={user?.avatarUrl} size={compact ? 28 : 32} />
+      <div className="flex flex-1 items-end gap-1 rounded-2xl bg-black/[0.05] px-3 py-1.5 focus-within:ring-1 focus-within:ring-blue-400 dark:bg-white/[0.06]">
+        <textarea
+          ref={ref}
+          value={v}
+          onChange={(e) => setV(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void submit(); } }}
+          placeholder={parentId ? 'Write a reply…' : 'Write a comment…'}
+          rows={1}
+          className="max-h-[120px] min-h-[24px] flex-1 resize-none bg-transparent py-1 text-[15px] leading-snug text-text-primary-light outline-none placeholder:text-text-secondary-light/80 dark:text-text-primary-dark"
+        />
+        <button
+          onClick={() => void submit()}
+          disabled={!v.trim() || busy}
+          aria-label="Post comment"
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-blue-600 transition-colors hover:bg-blue-50 disabled:opacity-30 dark:text-blue-400 dark:hover:bg-blue-900/20"
+        >
+          <SendHorizontal size={16} />
+        </button>
+      </div>
     </div>
   );
 };

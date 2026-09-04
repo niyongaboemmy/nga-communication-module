@@ -10,7 +10,7 @@ import { FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
 import { Avatar } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { uploadFile, probeMedia, validateFile } from '../chat/uploads';
-import { useMediaUrl } from './lib';
+import { useMediaUrl, firstName } from './lib';
 import * as api from './api';
 
 interface PendingMedia {
@@ -137,7 +137,7 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
 
   if (!postable.length && !editing) {
     return (
-      <div className="rounded-2xl border border-dashed border-border-light p-4 text-center text-sm text-text-secondary-light dark:border-border-dark/50 dark:text-text-secondary-dark">
+      <div className="feed-card p-4 text-center text-sm text-text-secondary-light dark:text-text-secondary-dark">
         You are not an editor of any page yet. Ask an admin to add you, or create a page from <span className="font-medium">Pages</span>.
       </div>
     );
@@ -145,16 +145,21 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
 
   if (!open) {
     return (
-      <div className="flex items-center gap-3 rounded-2xl border border-border-light bg-card-light p-3 dark:border-border-dark/40 dark:bg-elevated-dark/50">
-        <Avatar name={user?.name ?? '?'} src={user?.avatarUrl} size={40} />
-        <button
-          onClick={() => setOpen(true)}
-          className="flex-1 rounded-full bg-surface-light px-4 py-2.5 text-left text-sm text-text-secondary-light transition-colors hover:bg-border-light/60 dark:bg-card-dark/50 dark:hover:bg-card-dark"
-        >
-          Share something with your {page?.name ?? 'community'}…
-        </button>
-        <button onClick={() => { setTool('poll'); setOpen(true); }} aria-label="Create a poll" className="grid h-9 w-9 place-items-center rounded-full text-purple-500 hover:bg-surface-light dark:hover:bg-card-dark"><BarChart3 size={18} /></button>
-        <button onClick={() => { fileInput.current?.click(); setOpen(true); }} aria-label="Add photos" className="grid h-9 w-9 place-items-center rounded-full text-emerald-500 hover:bg-surface-light dark:hover:bg-card-dark"><ImageIcon size={18} /></button>
+      <div className="feed-card px-3 pb-1.5 pt-3 sm:px-4">
+        <div className="flex items-center gap-2.5">
+          <Avatar name={user?.name ?? '?'} src={user?.avatarUrl} size={40} />
+          <button
+            onClick={() => setOpen(true)}
+            className="flex-1 rounded-full bg-black/[0.05] px-4 py-2.5 text-left text-[15px] text-text-secondary-light transition-colors hover:bg-black/[0.08] dark:bg-white/5 dark:hover:bg-white/10"
+          >
+            {`What's on your mind${user?.name ? `, ${firstName(user.name)}` : ''}?`}
+          </button>
+        </div>
+        <div className="mt-1.5 flex items-stretch border-t border-black/[0.08] pt-1 dark:border-white/[0.06]">
+          <PillButton onClick={() => { fileInput.current?.click(); setOpen(true); }} icon={<ImageIcon size={20} className="text-emerald-500" />} label="Photo/video" />
+          <PillButton onClick={() => { setTool('poll'); setOpen(true); }} icon={<BarChart3 size={20} className="text-purple-500" />} label="Poll" />
+          <PillButton onClick={() => { setTool('event'); setOpen(true); }} icon={<CalendarDays size={20} className="text-orange-500" />} label="Event" />
+        </div>
         <input ref={fileInput} type="file" hidden multiple accept="image/*,video/*,.pdf,.doc,.docx" onChange={(e) => e.target.files && addFiles(e.target.files)} />
       </div>
     );
@@ -310,6 +315,12 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
   }
   return <div className="animate-pop">{modal}</div>;
 };
+
+const PillButton: React.FC<{ onClick: () => void; icon: React.ReactNode; label: string }> = ({ onClick, icon, label }) => (
+  <button onClick={onClick} className="feed-act flex flex-1 items-center justify-center gap-2 rounded-md py-2 text-[13px] font-semibold text-[#65676b] transition-colors sm:text-[15px] dark:text-text-secondary-dark">
+    {icon} <span>{label}</span>
+  </button>
+);
 
 const ToolBtn: React.FC<{ active: boolean; onClick: () => void; icon: React.ReactNode; label: string }> = ({ active, onClick, icon, label }) => (
   <button onClick={onClick} title={label} aria-label={label}
