@@ -38,38 +38,47 @@ async function candidateIds(
   actor: FeedActor, opts: GetFeedOpts, before: { key: string; id: string } | null, limit: number,
 ): Promise<Array<{ id: string; published_at: string }>> {
   const audiences = visibleAudiences(actor.roleLevel);
-  const params: unknown[] = [actor.id, audiences];
+  const params: unknown[] = [];
   const p = (v: unknown) => { params.push(v); return `$${params.length}`; };
+  // Bound once, referenced by whichever branches actually need it below —
+  // NOT unconditionally like `actor.id` used to be. A param pushed into
+  // `params` but never referenced in the query text (the pageId branch
+  // doesn't filter by actor at all) makes Postgres unable to infer its type
+  // and the whole query 500s with "could not determine data type of
+  // parameter $1", which is exactly what a page's own post list did.
+  const audP = p(audiences);
 
   let source: string;
   if (opts.filter === 'bookmarks') {
+    const actorP = p(actor.id);
     source = `
       SELECT fp.id, fp.published_at
         FROM feed_bookmarks bm
         JOIN feed_posts fp ON fp.id = bm.post_id
-       WHERE bm.user_id = $1 AND fp.deleted_at IS NULL AND fp.status = 'published'
-         AND fp.audience = ANY($2)`;
+       WHERE bm.user_id = ${actorP} AND fp.deleted_at IS NULL AND fp.status = 'published'
+         AND fp.audience = ANY(${audP})`;
   } else if (opts.pageId) {
     source = `
       SELECT fp.id, fp.published_at
         FROM feed_posts fp
        WHERE fp.page_id = ${p(opts.pageId)} AND fp.deleted_at IS NULL AND fp.status = 'published'
-         AND fp.audience = ANY($2)`;
+         AND fp.audience = ANY(${audP})`;
   } else {
     // timeline ∪ read-time merge of big / mandatory pages the user follows
     const followFilter = opts.filter === 'following' ? `AND t.reason = 'follow'` : '';
     const annFilter = opts.filter === 'announcements' ? `AND fp.type = 'announcement'` : '';
+    const actorP = p(actor.id);
     source = `
       SELECT fp.id, fp.published_at FROM feed_timeline t
         JOIN feed_posts fp ON fp.id = t.post_id
-       WHERE t.user_id = $1 AND fp.deleted_at IS NULL AND fp.status = 'published'
-         AND fp.audience = ANY($2) ${followFilter} ${annFilter}
+       WHERE t.user_id = ${actorP} AND fp.deleted_at IS NULL AND fp.status = 'published'
+         AND fp.audience = ANY(${audP}) ${followFilter} ${annFilter}
       UNION
       SELECT fp.id, fp.published_at FROM feed_page_followers f
         JOIN feed_pages pg ON pg.id = f.page_id AND pg.deleted_at IS NULL
         JOIN feed_posts fp ON fp.page_id = pg.id
-       WHERE f.user_id = $1 AND (pg.mandatory OR pg.follower_count > ${p(FEED_LIMITS.FANOUT_THRESHOLD)})
-         AND fp.deleted_at IS NULL AND fp.status = 'published' AND fp.audience = ANY($2)
+       WHERE f.user_id = ${actorP} AND (pg.mandatory OR pg.follower_count > ${p(FEED_LIMITS.FANOUT_THRESHOLD)})
+         AND fp.deleted_at IS NULL AND fp.status = 'published' AND fp.audience = ANY(${audP})
          ${opts.filter === 'announcements' ? `AND fp.type = 'announcement'` : ''}`;
   }
 
