@@ -95,7 +95,7 @@ export const App: React.FC = () => (
           {/* The one route a person with no NGA account can reach. */}
           <Route path="/meet/:idOrCode" element={<GuestMeeting />} />
           <Route path="/app" element={<Protected><AppShell /></Protected>}>
-            <Route index element={<Navigate to="/app/chat" replace />} />
+            <Route index element={<Navigate to="/app/feed" replace />} />
             <Route path="chat" element={<ChatLayout />} />
             <Route path="feed" element={
               <RequirePermission anyOf={['FEED_VIEW']}><FeedProviderLayout /></RequirePermission>}>

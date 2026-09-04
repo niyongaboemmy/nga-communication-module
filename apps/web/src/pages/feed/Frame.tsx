@@ -80,19 +80,19 @@ export const LeftRail: React.FC<{ following: FeedPageSummary[] }> = ({ following
     <Link to={to} className={`flex items-center gap-3 rounded-lg px-2 py-2 text-[15px] font-medium transition-colors ${
       active(to) ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/25 dark:text-blue-300' : 'text-text-primary-light hover:bg-black/5 dark:text-text-primary-dark dark:hover:bg-white/5'
     }`}>
-      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full" style={{ background: tint ?? 'var(--color-surface-light)' }}>{icon}</span>
+      <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-full dark:bg-white/6 ${tint ?? 'bg-surface-light'}`}>{icon}</span>
       {label}
     </Link>
   );
   return (
     <>
       <nav className="space-y-0.5">
-        <Item to="/app/feed" icon={<Newspaper size={19} className="text-blue-600" />} label="Home" tint="#e7f0ff" />
-        <Item to="/app/feed?filter=following" icon={<TrendingUp size={19} className="text-emerald-600" />} label="Following" tint="#e6f6ee" />
-        <Item to="/app/feed?filter=announcements" icon={<Megaphone size={19} className="text-orange-600" />} label="Announcements" tint="#fdeee0" />
-        <Item to="/app/feed/saved" icon={<Bookmark size={19} className="text-violet-600" />} label="Saved" tint="#efe9fb" />
-        <Item to="/app/feed/pages" icon={<LayoutGrid size={19} className="text-sky-600" />} label="Pages" tint="#e4f2fb" />
-        {can(['MODERATION_QUEUE_VIEW']) && <Item to="/app/feed/moderation" icon={<ShieldAlert size={19} className="text-rose-600" />} label="Moderation" tint="#fce8ec" />}
+        <Item to="/app/feed" icon={<Newspaper size={19} className="text-blue-600 dark:text-blue-400" />} label="Home" tint="bg-[#e7f0ff]" />
+        <Item to="/app/feed?filter=following" icon={<TrendingUp size={19} className="text-emerald-600 dark:text-emerald-400" />} label="Following" tint="bg-[#e6f6ee]" />
+        <Item to="/app/feed?filter=announcements" icon={<Megaphone size={19} className="text-orange-600 dark:text-orange-400" />} label="Announcements" tint="bg-[#fdeee0]" />
+        <Item to="/app/feed/saved" icon={<Bookmark size={19} className="text-violet-600 dark:text-violet-400" />} label="Saved" tint="bg-[#efe9fb]" />
+        <Item to="/app/feed/pages" icon={<LayoutGrid size={19} className="text-sky-600 dark:text-sky-400" />} label="Pages" tint="bg-[#e4f2fb]" />
+        {can(['MODERATION_QUEUE_VIEW']) && <Item to="/app/feed/moderation" icon={<ShieldAlert size={19} className="text-rose-600 dark:text-rose-400" />} label="Moderation" tint="bg-[#fce8ec]" />}
       </nav>
       {following.length > 0 && (
         <>

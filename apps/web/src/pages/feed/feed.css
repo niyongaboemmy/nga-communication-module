@@ -5,19 +5,21 @@
    Facebook's distinctive grey, so the white cards read as cards. Sits behind
    the whole feed area, edge to edge. */
 .feed-canvas { background: #f0f2f5; min-height: 100%; }
-:where(.dark) .feed-canvas { background: #101827; }
+:where(.dark) .feed-canvas { background: var(--color-background-dark); }
 
 /* A Facebook-style card: soft, borderless in light, faint hairline in dark. */
 .feed-card {
   background: #fff;
   border-radius: 8px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1), 0 0 1px rgba(0, 0, 0, 0.05);
+  transition: box-shadow 150ms ease, border-color 150ms ease;
 }
 :where(.dark) .feed-card {
-  background: #1c2635;
+  background: var(--color-card-dark);
   box-shadow: none;
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
+:where(.dark) .feed-card:hover { border-color: rgba(255, 255, 255, 0.12); }
 @media (max-width: 640px) {
   .feed-card { border-radius: 0; box-shadow: 0 1px 0 rgba(0, 0, 0, 0.06); }
   :where(.dark) .feed-card { border-left: 0; border-right: 0; border-radius: 0; }
