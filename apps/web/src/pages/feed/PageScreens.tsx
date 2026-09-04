@@ -10,7 +10,7 @@ import { FEED_PAGE_KINDS, FEED_AUDIENCES } from '@tupo/shared';
 import { Avatar, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useFeed, useFeedList } from './FeedProvider';
-import { FeedFrame, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
+import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
 import { Composer } from './Composer';
 import { useMediaUrl } from './lib';
 import * as api from './api';
@@ -32,6 +32,7 @@ export const PageProfile: React.FC = () => {
   const loader = useCallback((cursor?: string) => api.getPagePosts(page?.id ?? slug, { cursor }), [page?.id, slug]);
   const list = useFeedList(loader, [page?.id ?? slug]);
   const items = list.ids.map((id) => posts[id]).filter((p): p is FeedPostView => Boolean(p));
+  const { left, right } = useFeedRails();
 
   if (!page) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
@@ -46,7 +47,7 @@ export const PageProfile: React.FC = () => {
 
   return (
     <>
-      <FeedFrame>
+      <FeedFrame left={left} right={right}>
         <div className="mx-auto max-w-2xl">
           <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light dark:text-text-secondary-dark">
             <ArrowLeft size={15} /> Back to feed
@@ -149,10 +150,14 @@ export const PageDirectory: React.FC = () => {
     const updated = following ? await api.unfollowPage(id) : await api.followPage(id);
     setPages((p) => p.map((x) => (x.id === id ? updated : x)));
   };
+  const { left, right } = useFeedRails();
 
   return (
-    <FeedFrame>
+    <FeedFrame left={left} right={right}>
       <div className="mx-auto max-w-3xl">
+        <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light lg:hidden dark:text-text-secondary-dark">
+          <ArrowLeft size={15} /> Back to feed
+        </Link>
         <div className="mb-4 flex items-center justify-between">
           <h1 className="text-lg font-bold text-text-primary-light dark:text-text-primary-dark">Pages</h1>
           {can(['FEED_PAGE_MANAGE']) && (
@@ -268,9 +273,10 @@ export const PageInsights: React.FC = () => {
     { label: 'Shares', value: data.totals.shares },
     { label: 'Followers', value: data.totals.followerCount, delta: data.totals.followerGrowth },
   ] : [], [data]);
+  const { left, right } = useFeedRails();
 
   return (
-    <FeedFrame>
+    <FeedFrame left={left} right={right}>
       <div className="mx-auto max-w-2xl">
         <button onClick={() => history.back()} className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light">
           <ArrowLeft size={15} /> Back

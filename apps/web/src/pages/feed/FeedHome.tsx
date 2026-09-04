@@ -1,10 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { ArrowUp, Clock, Flame, Sparkles } from 'lucide-react';
-import type { FeedFilter, FeedPageSummary, FeedPostView, FeedSort } from '@tupo/shared';
+import type { FeedFilter, FeedPostView, FeedSort } from '@tupo/shared';
 import { EmptyState } from '../../components/ui';
 import { useFeed, useFeedList } from './FeedProvider';
-import { FeedFrame, LeftRail, RightRail, ReportDialog, EditPostMount, PostSkeleton, PostCard, LoadMoreSentinel } from './Frame';
+import { FeedFrame, useFeedRails, ReportDialog, EditPostMount, PostSkeleton, PostCard, LoadMoreSentinel } from './Frame';
 import { Composer } from './Composer';
 import { HighlightsBar } from './HighlightsBar';
 import * as api from './api';
@@ -13,11 +13,9 @@ export const FeedHome: React.FC = () => {
   const [params, setParams] = useSearchParams();
   const filter = (params.get('filter') as FeedFilter) || 'all';
   const [sort, setSort] = useState<FeedSort>('recent');
-  const [pages, setPages] = useState<FeedPageSummary[]>([]);
   const { posts, ingest, currentUserId } = useFeed();
   const [pendingTop, setPendingTop] = useState<FeedPostView[]>([]);
-
-  useEffect(() => { void api.listPages().then(setPages); }, []);
+  const { pages, left, right } = useFeedRails();
 
   const loader = useCallback(
     (cursor?: string) => api.getFeed({ cursor, sort, filter: filter === 'all' ? undefined : filter }),
@@ -39,19 +37,11 @@ export const FeedHome: React.FC = () => {
     document.querySelector('[data-app-scroll]')?.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const following = useMemo(() => pages.filter((p) => p.following), [pages]);
-  const suggestions = useMemo(() => pages.filter((p) => !p.following && !p.mandatory), [pages]);
-
-  const follow = async (id: string) => {
-    const updated = await api.followPage(id);
-    setPages((prev) => prev.map((p) => (p.id === id ? updated : p)));
-  };
-
   const items = list.ids.map((id) => posts[id]).filter((p): p is FeedPostView => Boolean(p));
 
   return (
     <>
-      <FeedFrame left={<LeftRail following={following} />} right={<RightRail suggestions={suggestions} onFollow={follow} />}>
+      <FeedFrame left={left} right={right}>
         <div className="relative space-y-3 pt-0 sm:pt-0">
           <HighlightsBar />
           <Composer pages={pages} onPublished={(post) => { if (post) { list.prepend(post.id); ingest([post]); } }} />

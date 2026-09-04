@@ -4,7 +4,7 @@ import { ArrowLeft, Bookmark, ShieldAlert, Check, Trash2, AlertTriangle } from '
 import type { FeedPostView, FeedReportView } from '@tupo/shared';
 import { Avatar, EmptyState, Spinner } from '../../components/ui';
 import { useFeed, useFeedList } from './FeedProvider';
-import { FeedFrame, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
+import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
 import { relativeTime } from './lib';
 import * as api from './api';
 
@@ -14,10 +14,15 @@ export const SavedPosts: React.FC = () => {
   const { posts } = useFeed();
   const list = useFeedList(useCallback((cursor?: string) => api.getBookmarks(cursor), []), []);
   const items = list.ids.map((id) => posts[id]).filter((p): p is FeedPostView => Boolean(p));
+  const { pages, left, right } = useFeedRails();
   return (
     <>
-      <FeedFrame>
+      <FeedFrame left={left} right={right}>
         <div className="mx-auto max-w-2xl">
+          {/* The rail hides under 980px, so this is the only way back on a phone. */}
+          <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light lg:hidden dark:text-text-secondary-dark">
+            <ArrowLeft size={15} /> Back to feed
+          </Link>
           <h1 className="mb-4 flex items-center gap-2 text-lg font-bold text-text-primary-light dark:text-text-primary-dark"><Bookmark size={18} /> Saved posts</h1>
           {list.loading ? <><PostSkeleton /><PostSkeleton /></>
             : items.length === 0 ? <EmptyState title="Nothing saved yet" hint="Tap the bookmark on any post to keep it here." />
@@ -26,7 +31,7 @@ export const SavedPosts: React.FC = () => {
         </div>
       </FeedFrame>
       <ReportDialog />
-      <EditPostMount pages={[]} />
+      <EditPostMount pages={pages} />
     </>
   );
 };
@@ -38,6 +43,7 @@ export const PostPermalink: React.FC = () => {
   const { getPost, ingest } = useFeed();
   const [status, setStatus] = useState<'loading' | 'ok' | 'gone'>('loading');
   const post = getPost(id);
+  const { pages, left, right } = useFeedRails();
 
   useEffect(() => {
     setStatus('loading');
@@ -46,7 +52,7 @@ export const PostPermalink: React.FC = () => {
 
   return (
     <>
-      <FeedFrame>
+      <FeedFrame left={left} right={right}>
         <div className="mx-auto max-w-2xl">
           <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light dark:text-text-secondary-dark">
             <ArrowLeft size={15} /> Back to feed
@@ -58,7 +64,7 @@ export const PostPermalink: React.FC = () => {
         </div>
       </FeedFrame>
       <ReportDialog />
-      <EditPostMount pages={[]} />
+      <EditPostMount pages={pages} />
     </>
   );
 };
@@ -76,10 +82,14 @@ export const ModerationQueue: React.FC = () => {
     await api.actOnReport(r.id, action);
     setReports((prev) => prev?.filter((x) => x.id !== r.id) ?? null);
   };
+  const { left, right } = useFeedRails();
 
   return (
-    <FeedFrame>
+    <FeedFrame left={left} right={right}>
       <div className="mx-auto max-w-2xl">
+        <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light lg:hidden dark:text-text-secondary-dark">
+          <ArrowLeft size={15} /> Back to feed
+        </Link>
         <h1 className="mb-3 flex items-center gap-2 text-lg font-bold text-text-primary-light dark:text-text-primary-dark">
           <ShieldAlert size={18} /> Moderation queue
         </h1>

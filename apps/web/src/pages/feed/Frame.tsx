@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   Sparkles, Bookmark, ShieldAlert, LayoutGrid, Newspaper, Megaphone, TrendingUp,
@@ -139,6 +139,29 @@ export const RightRail: React.FC<{ suggestions: FeedPageSummary[]; onFollow: (id
       </p>
     </>
   );
+};
+
+/**
+ * Every Feed screen needs the same left/right rails so the section nav
+ * (Home/Following/Announcements/Saved/Pages/Moderation) never disappears
+ * just because a screen is Saved, a page profile, or the moderation queue
+ * rather than the Home feed itself. Centralised here so a new screen can't
+ * forget to wire it up the way Saved/Moderation/PageDirectory once did.
+ */
+export const useFeedRails = () => {
+  const [pages, setPages] = useState<FeedPageSummary[]>([]);
+  useEffect(() => { void api.listPages().then(setPages); }, []);
+  const following = useMemo(() => pages.filter((p) => p.following), [pages]);
+  const suggestions = useMemo(() => pages.filter((p) => !p.following && !p.mandatory), [pages]);
+  const follow = useCallback(async (id: string) => {
+    const updated = await api.followPage(id);
+    setPages((prev) => prev.map((p) => (p.id === id ? updated : p)));
+  }, []);
+  return {
+    pages, following, suggestions, follow,
+    left: <LeftRail following={following} />,
+    right: <RightRail suggestions={suggestions} onFollow={follow} />,
+  };
 };
 
 /** Global report dialog — opened by a `feed:report` window event from any card. */
