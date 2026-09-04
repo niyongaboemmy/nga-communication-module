@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  BadgeCheck, Bell, BellOff, Plus, BarChart3, ArrowLeft, Users, Search, X, Loader2, Settings2,
+  BadgeCheck, Bell, BellOff, Plus, BarChart3, ArrowLeft, Users, Search, X, Loader2, Settings2, Camera,
 } from 'lucide-react';
 import type {
   CreatePagePayload, FeedPageDetail, FeedPageKind, FeedPageSummary, FeedPostView, FeedPageAnalytics,
@@ -9,20 +9,68 @@ import type {
 import { FEED_PAGE_KINDS, FEED_AUDIENCES } from '@tupo/shared';
 import { Avatar, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
+import { useNotify } from '../../context/NotificationContext';
+import { uploadFile, validateFile } from '../chat/uploads';
 import { useFeed, useFeedList } from './FeedProvider';
 import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
 import { Composer } from './Composer';
 import { useMediaUrl } from './lib';
 import * as api from './api';
 
+/**
+ * A hover-to-change image well used for a page's avatar and cover, in both
+ * the create dialog (uploads straight away, hands back a fileId to hold
+ * until Create is pressed) and the profile header (uploads and saves
+ * immediately, Facebook-style — there's no separate "save" step for a
+ * cover photo).
+ */
+const BrandingImageButton: React.FC<{
+  shape: 'circle' | 'cover';
+  src?: string;
+  fallback?: React.ReactNode;
+  editable: boolean;
+  onFile: (file: File) => void;
+  busy?: boolean;
+  label: string;
+  className?: string;
+}> = ({ shape, src, fallback, editable, onFile, busy, label, className = '' }) => {
+  const input = useRef<HTMLInputElement>(null);
+  const shapeClass = shape === 'circle' ? 'rounded-full' : '';
+  return (
+    <div className={`group relative overflow-hidden ${shapeClass} ${className}`}>
+      {src ? <img src={src} alt="" className="h-full w-full object-cover" /> : (fallback ?? <div className="h-full w-full bg-gradient-to-br from-blue-500 to-indigo-600" />)}
+      {editable && (
+        <button
+          type="button"
+          aria-label={label}
+          title={label}
+          onClick={() => input.current?.click()}
+          disabled={busy}
+          className={`absolute inset-0 grid place-items-center bg-black/0 text-white opacity-0 transition-all duration-150 hover:bg-black/40 hover:opacity-100 focus-visible:bg-black/40 focus-visible:opacity-100 group-hover:opacity-100 ${shapeClass}`}
+        >
+          {busy ? <Loader2 size={shape === 'circle' ? 18 : 22} className="animate-spin" /> : <Camera size={shape === 'circle' ? 18 : 22} />}
+        </button>
+      )}
+      {editable && (
+        <input ref={input} type="file" accept="image/*" hidden
+          onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
+      )}
+    </div>
+  );
+};
+
 /* ════════════════════════════════════════════════════════ Page profile ══ */
 
 export const PageProfile: React.FC = () => {
   const { slug = '' } = useParams();
   const { posts, ingest } = useFeed();
+  const { can } = usePermissions();
+  const { notify, confirm } = useNotify();
   const [page, setPage] = useState<FeedPageDetail | null>(null);
   const [tab, setTab] = useState<'posts' | 'about'>('posts');
   const [allPages, setAllPages] = useState<FeedPageSummary[]>([]);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [coverBusy, setCoverBusy] = useState(false);
   const cover = useMediaUrl(page?.coverFileId);
   const avatar = useMediaUrl(page?.avatarFileId);
 
@@ -36,6 +84,11 @@ export const PageProfile: React.FC = () => {
 
   if (!page) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
+  // Mirrors assertPageAdmin on the server: an owner can always manage
+  // branding, but a plain editor needs FEED_PAGE_MANAGE too — showing the
+  // camera button to an editor who lacks it would just 403 on click.
+  const canManage = page.myRole === 'owner' || can(['FEED_PAGE_MANAGE']);
+
   const toggleFollow = async () => {
     const updated = page.following ? await api.unfollowPage(page.id) : await api.followPage(page.id);
     setPage({ ...page, ...updated });
@@ -45,6 +98,23 @@ export const PageProfile: React.FC = () => {
     setPage({ ...page, notify: !page.notify });
   };
 
+  const uploadBranding = async (file: File, kind: 'avatarFileId' | 'coverFileId') => {
+    const invalid = validateFile(file);
+    if (invalid) { notify({ title: invalid, tone: 'error' }); return; }
+    const setBusy = kind === 'avatarFileId' ? setAvatarBusy : setCoverBusy;
+    setBusy(true);
+    try {
+      const fileId = await uploadFile(file, () => {}).promise;
+      const updated = await api.updatePage(page.id, { [kind]: fileId });
+      setPage(updated);
+      confirm(kind === 'avatarFileId' ? 'Page photo updated' : 'Cover photo updated');
+    } catch (e) {
+      notify({ title: e instanceof Error ? e.message : 'Could not update the photo', tone: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <FeedFrame left={left} right={right}>
@@ -52,13 +122,21 @@ export const PageProfile: React.FC = () => {
           <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light dark:text-text-secondary-dark">
             <ArrowLeft size={15} /> Back to feed
           </Link>
-          <div className="overflow-hidden rounded-2xl border border-border-light bg-card-light dark:border-border-dark/40 dark:bg-elevated-dark/50">
-            <div className="h-36 w-full bg-gradient-to-br from-blue-500 to-indigo-600" style={{ background: cover ? undefined : `linear-gradient(130deg, ${page.accent}, #1e293b)` }}>
-              {cover && <img src={cover} alt="" className="h-full w-full object-cover" />}
-            </div>
+          <div className="overflow-hidden rounded-2xl border border-border-light bg-card-light shadow-sm transition-shadow hover:shadow-md dark:border-border-dark/40 dark:bg-elevated-dark/50">
+            <BrandingImageButton
+              shape="cover" src={cover} editable={canManage} busy={coverBusy} label="Change cover photo"
+              onFile={(f) => void uploadBranding(f, 'coverFileId')}
+              className="h-36 w-full sm:h-48"
+              fallback={<div className="h-full w-full" style={{ background: `linear-gradient(130deg, ${page.accent}, #1e293b)` }} />}
+            />
             <div className="px-4 pb-4">
               <div className="-mt-10 flex items-end justify-between">
-                <Avatar name={page.name} src={avatar} size={80} className="ring-4 ring-card-light dark:ring-elevated-dark" />
+                <BrandingImageButton
+                  shape="circle" src={avatar} editable={canManage} busy={avatarBusy} label="Change page photo"
+                  onFile={(f) => void uploadBranding(f, 'avatarFileId')}
+                  className="h-20 w-20 shrink-0 ring-4 ring-card-light dark:ring-elevated-dark"
+                  fallback={<Avatar name={page.name} size={80} />}
+                />
                 <div className="mb-1 flex items-center gap-2">
                   {page.following && (
                     <button onClick={toggleNotify} aria-label="Notifications" className="grid h-9 w-9 place-items-center rounded-full border border-border-light text-text-secondary-light hover:bg-surface-light dark:border-border-dark/60 dark:hover:bg-card-dark">
@@ -209,9 +287,33 @@ const PageDirCard: React.FC<{ page: FeedPageSummary; onFollow: () => void }> = (
 
 const CreatePageDialog: React.FC<{ onClose: () => void; onCreated: () => void }> = ({ onClose, onCreated }) => {
   const nav = useNavigate();
+  const { notify } = useNotify();
   const [form, setForm] = useState<CreatePagePayload>({ name: '', kind: 'community', audience: 'everyone', accent: '#2563eb', bio: '' });
+  const [avatarPreview, setAvatarPreview] = useState<string>();
+  const [coverPreview, setCoverPreview] = useState<string>();
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [coverBusy, setCoverBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // The object URLs are only ever needed while this dialog is open.
+  useEffect(() => () => { if (avatarPreview) URL.revokeObjectURL(avatarPreview); if (coverPreview) URL.revokeObjectURL(coverPreview); }, [avatarPreview, coverPreview]);
+
+  const pickImage = async (file: File, kind: 'avatarFileId' | 'coverFileId') => {
+    const invalid = validateFile(file);
+    if (invalid) { notify({ title: invalid, tone: 'error' }); return; }
+    (kind === 'avatarFileId' ? setAvatarPreview : setCoverPreview)(URL.createObjectURL(file));
+    const setBusy2 = kind === 'avatarFileId' ? setAvatarBusy : setCoverBusy;
+    setBusy2(true);
+    try {
+      const fileId = await uploadFile(file, () => {}).promise;
+      setForm((f) => ({ ...f, [kind]: fileId }));
+    } catch (e) {
+      notify({ title: e instanceof Error ? e.message : 'Could not upload the image', tone: 'error' });
+    } finally {
+      setBusy2(false);
+    }
+  };
 
   const submit = async () => {
     if (!form.name.trim()) return;
@@ -223,12 +325,28 @@ const CreatePageDialog: React.FC<{ onClose: () => void; onCreated: () => void }>
 
   return (
     <div className="fixed inset-0 z-[110] grid place-items-center bg-black/50 p-4" onClick={onClose}>
-      <div className="w-full max-w-md animate-pop rounded-2xl border border-border-light bg-white p-5 dark:border-border-dark/50 dark:bg-elevated-dark" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-3 flex items-center justify-between">
+      <div className="w-full max-w-md animate-pop overflow-hidden rounded-2xl border border-border-light bg-white shadow-2xl dark:border-border-dark/50 dark:bg-elevated-dark" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 pt-4">
           <h2 className="flex items-center gap-2 text-sm font-semibold text-text-primary-light dark:text-text-primary-dark"><Settings2 size={15} /> Create a page</h2>
-          <button onClick={onClose} aria-label="Close"><X size={18} /></button>
+          <button onClick={onClose} aria-label="Close" className="grid h-8 w-8 place-items-center rounded-full text-text-secondary-light hover:bg-surface-light dark:hover:bg-card-dark"><X size={18} /></button>
         </div>
-        <div className="space-y-2.5">
+
+        <BrandingImageButton
+          shape="cover" src={coverPreview} editable busy={coverBusy} label="Add a cover photo"
+          onFile={(f) => void pickImage(f, 'coverFileId')}
+          className="mt-3 h-24 w-full"
+          fallback={<div className="h-full w-full" style={{ background: `linear-gradient(130deg, ${form.accent}, #1e293b)` }} />}
+        />
+        <div className="-mt-8 px-5">
+          <BrandingImageButton
+            shape="circle" src={avatarPreview} editable busy={avatarBusy} label="Add a page photo"
+            onFile={(f) => void pickImage(f, 'avatarFileId')}
+            className="h-14 w-14 ring-4 ring-white dark:ring-elevated-dark"
+            fallback={<Avatar name={form.name || '?'} size={56} />}
+          />
+        </div>
+
+        <div className="space-y-2.5 px-5 pb-5 pt-3">
           <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Page name" autoFocus
             className="w-full rounded-lg border border-border-light bg-surface-light px-3 py-2 text-sm outline-none dark:border-border-dark/60 dark:bg-card-dark/50" />
           <textarea value={form.bio} onChange={(e) => setForm({ ...form, bio: e.target.value })} rows={2} placeholder="What is this page about?"
@@ -244,9 +362,9 @@ const CreatePageDialog: React.FC<{ onClose: () => void; onCreated: () => void }>
           </div>
           {err && <p className="text-xs font-medium text-red-600 dark:text-red-400">{err}</p>}
         </div>
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="flex justify-end gap-2 border-t border-border-light px-5 py-3 dark:border-border-dark/40">
           <button onClick={onClose} className="rounded-full px-3 py-1.5 text-sm text-text-secondary-light dark:text-text-secondary-dark">Cancel</button>
-          <button onClick={() => void submit()} disabled={busy || !form.name.trim()} className="inline-flex items-center gap-1.5 rounded-full bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-40">
+          <button onClick={() => void submit()} disabled={busy || avatarBusy || coverBusy || !form.name.trim()} className="inline-flex items-center gap-1.5 rounded-full bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white transition-opacity hover:bg-blue-700 disabled:opacity-40">
             {busy && <Loader2 size={13} className="animate-spin" />} Create
           </button>
         </div>
