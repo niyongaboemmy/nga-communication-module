@@ -7,17 +7,20 @@
 .feed-canvas { background: #f0f2f5; min-height: 100%; }
 :where(.dark) .feed-canvas { background: var(--color-background-dark); }
 
-/* A Facebook-style card: soft, borderless in light, faint hairline in dark. */
+/* A Facebook-style card, using the same rounded-xl + elevated-on-canvas
+   language as the app's shared `Card` primitive (ui.tsx) — a translucent
+   lift off the canvas rather than a flat block, so it reads as one layered
+   surface instead of a mismatched patch. */
 .feed-card {
   background: #fff;
-  border-radius: 8px;
+  border-radius: 12px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1), 0 0 1px rgba(0, 0, 0, 0.05);
-  transition: box-shadow 150ms ease, border-color 150ms ease;
+  transition: box-shadow 150ms ease, border-color 150ms ease, background-color 150ms ease;
 }
 :where(.dark) .feed-card {
-  background: var(--color-card-dark);
+  background: rgba(22, 32, 47, 0.55);
   box-shadow: none;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(34, 45, 63, 0.6);
 }
 :where(.dark) .feed-card:hover { border-color: rgba(255, 255, 255, 0.12); }
 @media (max-width: 640px) {
