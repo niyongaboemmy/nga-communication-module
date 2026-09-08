@@ -132,6 +132,20 @@ export const AiPanel: React.FC<AiPanelProps> = ({
             <p className="text-xs text-white/50">Only the host can invite Tupo AI.</p>
           ) : (
             <>
+              {/*
+                One switch, not two. The AI reads the transcript, so it is
+                useless without captions — and this used to be a toggle that
+                stayed disabled until you found the *other* toggle above it,
+                which is why people concluded the AI did not work. Turning the
+                notetaker on now turns captions on with it; captions remain
+                separately available for anyone who wants them without the AI.
+              */}
+              <PanelToggle
+                label="Tupo AI notetaker"
+                hint="Turns on live captions too — the AI reads the transcript, never the audio."
+                checked={aiPresent}
+                onChange={onEnableAi}
+              />
               <PanelToggle
                 label="Live captions"
                 hint={captionsSupported
@@ -140,13 +154,13 @@ export const AiPanel: React.FC<AiPanelProps> = ({
                 checked={transcribing}
                 onChange={onEnableTranscription}
               />
-              <PanelToggle
-                label="Tupo AI notetaker"
-                hint="Needs captions on — the AI reads the transcript, never the audio."
-                checked={aiPresent}
-                disabled={!transcribing}
-                onChange={onEnableAi}
-              />
+              {!captionsSupported && (
+                <p className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 py-2 text-xs leading-relaxed text-amber-200">
+                  This browser cannot produce captions, so nothing you say will reach the
+                  transcript. Chrome or Edge can — and anyone in the meeting on one of those
+                  still contributes, so the AI will have something to read.
+                </p>
+              )}
             </>
           )}
         </div>

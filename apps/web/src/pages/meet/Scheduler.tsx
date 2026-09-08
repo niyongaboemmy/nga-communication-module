@@ -308,13 +308,21 @@ export const Scheduler: React.FC = () => {
                 checked={settings.joinCameraOff}
                 onChange={(v) => set("joinCameraOff", v)}
               />
-              <Toggle
-                label="Let guests without an account in"
-                hint="They choose a display name. Only ever offered on a public meeting."
-                checked={settings.guestsAllowed && category === "public"}
-                disabled={category !== "public"}
-                onChange={(v) => set("guestsAllowed", v)}
-              />
+              {/*
+                This used to be a "Let guests without an account in" toggle
+                bound to settings.guestsAllowed — which nothing on the server
+                has ever read. The audience choice above is the only thing that
+                decides, so a host who set Public and left the toggle off
+                believed guests were shut out when they were not. Stating the
+                consequence beats a switch that does nothing.
+              */}
+              {category === "public" && (
+                <p className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-2 text-xs leading-relaxed text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+                  Anyone with the link can join this meeting, including people with no
+                  account — they pick a display name and wait in the lobby for you to let
+                  them in.
+                </p>
+              )}
             </div>
           </Card>
 

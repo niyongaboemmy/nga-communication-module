@@ -764,11 +764,21 @@ router.post('/:id/token', authorizePermission('MEET_JOIN'), async (req: Request,
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
 
-  const { rows } = await getPool().query<meet.ParticipantRow>(
-    `SELECT * FROM meeting_participants WHERE meeting_id = $1 AND user_id = $2
-      ORDER BY created_at DESC LIMIT 1`,
-    [m.id, actor(req).id],
-  );
+  // A guest's row has `user_id IS NULL` — they are identified by the
+  // participant id inside their ticket, the same way the SFU routes do it
+  // (see sfuParticipant below). Matching them on user_id found nothing and
+  // returned "You are not in this meeting" to somebody the host had just
+  // admitted, so every public-link guest reached a working roster with no
+  // audio or video at all.
+  const guest = (req as MeetRequest).guest;
+  const { rows } = guest
+    ? await getPool().query<meet.ParticipantRow>(
+        `SELECT * FROM meeting_participants WHERE id = $1 AND meeting_id = $2 LIMIT 1`,
+        [guest.participantId, m.id])
+    : await getPool().query<meet.ParticipantRow>(
+        `SELECT * FROM meeting_participants WHERE meeting_id = $1 AND user_id = $2
+          ORDER BY created_at DESC LIMIT 1`,
+        [m.id, actor(req).id]);
   const participant = rows[0];
   if (!participant) return res.status(404).json(fail('You are not in this meeting.'));
   if (participant.state !== 'active') {
@@ -787,11 +797,20 @@ router.post('/:id/leave', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
 
-  const { rows } = await getPool().query<{ id: string }>(
-    `SELECT id FROM meeting_participants
-      WHERE meeting_id = $1 AND user_id = $2 AND left_at IS NULL LIMIT 1`,
-    [m.id, actor(req).id],
-  );
+  // Guests match on their participant id, not user_id — see /token above.
+  // Without this a guest was never marked as having left, so they kept
+  // counting against the meeting's capacity and stayed in the attendance
+  // export as present.
+  const leavingGuest = (req as MeetRequest).guest;
+  const { rows } = leavingGuest
+    ? await getPool().query<{ id: string }>(
+        `SELECT id FROM meeting_participants
+          WHERE id = $1 AND meeting_id = $2 AND left_at IS NULL LIMIT 1`,
+        [leavingGuest.participantId, m.id])
+    : await getPool().query<{ id: string }>(
+        `SELECT id FROM meeting_participants
+          WHERE meeting_id = $1 AND user_id = $2 AND left_at IS NULL LIMIT 1`,
+        [m.id, actor(req).id]);
   if (rows[0]) {
     await meet.markParticipantLeft(rows[0].id);
     await meet.logMeetEvent(m.id, 'participant.left', {

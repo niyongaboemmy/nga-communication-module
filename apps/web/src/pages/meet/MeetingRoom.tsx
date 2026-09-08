@@ -350,7 +350,12 @@ export const MeetingRoom: React.FC = () => {
         tone="error"
         title="You are no longer in this meeting"
         body={room.error ?? 'The host removed you.'}
-        action={{ label: 'Back to Meet', onClick: () => navigate('/app/meet') }}
+        // Ends the call as well as navigating: leaving it running kept the
+        // provider holding a call the user is no longer part of.
+        action={{
+          label: 'Back to Meet',
+          onClick: () => { void endCall(); navigate('/app/meet'); },
+        }}
       />
     );
   }
@@ -490,7 +495,12 @@ export const MeetingRoom: React.FC = () => {
                 isHost={isHost}
                 thinking={room.aiThinking}
                 onClose={() => setPanel(null)}
-                onEnableAi={(on) => room.patchSettings({ aiAssistantEnabled: on })}
+                // Captions come on with it: the notetaker reads the transcript
+                // and there is no transcript without them, so enabling one
+                // without the other is a setting that silently does nothing.
+                onEnableAi={(on) => room.patchSettings(on
+                  ? { aiAssistantEnabled: true, transcriptionEnabled: true }
+                  : { aiAssistantEnabled: false })}
                 onEnableTranscription={(on) => room.patchSettings({ transcriptionEnabled: on })}
               />
             )}

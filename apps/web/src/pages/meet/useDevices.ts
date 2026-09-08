@@ -55,6 +55,8 @@ export function useDevices(): UseDevices {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
   const detachedRef = useRef(false);
+  /** Which `open()` owns the stream. See the note inside open(). */
+  const openSeqRef = useRef(0);
 
   const enumerate = useCallback(async () => {
     try {
@@ -116,6 +118,9 @@ export function useDevices(): UseDevices {
   }, [stopMeter]);
 
   const stop = useCallback(() => {
+    // Invalidates any open() still waiting on getUserMedia, so its stream is
+    // closed on arrival rather than installed over the top of this teardown.
+    openSeqRef.current++;
     stopMeter();
     for (const track of streamRef.current?.getTracks() ?? []) track.stop();
     streamRef.current = null;
@@ -125,6 +130,19 @@ export function useDevices(): UseDevices {
   const open = useCallback(async (opts?: { video?: boolean; audio?: boolean }) => {
     const wantVideo = opts?.video !== false;
     const wantAudio = opts?.audio !== false;
+
+    /*
+     * Claim this attempt.
+     *
+     * `getUserMedia` is awaited below, and everything before the await already
+     * ran for any call that started earlier. Two opens close together — mount,
+     * then again the moment `enumerate()` fills in the device list and the
+     * selected camera id changes — therefore both saw `streamRef.current` as
+     * null, both stopped nothing, and the slower one overwrote the ref. The
+     * first stream stayed open with nothing referencing it, which is a camera
+     * light that never goes out no matter what the leave path does.
+     */
+    const seq = ++openSeqRef.current;
 
     // Stop the previous stream first. Chromium will not open the same camera
     // twice, so leaving the old one running makes switching silently fail.
@@ -149,6 +167,14 @@ export function useDevices(): UseDevices {
             }
           : false,
       });
+
+      // Superseded while we waited — by another open(), by stop(), or by the
+      // stream being detached into a call. Nothing will ever reference this
+      // one, so it has to be closed here or it leaks the device.
+      if (seq !== openSeqRef.current) {
+        for (const track of stream.getTracks()) track.stop();
+        return null;
+      }
 
       streamRef.current = stream;
       detachedRef.current = false;
@@ -175,6 +201,7 @@ export function useDevices(): UseDevices {
 
   /** Hand the stream over to the call; this hook stops owning its lifetime. */
   const detach = useCallback(() => {
+    openSeqRef.current++;
     stopMeter();
     detachedRef.current = true;
     const stream = streamRef.current;
@@ -191,6 +218,7 @@ export function useDevices(): UseDevices {
 
   // Unmount must not stop a stream that was handed to the call.
   useEffect(() => () => {
+    openSeqRef.current++;
     stopMeter();
     if (!detachedRef.current) {
       for (const track of streamRef.current?.getTracks() ?? []) track.stop();

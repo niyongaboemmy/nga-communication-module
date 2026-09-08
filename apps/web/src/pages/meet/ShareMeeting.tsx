@@ -65,7 +65,18 @@ export const ShareMeeting: React.FC<ShareMeetingProps> = ({
   const [copied, setCopied] = useState<string | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
 
-  const url = `${window.location.origin}/app/meet/${meetingId}`;
+  /*
+   * A public meeting gets the guest link, everything else gets the in-app one.
+   *
+   * `/app/*` is behind the signed-in guard, so handing a public link to
+   * somebody without an account bounced them to the sign-in page — the one
+   * thing the panel promises will not happen. `/meet/:code` is the only route
+   * that renders without a session, and the join code is what a guest can
+   * also type by hand, so it is the better identifier here in any case.
+   */
+  const url = admission === 'public'
+    ? `${window.location.origin}/meet/${joinCode}`
+    : `${window.location.origin}/app/meet/${meetingId}`;
   const invitation =
     `${title}\n\nJoin: ${url}\nMeeting code: ${joinCode}`;
 

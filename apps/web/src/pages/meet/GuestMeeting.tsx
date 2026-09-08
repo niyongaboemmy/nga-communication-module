@@ -71,7 +71,10 @@ export const GuestMeeting: React.FC = () => {
           willKnock
           joinLabel="Ask to join"
           error={error}
-          yourName={step.ticket.meeting.title}
+          // The guest's own name, not the meeting's — this labels their own
+          // preview tile, and it read as the meeting title sitting under their
+          // face.
+          yourName={localStorage.getItem('tupo_guest_name') ?? 'You'}
           onJoin={onJoin}
           onCancel={() => { setError(null); setStep({ at: 'name' }); }}
         />

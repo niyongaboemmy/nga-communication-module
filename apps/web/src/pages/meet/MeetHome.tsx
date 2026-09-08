@@ -11,11 +11,14 @@ import {
   Video,
   CalendarDays,
   Clock,
+  ChevronDown,
+  Globe,
 } from "lucide-react";
 import {
   normalizeJoinCode,
   JOIN_CODE_PATTERN,
   CATEGORY_TO_POLICY,
+  CATEGORY_META,
   type MeetCategory,
 } from "@tupo/shared";
 import { MeetCalendar, dayKey, type CalendarEntry } from "./MeetCalendar";
@@ -42,6 +45,7 @@ export const MeetHome: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [code, setCode] = useState("");
   const [starting, setStarting] = useState(false);
+  const [audienceOpen, setAudienceOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<Date>(() => new Date());
 
@@ -69,11 +73,23 @@ export const MeetHome: React.FC = () => {
     void load();
   }, [load]);
 
-  const startInstant = async () => {
+  /**
+   * Start a call right now, at a chosen audience.
+   *
+   * Defaults to "anyone signed in": the safe answer for a school, and the one
+   * that needs no thought for the assembly-or-briefing case this button is
+   * mostly pressed for. Public is a deliberate second click, because it admits
+   * people with no account at all.
+   */
+  const startInstant = async (category: MeetCategory = "loggedIn") => {
     setStarting(true);
     setError(null);
+    setAudienceOpen(false);
     try {
-      const meeting = await meetApi.startInstant({ title: "Instant meeting" });
+      const meeting = await meetApi.startInstant({
+        title: "Instant meeting",
+        settings: { admissionPolicy: CATEGORY_TO_POLICY[category] },
+      });
       navigate(`/app/meet/${meeting.id}`);
     } catch (err) {
       setError(
@@ -215,23 +231,75 @@ export const MeetHome: React.FC = () => {
 
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3 xl:shrink-0">
           <div className="flex shrink-0 gap-2">
-            <button
-              onClick={() => void startInstant()}
-              disabled={!canStart || starting}
-              className="tupo-press flex flex-1 items-center justify-center gap-2 rounded-full bg-blue-600 hover:bg-blue-500 px-4 py-2.5 text-sm font-semibold text-white transition-colors duration-150 disabled:opacity-40 sm:flex-none"
-            >
-              {starting ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <span className="relative flex h-2 w-2">
-                  {/* A live dot on the primary action: this button does not
-                      open a form, it puts you on camera. */}
-                  <span className="tupo-live-dot absolute inset-0 rounded-full bg-white/90" />
-                  <span className="relative h-2 w-2 rounded-full bg-white" />
-                </span>
+            {/* A split button: press it to start at the safe default, or open
+                the caret to start a public one. Two clicks for public is the
+                point — it lets in people with no account. */}
+            <div className="relative flex flex-1 sm:flex-none">
+              <button
+                onClick={() => void startInstant()}
+                disabled={!canStart || starting}
+                className="tupo-press flex flex-1 items-center justify-center gap-2 rounded-l-full bg-blue-600 hover:bg-blue-500 py-2.5 pl-4 pr-3 text-sm font-semibold text-white transition-colors duration-150 disabled:opacity-40 sm:flex-none"
+              >
+                {starting ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <span className="relative flex h-2 w-2">
+                    {/* A live dot on the primary action: this button does not
+                        open a form, it puts you on camera. */}
+                    <span className="tupo-live-dot absolute inset-0 rounded-full bg-white/90" />
+                    <span className="relative h-2 w-2 rounded-full bg-white" />
+                  </span>
+                )}
+                Start now
+              </button>
+              <button
+                onClick={() => setAudienceOpen((v) => !v)}
+                disabled={!canStart || starting}
+                aria-haspopup="menu"
+                aria-expanded={audienceOpen}
+                aria-label="Choose who can join"
+                className="tupo-press grid shrink-0 place-items-center rounded-r-full border-l border-white/25 bg-blue-600 px-2.5 text-white transition-colors duration-150 hover:bg-blue-500 disabled:opacity-40"
+              >
+                <ChevronDown size={15} />
+              </button>
+
+              {audienceOpen && (
+                <>
+                  <button
+                    aria-hidden="true"
+                    tabIndex={-1}
+                    onClick={() => setAudienceOpen(false)}
+                    className="fixed inset-0 z-20 cursor-default"
+                  />
+                  <div
+                    role="menu"
+                    className="absolute right-0 top-full z-30 mt-1.5 w-72 overflow-hidden rounded-2xl border border-border-light bg-white p-1 shadow-xl dark:border-border-dark/60 dark:bg-elevated-dark"
+                  >
+                    {(["loggedIn", "public"] as const).map((c) => (
+                      <button
+                        key={c}
+                        role="menuitem"
+                        onClick={() => void startInstant(c)}
+                        className="w-full rounded-xl px-3 py-2 text-left transition-colors hover:bg-surface-light dark:hover:bg-card-dark/60"
+                      >
+                        <span className="flex items-center gap-1.5 text-sm font-medium text-text-primary-light dark:text-text-primary-dark">
+                          {c === "public" ? <Globe size={13} /> : <Users size={13} />}
+                          {CATEGORY_META[c].label}
+                          {c === "loggedIn" && (
+                            <span className="ml-auto text-[10px] font-semibold uppercase tracking-wide text-text-secondary-light dark:text-text-secondary-dark">
+                              Default
+                            </span>
+                          )}
+                        </span>
+                        <span className="mt-0.5 block text-xs leading-relaxed text-text-secondary-light dark:text-text-secondary-dark">
+                          {CATEGORY_META[c].hint}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </>
               )}
-              Start now
-            </button>
+            </div>
 
             <button
               onClick={() => navigate("/app/meet/new")}

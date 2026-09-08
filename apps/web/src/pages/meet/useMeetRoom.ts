@@ -175,6 +175,63 @@ export function useMeetRoom(
   const localStreamRef = useRef<MediaStream | null>(initialStream);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const vadCleanupRef = useRef<(() => void) | null>(null);
+
+  /**
+   * Give the camera and microphone back to the operating system.
+   *
+   * The capture light is the user's only evidence of whether they are still
+   * being recorded, so this is the one piece of teardown that must be
+   * unconditional, idempotent, and incapable of throwing. Every exit — the
+   * Leave button, being removed by the host, the meeting ending, signing out,
+   * closing the tab — routes through here.
+   */
+  const releaseLocalMedia = useCallback(() => {
+    for (const t of localStreamRef.current?.getTracks() ?? []) {
+      try { t.stop(); } catch { /* already ended */ }
+    }
+    for (const t of screenStreamRef.current?.getTracks() ?? []) {
+      try { t.stop(); } catch { /* already ended */ }
+    }
+    localStreamRef.current = null;
+    screenStreamRef.current = null;
+  }, []);
+
+  // Held in a ref so the unmount cleanup can call it without listing it as a
+  // dependency — a cleanup that re-runs whenever its callback identity changes
+  // would close the camera mid-call.
+  const releaseLocalMediaRef = useRef(releaseLocalMedia);
+  releaseLocalMediaRef.current = releaseLocalMedia;
+
+  /**
+   * The meeting is over for this person — give the camera back immediately.
+   *
+   * `ended` and `removed` are the two exits nobody presses a button for, and
+   * the only handler that used to notice them lived inside the meeting route.
+   * Someone sitting in Chat with the mini-call up when the host ended the
+   * meeting kept a live capture: the mini-call hides itself on `ended`, so the
+   * Leave button went away and left no way at all to close the device. The
+   * rest of the call state is left alone — the UI still shows "the meeting
+   * ended" and routes on to the summary.
+   */
+  useEffect(() => {
+    if (state.phase === 'ended' || state.phase === 'removed') {
+      releaseLocalMediaRef.current();
+    }
+  }, [state.phase]);
+
+  /**
+   * Last-resort release when the tab goes away.
+   *
+   * `pagehide` covers the cases no React cleanup ever sees: a closed tab, a
+   * navigation to another site, and the bfcache. Without it, killing the tab
+   * mid-call can leave the light on until the browser itself gets round to
+   * reclaiming the device.
+   */
+  useEffect(() => {
+    const onPageHide = () => releaseLocalMediaRef.current();
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, []);
   /**
    * The last set of visible tiles.
    *
@@ -215,6 +272,12 @@ export function useMeetRoom(
    */
   useEffect(() => {
     if (!initialStream || localStreamRef.current === initialStream) return;
+    // Whatever we were holding is being replaced — a second device check, or
+    // joining a different meeting without leaving the first. Stop it, or its
+    // camera stays open for the life of the tab with nothing referencing it.
+    for (const t of localStreamRef.current?.getTracks() ?? []) {
+      try { t.stop(); } catch { /* already ended */ }
+    }
     localStreamRef.current = initialStream;
     // Remember which camera this is, so releasing and re-acquiring the device
     // comes back to the one the user picked in the device check.
@@ -646,7 +709,11 @@ export function useMeetRoom(
     void transportRef.current?.disconnect();
     transportRef.current = null;
     vadCleanupRef.current?.();
-    for (const t of screenStreamRef.current?.getTracks() ?? []) t.stop();
+    // Both streams, not just the screen. This hook lives in a provider mounted
+    // above the router so it rarely unmounts — but when it does (sign-out
+    // tears the tree down, for one) it was leaving the webcam capturing with
+    // no UI left anywhere that could stop it.
+    releaseLocalMediaRef.current();
   }, []);
 
   /* ---------------- voice activity detection ---------------- */
@@ -1004,14 +1071,20 @@ export function useMeetRoom(
 
   const leave = useCallback(async () => {
     socketRef.current?.emit('meet:leave', { meetingId });
-    await transportRef.current?.disconnect();
+
+    // The camera goes dark FIRST, before anything that can throw or hang.
+    // Releasing the device used to sit after `await transport.disconnect()`,
+    // so a transport that rejected left the capture light on with no second
+    // chance at it — and the caller latches itself against re-entry.
+    releaseLocalMedia();
+
+    try {
+      await transportRef.current?.disconnect();
+    } catch { /* the devices are already released; the socket will time out */ }
     transportRef.current = null;
-    for (const t of localStreamRef.current?.getTracks() ?? []) t.stop();
-    for (const t of screenStreamRef.current?.getTracks() ?? []) t.stop();
-    localStreamRef.current = null;
-    screenStreamRef.current = null;
+
     if (meetingId) await meetApi.leaveMeeting(meetingId).catch(() => {});
-  }, [meetingId]);
+  }, [meetingId, releaseLocalMedia]);
 
   /* ---------------- derived ---------------- */
 
