@@ -10,6 +10,7 @@ import { Avatar, IconButton, UnreadBadge } from '../components/ui';
 import { AppsSwitcher } from '../components/shell/AppsSwitcher';
 import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
+import { GlobalSearch } from '../components/GlobalSearch';
 
 /**
  * The Tupo application frame.
@@ -271,7 +272,7 @@ const UserMenu: React.FC = () => {
   );
 };
 
-const TopBar: React.FC = () => {
+const TopBar: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch }) => {
   const { theme, toggleTheme } = useAuth();
 
   return (
@@ -298,6 +299,7 @@ const TopBar: React.FC = () => {
           input: the real surface is a command palette, and a fake input that
           steals focus on a phone is a trap. */}
       <button
+        onClick={onOpenSearch}
         className="hidden max-w-md flex-1 items-center gap-2 rounded-xl border border-border-light bg-surface-light px-3 py-2 text-sm text-text-secondary-light transition-colors duration-150 hover:border-blue-300 hover:bg-white md:flex dark:border-border-dark/50 dark:bg-chrome-dark/70 dark:text-text-secondary-dark dark:hover:border-blue-800 dark:hover:bg-chrome-dark"
       >
         <Search size={15} />
@@ -308,7 +310,7 @@ const TopBar: React.FC = () => {
       </button>
 
       <div className="flex items-center gap-0.5 sm:gap-1.5">
-        <IconButton label="Search" className="md:hidden">
+        <IconButton label="Search" className="md:hidden" onClick={onOpenSearch}>
           <Search size={18} />
         </IconButton>
 
@@ -336,14 +338,35 @@ const TopBar: React.FC = () => {
 export const AppShell: React.FC = () => {
   const { can } = usePermissions();
   const connection = useConnectionStatus();
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  /*
+   * ⌘K anywhere in the shell.
+   *
+   * Ignored while a text field has focus unless the modifier is held, so
+   * typing "k" into a message composer does not open a search box. Chat's own
+   * palette used to own this chord; it now defers to this one, which searches
+   * conversations too and a great deal besides.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   const modules = MODULES.filter((i) => can(i.perm));
   const admin = ADMIN.filter((i) => can(i.perm));
 
   return (
     <div className="h-app flex flex-col overflow-hidden bg-background-light text-text-primary-light dark:bg-background-dark dark:text-text-primary-dark">
-      <TopBar />
+      <TopBar onOpenSearch={() => setSearchOpen(true)} />
       <ConnectionBanner status={connection} />
+      {searchOpen && <GlobalSearch onClose={() => setSearchOpen(false)} />}
 
       <div className="flex min-h-0 flex-1">
         <Rail modules={modules} admin={admin} />

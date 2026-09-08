@@ -153,7 +153,12 @@ const ChatWorkspace: React.FC = () => {
       const target = e.target as HTMLElement | null;
       const typing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
 
-      if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); setPaletteOpen(true); return; }
+      // ⌘K belongs to the global search in the app shell now — it finds
+      // conversations too, plus messages, people, mail and the rest. This
+      // palette keeps the chat-only actions on ⌘⇧K.
+      if (mod && e.shiftKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault(); setPaletteOpen(true); return;
+      }
       if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); setPanel('search'); return; }
       if (mod && e.shiftKey && e.key.toLowerCase() === 's') {
         e.preventDefault(); setPanel('saved'); return;

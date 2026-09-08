@@ -4,7 +4,7 @@ import { Avatar, IconButton, Skeleton, EmptyState } from '../../components/ui';
 import { useChat } from './ChatProvider';
 import * as chatApi from './api';
 import { shortStamp } from './data';
-import { HIGHLIGHT_START, HIGHLIGHT_END } from './searchHighlight';
+import { Highlighted } from '../../components/Highlighted';
 
 /**
  * Message search (FR-SRCH).
@@ -16,28 +16,6 @@ import { HIGHLIGHT_START, HIGHLIGHT_END } from './searchHighlight';
  * sentinels and building React elements keeps every byte of user content
  * escaped.
  */
-
-const Highlighted: React.FC<{ text: string }> = ({ text }) => {
-  // Split on the start sentinel, then on the end sentinel: everything before an
-  // end sentinel is a match, everything after it is ordinary text.
-  const segments = text.split(HIGHLIGHT_START);
-  return (
-    <>
-      {segments.map((segment, i) => {
-        if (i === 0) return <React.Fragment key={i}>{segment}</React.Fragment>;
-        const [matched, ...rest] = segment.split(HIGHLIGHT_END);
-        return (
-          <React.Fragment key={i}>
-            <mark className="rounded bg-amber-200 px-0.5 text-inherit dark:bg-amber-500/40">
-              {matched}
-            </mark>
-            {rest.join(HIGHLIGHT_END)}
-          </React.Fragment>
-        );
-      })}
-    </>
-  );
-};
 
 export const SearchPanel: React.FC<{
   onClose: () => void;

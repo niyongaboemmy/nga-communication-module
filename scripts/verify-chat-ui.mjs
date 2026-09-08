@@ -598,9 +598,10 @@ try {
   /* ── Command palette ──────────────────────────────────────────────────── */
 
   await A.page.locator('#composer').fill('');
-  await A.page.keyboard.press('ControlOrMeta+k');
+  // ⌘K is the app-wide search now; the chat-only palette moved to ⌘⇧K.
+  await A.page.keyboard.press('ControlOrMeta+Shift+k');
   const palette = A.page.getByRole('dialog', { name: 'Command palette' });
-  check('Ctrl/Cmd K opens the command palette', await visible(palette, 4000));
+  check('Ctrl/Cmd Shift K opens the chat command palette', await visible(palette, 4000));
   check('and it lists conversations to jump to',
     await visible(palette.getByRole('option', { name: /Bosco Rugema/ })));
 
@@ -683,7 +684,7 @@ try {
   check('scheduling clears the composer',
     await valueBecomes(A.page.locator('#composer'), ''));
 
-  await A.page.keyboard.press('ControlOrMeta+k');
+  await A.page.keyboard.press('ControlOrMeta+Shift+k');
   await A.page.keyboard.type('scheduled');
   await A.page.keyboard.press('Enter');
   const scheduledPanel = A.page.getByRole('complementary', { name: 'Scheduled messages' });

@@ -22,7 +22,8 @@ const GROUPS: Array<{ title: string; items: Array<[string, string]> }> = [
   {
     title: 'Getting around',
     items: [
-      [`${MOD} K`, 'Jump to a conversation'],
+      [`${MOD} K`, 'Search everything — messages, people, mail, posts, meetings'],
+      [`${MOD} ⇧ K`, 'Chat actions'],
       [`${MOD} F`, 'Search messages'],
       [`${MOD} ⇧ S`, 'Saved items'],
       ['Esc', 'Close the open panel'],

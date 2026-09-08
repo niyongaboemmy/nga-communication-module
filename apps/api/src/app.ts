@@ -12,6 +12,7 @@ import notificationRoutes from './routes/notifications.js';
 import chatRoutes from './routes/chat.js';
 import mailRoutes from './routes/mail.js';
 import feedRoutes from './routes/feed.js';
+import searchRoutes from './routes/search.js';
 
 /**
  * The Express app with no side effects — no database init, no listen — so
@@ -40,6 +41,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/mail', mailRoutes);
 app.use('/api/feed', feedRoutes);
+app.use('/api/search', searchRoutes);
 
 app.use((_req, res) => res.status(404).json(fail('Not found')));
 
