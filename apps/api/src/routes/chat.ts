@@ -1061,6 +1061,7 @@ router.patch('/conversations/:id', authorizePermission('CHANNEL_MANAGE'), wrap(a
     description: body.description === undefined ? undefined : (body.description ?? null),
     iconEmoji: body.iconEmoji === undefined ? undefined : (body.iconEmoji ?? null),
     avatarColor: body.avatarColor === undefined ? undefined : (body.avatarColor ?? null),
+    avatarFileId: body.avatarFileId === undefined ? undefined : (body.avatarFileId ?? null),
     isPrivate: body.isPrivate === true ? true : undefined,
   });
 

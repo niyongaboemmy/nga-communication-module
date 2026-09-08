@@ -285,7 +285,12 @@ export const transferOwnership = (id: string, userId: string) =>
 
 export const updateConversation = (
   id: string,
-  patch: { name?: string; topic?: string | null; description?: string | null; isPrivate?: boolean },
+  patch: {
+    name?: string; topic?: string | null; description?: string | null;
+    isPrivate?: boolean; iconEmoji?: string | null; avatarColor?: string | null;
+    /** An uploaded logo, or null to go back to the emoji/colour tile. */
+    avatarFileId?: string | null;
+  },
 ) => apiPatch<{ conversation: ConversationSummary }>(`/api/chat/conversations/${id}`, patch)
   .then((r) => r.data!.conversation);
 

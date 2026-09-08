@@ -3,13 +3,13 @@ import {
   Search, Plus, Hash, Megaphone, Star, ChevronRight, BellOff, Users, Filter, Lock, AtSign,
   Bookmark, Bell, Compass,
 } from 'lucide-react';
-import { Avatar, IconButton, SearchInput, Skeleton, UnreadBadge, EmptyState } from '../../components/ui';
+import { IconButton, SearchInput, Skeleton, UnreadBadge, EmptyState } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
 import { shortStamp, sectionOf, SECTION_LABEL, SECTION_ORDER, typingLabel } from './data';
 import type { SidebarSection } from './data';
 import { useChat } from './ChatProvider';
-import { toPresence } from './types';
+import { ConversationAvatar } from './ConversationAvatar';
 import type { Conversation } from './types';
 import { NewConversationDialog } from './NewConversationDialog';
 
@@ -51,26 +51,11 @@ const Row: React.FC<{
             : 'hover:bg-surface-light dark:hover:bg-surface-dark'
         }`}
       >
-        {c.type === 'dm' ? (
-          <Avatar
-            name={c.name}
-            src={c.avatarUrl ?? undefined}
-            size={38}
-            presence={toPresence(c.peer?.presence)}
-          />
-        ) : (
-          <span
-            className={`grid h-[38px] w-[38px] shrink-0 place-items-center rounded-xl ${
-              c.type === 'announcement'
-                ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
-                : 'bg-slate-100 text-slate-500 dark:bg-card-dark/60 dark:text-slate-300'
-            }`}
-          >
-            {c.iconEmoji
-              ? <span className="text-base leading-none">{c.iconEmoji}</span>
-              : Icon && <Icon size={18} />}
-          </span>
-        )}
+        <ConversationAvatar
+          conversation={c}
+          size={38}
+          fallback={Icon ? <Icon size={18} /> : null}
+        />
 
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline gap-2">

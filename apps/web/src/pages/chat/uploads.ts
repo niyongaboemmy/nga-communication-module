@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { SESSION_KEY } from '../../lib/api';
 import type { WireAttachment } from '@tupo/shared';
 
@@ -229,6 +230,36 @@ export async function inlineUrl(fileId: string): Promise<string> {
 
   ticketCache.set(fileId, { token, expiresAt: Date.now() + expiresIn * 1000 });
   return `/api/files/${fileId}/content?inline=1&t=${encodeURIComponent(token)}`;
+}
+
+/**
+ * `inlineUrl` as a hook, for anything that renders a stored image.
+ *
+ * `enabled` is what keeps it lazy: a channel with three hundred images in its
+ * history would otherwise mint three hundred tickets on mount, for pictures
+ * nobody has scrolled to. Pass a falsy `fileId` for "there is no image" —
+ * the hook then simply never resolves a URL, so callers can fall back.
+ */
+export function useMediaUrl(
+  fileId: string | null | undefined, enabled = true,
+): { url: string | null; failed: boolean } {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    // Reset on change, or a swapped-out logo keeps showing the old picture
+    // until the new ticket lands.
+    setUrl(null);
+    setFailed(false);
+    if (!enabled || !fileId) return;
+    let cancelled = false;
+    inlineUrl(fileId)
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [fileId, enabled]);
+
+  return { url, failed };
 }
 
 /**

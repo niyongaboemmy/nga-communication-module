@@ -106,6 +106,7 @@ interface ConversationRow {
   id: string; type: ConversationType; slug: string | null; name: string | null;
   topic: string | null; description: string | null; is_private: boolean;
   is_archived: boolean; icon_emoji: string | null; avatar_color: string | null;
+  avatar_file_id: string | null;
   member_count: number; last_seq: string;
   last_message_at: string | null; last_message_preview: string | null;
   last_message_sender: string | null; last_sender_name: string | null;
@@ -126,7 +127,8 @@ interface ConversationRow {
  */
 const CONVERSATION_SELECT = `
   SELECT c.id, c.type, c.slug, c.name, c.topic, c.description, c.is_private,
-         c.is_archived, c.icon_emoji, c.avatar_color, c.member_count, c.last_seq,
+         c.is_archived, c.icon_emoji, c.avatar_color, c.avatar_file_id,
+         c.member_count, c.last_seq,
          c.last_message_at, c.last_message_preview, c.last_message_sender,
          ls.name AS last_sender_name,
          m.role AS my_role, m.unread_count, m.unread_mentions, m.last_read_seq,
@@ -161,6 +163,9 @@ function toConversation(r: ConversationRow): ConversationSummary {
     iconEmoji: r.icon_emoji,
     avatarColor: r.avatar_color,
     avatarUrl: isDm ? r.peer_avatar : null,
+    // A DM shows the peer's own picture; only a group/channel carries an
+    // uploaded logo of its own.
+    avatarFileId: isDm ? null : r.avatar_file_id,
     memberCount: r.member_count,
     lastSeq: Number(r.last_seq),
     myRole: r.my_role,
@@ -2792,6 +2797,7 @@ export async function updateConversation(
   patch: {
     name?: string; topic?: string | null; description?: string | null;
     iconEmoji?: string | null; avatarColor?: string | null; isPrivate?: boolean;
+    avatarFileId?: string | null;
   },
 ): Promise<ConversationSummary> {
   const membership = await requireMembership(actorId, conversationId);
@@ -2819,6 +2825,24 @@ export async function updateConversation(
   if (patch.description !== undefined) set('description', patch.description?.slice(0, 1000) ?? null);
   if (patch.iconEmoji !== undefined) set('icon_emoji', patch.iconEmoji?.slice(0, 16) ?? null);
   if (patch.avatarColor !== undefined) set('avatar_color', patch.avatarColor?.slice(0, 32) ?? null);
+  if (patch.avatarFileId !== undefined) {
+    // Never take a file id on the client's word: it becomes readable to every
+    // member of this conversation the moment it lands (see the conversation
+    // avatar grant in apps/files/src/access.ts), so an unchecked id here would
+    // let anyone republish someone else's private upload to a whole channel.
+    // Clearing it (null) needs no check.
+    if (patch.avatarFileId !== null) {
+      const { rows } = await getPool().query<{ owner_id: string; status: string }>(
+        'SELECT owner_id, status FROM files WHERE id = $1 AND deleted_at IS NULL',
+        [patch.avatarFileId],
+      );
+      const file = rows[0];
+      if (!file) throw new ChatError('That image could not be found.', 400);
+      if (file.owner_id !== actorId) throw new ChatError('That image is not yours to use.', 403);
+      if (file.status !== 'ready') throw new ChatError('That image has not finished uploading.', 409);
+    }
+    set('avatar_file_id', patch.avatarFileId);
+  }
   // Public → private is allowed; private → public is not. Opening a channel
   // retroactively publishes everything ever said in it to people who were never
   // party to it, which is not a settings change, it is a disclosure.

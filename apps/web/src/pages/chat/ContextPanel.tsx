@@ -1,12 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import {
   X, Users, FileText, Info, Bell, BellOff, Star, LogOut, AtSign, Download, Image as ImageIcon,
+  UserPlus,
 } from 'lucide-react';
 import { Avatar, IconButton, EmptyState, Skeleton } from '../../components/ui';
+import { usePermissions } from '../../hooks/usePermissions';
+import { useAuth } from '../../context/AuthContext';
+import { useNotify } from '../../context/NotificationContext';
 import { listConversationFiles, downloadFile } from './uploads';
 import type { ConversationFile } from './uploads';
+import * as chatApi from './api';
 import { formatBytes, shortStamp } from './data';
 import { useChat } from './ChatProvider';
+import { ConversationAvatar } from './ConversationAvatar';
 import { toPresence } from './types';
 import type { Conversation, Member } from './types';
 
@@ -31,10 +37,41 @@ export const ContextPanel: React.FC<{
   conversation: Conversation;
   members: Member[];
   onClose: () => void;
-}> = ({ conversation: c, members, onClose }) => {
+  /** Opens the settings panel — where members are added and details edited. */
+  onOpenSettings?: () => void;
+}> = ({ conversation: c, members, onClose, onOpenSettings }) => {
   const [tab, setTab] = useState<Tab>('about');
-  const { toggleStar, setNotificationLevel, jumpTo } = useChat();
+  const { toggleStar, setNotificationLevel, jumpTo, setActiveId, refresh } = useChat();
+  const { can } = usePermissions();
+  const { user } = useAuth();
+  const { notify } = useNotify();
   const muted = c.notification === 'none';
+  const [leaving, setLeaving] = useState(false);
+
+  const kind = c.type === 'group' ? 'group' : 'channel';
+  // Same two-layer rule the settings panel uses: a conversation role of
+  // owner/admin *and* the platform permission.
+  const canManageMembers =
+    c.type !== 'dm' && (c.myRole === 'owner' || c.myRole === 'admin') && can('CHANNEL_MEMBERS_MANAGE');
+
+  const leave = async () => {
+    if (!user) return;
+    try {
+      await chatApi.removeMember(c.id, user.id);
+      await refresh();
+      setActiveId(null);
+      onClose();
+      notify({ title: `You left the ${kind}`, tone: 'success', confirmation: true });
+    } catch (err) {
+      notify({
+        title: 'Could not leave',
+        body: err instanceof Error ? err.message : undefined,
+        tone: 'error',
+      });
+    } finally {
+      setLeaving(false);
+    }
+  };
 
   const [files, setFiles] = useState<ConversationFile[] | null>(null);
   const [filter, setFilter] = useState<'all' | 'image' | 'document'>('all');
@@ -85,19 +122,13 @@ export const ContextPanel: React.FC<{
         {tab === 'about' && (
           <div className="space-y-5">
             <div className="text-center">
-              {c.type === 'dm' ? (
-                <Avatar
-                  name={c.name}
-                  src={c.avatarUrl ?? undefined}
-                  size={72}
-                  className="mx-auto"
-                  presence={toPresence(c.peer?.presence)}
-                />
-              ) : (
-                <span className="mx-auto grid h-[72px] w-[72px] place-items-center rounded-2xl bg-slate-100 text-2xl font-bold text-slate-500 dark:bg-card-dark/60 dark:text-slate-300">
-                  {c.iconEmoji ?? '#'}
-                </span>
-              )}
+              <ConversationAvatar
+                conversation={c}
+                size={72}
+                radius="rounded-2xl"
+                className="mx-auto"
+                fallback={<span className="text-2xl font-bold">#</span>}
+              />
               <p className="mt-3 text-base font-semibold text-text-primary-light dark:text-text-primary-dark">{c.name}</p>
               {c.topic && (
                 <p className="mt-1 text-sm leading-relaxed text-text-secondary-light dark:text-text-secondary-dark">{c.topic}</p>
@@ -107,7 +138,9 @@ export const ContextPanel: React.FC<{
               )}
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
+            {/* Two tiles for a DM: "Block" used to sit here doing nothing at
+                all, and there is no block endpoint to wire it to. */}
+            <div className={`grid gap-2 ${c.type === 'dm' ? 'grid-cols-2' : 'grid-cols-3'}`}>
               <button
                 onClick={() => setNotificationLevel(c.id, muted ? 'all' : 'none')}
                 aria-pressed={muted}
@@ -123,12 +156,41 @@ export const ContextPanel: React.FC<{
                 <Star size={16} className={c.isStarred ? 'fill-amber-400 text-amber-400' : ''} />
                 {c.isStarred ? 'Unstar' : 'Star'}
               </button>
-              <button
-                className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-secondary-dark dark:hover:bg-card-dark/50"
-              >
-                <LogOut size={16} /> {c.type === 'dm' ? 'Block' : 'Leave'}
-              </button>
+              {c.type !== 'dm' && (
+                <button
+                  onClick={() => setLeaving(true)}
+                  className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-secondary-dark dark:hover:bg-card-dark/50"
+                >
+                  <LogOut size={16} /> Leave
+                </button>
+              )}
             </div>
+
+            {leaving && (
+              <div className="rounded-xl border border-red-300 bg-red-50 p-2.5 dark:border-red-500/40 dark:bg-red-500/10">
+                <p className="mb-2 text-xs text-red-900 dark:text-red-200">
+                  {c.myRole === 'owner'
+                    ? `You own this ${kind}. Make someone else the owner before you leave.`
+                    : `Leave this ${kind}? You will stop receiving its messages.`}
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => setLeaving(false)}
+                    className="rounded-lg px-2 py-1 text-xs text-text-secondary-light dark:text-text-secondary-dark"
+                  >
+                    Cancel
+                  </button>
+                  {c.myRole !== 'owner' && (
+                    <button
+                      onClick={() => void leave()}
+                      className="rounded-lg bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700"
+                    >
+                      Leave
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Three levels rather than a mute toggle. "Mentions only" is the
                 setting that keeps people in a busy class channel instead of
@@ -163,9 +225,23 @@ export const ContextPanel: React.FC<{
           </div>
         )}
 
-        {tab === 'members' && (members.length === 0 ? (
-          <EmptyState icon={<Users size={22} />} title="Loading members" hint="One moment." />
-        ) : (
+        {tab === 'members' && (
+          <>
+            {/* The Members tab is where people look for this, not the gear. */}
+            {canManageMembers && onOpenSettings && (
+              <button
+                onClick={onOpenSettings}
+                className="mb-2 flex w-full items-center gap-2.5 rounded-xl border border-dashed border-border-light px-2 py-2 text-left text-sm font-medium text-blue-600 transition-colors hover:border-blue-400 hover:bg-blue-50/50 dark:border-border-dark/50 dark:text-blue-400 dark:hover:bg-blue-900/20"
+              >
+                <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full bg-blue-50 dark:bg-blue-900/30">
+                  <UserPlus size={16} />
+                </span>
+                Add people
+              </button>
+            )}
+            {members.length === 0 ? (
+              <EmptyState icon={<Users size={22} />} title="Loading members" hint="One moment." />
+            ) : (
           <ul className="space-y-0.5">
             {members.map((m) => (
               <li key={m.userId}>
@@ -188,7 +264,9 @@ export const ContextPanel: React.FC<{
               </li>
             ))}
           </ul>
-        ))}
+            )}
+          </>
+        )}
 
         {tab === 'files' && (
           <div>

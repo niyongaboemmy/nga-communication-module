@@ -25,7 +25,8 @@ import { getPool } from '@tupo/db';
  * request.
  */
 
-export type AccessReason = 'owner' | 'conversation' | 'mail' | 'feed' | 'denied' | 'missing';
+export type AccessReason =
+  | 'owner' | 'conversation' | 'conversation_avatar' | 'mail' | 'feed' | 'denied' | 'missing';
 
 export interface AccessDecision {
   allowed: boolean;
@@ -75,6 +76,33 @@ export async function canReadFile(userId: string, fileId: string): Promise<Acces
     return {
       allowed: true, reason: 'conversation',
       viaConversationId: viaConversation[0].conversation_id,
+    };
+  }
+
+  /*
+   * A group/channel logo (0019_conversation_avatar.sql). It is not attached to
+   * any message, so the grant above never sees it — without this branch every
+   * member except whoever uploaded it gets a 403 and a broken picture.
+   *
+   * Same rule as the attachment grant, deliberately: membership is the check,
+   * and `left_at IS NULL` means leaving the channel takes its logo with it.
+   */
+  const { rows: viaAvatar } = await getPool().query<{ conversation_id: string }>(
+    `SELECT c.id AS conversation_id
+       FROM conversations c
+       JOIN conversation_members cm
+         ON cm.conversation_id = c.id
+        AND cm.user_id = $2
+        AND cm.left_at IS NULL
+      WHERE c.avatar_file_id = $1 AND c.deleted_at IS NULL
+      LIMIT 1`,
+    [fileId, userId],
+  );
+
+  if (viaAvatar[0]) {
+    return {
+      allowed: true, reason: 'conversation_avatar',
+      viaConversationId: viaAvatar[0].conversation_id,
     };
   }
 

@@ -251,7 +251,12 @@ const ChatWorkspace: React.FC = () => {
       )}
       {panel === 'details' && active && (
         <SidePanel width="narrow" onDismiss={closePanel}>
-          <ContextPanel conversation={active} members={members} onClose={closePanel} />
+          <ContextPanel
+            conversation={active}
+            members={members}
+            onClose={closePanel}
+            onOpenSettings={() => setPanel('channel')}
+          />
         </SidePanel>
       )}
       {panel === 'saved' && (

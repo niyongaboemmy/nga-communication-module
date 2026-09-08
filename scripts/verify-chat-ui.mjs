@@ -789,11 +789,29 @@ try {
   check('and list the members',
     await visible(chanSettings.getByText(/Members ·/), 6000));
 
-  await chanSettings.getByLabel('Channel topic').fill('Timetables and rooms');
-  await chanSettings.getByLabel('Channel topic').blur();
+  // The topic field carries a visible <label> now, not an aria-label.
+  await chanSettings.getByLabel('Topic', { exact: true }).fill('Timetables and rooms');
+  await chanSettings.getByLabel('Topic', { exact: true }).blur();
   check('the topic saves and is announced',
     await visible(A.page.getByRole('log', { name: 'Messages' })
       .getByText(/set the topic/).first(), 8000));
+
+  // The rest of the identity block, which used to be topic-only. The name is
+  // only asserted, never changed — the rest of this script still refers to the
+  // channel by it.
+  check('the name is editable from settings',
+    (await chanSettings.getByLabel('Name', { exact: true }).inputValue()) === chanName);
+
+  await chanSettings.getByLabel('Description', { exact: true }).fill('Who belongs here.');
+  await chanSettings.getByLabel('Description', { exact: true }).blur();
+  await A.page.waitForTimeout(1000);
+  check('a description can be set',
+    (await chanSettings.getByLabel('Description', { exact: true }).inputValue()) === 'Who belongs here.');
+
+  check('a logo can be uploaded from settings',
+    await visible(chanSettings.getByRole('button', { name: 'Upload a logo' }), 4000));
+  check('people can be added without an invite link',
+    await visible(chanSettings.getByRole('button', { name: /Add people/ }), 4000));
 
   // Promote Bob, then remove him — both from the owner's side.
   const bobMemberRow = chanSettings.locator('li', { hasText: 'Bosco Rugema' }).first();

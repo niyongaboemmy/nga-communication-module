@@ -34,6 +34,10 @@ export interface ConversationSummary {
   iconEmoji: string | null;
   avatarColor: string | null;
   avatarUrl: string | null;
+  /** An uploaded group/channel logo. Resolved to a URL by the client through
+   *  the files service, the same way a message attachment is — unlike a DM's
+   *  `avatarUrl`, which is a plain URL on the peer's user row. */
+  avatarFileId: string | null;
   memberCount: number;
   lastSeq: number;
 

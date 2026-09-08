@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { IconButton, Spinner } from '../../components/ui';
 import { formatBytes } from './data';
-import { inlineUrl, downloadFile } from './uploads';
+import { downloadFile, useMediaUrl } from './uploads';
 import type { Attachment } from './types';
 
 /**
@@ -31,22 +31,6 @@ import type { Attachment } from './types';
  * otherwise mint three hundred tickets on mount, for pictures nobody has
  * scrolled to.
  */
-function useMediaUrl(fileId: string, enabled: boolean): { url: string | null; failed: boolean } {
-  const [url, setUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    inlineUrl(fileId)
-      .then((u) => { if (!cancelled) setUrl(u); })
-      .catch(() => { if (!cancelled) setFailed(true); });
-    return () => { cancelled = true; };
-  }, [fileId, enabled]);
-
-  return { url, failed };
-}
-
 /** Renders its children only once they have been scrolled near. */
 const WhenVisible: React.FC<{
   children: (visible: boolean) => React.ReactNode;

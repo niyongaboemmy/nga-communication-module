@@ -12,6 +12,7 @@ import {
   dayLabel, startsNewGroup, timeOf, formatBytes, firstUnreadId, typingLabel, emojiOnly,
 } from './data';
 import { useChat } from './ChatProvider';
+import { ConversationAvatar } from './ConversationAvatar';
 import { toPresence } from './types';
 import type { Conversation, Message } from './types';
 import { RichText } from './RichText';
@@ -83,13 +84,11 @@ const ThreadHeader: React.FC<{
         onClick={onToggleContext}
         className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-1.5 py-1 text-left transition-colors duration-150 hover:bg-surface-light dark:hover:bg-surface-dark"
       >
-        {c.type === 'dm' ? (
-          <Avatar name={c.name} src={c.avatarUrl ?? undefined} size={34} presence={toPresence(c.peer?.presence)} />
-        ) : (
-          <span className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 dark:bg-card-dark/60 dark:text-slate-300">
-            {c.iconEmoji ? <span className="text-base leading-none">{c.iconEmoji}</span> : Icon && <Icon size={17} />}
-          </span>
-        )}
+        <ConversationAvatar
+          conversation={c}
+          size={34}
+          fallback={Icon ? <Icon size={17} /> : null}
+        />
         <span className="min-w-0">
           <span className="flex items-center gap-1.5">
             <span className="block truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
