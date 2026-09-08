@@ -10,8 +10,10 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
 import {
   dayLabel, startsNewGroup, timeOf, formatBytes, firstUnreadId, typingLabel, emojiOnly,
+  lastSeenLabel,
 } from './data';
 import { useChat } from './ChatProvider';
+import * as chatApi from './api';
 import { ConversationAvatar } from './ConversationAvatar';
 import { toPresence } from './types';
 import type { Conversation, Message } from './types';
@@ -26,7 +28,7 @@ import { LinkPreviewCard } from './LinkPreviewCard';
 import { TranslateControl } from './TranslateButton';
 import { useVirtualWindow } from './useVirtualWindow';
 import type { MeetMessageMetadata } from './MeetCard';
-import { QUICK_REACTIONS, EDIT_WINDOW_MS } from '@tupo/shared';
+import { QUICK_REACTIONS, EDIT_WINDOW_MS, PRESENCE_REFRESH_MS } from '@tupo/shared';
 
 /**
  * The message pane: header, scrollback, composer slot.
@@ -64,13 +66,55 @@ const ThreadHeader: React.FC<{
   onOpenChannelSettings: () => void;
 }> = ({ conversation: c, onBack, onToggleContext, contextOpen, onOpenSearch, onOpenChannelSettings }) => {
   const { can } = usePermissions();
-  const { typing } = useChat();
+  const { typing, conversationPresence } = useChat();
   const Icon = c.type === 'dm' ? null : KIND_ICON[c.type];
 
   // The typing line replaces the subtitle rather than pushing it aside: two
   // lines of status in a 56px header is one line too many, and "typing" is
   // always the more urgent of the two.
-  const typingText = typingLabel(typing.map((t) => t.name.split(' ')[0]!));
+  const typingText = typingLabel(
+    typing.map((t) => t.name.split(' ')[0]!),
+    // Whatever the first of them is doing. Mixing verbs across people would
+    // need a sentence, and this is a 56px header.
+    typing[0]?.kind,
+  );
+
+  /*
+   * "3 of 12 online" for a group or channel.
+   *
+   * Pulled, not pushed. Presence is fanned out to DM counterparts only — on
+   * purpose, so a 400-member channel does not get a packet every time somebody
+   * switches tab — so the count is fetched with the roster and refreshed on a
+   * slow timer while this conversation is open. One request a minute for a
+   * header line is a fair trade; a broadcast per member per tab switch is not.
+   */
+  const [polledOnline, setPolledOnline] = useState<number | null>(null);
+  useEffect(() => {
+    if (c.type === 'dm') { setPolledOnline(null); return; }
+    let cancelled = false;
+    const load = () => {
+      chatApi.listMemberRoster(c.id)
+        .then((r) => { if (!cancelled) setPolledOnline(r.onlineCount); })
+        .catch(() => { if (!cancelled) setPolledOnline(null); });
+    };
+    load();
+    const t = setInterval(load, PRESENCE_REFRESH_MS);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [c.id, c.type]);
+
+  /*
+   * The pushed figure wins whenever there is one.
+   *
+   * `conversation:presence` arrives the instant somebody opens or closes this
+   * conversation, which is the change people actually notice. It does not fire
+   * for a status flick elsewhere, so the poll above stays as the slow backstop
+   * — but while both have an answer, the pushed one is the fresher.
+   */
+  const pushedOnline = conversationPresence[c.id]?.online.length;
+  const onlineCount = pushedOnline ?? polledOnline;
+
+  // A grey dot with no explanation is worse than one with a date on it.
+  const peerLastSeen = lastSeenLabel(c.peer?.lastSeenAt);
 
   return (
     <header className="relative z-20 flex h-14 min-w-0 shrink-0 items-center gap-2 border-b border-border-light bg-white/90 px-2 backdrop-blur-md sm:px-4 dark:border-border-dark/30 dark:bg-chrome-dark/80">
@@ -105,8 +149,10 @@ const ThreadHeader: React.FC<{
             aria-live="polite"
           >
             {typingText || (c.type === 'dm'
-              ? (toPresence(c.peer?.presence) === 'online' ? 'Online' : (c.peer?.role ?? 'Offline'))
-              : `${c.memberCount} members${c.topic ? ` · ${c.topic}` : ''}`)}
+              ? (toPresence(c.peer?.presence) === 'online'
+                  ? 'Online'
+                  : (peerLastSeen ?? c.peer?.role ?? 'Offline'))
+              : `${onlineCount !== null ? `${onlineCount} of ${c.memberCount} online` : `${c.memberCount} members`}${c.topic ? ` · ${c.topic}` : ''}`)}
           </span>
         </span>
       </button>

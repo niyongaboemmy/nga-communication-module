@@ -1,3 +1,4 @@
+import type { ActivityKind } from '@tupo/shared';
 import React, { useMemo, useState } from 'react';
 import {
   Search, Plus, Hash, Megaphone, Star, ChevronRight, BellOff, Users, Filter, Lock, AtSign,
@@ -31,9 +32,10 @@ const Row: React.FC<{
   conversation: Conversation;
   active: boolean;
   typing: string[];
+  typingKind?: ActivityKind;
   onSelect: (id: string) => void;
   onToggleStar: (id: string) => void;
-}> = ({ conversation: c, active, typing, onSelect, onToggleStar }) => {
+}> = ({ conversation: c, active, typing, typingKind, onSelect, onToggleStar }) => {
   const { user } = useAuth();
   const unread = c.unread > 0;
   const muted = c.notification === 'none' || Boolean(c.mutedUntil);
@@ -92,7 +94,7 @@ const Row: React.FC<{
               {/* Typing wins over the preview and over a draft: it is the only
                   one of the three that is happening right now. */}
               {typing.length > 0
-                ? <span className="text-blue-600 dark:text-blue-400">{typingLabel(typing)}…</span>
+                ? <span className="text-blue-600 dark:text-blue-400">{typingLabel(typing, typingKind)}…</span>
                 : c.draft
                 ? <span className="text-amber-600 dark:text-amber-400">Draft: {c.draft}</span>
                 : c.lastMessage
@@ -294,6 +296,7 @@ export const ConversationList: React.FC<{
                   conversation={c}
                   active={c.id === activeId}
                   typing={(typingByConversation[c.id] ?? []).map((t) => t.name.split(' ')[0]!)}
+                  typingKind={typingByConversation[c.id]?.[0]?.kind}
                   onSelect={setActiveId}
                   onToggleStar={toggleStar}
                 />

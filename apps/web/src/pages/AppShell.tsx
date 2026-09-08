@@ -11,6 +11,9 @@ import { AppsSwitcher } from '../components/shell/AppsSwitcher';
 import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
 import { GlobalSearch } from '../components/GlobalSearch';
+import { usePresenceReporter } from '../hooks/usePresenceReporter';
+import { toPresence } from './chat/types';
+import type { Presence } from './chat/types';
 
 /**
  * The Tupo application frame.
@@ -197,7 +200,7 @@ const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modu
  * Top bar
  * ------------------------------------------------------------------ */
 
-const UserMenu: React.FC = () => {
+const UserMenu: React.FC<{ presence: Presence }> = ({ presence }) => {
   const { user, signOut } = useAuth();
   const { roleName } = usePermissions();
   const [open, setOpen] = useState(false);
@@ -227,7 +230,7 @@ const UserMenu: React.FC = () => {
         aria-expanded={open}
         className="flex items-center gap-2 rounded-xl p-1 transition-colors duration-150 hover:bg-surface-light dark:hover:bg-surface-dark"
       >
-        <Avatar name={user.name} src={user.avatarUrl} size={32} presence="online" />
+        <Avatar name={user.name} src={user.avatarUrl} size={32} presence={presence} />
         {/* The name is dropped below `lg` — on a phone the avatar alone is the
             affordance, and the width belongs to the conversation. */}
         <span className="hidden max-w-[10rem] flex-col items-start leading-tight lg:flex">
@@ -272,7 +275,7 @@ const UserMenu: React.FC = () => {
   );
 };
 
-const TopBar: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch }) => {
+const TopBar: React.FC<{ onOpenSearch: () => void; myPresence: Presence }> = ({ onOpenSearch, myPresence }) => {
   const { theme, toggleTheme } = useAuth();
 
   return (
@@ -325,7 +328,7 @@ const TopBar: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch }) => {
         </IconButton>
 
         <div className="mx-1 hidden h-6 w-px bg-border-light sm:block dark:bg-card-dark/60" />
-        <UserMenu />
+        <UserMenu presence={myPresence} />
       </div>
     </header>
   );
@@ -339,6 +342,9 @@ export const AppShell: React.FC = () => {
   const { can } = usePermissions();
   const connection = useConnectionStatus();
   const [searchOpen, setSearchOpen] = useState(false);
+  // Reports idle/away for this tab, and gives the own-avatar dot something
+  // truthful to show instead of a hardcoded green.
+  const myPresence = usePresenceReporter();
 
   /*
    * ⌘K anywhere in the shell.
@@ -364,7 +370,7 @@ export const AppShell: React.FC = () => {
 
   return (
     <div className="h-app flex flex-col overflow-hidden bg-background-light text-text-primary-light dark:bg-background-dark dark:text-text-primary-dark">
-      <TopBar onOpenSearch={() => setSearchOpen(true)} />
+      <TopBar onOpenSearch={() => setSearchOpen(true)} myPresence={toPresence(myPresence)} />
       <ConnectionBanner status={connection} />
       {searchOpen && <GlobalSearch onClose={() => setSearchOpen(false)} />}
 

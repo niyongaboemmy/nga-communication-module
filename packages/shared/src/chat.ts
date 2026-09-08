@@ -55,7 +55,7 @@ export interface ConversationSummary {
    *  `presence` is filled in from Redis by the route, not the database. */
   peer: {
     id: string; name: string; avatarUrl: string | null;
-    role: string | null; presence?: string;
+    role: string | null; presence?: string; lastSeenAt?: string | null;
   } | null;
 
   lastMessage: {
@@ -179,13 +179,32 @@ export interface WireMember {
   role: MemberRole;
   platformRole: string | null;
   presence: string;
+  /** ISO timestamp of their last connection; omitted when they hide presence. */
+  lastSeenAt?: string | null;
   joinedAt: string;
   lastReadSeq: number;
 }
 
+/**
+ * What somebody is doing that is worth showing before it arrives.
+ *
+ * Typing is the familiar one, but a voice note being recorded and a large file
+ * going up are the same promise to the room — something is coming, wait a
+ * moment — and they share the typing transport because they share every
+ * property that matters: short-lived, per conversation, worthless if stale.
+ */
+export type ActivityKind = 'typing' | 'recording' | 'uploading';
+
 export interface TypingUser {
   userId: string;
   name: string;
+  /**
+   * Optional because a hash written by an older gateway mid-deploy holds a bare
+   * name; such an entry degrades to a face-less indicator rather than blanking
+   * the row for everyone in the room.
+   */
+  avatarUrl?: string | null;
+  kind?: ActivityKind;
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *

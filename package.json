@@ -34,6 +34,7 @@
     "verify:chat": "node scripts/verify-chat-core.mjs",
     "verify:chat:ui": "node scripts/verify-chat-ui.mjs",
     "verify:chat:live": "node scripts/verify-chat-live.mjs",
+    "verify:presence": "node scripts/verify-presence.mjs",
     "verify:chat:threads": "node scripts/verify-chat-threads.mjs",
     "verify:chat:files": "node scripts/verify-chat-files.mjs",
     "verify:chat:notifications": "node scripts/verify-chat-notifications.mjs",

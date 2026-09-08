@@ -1,4 +1,4 @@
-import type { ConversationSummary, WireMessage } from '@tupo/shared';
+import type { ActivityKind, ConversationSummary, WireMessage } from '@tupo/shared';
 
 /**
  * Presentation helpers for the chat log.
@@ -80,12 +80,45 @@ export function firstUnreadId(
   return first?.id ?? null;
 }
 
+/**
+ * "Last seen 5m ago" — the line under a name when the dot is grey.
+ *
+ * Coarser than shortStamp on purpose. Presence is refreshed on a 45-second
+ * heartbeat and expires after 90, so anything finer than "a moment ago" would
+ * be claiming a precision the data does not have. Absent (the person hides
+ * their presence, or has never connected) returns null and the caller shows
+ * nothing rather than "last seen never".
+ */
+export function lastSeenLabel(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const at = new Date(iso).getTime();
+  if (Number.isNaN(at)) return null;
+  const mins = Math.round((Date.now() - at) / 60_000);
+  if (mins < 2) return 'Last seen a moment ago';
+  if (mins < 60) return `Last seen ${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `Last seen ${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return 'Last seen yesterday';
+  if (days < 7) return `Last seen ${days} days ago`;
+  return `Last seen ${new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
+}
+
 /** "Aline is typing" · "Aline and Jean-Paul are typing" · "3 people are typing". */
-export function typingLabel(names: string[]): string {
+export function typingLabel(names: string[], kind: ActivityKind = 'typing'): string {
   if (names.length === 0) return '';
-  if (names.length === 1) return `${names[0]} is typing`;
-  if (names.length === 2) return `${names[0]} and ${names[1]} are typing`;
-  return `${names.length} people are typing`;
+  /*
+   * The verb, not just the subject. A file going up and a voice note being
+   * recorded travel on the typing channel because they are the same promise —
+   * something is coming — but "is typing" for a 40MB upload is a small lie, and
+   * the wait it explains is much longer.
+   */
+  const verb = kind === 'uploading' ? 'uploading'
+    : kind === 'recording' ? 'recording audio'
+    : 'typing';
+  if (names.length === 1) return `${names[0]} is ${verb}`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} are ${verb}`;
+  return `${names.length} people are ${verb}`;
 }
 
 /** How the sidebar groups conversations (FR-CHN-10). */

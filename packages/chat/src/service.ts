@@ -177,6 +177,11 @@ function toConversation(r: ConversationRow): ConversationSummary {
     mutedUntil: r.muted_until,
     draft: r.draft,
     peer: isDm && r.peer_id
+      // No lastSeenAt here, for the same reason there is no presence: both are
+      // withheld from anyone who turned "show when I am online" off, and that
+      // filter lives in the route. Selecting the column here would hand every
+      // caller an unfiltered copy — including the socket payload — and the one
+      // that forgets to overwrite it is the leak.
       ? { id: r.peer_id, name: r.peer_name ?? '', avatarUrl: r.peer_avatar, role: r.peer_role }
       : null,
     lastMessage: r.last_message_at
@@ -1084,9 +1089,10 @@ export async function listMembers(conversationId: string): Promise<WireMember[]>
   const { rows } = await getPool().query<{
     user_id: string; name: string; avatar_url: string | null; role: MemberRole;
     platform_role: string | null; joined_at: string; last_read_seq: string;
+    last_seen_at: Date | null;
   }>(
     `SELECT m.user_id, u.name, u.avatar_url, m.role, u.role AS platform_role,
-            m.joined_at, m.last_read_seq
+            m.joined_at, m.last_read_seq, u.last_seen_at
        FROM conversation_members m
        JOIN users u ON u.id = m.user_id
       WHERE m.conversation_id = $1 AND m.left_at IS NULL
@@ -1103,6 +1109,10 @@ export async function listMembers(conversationId: string): Promise<WireMember[]>
     platformRole: r.platform_role,
     // Filled in from Redis by the route — presence is not a database fact.
     presence: 'offline',
+    // Last seen *is* one, and it is only ever read for the people the line
+    // above just called offline, so it comes back with the roster rather than
+    // costing a second lookup.
+    lastSeenAt: r.last_seen_at ? r.last_seen_at.toISOString() : null,
     joinedAt: r.joined_at,
     lastReadSeq: Number(r.last_read_seq),
   }));
@@ -2044,6 +2054,19 @@ export async function setPrefs(
      minute(next.quietFromMinute), minute(next.quietToMinute),
      next.timezone ?? null, next.showPresence],
   );
+
+  /*
+   * Switching presence off has to erase the trail, not just stop adding to it.
+   *
+   * The gateway stops writing last-seen the moment this is false, but the value
+   * already on the row would sit there being read — so someone who turned the
+   * setting off to stop being tracked would still be publishing "last seen
+   * Tuesday" indefinitely. A privacy switch that only applies going forward is
+   * not the switch people think they flicked.
+   */
+  if (patch.showPresence === false) {
+    await getPool().query('UPDATE users SET last_seen_at = NULL WHERE id = $1', [userId]);
+  }
 
   return getPrefs(userId);
 }
@@ -3076,6 +3099,8 @@ export interface UserProfile {
   statusExpiresAt: string | null;
   /** Filled in from Redis by the route. */
   presence: string;
+  /** Null when they have never connected, or keep their presence private. */
+  lastSeenAt: string | null;
   /** The DM with this person, if one already exists. */
   directConversationId: string | null;
 }
@@ -3085,9 +3110,10 @@ export async function getProfile(viewerId: string, userId: string): Promise<User
     id: string; name: string; avatar_url: string | null; role: string;
     title: string | null; pronouns: string | null; timezone: string | null;
     status_emoji: string | null; status_text: string | null; status_expires_at: string | null;
+    last_seen_at: Date | null;
   }>(
     `SELECT id, name, avatar_url, role, title, pronouns, timezone,
-            status_emoji, status_text, status_expires_at
+            status_emoji, status_text, status_expires_at, last_seen_at
        FROM users WHERE id = $1 AND status = 'active'`,
     [userId],
   );
@@ -3111,6 +3137,7 @@ export async function getProfile(viewerId: string, userId: string): Promise<User
     statusText: expired ? null : u.status_text,
     statusExpiresAt: expired ? null : u.status_expires_at,
     presence: 'offline',
+    lastSeenAt: u.last_seen_at ? u.last_seen_at.toISOString() : null,
     directConversationId: await findDirect(viewerId, userId),
   };
 }

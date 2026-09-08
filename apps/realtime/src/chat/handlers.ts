@@ -7,8 +7,9 @@ import {
   TYPING_TTL_SECONDS, conversationRoom, typingKey, userRoom,
 } from '@tupo/shared';
 import type {
-  ClientToServerEvents, ServerToClientEvents, SessionClaims, TypingUser,
+  ActivityKind, ClientToServerEvents, ServerToClientEvents, SessionClaims, TypingUser,
 } from '@tupo/shared';
+import { emitConversationPresence } from '../presence.js';
 
 /**
  * Chat over the socket.
@@ -65,6 +66,11 @@ export function registerChatHandlers(
     }
 
     ack?.({ ok: denied.length === 0, subscribed: granted, denied });
+
+    // Opening a conversation changes who is in the room, so everyone already
+    // there needs the new roster — and the arriving socket needs its first
+    // copy. One broadcast serves both.
+    for (const id of granted) void emitConversationPresence(io, redis, id);
   });
 
   socket.on('conversation:unsubscribe', async ({ conversationIds }) => {
@@ -72,7 +78,24 @@ export function registerChatHandlers(
       await socket.leave(conversationRoom(id));
       subscribed.delete(id);
       await clearTyping(id);
+      // Left *after* the leave, so the roster it computes no longer counts
+      // this socket. Computing it first would tell everybody the person who
+      // just closed the conversation is still watching.
+      void emitConversationPresence(io, redis, id);
     }
+  });
+
+  /**
+   * A late-opening panel asking for the roster it missed.
+   *
+   * The member list is not mounted when the conversation is subscribed — it
+   * appears when someone opens Details, which may be an hour later. Without
+   * this it would start grey and stay grey until somebody happened to connect.
+   */
+  socket.on('conversation:presence:query', async ({ conversationId }, ack) => {
+    if (!subscribed.has(conversationId)) { ack?.({ online: [], viewing: [] }); return; }
+    await emitConversationPresence(io, redis, conversationId);
+    ack?.({ online: [], viewing: [] });
   });
 
   /* ── Send ─────────────────────────────────────────────────────────────── */
@@ -224,17 +247,42 @@ export function registerChatHandlers(
     if (!redis) return;
     try {
       const raw = await redis.hgetall(typingKey(conversationId));
-      const users: TypingUser[] = Object.entries(raw)
-        .map(([userId, name]) => ({ userId, name }));
+      const users: TypingUser[] = Object.entries(raw).map(([userId, value]) => {
+        // The field used to be a bare name. A hash written by an older gateway
+        // during a rolling deploy is still readable — it degrades to a name
+        // with no face and the default activity, rather than throwing and
+        // blanking the indicator for everyone in the room.
+        try {
+          const parsed = JSON.parse(value) as
+            { name?: string; avatarUrl?: string | null; kind?: ActivityKind };
+          return {
+            userId,
+            name: parsed.name ?? 'Someone',
+            avatarUrl: parsed.avatarUrl ?? null,
+            kind: parsed.kind ?? 'typing',
+          };
+        } catch {
+          return { userId, name: value, avatarUrl: null, kind: 'typing' as ActivityKind };
+        }
+      });
       io.to(conversationRoom(conversationId)).emit('typing:update', { conversationId, users });
     } catch { /* ignore */ }
   };
 
-  socket.on('typing:start', async ({ conversationId }) => {
+  const ACTIVITY_KINDS = new Set<ActivityKind>(['typing', 'recording', 'uploading']);
+
+  socket.on('typing:start', async ({ conversationId, kind }) => {
     if (!subscribed.has(conversationId) || !redis) return;
     try {
       const key = typingKey(conversationId);
-      await redis.hset(key, user.id, user.name ?? 'Someone');
+      await redis.hset(key, user.id, JSON.stringify({
+        name: user.name ?? 'Someone',
+        // Straight from the verified session claims, never from the client:
+        // this is rendered as somebody's face beside their name, so letting the
+        // socket supply it would let anyone wear anyone else's.
+        avatarUrl: user.avatarUrl ?? null,
+        kind: ACTIVITY_KINDS.has(kind as ActivityKind) ? kind : 'typing',
+      }));
       // Refreshed on every keystroke burst, so the key outlives a pause in
       // typing but not a closed tab.
       await redis.expire(key, TYPING_TTL_SECONDS);
@@ -284,8 +332,14 @@ export function registerChatHandlers(
   });
 
   socket.on('disconnect', () => {
-    // A closed tab must not leave typing state behind in any conversation.
-    for (const id of subscribed) void clearTyping(id);
+    for (const id of subscribed) {
+      // A closed tab must not leave typing state behind in any conversation…
+      void clearTyping(id);
+      // …nor keep counting towards "3 people are here". Socket.IO has already
+      // removed this socket from its rooms by the time `disconnect` fires, so
+      // the roster this computes is the correct post-departure one.
+      void emitConversationPresence(io, redis, id);
+    }
   });
 }
 
@@ -304,31 +358,6 @@ export async function fanOutMessage(
     conversationId, message: result.message,
   });
   await pushUnread(io, conversationId, result.message.senderId);
-}
-
-/**
- * Tell the people who display this person's presence that it changed.
- *
- * Addressed to the `user:` room of each DM counterpart rather than broadcast:
- * presence is rendered against DM rows and nowhere else, so a wider fan-out
- * would be a packet per channel member per tab switch, delivered to a UI with
- * nowhere to put it.
- */
-export async function broadcastPresence(
-  io: ChatServer, userId: string, status: string,
-): Promise<void> {
-  try {
-    const peers = await chat.dmPeerIdsOf(userId);
-    if (!peers.length) return;
-    const at = new Date().toISOString();
-    for (const peerId of peers) {
-      io.to(userRoom(peerId)).emit('presence:update', {
-        userId, status: status as never, at,
-      });
-    }
-  } catch {
-    // Presence is decoration. It must never take a connection down with it.
-  }
 }
 
 /**

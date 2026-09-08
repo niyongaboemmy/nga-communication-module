@@ -1,7 +1,7 @@
 import React, {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from 'react';
-import type {
+import type { ActivityKind,
   ConversationSummary, MessageType, NotificationLevel, TypingUser, WireMessage,
 } from '@tupo/shared';
 import { TYPING_THROTTLE_MS, EDIT_WINDOW_MS } from '@tupo/shared';
@@ -49,6 +49,15 @@ interface ChatValue {
   typingByConversation: Record<string, TypingUser[]>;
   connected: boolean;
 
+  /**
+   * Who is online in, and who is actively looking at, each open conversation.
+   *
+   * Pushed by the gateway whenever the room's membership changes — someone
+   * opens the conversation, closes it, or disconnects. Only conversations this
+   * client has subscribed to ever appear here.
+   */
+  conversationPresence: Record<string, { online: string[]; viewing: string[] }>;
+
   send: (input: {
     body: string; replyToId?: string | null; threadRootId?: string | null;
     attachments?: string[]; type?: MessageType;
@@ -80,7 +89,8 @@ interface ChatValue {
   remove: (messageId: string) => Promise<void>;
   /** Messages still waiting for a connection (FR-MSG-24). */
   queued: number;
-  notifyTyping: () => void;
+  /** `kind` widens the indicator past typing — see ActivityKind. */
+  notifyTyping: (kind?: ActivityKind) => void;
   markReadTo: (seq: number) => void;
   markEverythingRead: () => Promise<void>;
   /** The newest message of mine that can still be edited — what ↑ targets. */
@@ -143,6 +153,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loadingMore, setLoadingMore] = useState(false);
 
   const [typingByConv, setTypingByConv] = useState<Record<string, TypingUser[]>>({});
+  const [convPresence, setConvPresence] = useState<
+    Record<string, { online: string[]; viewing: string[] }>
+  >({});
   const [connected, setConnected] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [queued, setQueued] = useState(0);
@@ -369,6 +382,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         : c)));
     };
 
+    const onConvPresence = (p: {
+      conversationId: string; online: string[]; viewing: string[];
+    }) => {
+      setConvPresence((prev) => ({
+        ...prev, [p.conversationId]: { online: p.online, viewing: p.viewing },
+      }));
+    };
+
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('message:new', onNew);
@@ -381,6 +402,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     socket.on('conversation:prefs', onPrefs);
     socket.on('conversation:draft', onDraft);
     socket.on('presence:update', onPresence);
+    socket.on('conversation:presence', onConvPresence);
     if (socket.connected) onConnect();
 
     return () => {
@@ -396,6 +418,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       socket.off('conversation:prefs', onPrefs);
       socket.off('conversation:draft', onDraft);
       socket.off('presence:update', onPresence);
+      socket.off('conversation:presence', onConvPresence);
     };
   }, [user, refresh]);
 
@@ -791,7 +814,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * Typing, reading, drafts
    * ────────────────────────────────────────────────────────────────────── */
 
-  const notifyTyping = useCallback(() => {
+  const notifyTyping = useCallback((kind: ActivityKind = 'typing') => {
     const id = activeIdRef.current;
     const socket = getSocket();
     if (!id || !socket?.connected) return;
@@ -800,7 +823,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const now = Date.now();
     if (now - lastTypingSentAt.current < TYPING_THROTTLE_MS) return;
     lastTypingSentAt.current = now;
-    socket.emit('typing:start', { conversationId: id });
+    socket.emit('typing:start', { conversationId: id, kind });
   }, []);
 
   const markReadTo = useCallback((seq: number) => {
@@ -846,6 +869,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     messages, messagesLoading, hasMore, loadingMore, loadOlder,
     typing: (activeId && typingByConv[activeId]) || [],
     typingByConversation: typingByConv,
+    conversationPresence: convPresence,
     connected,
     send, retry, react, edit, remove, notifyTyping, markReadTo, queued,
     markEverythingRead, lastEditableOwnMessage, editingId, setEditingId,

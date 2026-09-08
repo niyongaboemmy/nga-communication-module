@@ -4,6 +4,7 @@ import { getPool } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import type { NotificationLevel } from '@tupo/shared';
 import { NOTIFICATION_LEVELS, CONVERSATION_TYPES, MEMBER_ROLES } from '@tupo/shared';
+import { lastSeenKey, presenceKey } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
 import { config } from '../config.js';
@@ -71,10 +72,75 @@ async function presenceFor(userIds: string[]): Promise<Record<string, string>> {
   const client = presence();
   if (!client) return out;
   try {
-    const values = await client.mget(userIds.map((id) => `presence:${id}`));
+    const values = await client.mget(userIds.map(presenceKey));
     userIds.forEach((id, i) => { out[id] = values[i] ?? 'offline'; });
+    // "Show when I am online" is a real setting now. Someone who turned it off
+    // reads as offline to everyone else — the same shape as the read-receipts
+    // preference, which was the only one of these ever enforced.
+    const visible = await chat.presenceVisibleFor(userIds);
+    for (const id of userIds) if (!visible.has(id)) out[id] = 'offline';
   } catch { /* everyone reads as offline */ }
   return out;
+}
+
+/**
+ * When each of these people was last connected.
+ *
+ * Only asked for alongside presence, and only useful for the ones who are not
+ * online right now. Hidden for anyone who has turned presence off: "last seen
+ * 3 minutes ago" discloses exactly what that setting is meant to withhold.
+ *
+ * Redis answers first — the gateway writes `lastseen:` on every disconnect, so
+ * for anyone who has used the app since the last restart it is already there
+ * and the database is never touched. Postgres backs the misses, which is the
+ * durable copy and the only source after a Redis flush.
+ */
+async function lastSeenFor(userIds: string[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  if (!userIds.length) return out;
+  try {
+    const visible = await chat.presenceVisibleFor(userIds);
+    const wanted = userIds.filter((id) => visible.has(id));
+    if (!wanted.length) return out;
+
+    const client = presence();
+    let missing = wanted;
+    if (client) {
+      try {
+        const cached = await client.mget(wanted.map(lastSeenKey));
+        missing = [];
+        wanted.forEach((id, i) => {
+          const v = cached[i];
+          if (v) out[id] = v; else missing.push(id);
+        });
+      } catch { /* fall through to the database for all of them */ }
+    }
+
+    if (missing.length) {
+      const { rows } = await getPool().query<{ id: string; last_seen_at: Date | null }>(
+        'SELECT id, last_seen_at FROM users WHERE id = ANY($1::text[])', [missing]);
+      for (const r of rows) {
+        if (r.last_seen_at) out[r.id] = new Date(r.last_seen_at).toISOString();
+      }
+    }
+  } catch { /* no last-seen is a missing line, not an error */ }
+  return out;
+}
+
+/**
+ * Attach presence and last-seen to a person-shaped object.
+ *
+ * Both maps are built once per request for the whole batch, so this is a plain
+ * lookup — the point is that every endpoint returning a person decorates it the
+ * same way. `lastSeenAt` is null rather than absent when unknown, so a client
+ * can tell "offline, never seen" from "offline, seen at 3pm" without treating a
+ * missing key as a special case.
+ */
+function withPresence<T extends object>(
+  person: T, id: string,
+  online: Record<string, string>, seen: Record<string, string>,
+): T & { presence: string; lastSeenAt: string | null } {
+  return { ...person, presence: online[id] ?? 'offline', lastSeenAt: seen[id] ?? null };
 }
 
 /**
@@ -156,13 +222,14 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
     [me.id, q, limit],
   );
 
-  const online = await presenceFor(rows.map((r) => r.id));
+  const ids = rows.map((r) => r.id);
+  const online = await presenceFor(ids);
+  const seen = await lastSeenFor(ids);
   res.json(ok({
-    people: rows.map((r) => ({
+    people: rows.map((r) => withPresence({
       id: r.id, name: r.name, avatarUrl: r.avatar_url, role: r.role,
       email: r.email,
-      presence: online[r.id] ?? 'offline',
-    })),
+    }, r.id, online, seen)),
   }));
 }));
 
@@ -177,12 +244,18 @@ router.get('/conversations', authorizePermission('MESSAGE_READ'), wrap(async (re
   // Presence for DM counterparts only — a channel has no single presence, and
   // looking up 400 members to render a sidebar row would be absurd.
   const peerIds = conversations.map((c) => c.peer?.id).filter((x): x is string => Boolean(x));
-  const online = await presenceFor(peerIds);
+  const [online, lastSeen] = await Promise.all([presenceFor(peerIds), lastSeenFor(peerIds)]);
 
   res.json(ok({
     conversations: conversations.map((c) => ({
       ...c,
-      peer: c.peer ? { ...c.peer, presence: online[c.peer.id] ?? 'offline' } : null,
+      peer: c.peer
+        ? {
+            ...c.peer,
+            presence: online[c.peer.id] ?? 'offline',
+            lastSeenAt: lastSeen[c.peer.id] ?? null,
+          }
+        : null,
     })),
   }));
 }));
@@ -302,9 +375,24 @@ router.get('/conversations/:id/members', wrap(async (req, res) => {
   await chat.requireMembership(me.id, id);
 
   const members = await chat.listMembers(id);
-  const online = await presenceFor(members.map((m) => m.userId));
+  const ids = members.map((m) => m.userId);
+  const [online, lastSeen] = await Promise.all([presenceFor(ids), lastSeenFor(ids)]);
+
+  const roster = members.map((m) => withPresence(m, m.userId, online, lastSeen));
+
+  /*
+   * "3 of 12 online" for the header.
+   *
+   * Counted here, from the same mget that was already happening, rather than
+   * pushed: presence is fanned out to DM counterparts only, precisely so that
+   * a 400-member channel does not get a packet every time somebody switches
+   * tab. A count that is pulled when the panel is open costs one round trip
+   * and contradicts nothing.
+   */
   res.json(ok({
-    members: members.map((m) => ({ ...m, presence: online[m.userId] ?? 'offline' })),
+    members: roster,
+    onlineCount: roster.filter((m) => m.presence !== 'offline').length,
+    memberCount: roster.length,
   }));
 }));
 
@@ -1150,7 +1238,8 @@ router.get('/profile/:userId', authorizePermission('DIRECTORY_VIEW'), wrap(async
   const me = actor(req);
   const profile = await chat.getProfile(me.id, req.params.userId!);
   const online = await presenceFor([profile.id]);
-  res.json(ok({ profile: { ...profile, presence: online[profile.id] ?? 'offline' } }));
+  const seen = await lastSeenFor([profile.id]);
+  res.json(ok({ profile: withPresence(profile, profile.id, online, seen) }));
 }));
 
 router.put('/status', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, res) => {

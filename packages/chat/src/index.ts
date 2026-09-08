@@ -9,5 +9,6 @@
  * with the hole in it.
  */
 export * from './service.js';
+export * from './presence.js';
 export * from './notifications.js';
 export * from './unfurl.js';

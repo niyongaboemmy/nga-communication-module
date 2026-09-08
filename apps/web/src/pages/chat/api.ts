@@ -19,9 +19,20 @@ export const getConversation = (id: string) =>
   apiGet<{ conversation: ConversationSummary }>(`/api/chat/conversations/${id}`)
     .then((r) => r.data!.conversation);
 
+export interface MemberRoster {
+  members: WireMember[];
+  /** How many of them are not offline right now. */
+  onlineCount: number;
+  memberCount: number;
+}
+
 export const listMembers = (id: string) =>
-  apiGet<{ members: WireMember[] }>(`/api/chat/conversations/${id}/members`)
+  apiGet<MemberRoster>(`/api/chat/conversations/${id}/members`)
     .then((r) => r.data!.members);
+
+/** The same fetch, keeping the counts — for the header's "N of M online". */
+export const listMemberRoster = (id: string) =>
+  apiGet<MemberRoster>(`/api/chat/conversations/${id}/members`).then((r) => r.data!);
 
 export interface PageQuery {
   before?: number;

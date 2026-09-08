@@ -18,7 +18,7 @@
  */
 
 import type {
-  ConversationSummary, DeliveryState, MessageType, NotificationLevel,
+  ActivityKind, ConversationSummary, DeliveryState, MessageType, NotificationLevel,
   TypingUser, WireMessage, WireReaction,
 } from './chat.js';
 
@@ -73,9 +73,28 @@ export interface ChatClientToServerEvents {
     ack?: (r: { ok: boolean; reactions?: WireReaction[]; error?: string }) => void,
   ) => void;
 
-  /** Throttled client-side to one per TYPING_THROTTLE_MS; TTL'd server-side. */
-  'typing:start': (p: { conversationId: string }) => void;
+  /**
+   * Throttled client-side to one per TYPING_THROTTLE_MS; TTL'd server-side.
+   *
+   * `kind` widens the same channel to the other waits worth showing — a voice
+   * note being recorded, a large file going up. They share the transport
+   * because they share every property that matters: short-lived, per
+   * conversation, and worthless if stale.
+   */
+  'typing:start': (p: { conversationId: string; kind?: ActivityKind }) => void;
   'typing:stop': (p: { conversationId: string }) => void;
+
+  /**
+   * Ask for a conversation's live roster.
+   *
+   * The room tells the gateway who has it *open*; the member list plus Redis
+   * tells it who is merely online. Both are pushed on subscribe, and this is
+   * how a panel that opened later catches up without a reconnect.
+   */
+  'conversation:presence:query': (
+    p: { conversationId: string },
+    ack?: (r: { online: string[]; viewing: string[] }) => void,
+  ) => void;
 
   /**
    * Advance the read watermark. Monotonic — a lower seq is ignored rather than
@@ -112,6 +131,24 @@ export interface ChatServerToClientEvents {
   /** The complete current set for the conversation, not a delta — a delta stream
    *  of a 6-second-lived state is not worth the reconciliation bugs. */
   'typing:update': (p: { conversationId: string; users: TypingUser[] }) => void;
+
+  /**
+   * Who is live in one conversation.
+   *
+   * Two different sets, because they answer two different questions and a UI
+   * that conflates them lies in both directions. `online` is members who are
+   * connected to Tupo at all — the green dots in the member list. `viewing` is
+   * the subset with *this* conversation open, which is what makes "3 here now"
+   * mean something and what tells you a message will be read rather than
+   * merely delivered.
+   *
+   * Sent as the whole set rather than a delta, for the same reason typing is:
+   * it is small, it changes constantly, and a client that missed one delta
+   * would stay wrong until a reconnect.
+   */
+  'conversation:presence': (
+    p: { conversationId: string; online: string[]; viewing: string[]; at: string },
+  ) => void;
 
   /** Someone else advanced their watermark: repaint their avatar on the log. */
   'read:update': (

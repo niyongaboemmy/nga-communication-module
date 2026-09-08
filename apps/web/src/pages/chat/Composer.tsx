@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { IconButton } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
-import { MAX_MESSAGE_LENGTH } from '@tupo/shared';
+import { TYPING_THROTTLE_MS, MAX_MESSAGE_LENGTH } from '@tupo/shared';
 import { useNavigate } from 'react-router-dom';
 import { useNotify } from '../../context/NotificationContext';
 import { useChat } from './ChatProvider';
@@ -63,6 +63,23 @@ export const Composer: React.FC<{
   const [members, setMembers] = useState<WireMember[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const tray = useUploads();
+
+  /*
+   * An upload in flight is worth announcing.
+   *
+   * A large attachment can take a minute, during which the room sees nothing at
+   * all — the sender stopped typing to pick the file, so even the typing
+   * indicator has expired. This reuses the typing channel (see ActivityKind) to
+   * say what is actually happening, refreshed on the same TTL as typing so it
+   * disappears on its own if the tab goes away mid-upload.
+   */
+  const uploading = tray.uploads.some((u) => u.state === 'uploading');
+  useEffect(() => {
+    if (!uploading) return;
+    notifyTyping('uploading');
+    const t = setInterval(() => notifyTyping('uploading'), TYPING_THROTTLE_MS);
+    return () => clearInterval(t);
+  }, [uploading, notifyTyping]);
 
   useEffect(() => {
     setTouch(window.matchMedia('(pointer: coarse)').matches);

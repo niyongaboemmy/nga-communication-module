@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   X, Users, FileText, Info, Bell, BellOff, Star, LogOut, AtSign, Download, Image as ImageIcon,
   UserPlus,
@@ -10,11 +10,13 @@ import { useNotify } from '../../context/NotificationContext';
 import { listConversationFiles, downloadFile } from './uploads';
 import type { ConversationFile } from './uploads';
 import * as chatApi from './api';
-import { formatBytes, shortStamp } from './data';
+import { formatBytes, shortStamp, lastSeenLabel } from './data';
 import { useChat } from './ChatProvider';
+import { getSocket } from '../../lib/socket';
 import { ConversationAvatar } from './ConversationAvatar';
 import { toPresence } from './types';
 import type { Conversation, Member } from './types';
+import { PRESENCE_REFRESH_MS } from '@tupo/shared';
 
 /**
  * The right-hand context panel (§15.1) — thread, members, files and details for
@@ -41,7 +43,9 @@ export const ContextPanel: React.FC<{
   onOpenSettings?: () => void;
 }> = ({ conversation: c, members, onClose, onOpenSettings }) => {
   const [tab, setTab] = useState<Tab>('about');
-  const { toggleStar, setNotificationLevel, jumpTo, setActiveId, refresh } = useChat();
+  const {
+    toggleStar, setNotificationLevel, jumpTo, setActiveId, refresh, conversationPresence,
+  } = useChat();
   const { can } = usePermissions();
   const { user } = useAuth();
   const { notify } = useNotify();
@@ -72,6 +76,83 @@ export const ContextPanel: React.FC<{
       setLeaving(false);
     }
   };
+
+  /*
+   * Presence for the open conversation, re-pulled on a slow timer.
+   *
+   * The roster arrives once from ChatLayout and is never updated by a socket:
+   * presence:update only reaches DM counterparts, by design, so a channel's
+   * member list would otherwise show whatever was true when the panel opened.
+   * Pulling for the one conversation on screen respects that decision and
+   * still keeps the dots honest.
+   */
+  const [livePresence, setLivePresence] = useState<Record<string, string>>({});
+  const [liveSeen, setLiveSeen] = useState<Record<string, string | null>>({});
+  useEffect(() => {
+    if (tab !== 'members') return;
+    let cancelled = false;
+    const load = () => {
+      chatApi.listMemberRoster(c.id)
+        .then((r) => {
+          if (cancelled) return;
+          setLivePresence(Object.fromEntries(r.members.map((m) => [m.userId, m.presence])));
+          setLiveSeen(Object.fromEntries(r.members.map((m) => [m.userId, m.lastSeenAt ?? null])));
+        })
+        .catch(() => { /* keep whatever we last knew */ });
+    };
+    load();
+    /*
+     * Ask the gateway for a roster push as well.
+     *
+     * The member list is not mounted when the conversation is subscribed — it
+     * appears when someone opens Details, possibly an hour later — so without
+     * this it would show whoever happened to connect since, and nothing else.
+     */
+    getSocket()?.emit('conversation:presence:query', { conversationId: c.id }, () => {});
+    const t = setInterval(load, PRESENCE_REFRESH_MS);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [tab, c.id]);
+
+  /** Online first, then alphabetical — the list is read to find who is about. */
+  const live = conversationPresence[c.id];
+  const membersWithPresence = useMemo(() => {
+    const pushedOnline = live ? new Set(live.online) : null;
+    const pushedViewing = live ? new Set(live.viewing) : null;
+    return members.map((m) => {
+      const polled = livePresence[m.userId] ?? m.presence;
+      /*
+       * The push is more recent than the poll between ticks, but it only knows
+       * online-or-not. So it can promote someone the poll still shows offline,
+       * and demote someone who has since gone — without flattening the richer
+       * statuses ("busy", "in a meeting") that only the poll carries.
+       */
+      let presence = polled;
+      if (pushedOnline) {
+        if (pushedOnline.has(m.userId)) {
+          if (toPresence(polled) === 'offline') presence = 'online';
+        } else {
+          presence = 'offline';
+        }
+      }
+      return {
+        ...m,
+        presence,
+        lastSeenAt: liveSeen[m.userId] ?? m.lastSeenAt ?? null,
+        /** Has this conversation open right now, not merely signed in. */
+        viewing: pushedViewing?.has(m.userId) ?? false,
+      };
+    });
+  }, [members, livePresence, liveSeen, live]);
+
+  const onlineMembers = useMemo(
+    () => membersWithPresence.filter((m) => toPresence(m.presence) !== 'offline'),
+    [membersWithPresence],
+  );
+  const sortedMembers = useMemo(() => [...membersWithPresence].sort((a, b) => {
+    const aOn = toPresence(a.presence) !== 'offline' ? 0 : 1;
+    const bOn = toPresence(b.presence) !== 'offline' ? 0 : 1;
+    return aOn - bOn || a.name.localeCompare(b.name);
+  }), [membersWithPresence]);
 
   const [files, setFiles] = useState<ConversationFile[] | null>(null);
   const [filter, setFilter] = useState<'all' | 'image' | 'document'>('all');
@@ -242,28 +323,60 @@ export const ContextPanel: React.FC<{
             {members.length === 0 ? (
               <EmptyState icon={<Users size={22} />} title="Loading members" hint="One moment." />
             ) : (
-          <ul className="space-y-0.5">
-            {members.map((m) => (
-              <li key={m.userId}>
-                <button className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors duration-150 hover:bg-surface-light dark:hover:bg-surface-dark">
-                  <Avatar
-                    name={m.name}
-                    src={m.avatarUrl ?? undefined}
-                    size={34}
-                    presence={toPresence(m.presence)}
-                  />
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium text-text-primary-light dark:text-text-primary-dark">
-                      {m.name}
-                    </span>
-                    <span className="block truncate text-xs capitalize text-text-secondary-light dark:text-text-secondary-dark">
-                      {m.role === 'member' ? (m.platformRole ?? 'Member') : m.role}
-                    </span>
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
+          <>
+            {/* Who is here right now, before the full list. In a channel of
+                thirty this is the only line most people are looking for. */}
+            {c.type !== 'dm' && (
+              <p className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-text-secondary-light/80 dark:text-text-secondary-dark/70">
+                {onlineMembers.length} of {members.length} online
+              </p>
+            )}
+            <ul className="space-y-0.5">
+              {sortedMembers.map((m) => {
+                const presence = toPresence(m.presence);
+                const seen = presence === 'offline' ? lastSeenLabel(m.lastSeenAt) : null;
+                return (
+                  <li key={m.userId}>
+                    <button className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors duration-150 hover:bg-surface-light dark:hover:bg-surface-dark">
+                      <Avatar
+                        name={m.name}
+                        src={m.avatarUrl ?? undefined}
+                        size={34}
+                        presence={presence}
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium text-text-primary-light dark:text-text-primary-dark">
+                          {m.name}
+                        </span>
+                        <span className="flex items-center gap-1.5 truncate text-xs capitalize text-text-secondary-light dark:text-text-secondary-dark">
+                          {m.role === 'member' ? (m.platformRole ?? 'Member') : m.role}
+                          {/* Reading this conversation right now, which is a
+                              stronger statement than a green dot: that only
+                              says they are signed in somewhere. */}
+                          {m.viewing && (
+                            <span
+                              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-medium normal-case text-primary"
+                              title="Has this conversation open"
+                            >
+                              <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                              Here
+                            </span>
+                          )}
+                        </span>
+                        {/* Lower-cased sentence, so it does not fight the
+                            capitalised role line above it. */}
+                        {seen && (
+                          <span className="block truncate text-[11px] normal-case text-text-secondary-light/80 dark:text-text-secondary-dark/70">
+                            {seen}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
             )}
           </>
         )}
