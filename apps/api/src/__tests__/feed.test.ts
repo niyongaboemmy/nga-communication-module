@@ -109,6 +109,61 @@ describe('permissions', () => {
     const r2 = await api(staff.token).post(`/api/feed/pages/${pageId}/posts`, { body: 'hi' });
     expect(r2.status).toBe(201);
   });
+
+  /*
+   * The permission to make pages is not a claim over other people's.
+   *
+   * This is the case that was missing, and its absence hid the bug: every test
+   * here used the admin who had created the page, so "may manage a page"
+   * and "may manage this page" never had to be told apart.
+   */
+  it('FEED_PAGE_MANAGE does not confer power over a page you do not own', async () => {
+    // A second admin: holds FEED_PAGE_MANAGE, owns nothing here.
+    const other = await user('Admin', 'Otto');
+
+    const patched = await api(other.token).patch(`/api/feed/pages/${pageId}`, { name: 'Hijacked' });
+    expect(patched.status).toBe(403);
+
+    const branded = await api(other.token).patch(`/api/feed/pages/${pageId}`, { avatarFileId: null, coverFileId: null });
+    expect(branded.status).toBe(403);
+
+    const added = await api(other.token)
+      .post(`/api/feed/pages/${pageId}/editors`, { userId: other.id, role: 'owner' });
+    expect(added.status).toBe(403);
+
+    // …and the page is untouched.
+    const page = await api(admin.token).get(`/api/feed/pages/${pageId}`);
+    expect(page.body.data.page.name).toBe('NGA News');
+  });
+
+  it('an editor cannot restyle the page or promote themselves', async () => {
+    const ed = await user('Staff', 'Edie');
+    await api(admin.token).post(`/api/feed/pages/${pageId}/editors`, { userId: ed.id, role: 'editor' });
+
+    expect((await api(ed.token).patch(`/api/feed/pages/${pageId}`, { name: 'Edie News' })).status).toBe(403);
+    expect((await api(ed.token).post(`/api/feed/pages/${pageId}/editors`, { userId: ed.id, role: 'owner' })).status).toBe(403);
+    // But they can still do the thing being an editor is for.
+    expect((await api(ed.token).post(`/api/feed/pages/${pageId}/posts`, { body: 'as the page' })).status).toBe(201);
+  });
+
+  it('an owner manages their own page without holding FEED_PAGE_MANAGE', async () => {
+    const owner = await user('Staff', 'Olga');
+    await api(admin.token).post(`/api/feed/pages/${pageId}/editors`, { userId: owner.id, role: 'owner' });
+
+    const r = await api(owner.token).patch(`/api/feed/pages/${pageId}`, { bio: 'Ours to run.' });
+    expect(r.status).toBe(200);
+    expect(r.body.data.page.bio).toBe('Ours to run.');
+
+    // Institutional flags stay with the institution, owner or not.
+    expect((await api(owner.token).patch(`/api/feed/pages/${pageId}`, { verified: true })).status).toBe(403);
+  });
+
+  it('addressing a page by slug updates that page rather than silently nothing', async () => {
+    const page = (await api(admin.token).get(`/api/feed/pages/${pageId}`)).body.data.page;
+    const r = await api(admin.token).patch(`/api/feed/pages/${page.slug}`, { bio: 'By slug.' });
+    expect(r.status).toBe(200);
+    expect(r.body.data.page.bio).toBe('By slug.');
+  });
 });
 
 describe('post lifecycle', () => {

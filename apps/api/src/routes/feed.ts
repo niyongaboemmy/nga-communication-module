@@ -90,12 +90,26 @@ router.get('/pages/:id', authorizePermission('FEED_VIEW'), wrap(async (req, res)
   res.json(ok({ page: await feed.pages.getPage(actorOf(req), req.params.id!) }));
 }));
 
-router.patch('/pages/:id', authorizePermission('FEED_PAGE_MANAGE'), wrap(async (req, res) => {
+/*
+ * The page-scoped routes below gate on FEED_VIEW, not FEED_PAGE_MANAGE.
+ *
+ * FEED_PAGE_MANAGE is the permission to *create* pages; it says nothing about
+ * any particular page, and requiring it here had it backwards twice over. It
+ * let every holder through to pages they had no part in (the service then
+ * waved them past, because the only role holding it is ADMIN), while locking
+ * out the people who actually own a page — a teacher made owner of their
+ * department's page could not change its logo, because owning a page was worth
+ * less than a permission about making them.
+ *
+ * Authority over a specific page now lives entirely in the service, in
+ * assertPageOwner / assertPageGovernance, where the page is actually loaded.
+ */
+router.patch('/pages/:id', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
   const page = await feed.pages.updatePage(actorOf(req), req.params.id!, req.body ?? {});
   res.json(ok({ page }));
 }));
 
-router.delete('/pages/:id', authorizePermission('FEED_PAGE_MANAGE'), wrap(async (req, res) => {
+router.delete('/pages/:id', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
   await feed.pages.deletePage(actorOf(req), req.params.id!);
   await audit({ actorId: actorOf(req).id, action: 'feed.page.delete', targetType: 'feed_page', targetId: req.params.id! });
   res.json(ok({ deleted: true }));
@@ -115,12 +129,12 @@ router.post('/pages/:id/notify', authorizePermission('FEED_VIEW'), wrap(async (r
   res.json(ok({ updated: true }));
 }));
 
-router.post('/pages/:id/editors', authorizePermission('FEED_PAGE_MANAGE'), wrap(async (req, res) => {
+router.post('/pages/:id/editors', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
   await feed.pages.addEditor(actorOf(req), req.params.id!, String(req.body?.userId ?? ''), req.body?.role === 'owner' ? 'owner' : 'editor');
   res.json(ok({ page: await feed.pages.getPage(actorOf(req), req.params.id!) }));
 }));
 
-router.delete('/pages/:id/editors/:userId', authorizePermission('FEED_PAGE_MANAGE'), wrap(async (req, res) => {
+router.delete('/pages/:id/editors/:userId', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
   await feed.pages.removeEditor(actorOf(req), req.params.id!, req.params.userId!);
   res.json(ok({ page: await feed.pages.getPage(actorOf(req), req.params.id!) }));
 }));
@@ -134,7 +148,14 @@ router.get('/pages/:id/posts', authorizePermission('FEED_VIEW'), wrap(async (req
   res.json(ok(page));
 }));
 
-router.get('/pages/:id/analytics', authorizePermission('FEED_ANALYTICS_VIEW', 'FEED_PAGE_MANAGE'), wrap(async (req, res) => {
+/*
+ * Same shape as the routes above: an editor of the page reads its own numbers
+ * without needing an institution-wide permission, and pageAnalytics decides.
+ * FEED_ANALYTICS_VIEW remains a genuinely cross-page permission — it is how an
+ * administrator compares pages they do not run — so it is checked there, not
+ * here.
+ */
+router.get('/pages/:id/analytics', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
   const range = (['7d', '30d', 'all'] as const).find((r) => r === req.query.range) ?? '30d';
   res.json(ok({ analytics: await feed.analytics.pageAnalytics(actorOf(req), req.params.id!, range) }));
 }));

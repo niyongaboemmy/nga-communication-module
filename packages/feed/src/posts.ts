@@ -293,6 +293,20 @@ export async function deletePost(actor: FeedActor, postId: string, byModerator =
 
 export async function editPost(actor: FeedActor, postId: string, patch: EditPostPayload): Promise<void> {
   const post = await loadForWrite(actor, postId);
+
+  /*
+   * Pinning is a claim on the page, not on the post.
+   *
+   * Editing your own words needs only authorship, but pinning decides what the
+   * page shows first — so it needs a current say in the page. Authorship alone
+   * let someone who had since been removed as an editor keep pinning their old
+   * post to the top of a page they no longer had any part in.
+   */
+  if (patch.pinned !== undefined
+      && (post as PostRow & { editor_role: string | null }).editor_role === null
+      && actor.roleLevel !== 'ADMIN') {
+    throw new FeedError('Only an editor of this page can pin a post.', 403);
+  }
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');

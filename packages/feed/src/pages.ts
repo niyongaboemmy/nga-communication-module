@@ -181,19 +181,82 @@ export async function createPage(actor: FeedActor, payload: CreatePagePayload): 
   }
 }
 
-/** Owner of the page, an editor with FEED_PAGE_MANAGE, or any admin. */
-export async function assertPageAdmin(actor: FeedActor, pageId: string): Promise<PageRow> {
+/*
+ * Two different questions, deliberately kept apart.
+ *
+ * `FEED_PAGE_MANAGE` is the permission to *create* pages. It is not a claim
+ * over pages other people made, and until this was split it behaved like one:
+ * every route below checked the platform permission, and the per-page check it
+ * then called returned early for anyone whose role level was ADMIN — which is
+ * the only level the permission is granted to. The ownership test never ran for
+ * a single caller that reached it.
+ */
+
+/**
+ * May this person change what the page *is* — its name, branding, audience,
+ * and who else may write as it?
+ *
+ * Ownership of that specific page, and nothing else. No platform permission
+ * substitutes for it: holding FEED_PAGE_MANAGE means you may make your own
+ * pages, not redecorate somebody else's. Editors are excluded too — they speak
+ * *as* the page, which is a different thing from deciding what it looks like.
+ */
+export async function assertPageOwner(actor: FeedActor, pageId: string): Promise<PageRow> {
   const row = await loadRow(actor, pageId);
-  if (actor.roleLevel === 'ADMIN') return row;
   if (row.my_editor_role === 'owner') return row;
-  if (row.my_editor_role === 'editor' && can(actor, 'FEED_PAGE_MANAGE')) return row;
+  throw new FeedError('Only an owner of this page can change it.', 403);
+}
+
+/**
+ * May this person act on the page as the institution, rather than as its owner?
+ *
+ * Owners plus platform admins. This is the governance door: an admin must be
+ * able to remove a page that should not exist, and to take one back when its
+ * only owner has left the school — otherwise such a page is unmanageable
+ * without a database edit. It is deliberately narrower than ownership: an admin
+ * gets here to delete a page or set its institutional flags, not to rename one
+ * or change its logo.
+ */
+export async function assertPageGovernance(actor: FeedActor, pageId: string): Promise<PageRow> {
+  const row = await loadRow(actor, pageId);
+  if (row.my_editor_role === 'owner') return row;
+  if (actor.roleLevel === 'ADMIN') return row;
   throw new FeedError('You do not manage this page.', 403);
+}
+
+/** May this person publish as the page? Owners and editors both. */
+export async function assertPageEditor(actor: FeedActor, pageId: string): Promise<PageRow> {
+  const row = await loadRow(actor, pageId);
+  if (row.my_editor_role !== null) return row;
+  throw new FeedError('You are not an editor of this page.', 403);
 }
 
 export async function updatePage(
   actor: FeedActor, pageId: string, patch: UpdatePagePayload,
 ): Promise<FeedPageDetail> {
-  await assertPageAdmin(actor, pageId);
+  /*
+   * Split by *what is being changed*, not by who is asking.
+   *
+   * Everything describing the page — its name, bio, look, audience — belongs to
+   * whoever owns it. `verified` and `mandatory` are institutional claims the
+   * page cannot make about itself, so they are the admin's and only the
+   * admin's. A request touching both needs to satisfy both tests.
+   */
+  const wantsContent = patch.name !== undefined || patch.bio !== undefined
+    || patch.accent !== undefined || patch.avatarFileId !== undefined
+    || patch.coverFileId !== undefined || patch.kind !== undefined
+    || patch.audience !== undefined;
+  const wantsGovernance = patch.verified !== undefined || patch.mandatory !== undefined;
+
+  // Resolved first, so the UPDATE below can key off the real id even when the
+  // caller addressed the page by slug.
+  const row = wantsContent
+    ? await assertPageOwner(actor, pageId)
+    : await assertPageGovernance(actor, pageId);
+  if (wantsGovernance && actor.roleLevel !== 'ADMIN') {
+    throw new FeedError('Only an administrator can verify or pin a page institution-wide.', 403);
+  }
+
   const sets: string[] = [];
   const params: unknown[] = [];
   const set = (col: string, val: unknown) => { params.push(val); sets.push(`${col} = $${params.length}`); };
@@ -205,20 +268,26 @@ export async function updatePage(
   if (patch.coverFileId !== undefined) set('cover_file_id', patch.coverFileId);
   if (patch.kind !== undefined && (FEED_PAGE_KINDS as readonly string[]).includes(patch.kind)) set('kind', patch.kind);
   if (patch.audience !== undefined && (FEED_AUDIENCES as readonly string[]).includes(patch.audience)) set('audience', patch.audience);
-  // verified/mandatory are institutional switches — admin only.
-  if (patch.verified !== undefined && actor.roleLevel === 'ADMIN') set('verified', patch.verified);
-  if (patch.mandatory !== undefined && actor.roleLevel === 'ADMIN') set('mandatory', patch.mandatory);
+  if (patch.verified !== undefined) set('verified', patch.verified);
+  if (patch.mandatory !== undefined) set('mandatory', patch.mandatory);
 
   if (sets.length) {
-    params.push(pageId);
+    /*
+     * `row.id`, never the caller's string. `loadRow` accepts an id or a slug,
+     * so keying the UPDATE off the raw parameter silently matched nothing
+     * whenever a page was addressed by slug — and still returned 200 with the
+     * unchanged page, which reads as "saved" to anyone watching.
+     */
+    params.push(row.id);
     await getPool().query(`UPDATE feed_pages SET ${sets.join(', ')}, updated_at = now() WHERE id = $${params.length}`, params);
   }
-  return getPage(actor, pageId);
+  return getPage(actor, row.id);
 }
 
+/** Removing a page is governance: its owners, or an admin acting for the school. */
 export async function deletePage(actor: FeedActor, pageId: string): Promise<void> {
-  await assertPageAdmin(actor, pageId);
-  await getPool().query('UPDATE feed_pages SET deleted_at = now() WHERE id = $1', [pageId]);
+  const row = await assertPageGovernance(actor, pageId);
+  await getPool().query('UPDATE feed_pages SET deleted_at = now() WHERE id = $1', [row.id]);
 }
 
 /* ── Following ──────────────────────────────────────────────────────────── */
@@ -283,34 +352,41 @@ export async function setNotify(actor: FeedActor, pageId: string, notify: boolea
 export async function addEditor(
   actor: FeedActor, pageId: string, userId: string, role: 'owner' | 'editor',
 ): Promise<void> {
-  await assertPageAdmin(actor, pageId);
+  /*
+   * Owners only, and this one matters most of the set: whoever can edit this
+   * list can grant themselves anything else on the page. When a plain editor
+   * could reach here, "editor" was not a lesser role at all — an editor could
+   * promote themselves to owner and then remove the real one, and the
+   * keep-one-owner rule below was no obstacle because they had just become one.
+   */
+  const page = await assertPageOwner(actor, pageId);
   const { rows } = await getPool().query('SELECT 1 FROM users WHERE id = $1', [userId]);
   if (!rows.length) throw new FeedError('No such user.', 404);
   await getPool().query(
     `INSERT INTO feed_page_editors (page_id, user_id, role, added_by) VALUES ($1,$2,$3,$4)
      ON CONFLICT (page_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
-    [pageId, userId, role === 'owner' ? 'owner' : 'editor', actor.id],
+    [page.id, userId, role === 'owner' ? 'owner' : 'editor', actor.id],
   );
   await getPool().query(
     `INSERT INTO feed_page_followers (page_id, user_id, notify, source) VALUES ($1,$2,true,'manual')
      ON CONFLICT DO NOTHING`,
-    [pageId, userId],
+    [page.id, userId],
   );
 }
 
 export async function removeEditor(actor: FeedActor, pageId: string, userId: string): Promise<void> {
-  await assertPageAdmin(actor, pageId);
+  const page = await assertPageOwner(actor, pageId);
   const { rows } = await getPool().query<{ role: string }>(
-    'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [pageId, userId],
+    'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [page.id, userId],
   );
   if (!rows[0]) return;
   if (rows[0].role === 'owner') {
     const { rows: owners } = await getPool().query(
-      `SELECT 1 FROM feed_page_editors WHERE page_id = $1 AND role = 'owner' AND user_id <> $2`, [pageId, userId],
+      `SELECT 1 FROM feed_page_editors WHERE page_id = $1 AND role = 'owner' AND user_id <> $2`, [page.id, userId],
     );
     if (!owners.length) throw new FeedError('A page must keep at least one owner.', 409);
   }
-  await getPool().query('DELETE FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [pageId, userId]);
+  await getPool().query('DELETE FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [page.id, userId]);
 }
 
 /* ── Mandatory follows (FR-FEED-1) ─────────────────────────────────────── */

@@ -58,7 +58,23 @@ function presence(): Redis | null {
   if (presenceClient) return presenceClient;
   try {
     presenceClient = new Redis(config.redisUrl, {
-      lazyConnect: true, maxRetriesPerRequest: 1, enableOfflineQueue: false,
+      lazyConnect: true,
+      maxRetriesPerRequest: 1,
+      /*
+       * Queue the commands issued while the connection is still opening.
+       *
+       * With the queue off, every command sent before `connect()` resolved was
+       * rejected outright — so for the first moments after an API restart the
+       * presence lookups all threw and the whole school read as offline, until
+       * some later request happened to arrive on a live socket. It looked like
+       * a flaky test; it was really every deploy showing empty rosters to
+       * whoever loaded chat first.
+       *
+       * This is not a retry-forever queue: `maxRetriesPerRequest: 1` still
+       * fails commands fast when Redis is genuinely down, which is the
+       * degradation we want — everyone offline beats a hung request.
+       */
+      enableOfflineQueue: true,
     });
     presenceClient.on('error', () => {});
     void presenceClient.connect().catch(() => {});

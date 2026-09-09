@@ -84,10 +84,16 @@ export const PageProfile: React.FC = () => {
 
   if (!page) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
-  // Mirrors assertPageAdmin on the server: an owner can always manage
-  // branding, but a plain editor needs FEED_PAGE_MANAGE too — showing the
-  // camera button to an editor who lacks it would just 403 on click.
-  const canManage = page.myRole === 'owner' || can(['FEED_PAGE_MANAGE']);
+  /*
+   * Mirrors assertPageOwner on the server: a page's branding belongs to whoever
+   * owns that page, and to nobody else.
+   *
+   * This used to read `|| can(['FEED_PAGE_MANAGE'])`, which put "Change page
+   * photo" on every page in the school for anyone holding a permission that
+   * only ever meant "you may create pages". The server agreed with it, so the
+   * upload went through — the visible half of the bug.
+   */
+  const canManage = page.myRole === 'owner';
 
   const toggleFollow = async () => {
     const updated = page.following ? await api.unfollowPage(page.id) : await api.followPage(page.id);
