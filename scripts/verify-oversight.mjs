@@ -229,6 +229,16 @@ try {
       method: 'POST', body: JSON.stringify({ reason: 'Academic dishonesty' }) });
   check('a message cannot be removed twice', twice.status === 409, String(twice.status));
 
+  // A message the SENDER deletes is revealed to oversight too, not just ones
+  // oversight removed itself.
+  const selfDel = await api(`/api/chat/conversations/${groupId}/messages`, pupilA.token, {
+    method: 'POST', body: JSON.stringify({ body: 'delete this quick', nonce: nonce() }) });
+  await api(`/api/chat/conversations/${groupId}/messages/${selfDel.data.message.id}`, pupilA.token,
+    { method: 'DELETE' });
+  const selfView = await api(`/api/oversight/conversations/${groupId}/messages`, admin.token);
+  check('a message its own sender deleted is still readable to oversight',
+    selfView.data.messages.find((m) => m.id === selfDel.data.message.id)?.body === 'delete this quick');
+
   /* ── Attachments: preview and removal ────────────────────────────────── */
   step('attachments');
 
