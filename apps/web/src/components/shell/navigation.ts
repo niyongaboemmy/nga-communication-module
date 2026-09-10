@@ -1,6 +1,6 @@
 import {
   MessagesSquare, Megaphone, Folder, Video, Mail, Activity,
-  ShieldCheck, Users, ScrollText,
+  ShieldCheck, Users, ScrollText, Eye,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -34,6 +34,10 @@ export const ADMIN: NavEntry[] = [
   {
     to: '/app/admin/roles', icon: ShieldCheck, label: 'Roles & permissions',
     perm: ['ROLES_PERMISSIONS_VIEW', 'ROLES_PERMISSIONS_MANAGE'],
+  },
+  {
+    to: '/app/admin/oversight', icon: Eye, label: 'Oversight',
+    perm: ['OVERSIGHT_VIEW_ALL', 'OVERSIGHT_MESSAGE_DELETE'],
   },
   { to: '/app/admin/audit', icon: ScrollText, label: 'Audit log', perm: 'AUDIT_VIEW' },
   { to: '/app/system', icon: Activity, label: 'System status', perm: 'SYSTEM_HEALTH_VIEW' },

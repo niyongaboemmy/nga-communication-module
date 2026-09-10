@@ -43,7 +43,8 @@
     "verify:mail": "node scripts/verify-mail.mjs",
     "verify:mail:ui": "node scripts/verify-mail-ui.mjs",
     "verify:feed": "node scripts/verify-feed.mjs",
-    "verify:feed:ui": "node scripts/verify-feed-ui.mjs"
+    "verify:feed:ui": "node scripts/verify-feed-ui.mjs",
+    "verify:oversight": "node scripts/verify-oversight.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

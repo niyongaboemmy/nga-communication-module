@@ -102,6 +102,8 @@ export const PERMISSIONS: PermissionDefinition[] = [
   { key: 'MODERATION_QUEUE_VIEW', category: PERMISSION_CATEGORIES.MODERATION, description: 'View reported content awaiting review.' },
   { key: 'MODERATION_ACT', category: PERMISSION_CATEGORIES.MODERATION, description: 'Remove content, warn, mute or suspend a user.' },
   { key: 'CONTACT_POLICY_MANAGE', category: PERMISSION_CATEGORIES.MODERATION, description: 'Define who may start a conversation with whom.' },
+  { key: 'OVERSIGHT_VIEW_ALL', category: PERMISSION_CATEGORIES.MODERATION, description: 'Academic oversight: open and read any group, channel or direct message, whether or not you are a member. Every conversation you open is audit-logged.' },
+  { key: 'OVERSIGHT_MESSAGE_DELETE', category: PERMISSION_CATEGORIES.MODERATION, description: 'Academic oversight: remove a message from any conversation when it breaks the rules. Requires a reason and is always audit-logged. Does not grant the ability to post or take part.' },
 
   // ── Administration ───────────────────────────────────────────────────────
   { key: 'USERS_VIEW', category: PERMISSION_CATEGORIES.ADMINISTRATION, description: 'View the user roster.' },
@@ -178,6 +180,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'FEED_COMMENT', 'FEED_POST',
     'MAIL_SEND', 'MAIL_BULK_SEND', 'MAIL_TEMPLATE_MANAGE', 'MAIL_LIST_MANAGE', 'MAIL_APPROVE', 'MAIL_AI_USE',
     'MODERATION_QUEUE_VIEW', 'MODERATION_ACT',
+    'OVERSIGHT_VIEW_ALL', 'OVERSIGHT_MESSAGE_DELETE',
     'FILE_DELETE_ANY',
     'USERS_VIEW', 'AUDIT_VIEW',
   ],

@@ -24,6 +24,7 @@ import { SystemStatus } from './pages/SystemStatus';
 import { RolesPermissions } from './pages/admin/RolesPermissions';
 import { Users } from './pages/admin/Users';
 import { AuditLog } from './pages/admin/AuditLog';
+import { Oversight } from './pages/admin/Oversight';
 import { MailLayout } from './pages/mail/MailLayout';
 import { MailTemplates } from './pages/mail/MailTemplates';
 import { MailLists } from './pages/mail/MailLists';
@@ -144,6 +145,8 @@ export const App: React.FC = () => (
               <RequirePermission anyOf={['ROLES_PERMISSIONS_VIEW', 'ROLES_PERMISSIONS_MANAGE']}><RolesPermissions /></RequirePermission>} />
             <Route path="admin/audit" element={
               <RequirePermission anyOf={['AUDIT_VIEW']}><AuditLog /></RequirePermission>} />
+            <Route path="admin/oversight" element={
+              <RequirePermission anyOf={['OVERSIGHT_VIEW_ALL', 'OVERSIGHT_MESSAGE_DELETE']}><Oversight /></RequirePermission>} />
             <Route path="system" element={
               <RequirePermission anyOf={['SYSTEM_HEALTH_VIEW']}><SystemStatus /></RequirePermission>} />
           </Route>
