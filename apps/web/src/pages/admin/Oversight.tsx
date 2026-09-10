@@ -1,13 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ShieldCheck, Search, Lock, Hash, Users as UsersIcon, MessageSquare, Megaphone,
-  AlertTriangle, ChevronDown, Archive, RefreshCw, X,
+  AlertTriangle, ChevronDown, ChevronUp, Archive, RefreshCw, X, Download, FileText, Play,
+  ImageOff, Trash2, Eye, EyeOff, CornerUpLeft, Forward,
 } from 'lucide-react';
+import type { WireAttachment } from '@tupo/shared';
 import { apiGet, apiPost, ApiError } from '../../lib/api';
 import { usePermissions } from '../../hooks/usePermissions';
+import { useAuth } from '../../context/AuthContext';
 import {
   Card, PageHeader, Spinner, EmptyState, Badge, Button, Avatar, SearchInput,
 } from '../../components/ui';
+import { Lightbox, VoiceNote } from '../chat/Attachments';
+import { useMediaUrl, downloadFile } from '../chat/uploads';
+import { formatBytes } from '../chat/data';
 
 /* ────────────────────────────────────────────────────────────────────────── *
  * Types — the slices of the API payloads this page reads
@@ -52,11 +58,19 @@ interface WireMessage {
   senderId: string | null;
   senderName: string;
   senderAvatarUrl: string | null;
+  senderRole: string | null;
   createdAt: string;
   editedAt: string | null;
+  editedCount?: number;
   deletedAt: string | null;
-  attachments: { name?: string; kind?: string }[];
+  deletedBy: string | null;
+  attachments: WireAttachment[];
   mentionNames?: Record<string, string>;
+  reactions?: { emoji: string; count: number }[];
+  replyTo?: {
+    id: string; senderName: string; body: string | null; deleted: boolean;
+  } | null;
+  forwardedFrom?: { senderName: string; conversationName: string | null } | null;
 }
 
 interface Stats {
@@ -66,6 +80,7 @@ interface Stats {
   channels: number;
   messages: number;
   redactions: number;
+  attachmentsRemoved: number;
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -101,6 +116,50 @@ function timeAgo(iso: string | null): string {
 function renderBody(m: WireMessage): string {
   if (!m.body) return '';
   return m.body.replace(/<@([a-zA-Z0-9_-]+)>/g, (_, id) => `@${m.mentionNames?.[id] ?? 'someone'}`);
+}
+
+const clock = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+function dayLabel(iso: string): string {
+  const d = new Date(iso);
+  const today = new Date();
+  const y = new Date(today); y.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return 'Today';
+  if (d.toDateString() === y.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString([], {
+    weekday: 'long', day: 'numeric', month: 'long',
+    year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric',
+  });
+}
+
+/** A flat list of day dividers and messages, with sender-grouping decided once. */
+type Row =
+  | { kind: 'day'; id: string; label: string }
+  | { kind: 'msg'; id: string; message: WireMessage; grouped: boolean };
+
+function buildRows(messages: WireMessage[]): Row[] {
+  const rows: Row[] = [];
+  let lastDay = '';
+  let prev: WireMessage | null = null;
+  for (const m of messages) {
+    const day = new Date(m.createdAt).toDateString();
+    if (day !== lastDay) {
+      rows.push({ kind: 'day', id: `day-${day}`, label: dayLabel(m.createdAt) });
+      lastDay = day;
+      prev = null;
+    }
+    const grouped = Boolean(
+      prev
+      && prev.senderId === m.senderId
+      && m.type !== 'system' && prev.type !== 'system'
+      && !m.deletedAt && !prev.deletedAt
+      && new Date(m.createdAt).getTime() - new Date(prev.createdAt).getTime() < 5 * 60 * 1000,
+    );
+    rows.push({ kind: 'msg', id: m.id, message: m, grouped });
+    prev = m;
+  }
+  return rows;
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -294,7 +353,8 @@ const StatsRow: React.FC<{ stats: Stats | null; onRefresh: () => void }> = ({ st
         <Chip label="Groups" value={stats.groups} />
         <Chip label="Channels" value={stats.channels} />
         <Chip label="Messages" value={stats.messages} />
-        <Chip label="Removed by oversight" value={stats.redactions} tone={stats.redactions > 0 ? 'amber' : 'slate'} />
+        <Chip label="Messages removed" value={stats.redactions} tone={stats.redactions > 0 ? 'amber' : 'slate'} />
+        <Chip label="Attachments removed" value={stats.attachmentsRemoved} tone={stats.attachmentsRemoved > 0 ? 'amber' : 'slate'} />
       </>
     ) : (
       <span className="text-xs text-text-secondary-light dark:text-text-secondary-dark">Loading totals…</span>
@@ -369,6 +429,7 @@ const ConversationViewer: React.FC<{
   mayRedact: boolean;
   onRedacted: () => void;
 }> = ({ summary, mayRedact, onRedacted }) => {
+  const { user } = useAuth();
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
   const [messages, setMessages] = useState<WireMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -377,7 +438,13 @@ const ConversationViewer: React.FC<{
   const [showMembers, setShowMembers] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [target, setTarget] = useState<WireMessage | null>(null);
+  const [attTarget, setAttTarget] = useState<{ message: WireMessage; attachment: WireAttachment } | null>(null);
+  const [atBottom, setAtBottom] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') =>
+    bottomRef.current?.scrollIntoView({ behavior, block: 'end' });
 
   useEffect(() => {
     let cancelled = false;
@@ -403,64 +470,113 @@ const ConversationViewer: React.FC<{
   }, [summary.id]);
 
   useEffect(() => {
-    if (!loading) bottomRef.current?.scrollIntoView();
+    if (!loading) scrollToBottom();
   }, [loading]);
 
   const loadOlder = async () => {
     if (olderCursor == null) return;
     setLoadingOlder(true);
+    const el = scrollRef.current;
+    const before = el ? el.scrollHeight - el.scrollTop : 0;
     try {
       const m = await apiGet<{ messages: WireMessage[]; nextCursor: string | null }>(
         `/api/oversight/conversations/${summary.id}/messages?limit=40&before=${olderCursor}`,
       );
       setMessages((prev) => [...(m.data?.messages ?? []), ...prev]);
       setOlderCursor(m.data?.nextCursor ? Number(m.data.nextCursor) : null);
+      // Keep the reader's eye on the same message rather than jumping to the top.
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight - before;
+      });
     } finally {
       setLoadingOlder(false);
     }
   };
 
   const handleRedacted = (messageId: string) => {
+    // Keep body/attachments — for oversight a removed message still shows its
+    // preserved content (behind a reveal toggle), matching what a fresh load
+    // would return.
     setMessages((prev) => prev.map((m) => (
-      m.id === messageId ? { ...m, body: null, deletedAt: new Date().toISOString(), attachments: [] } : m
+      m.id === messageId
+        ? { ...m, deletedAt: new Date().toISOString(), deletedBy: user?.id ?? null }
+        : m
     )));
     setTarget(null);
     onRedacted();
   };
 
+  const nameOf = (id: string | null): string => {
+    if (!id) return 'someone';
+    if (id === user?.id) return 'you';
+    return detail?.members.find((m) => m.userId === id)?.name ?? 'a reviewer';
+  };
+
+  const handleAttachmentRemoved = (messageId: string, fileId: string) => {
+    setMessages((prev) => prev.map((m) => (
+      m.id === messageId
+        ? { ...m, attachments: m.attachments.filter((a) => a.fileId !== fileId) }
+        : m
+    )));
+    setAttTarget(null);
+    onRedacted();
+  };
+
   const Icon = TYPE_META[summary.type].icon;
+  const rows = useMemo(() => buildRows(messages), [messages]);
+  const deletedOnPage = useMemo(() => messages.filter((m) => m.deletedAt).length, [messages]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Header */}
-      <div className="flex items-start gap-3 border-b border-border-light p-3 dark:border-border-dark/50">
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-500 dark:bg-slate-700/60 dark:text-slate-300">
-          <Icon size={16} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <h2 className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
-              {detail?.name ?? summary.name}
-            </h2>
-            <Badge tone="blue">{TYPE_META[summary.type].label}</Badge>
-            {summary.isPrivate && <Badge tone="amber">private</Badge>}
-            {summary.isArchived && <Badge tone="slate">archived</Badge>}
+      <div className="border-b border-border-light px-4 py-3 dark:border-border-dark/50">
+        <div className="flex items-start gap-3">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-blue-500/20 to-blue-500/5 text-blue-600 dark:text-blue-300">
+            <Icon size={17} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <h2 className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
+                {detail?.name ?? summary.name}
+              </h2>
+              <Badge tone="blue">{TYPE_META[summary.type].label}</Badge>
+              {summary.isPrivate && <Badge tone="amber">private</Badge>}
+              {summary.isArchived && <Badge tone="slate">archived</Badge>}
+            </div>
+            <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-text-secondary-light dark:text-text-secondary-dark">
+              <span>{summary.messageCount.toLocaleString()} messages</span>
+              <span aria-hidden>·</span>
+              <button
+                className="underline decoration-dotted underline-offset-2 hover:text-text-primary-light dark:hover:text-text-primary-dark"
+                onClick={() => setShowMembers((v) => !v)}
+              >
+                {detail?.members.length ?? summary.memberCount} participants
+              </button>
+              {deletedOnPage > 0 && (
+                <>
+                  <span aria-hidden>·</span>
+                  <span className="text-rose-500 dark:text-rose-400">{deletedOnPage} removed on this page</span>
+                </>
+              )}
+              {detail?.createdByName && (
+                <>
+                  <span aria-hidden>·</span>
+                  <span>started by {detail.createdByName}</span>
+                </>
+              )}
+            </p>
           </div>
-          <p className="mt-0.5 text-xs text-text-secondary-light dark:text-text-secondary-dark">
-            {summary.messageCount.toLocaleString()} messages ·{' '}
-            <button className="underline hover:text-text-primary-light dark:hover:text-text-primary-dark" onClick={() => setShowMembers((v) => !v)}>
-              {detail?.members.length ?? summary.memberCount} participants
-            </button>
-            {detail?.createdByName && <> · created by {detail.createdByName}</>}
-          </p>
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-700/60 dark:text-slate-300">
+            <Eye size={11} /> Read-only
+          </span>
         </div>
       </div>
 
       {showMembers && detail && (
-        <div className="max-h-40 overflow-y-auto border-b border-border-light bg-surface-light/50 p-3 dark:border-border-dark/50 dark:bg-elevated-dark/20">
-          <div className="flex flex-wrap gap-2">
+        <div className="max-h-40 overflow-y-auto border-b border-border-light bg-surface-light/60 px-4 py-3 dark:border-border-dark/50 dark:bg-elevated-dark/20">
+          <div className="flex flex-wrap gap-1.5">
             {detail.members.map((m) => (
-              <span key={m.userId} className="inline-flex items-center gap-1.5 rounded-full bg-white px-2 py-1 text-xs shadow-sm dark:bg-elevated-dark">
+              <span key={m.userId} className="inline-flex items-center gap-1.5 rounded-full border border-border-light bg-white px-2 py-1 text-xs dark:border-border-dark/50 dark:bg-elevated-dark">
                 <Avatar name={m.name} src={m.avatarUrl ?? undefined} size={18} tintKey={m.userId} />
                 {m.name}
                 {m.role !== 'member' && <Badge tone="slate">{m.role}</Badge>}
@@ -471,110 +587,409 @@ const ConversationViewer: React.FC<{
       )}
 
       {/* Messages */}
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {loading ? (
-          <div className="grid place-items-center py-16"><Spinner /></div>
-        ) : error ? (
-          <EmptyState title="Could not load messages" hint={error} />
-        ) : messages.length === 0 ? (
-          <EmptyState title="No messages in this conversation" />
-        ) : (
-          <>
-            {olderCursor != null && (
-              <div className="mb-3 text-center">
-                <Button variant="ghost" size="sm" onClick={loadOlder} disabled={loadingOlder}>
-                  {loadingOlder ? <Spinner className="h-4 w-4" /> : 'Load older messages'}
-                </Button>
+      <div className="relative min-h-0 flex-1 bg-surface-light/30 dark:bg-transparent">
+        <div
+          ref={scrollRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 120);
+          }}
+          className="h-full overflow-y-auto px-2 py-4 sm:px-3"
+        >
+          {loading ? (
+            <MessageSkeleton />
+          ) : error ? (
+            <EmptyState title="Could not load messages" hint={error} />
+          ) : messages.length === 0 ? (
+            <EmptyState title="No messages in this conversation" icon={<MessageSquare size={20} />} />
+          ) : (
+            <>
+              {olderCursor != null ? (
+                <div className="mb-2 flex justify-center">
+                  <button
+                    onClick={loadOlder}
+                    disabled={loadingOlder}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-border-light bg-white px-3 py-1 text-xs font-medium text-text-secondary-light transition-colors hover:text-text-primary-light disabled:opacity-50 dark:border-border-dark/50 dark:bg-elevated-dark dark:text-text-secondary-dark"
+                  >
+                    {loadingOlder ? <Spinner className="h-3.5 w-3.5" /> : <><ChevronUp size={13} /> Load earlier messages</>}
+                  </button>
+                </div>
+              ) : (
+                <p className="mb-3 text-center text-[11px] text-text-secondary-light/70 dark:text-text-secondary-dark/60">
+                  — beginning of the conversation —
+                </p>
+              )}
+
+              <div>
+                {rows.map((row) => (
+                  row.kind === 'day'
+                    ? <DayDivider key={row.id} label={row.label} />
+                    : (
+                      <MessageRow
+                        key={row.id}
+                        message={row.message}
+                        grouped={row.grouped}
+                        mayRedact={mayRedact}
+                        deleterName={row.message.deletedBy ? nameOf(row.message.deletedBy) : null}
+                        onRedactClick={() => setTarget(row.message)}
+                        onAttachmentRemoveClick={(attachment) => setAttTarget({ message: row.message, attachment })}
+                      />
+                    )
+                ))}
               </div>
-            )}
-            <ul className="space-y-1">
-              {messages.map((m) => (
-                <MessageRow
-                  key={m.id}
-                  message={m}
-                  mayRedact={mayRedact}
-                  onRedactClick={() => setTarget(m)}
-                />
-              ))}
-            </ul>
-            <div ref={bottomRef} />
-          </>
+              <div ref={bottomRef} />
+            </>
+          )}
+        </div>
+
+        {!atBottom && !loading && messages.length > 0 && (
+          <button
+            onClick={() => scrollToBottom('smooth')}
+            className="absolute bottom-3 right-3 inline-flex items-center gap-1 rounded-full bg-blue-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg transition-colors hover:bg-blue-700"
+          >
+            <ChevronDown size={14} /> Latest
+          </button>
         )}
       </div>
 
       {target && (
-        <RedactDialog
-          conversationId={summary.id}
-          message={target}
+        <RemoveDialog
+          title="Remove this message"
+          consequence="The message is replaced with a “removed” placeholder for everyone. This is recorded in the audit log with your name, the reason, and the original text."
+          confirmLabel="Remove message"
+          endpoint={`/api/oversight/conversations/${summary.id}/messages/${target.id}/remove`}
+          preview={(
+            <>
+              <span className="font-medium text-text-primary-light dark:text-text-primary-dark">{target.senderName}</span>
+              <p className="mt-0.5 line-clamp-4 whitespace-pre-wrap break-words text-text-secondary-light dark:text-text-secondary-dark">
+                {renderBody(target) || '(no text)'}
+              </p>
+            </>
+          )}
           onClose={() => setTarget(null)}
           onDone={() => handleRedacted(target.id)}
+        />
+      )}
+
+      {attTarget && (
+        <RemoveDialog
+          title="Remove this attachment"
+          consequence="The file is detached from the message and deleted, so no one can open it again. The message text stays. This is recorded in the audit log with your name, the reason, and the file name."
+          confirmLabel="Remove attachment"
+          endpoint={`/api/oversight/conversations/${summary.id}/messages/${attTarget.message.id}/attachments/${attTarget.attachment.fileId}/remove`}
+          preview={(
+            <span className="flex items-center gap-2">
+              <FileText size={15} className="shrink-0 opacity-70" />
+              <span className="min-w-0">
+                <span className="block truncate font-medium text-text-primary-light dark:text-text-primary-dark">
+                  {attTarget.attachment.name}
+                </span>
+                <span className="block text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
+                  {attTarget.attachment.kind} · {formatBytes(attTarget.attachment.size)} · from {attTarget.message.senderName}
+                </span>
+              </span>
+            </span>
+          )}
+          onClose={() => setAttTarget(null)}
+          onDone={() => handleAttachmentRemoved(attTarget.message.id, attTarget.attachment.fileId)}
         />
       )}
     </div>
   );
 };
 
+const DayDivider: React.FC<{ label: string }> = ({ label }) => (
+  <div className="sticky top-0 z-10 my-3 flex items-center justify-center">
+    <span className="rounded-full border border-border-light bg-white/90 px-3 py-0.5 text-[11px] font-medium text-text-secondary-light shadow-sm backdrop-blur dark:border-border-dark/50 dark:bg-elevated-dark/90 dark:text-text-secondary-dark">
+      {label}
+    </span>
+  </div>
+);
+
+const MessageSkeleton: React.FC = () => (
+  <div className="space-y-4 px-2">
+    {[70, 45, 88, 30, 60].map((w, i) => (
+      <div key={i} className="flex gap-3">
+        <div className="h-8 w-8 shrink-0 animate-pulse rounded-full bg-slate-200 dark:bg-slate-700" />
+        <div className="flex-1 space-y-1.5">
+          <div className="h-2.5 w-24 animate-pulse rounded bg-slate-200 dark:bg-slate-700" />
+          <div className="h-3 animate-pulse rounded bg-slate-200 dark:bg-slate-700" style={{ width: `${w}%` }} />
+        </div>
+      </div>
+    ))}
+  </div>
+);
+
+const MENTION_HL = /(@[\p{L}\p{N}._-]+)/u;
+
+/** Body text with @mentions tinted — a light touch, no full rich-text parser. */
+const BodyText: React.FC<{ text: string; muted?: boolean }> = ({ text, muted }) => (
+  <p className={`whitespace-pre-wrap break-words text-sm leading-relaxed ${
+    muted ? 'text-text-secondary-light dark:text-text-secondary-dark' : 'text-text-primary-light dark:text-text-primary-dark'
+  }`}>
+    {text.split(MENTION_HL).map((part, i) => (
+      MENTION_HL.test(part)
+        ? <span key={i} className="rounded bg-blue-500/10 px-1 font-medium text-blue-600 dark:text-blue-300">{part}</span>
+        : <React.Fragment key={i}>{part}</React.Fragment>
+    ))}
+  </p>
+);
+
 const MessageRow: React.FC<{
   message: WireMessage;
+  grouped: boolean;
   mayRedact: boolean;
+  deleterName: string | null;
   onRedactClick: () => void;
-}> = ({ message: m, mayRedact, onRedactClick }) => {
+  onAttachmentRemoveClick: (a: WireAttachment) => void;
+}> = ({ message: m, grouped, mayRedact, deleterName, onRedactClick, onAttachmentRemoveClick }) => {
+  const [revealed, setRevealed] = useState(false);
+
   if (m.type === 'system') {
     return (
-      <li className="py-1 text-center text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
-        {renderBody(m) || 'system event'}
-      </li>
+      <div className="my-1.5 flex justify-center">
+        <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] text-text-secondary-light dark:bg-slate-700/50 dark:text-text-secondary-dark">
+          {renderBody(m) || 'system event'}
+        </span>
+      </div>
     );
   }
 
   const removed = Boolean(m.deletedAt);
+  const text = renderBody(m);
 
-  return (
-    <li className="group flex gap-2.5 rounded-lg px-2 py-1.5 hover:bg-slate-50 dark:hover:bg-card-dark/40">
-      <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={28} tintKey={m.senderId ?? m.senderName} className="mt-0.5" />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-2">
-          <span className="text-xs font-semibold text-text-primary-light dark:text-text-primary-dark">
-            {m.senderName}
+  /* ── Removed message: a rose card with the original behind a reveal ── */
+  if (removed) {
+    return (
+      <div className="group/msg my-1 rounded-lg border border-rose-200/70 bg-rose-50/50 px-3 py-2 dark:border-rose-900/40 dark:bg-rose-950/20">
+        <div className="flex items-center gap-2">
+          <Trash2 size={13} className="shrink-0 text-rose-500" />
+          <span className="text-xs text-rose-700 dark:text-rose-300">
+            <span className="font-semibold">{m.senderName}</span>’s message · removed
+            {deleterName && <> by {deleterName}</>}
+            {m.deletedAt && <> · {clock(m.deletedAt)}</>}
           </span>
-          <span className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark tabular-nums">
-            {new Date(m.createdAt).toLocaleString()}
-          </span>
-          {m.editedAt && !removed && (
-            <span className="text-[11px] text-text-secondary-light/70">(edited)</span>
-          )}
+          <button
+            onClick={() => setRevealed((v) => !v)}
+            className="ml-auto inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-rose-600 hover:bg-rose-100 dark:text-rose-300 dark:hover:bg-rose-900/40"
+          >
+            {revealed ? <><EyeOff size={12} /> Hide</> : <><Eye size={12} /> Reveal original</>}
+          </button>
         </div>
-        {removed ? (
-          <p className="mt-0.5 inline-flex items-center gap-1.5 text-xs italic text-text-secondary-light dark:text-text-secondary-dark">
-            <AlertTriangle size={12} className="text-amber-500" /> Message removed
-          </p>
-        ) : (
-          <>
-            <p className="mt-0.5 whitespace-pre-wrap break-words text-sm text-text-primary-light dark:text-text-primary-dark">
-              {renderBody(m)}
-            </p>
+        {revealed && (
+          <div className="mt-2 border-l-2 border-rose-300 pl-3 dark:border-rose-800">
+            <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-rose-400">Original content — audit-logged</p>
+            {text ? <BodyText text={text} muted /> : <p className="text-xs italic text-text-secondary-light">(no text)</p>}
             {m.attachments.length > 0 && (
-              <p className="mt-1 text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
-                📎 {m.attachments.map((a) => a.name || a.kind || 'attachment').join(', ')}
-              </p>
+              <OversightAttachments attachments={m.attachments} mayRedact={false} onRemove={() => {}} />
             )}
-          </>
+          </div>
         )}
       </div>
-      {mayRedact && !removed && (
+    );
+  }
+
+  /* ── Live message ── */
+  return (
+    <div className={`group/msg relative flex gap-3 rounded-lg px-2 transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.03] ${grouped ? 'py-0.5' : 'mt-1.5 py-1'}`}>
+      <div className="w-9 shrink-0">
+        {grouped ? (
+          <span className="mt-1 hidden w-9 text-center text-[10px] tabular-nums text-text-secondary-light/70 group-hover/msg:block dark:text-text-secondary-dark/60">
+            {clock(m.createdAt)}
+          </span>
+        ) : (
+          <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={36} tintKey={m.senderId ?? m.senderName} shape="rounded" />
+        )}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        {!grouped && (
+          <div className="flex items-baseline gap-2">
+            <span className="text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">{m.senderName}</span>
+            {m.senderRole && (
+              <span className="rounded bg-slate-100 px-1 text-[10px] font-medium uppercase text-slate-500 dark:bg-slate-700/60 dark:text-slate-300">
+                {m.senderRole}
+              </span>
+            )}
+            <span className="text-[11px] tabular-nums text-text-secondary-light dark:text-text-secondary-dark">
+              {clock(m.createdAt)}
+            </span>
+          </div>
+        )}
+
+        {m.replyTo && (
+          <div className="mb-1 flex items-center gap-1.5 border-l-2 border-border-light pl-2 text-xs text-text-secondary-light dark:border-border-dark/60 dark:text-text-secondary-dark">
+            <CornerUpLeft size={11} className="shrink-0" />
+            <span className="font-medium">{m.replyTo.senderName}</span>
+            <span className="truncate opacity-80">{m.replyTo.deleted ? 'removed message' : (m.replyTo.body || 'attachment')}</span>
+          </div>
+        )}
+
+        {m.forwardedFrom && (
+          <p className="mb-0.5 flex items-center gap-1 text-[11px] italic text-text-secondary-light dark:text-text-secondary-dark">
+            <Forward size={11} /> forwarded from {m.forwardedFrom.senderName}
+          </p>
+        )}
+
+        {text && <BodyText text={text} />}
+        {m.editedAt && <span className="ml-1 text-[10px] text-text-secondary-light/70">(edited)</span>}
+
+        {m.attachments.length > 0 && (
+          <OversightAttachments attachments={m.attachments} mayRedact={mayRedact} onRemove={onAttachmentRemoveClick} />
+        )}
+
+        {!!m.reactions?.length && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {m.reactions.map((r) => (
+              <span key={r.emoji} className="inline-flex items-center gap-0.5 rounded-full border border-border-light bg-surface-light px-1.5 py-0.5 text-[11px] dark:border-border-dark/50 dark:bg-elevated-dark/50">
+                {r.emoji} <span className="tabular-nums text-text-secondary-light dark:text-text-secondary-dark">{r.count}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {mayRedact && (
         <button
           onClick={onRedactClick}
-          className="invisible mt-0.5 h-fit shrink-0 self-start rounded-md border border-red-200 px-2 py-1 text-[11px] font-medium text-red-600 opacity-0 transition-opacity hover:bg-red-50 group-hover:visible group-hover:opacity-100 dark:border-red-900/50 dark:text-red-400 dark:hover:bg-red-900/20"
+          title="Remove this message for everyone"
+          className="invisible absolute -top-2 right-2 inline-flex items-center gap-1 rounded-md border border-rose-200 bg-white px-2 py-1 text-[11px] font-medium text-rose-600 shadow-sm transition-opacity hover:bg-rose-50 group-hover/msg:visible dark:border-rose-900/50 dark:bg-elevated-dark dark:text-rose-400 dark:hover:bg-rose-950/40"
         >
-          Remove
+          <Trash2 size={11} /> Remove
         </button>
       )}
-    </li>
+    </div>
   );
 };
 
 /* ────────────────────────────────────────────────────────────────────────── *
- * Redaction dialog
+ * Attachment preview + removal
+ * ────────────────────────────────────────────────────────────────────────── */
+
+const OversightAttachments: React.FC<{
+  attachments: WireAttachment[];
+  mayRedact: boolean;
+  onRemove: (a: WireAttachment) => void;
+}> = ({ attachments, mayRedact, onRemove }) => {
+  const media = attachments.filter((a) => a.kind === 'image' || a.kind === 'video');
+  const voice = attachments.filter((a) => a.kind === 'audio');
+  const docs = attachments.filter((a) => a.kind === 'document' || a.kind === 'other');
+  const [lightbox, setLightbox] = useState<number | null>(null);
+
+  return (
+    <div className="mt-1.5 space-y-1.5">
+      {media.length > 0 && (
+        <div className={`grid gap-1.5 ${media.length === 1 ? 'max-w-xs grid-cols-1' : 'max-w-md grid-cols-2'}`}>
+          {media.map((a, i) => (
+            <MediaTile
+              key={a.fileId}
+              attachment={a}
+              mayRedact={mayRedact}
+              onOpen={() => setLightbox(i)}
+              onRemove={() => onRemove(a)}
+            />
+          ))}
+        </div>
+      )}
+
+      {voice.map((a) => (
+        <AttachmentShell key={a.fileId} mayRedact={mayRedact} onRemove={() => onRemove(a)}>
+          <div className="min-w-[13rem] flex-1"><VoiceNote attachment={a} onDark={false} /></div>
+        </AttachmentShell>
+      ))}
+
+      {docs.map((a) => (
+        <AttachmentShell key={a.fileId} mayRedact={mayRedact} onRemove={() => onRemove(a)}>
+          <FileText size={16} className="shrink-0 opacity-70" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-xs font-medium text-text-primary-light dark:text-text-primary-dark">{a.name}</span>
+            <span className="block text-[11px] text-text-secondary-light dark:text-text-secondary-dark">{formatBytes(a.size)}</span>
+          </span>
+          <button
+            onClick={() => void downloadFile(a.fileId, a.name)}
+            title={`Download ${a.name}`}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-text-secondary-light hover:bg-black/5 dark:text-text-secondary-dark dark:hover:bg-white/10"
+          >
+            <Download size={14} />
+          </button>
+        </AttachmentShell>
+      ))}
+
+      {lightbox !== null && (
+        <Lightbox
+          items={media}
+          index={lightbox}
+          onIndex={setLightbox}
+          onClose={() => setLightbox(null)}
+        />
+      )}
+    </div>
+  );
+};
+
+/** The chrome around a non-media attachment: a rounded row with a hover "remove". */
+const AttachmentShell: React.FC<{
+  mayRedact: boolean;
+  onRemove: () => void;
+  children: React.ReactNode;
+}> = ({ mayRedact, onRemove, children }) => (
+  <div className="group/att flex max-w-md items-center gap-2.5 rounded-xl bg-surface-light px-2.5 py-2 dark:bg-card-dark/50">
+    {children}
+    {mayRedact && (
+      <button
+        onClick={onRemove}
+        title="Remove this attachment"
+        className="invisible inline-flex shrink-0 items-center gap-1 rounded-md border border-red-200 px-1.5 py-1 text-[11px] font-medium text-red-600 opacity-0 transition-opacity hover:bg-red-50 group-hover/att:visible group-hover/att:opacity-100 dark:border-red-900/50 dark:text-red-400 dark:hover:bg-red-900/20"
+      >
+        <Trash2 size={11} />
+      </button>
+    )}
+  </div>
+);
+
+const MediaTile: React.FC<{
+  attachment: WireAttachment;
+  mayRedact: boolean;
+  onOpen: () => void;
+  onRemove: () => void;
+}> = ({ attachment: a, mayRedact, onOpen, onRemove }) => {
+  const { url, failed } = useMediaUrl(a.fileId, true);
+  const ratio = a.width && a.height ? Math.min(Math.max(a.width / a.height, 0.6), 2) : 4 / 3;
+
+  return (
+    <div className="group/tile relative overflow-hidden rounded-xl bg-slate-200 dark:bg-slate-700" style={{ aspectRatio: String(ratio) }}>
+      <button onClick={onOpen} className="block h-full w-full" title={`Open ${a.name}`}>
+        {failed ? (
+          <span className="grid h-full w-full place-items-center text-slate-500"><ImageOff size={18} /></span>
+        ) : url ? (
+          <img src={url} alt={a.name} className="h-full w-full object-cover transition-transform duration-200 group-hover/tile:scale-[1.02]" />
+        ) : (
+          <span className="grid h-full w-full place-items-center"><Spinner className="h-4 w-4" /></span>
+        )}
+      </button>
+      {a.kind === 'video' && (
+        <span className="pointer-events-none absolute inset-0 grid place-items-center">
+          <span className="grid h-9 w-9 place-items-center rounded-full bg-black/55 text-white"><Play size={16} className="translate-x-px" /></span>
+        </span>
+      )}
+      <span className="pointer-events-none absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/60 to-transparent px-2 py-1 text-[10px] text-white">
+        {a.name}
+      </span>
+      {mayRedact && (
+        <button
+          onClick={onRemove}
+          title="Remove this attachment"
+          className="invisible absolute right-1.5 top-1.5 grid h-7 w-7 place-items-center rounded-lg bg-black/55 text-white opacity-0 transition-opacity hover:bg-red-600 group-hover/tile:visible group-hover/tile:opacity-100"
+        >
+          <Trash2 size={13} />
+        </button>
+      )}
+    </div>
+  );
+};
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Removal dialog — shared by message and attachment removal
  * ────────────────────────────────────────────────────────────────────────── */
 
 const REASONS = [
@@ -588,12 +1003,15 @@ const REASONS = [
   'Other policy violation',
 ];
 
-const RedactDialog: React.FC<{
-  conversationId: string;
-  message: WireMessage;
+const RemoveDialog: React.FC<{
+  title: string;
+  consequence: string;
+  confirmLabel: string;
+  endpoint: string;
+  preview: React.ReactNode;
   onClose: () => void;
   onDone: () => void;
-}> = ({ conversationId, message, onClose, onDone }) => {
+}> = ({ title, consequence, confirmLabel, endpoint, preview, onClose, onDone }) => {
   const [preset, setPreset] = useState('');
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -602,50 +1020,53 @@ const RedactDialog: React.FC<{
   const reason = [preset, note.trim()].filter(Boolean).join(' — ');
   const valid = preset !== '' || note.trim().length >= 3;
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const submit = async () => {
-    if (!valid) return;
+    if (!valid || submitting) return;
     setSubmitting(true);
     setError(null);
     try {
-      await apiPost(`/api/oversight/conversations/${conversationId}/messages/${message.id}/remove`, { reason });
+      await apiPost(endpoint, { reason });
       onDone();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : 'Could not remove the message.');
+      setError(e instanceof ApiError ? e.message : 'Could not complete the removal.');
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={onClose}>
-      <Card className="w-full max-w-md p-5" >
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 backdrop-blur-sm" onClick={onClose}>
+      <Card className="w-full max-w-md p-5 shadow-2xl">
         <div onClick={(e) => e.stopPropagation()}>
           <div className="flex items-start justify-between">
             <h3 className="inline-flex items-center gap-2 text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
-              <AlertTriangle size={16} className="text-red-500" /> Remove this message
+              <AlertTriangle size={16} className="text-red-500" /> {title}
             </h3>
-            <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X size={16} /></button>
+            <button onClick={onClose} aria-label="Close" className="text-slate-400 hover:text-slate-600"><X size={16} /></button>
           </div>
 
           <div className="mt-3 rounded-lg border border-border-light bg-surface-light p-2.5 text-xs dark:border-border-dark/50 dark:bg-elevated-dark/40">
-            <span className="font-medium text-text-primary-light dark:text-text-primary-dark">{message.senderName}</span>
-            <p className="mt-0.5 line-clamp-4 whitespace-pre-wrap break-words text-text-secondary-light dark:text-text-secondary-dark">
-              {renderBody(message) || '(no text)'}
-            </p>
+            {preview}
           </div>
 
-          <p className="mt-3 text-xs text-text-secondary-light dark:text-text-secondary-dark">
-            The message is replaced with a “removed” placeholder for everyone. This is recorded
-            in the audit log with your name, the reason, and the original text.
-          </p>
+          <p className="mt-3 text-xs text-text-secondary-light dark:text-text-secondary-dark">{consequence}</p>
 
-          <div className="mt-3 space-y-1.5">
+          <fieldset className="mt-3 space-y-1.5">
+            <legend className="mb-1 text-[11px] font-medium uppercase tracking-wide text-text-secondary-light dark:text-text-secondary-dark">
+              Reason
+            </legend>
             {REASONS.map((r) => (
               <label key={r} className="flex cursor-pointer items-center gap-2 text-sm text-text-primary-light dark:text-text-primary-dark">
                 <input type="radio" name="reason" checked={preset === r} onChange={() => setPreset(r)} />
                 {r}
               </label>
             ))}
-          </div>
+          </fieldset>
 
           <textarea
             value={note}
@@ -660,7 +1081,7 @@ const RedactDialog: React.FC<{
           <div className="mt-4 flex justify-end gap-2">
             <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
             <Button variant="danger" size="sm" onClick={submit} disabled={!valid || submitting}>
-              {submitting ? <Spinner className="h-4 w-4" /> : 'Remove message'}
+              {submitting ? <Spinner className="h-4 w-4" /> : confirmLabel}
             </Button>
           </div>
         </div>

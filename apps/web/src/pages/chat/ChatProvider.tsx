@@ -555,7 +555,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       senderAvatarUrl: user.avatarUrl ?? null,
       senderRole: null,
       createdAt: new Date().toISOString(),
-      editedAt: null, deletedAt: null, nonce,
+      editedAt: null, deletedAt: null, deletedBy: null, nonce,
       reactions: [], attachments: [],
       threadRootId: input.threadRootId ?? null,
       replyCount: 0, threadLastAt: null,

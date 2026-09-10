@@ -26,7 +26,8 @@ import { getPool } from '@tupo/db';
  */
 
 export type AccessReason =
-  | 'owner' | 'conversation' | 'conversation_avatar' | 'mail' | 'feed' | 'denied' | 'missing';
+  | 'owner' | 'conversation' | 'conversation_avatar' | 'mail' | 'feed'
+  | 'oversight' | 'denied' | 'missing';
 
 export interface AccessDecision {
   allowed: boolean;
@@ -152,6 +153,34 @@ export async function canReadFile(userId: string, fileId: string): Promise<Acces
     [fileId],
   );
   if (viaFeed[0]) return { allowed: true, reason: 'feed' };
+
+  /*
+   * Academic-conduct oversight (OVERSIGHT_VIEW_ALL).
+   *
+   * A reviewer with that permission may read any conversation's messages
+   * whether or not they are a member (see apps/api routes/oversight.ts), so the
+   * attachments carried by those messages have to open too — a redacted photo
+   * they cannot see is a hole in the same review. `deleted_at` is deliberately
+   * NOT filtered here: a message removed for breaking the rules is exactly the
+   * one whose attachment a review needs, and the deleted-message content is
+   * shown to oversight anyway. Deliberately last: only reached for a file no
+   * ordinary grant covers, checked against the live permission set, not a claim
+   * in the token. Same shape as the FILE_DELETE_ANY lookup in the delete route.
+   */
+  const { rows: viaOversight } = await getPool().query(
+    `SELECT 1
+       FROM message_attachments ma
+       JOIN conversations c ON c.id = ma.conversation_id AND c.deleted_at IS NULL
+      WHERE ma.file_id = $1
+        AND EXISTS (
+          SELECT 1 FROM users u
+            JOIN role_permissions rp ON rp.role_id = u.role_id
+            JOIN permissions p ON p.id = rp.permission_id
+           WHERE u.id = $2 AND p.key = 'OVERSIGHT_VIEW_ALL')
+      LIMIT 1`,
+    [fileId, userId],
+  );
+  if (viaOversight[0]) return { allowed: true, reason: 'oversight' };
 
   return { allowed: false, reason: 'denied' };
 }

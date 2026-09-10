@@ -753,6 +753,8 @@ interface MessageRow {
   id: string; conversation_id: string; seq: string; type: MessageType;
   body: string | null; sender_id: string; created_at: string;
   edited_at: string | null; deleted_at: string | null; nonce: string | null;
+  deleted_by: string | null;
+  deleted_body: string | null; deleted_attachments: WireAttachment[] | null;
   thread_root_id: string | null; reply_count: number; thread_last_at: string | null;
   reply_to_id: string | null; pinned_at: string | null; pinned_by: string | null;
   edited_count: number; forwarded_from: WireMessage['forwardedFrom'];
@@ -774,7 +776,8 @@ interface MessageRow {
  */
 const MESSAGE_SELECT = `
   SELECT m.id, m.conversation_id, m.seq, m.type, m.body, m.sender_id, m.created_at,
-         m.edited_at, m.deleted_at, m.nonce, m.thread_root_id, m.reply_count,
+         m.edited_at, m.deleted_at, m.deleted_by, m.deleted_body, m.deleted_attachments,
+         m.nonce, m.thread_root_id, m.reply_count,
          m.thread_last_at, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_count,
          m.forwarded_from, m.metadata, m.attachments,
          u.name AS sender_name, u.avatar_url AS sender_avatar, u.role AS sender_role,
@@ -793,7 +796,17 @@ const MESSAGE_SELECT = `
     LEFT JOIN messages rp ON rp.id = m.reply_to_id AND rp.conversation_id = m.conversation_id
     LEFT JOIN users ru ON ru.id = rp.sender_id`;
 
-function toWireMessage(r: MessageRow, viewerId: string, memberCount = 2): WireMessage {
+/**
+ * @param revealDeleted  Oversight only. A deleted message normally comes back
+ *   with a null body and no attachments — the tombstone. With this set, the
+ *   content that was moved aside on deletion (`deleted_body`,
+ *   `deleted_attachments`) is put back into `body`/`attachments` so an
+ *   academic-conduct review can read what was said. Never pass it on an
+ *   ordinary read path.
+ */
+function toWireMessage(
+  r: MessageRow, viewerId: string, memberCount = 2, revealDeleted = false,
+): WireMessage {
   /* Reactions arrive as a flat (emoji, user) list and are folded here rather
    * than in SQL: grouping in Postgres would need a second aggregate level and
    * produce the same bytes on the wire. */
@@ -824,14 +837,17 @@ function toWireMessage(r: MessageRow, viewerId: string, memberCount = 2): WireMe
     else if (readCount > 0) delivery = 'delivered';
   }
 
+  const reveal = Boolean(r.deleted_at) && revealDeleted;
+
   return {
     id: r.id,
     conversationId: r.conversation_id,
     seq: Number(r.seq),
     type: r.type,
     // A deleted message keeps its row and its place in the sequence but loses
-    // its body on the way out. The tombstone is rendered client-side.
-    body: r.deleted_at ? null : r.body,
+    // its body on the way out. The tombstone is rendered client-side — unless
+    // this is an oversight read, which puts the preserved content back.
+    body: r.deleted_at ? (reveal ? (r.deleted_body ?? r.body) : null) : r.body,
     senderId: r.sender_id,
     senderName: r.sender_name ?? 'Unknown',
     senderAvatarUrl: r.sender_avatar,
@@ -839,9 +855,12 @@ function toWireMessage(r: MessageRow, viewerId: string, memberCount = 2): WireMe
     createdAt: r.created_at,
     editedAt: r.edited_at,
     deletedAt: r.deleted_at,
+    deletedBy: r.deleted_by ?? null,
     nonce: r.nonce,
     reactions: r.deleted_at ? [] : reactions,
-    attachments: r.deleted_at ? [] : (r.attachments ?? []),
+    attachments: r.deleted_at
+      ? (reveal ? (r.deleted_attachments ?? r.attachments ?? []) : [])
+      : (r.attachments ?? []),
     threadRootId: r.thread_root_id,
     replyCount: r.reply_count ?? 0,
     threadLastAt: r.thread_last_at,
@@ -898,6 +917,10 @@ export interface ListMessagesOptions {
   limit?: number;
   /** Only replies inside this thread. Omit for the main channel flow. */
   threadRootId?: string;
+  /** Oversight only: return the preserved content of deleted messages instead of
+   *  a blank tombstone. The route that sets this must hold OVERSIGHT_VIEW_ALL
+   *  and must audit-log the read. */
+  revealDeleted?: boolean;
 }
 
 /**
@@ -939,7 +962,9 @@ export async function listMessages(
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const count = await memberCountOf(conversationId);
-  const messages = await hydrateMessages(page.map((r) => toWireMessage(r, viewerId, count)));
+  const messages = await hydrateMessages(
+    page.map((r) => toWireMessage(r, viewerId, count, opts.revealDeleted === true)),
+  );
   if (opts.after === undefined) messages.reverse();
 
   return {
@@ -1540,8 +1565,14 @@ export async function deleteMessage(
   }
 
   await getPool().query(
+    // The content is *moved*, not destroyed: cleared from the fields every
+    // ordinary read looks at, kept in the deleted_* pair that only the
+    // oversight path (OVERSIGHT_VIEW_ALL, audit-logged) ever selects.
     `UPDATE messages
-        SET deleted_at = now(), deleted_by = $3, body = NULL, attachments = '[]'::jsonb
+        SET deleted_at = now(), deleted_by = $3,
+            deleted_body = COALESCE(deleted_body, body),
+            deleted_attachments = COALESCE(deleted_attachments, attachments),
+            body = NULL, attachments = '[]'::jsonb
       WHERE conversation_id = $1 AND id = $2`,
     [conversationId, messageId, userId],
   );

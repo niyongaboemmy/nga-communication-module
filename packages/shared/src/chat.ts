@@ -115,6 +115,9 @@ export interface WireMessage {
   createdAt: string;
   editedAt: string | null;
   deletedAt: string | null;
+  /** Who deleted it — the sender for a self-delete, a moderator or an oversight
+   *  reviewer otherwise. Null while the message is live. */
+  deletedBy: string | null;
   /** The client's own id for this send, echoed back so an optimistic row can be
    *  reconciled instead of duplicated (FR-MSG-23). */
   nonce: string | null;

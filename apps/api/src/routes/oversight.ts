@@ -95,7 +95,10 @@ router.get('/conversations/:id/messages',
     // 404s here if the conversation does not exist, before we log anything.
     const conversation = await chat.oversightGetConversation(id);
 
-    const page = await chat.listMessages(me.id, id, {
+    // Deleted messages come back with their preserved content, not a blank
+    // tombstone — the whole point of an academic-conduct review is being able
+    // to read the message that was taken down.
+    const page = await chat.oversightListMessages(me.id, id, {
       before: num(req.query.before),
       after: num(req.query.after),
       limit: num(req.query.limit),
@@ -112,6 +115,7 @@ router.get('/conversations/:id/messages',
         conversationName: conversation.name,
         isPrivate: conversation.isPrivate,
         messagesReturned: page.messages.length,
+        deletedMessagesRevealed: page.messages.filter((m) => m.deletedAt).length,
         before: num(req.query.before) ?? null,
       },
       ipAddress: req.ip,
@@ -179,6 +183,57 @@ router.post('/conversations/:id/messages/:messageId/remove',
     }
 
     res.json(ok({ removed: true, seq: result.seq }));
+  }));
+
+/**
+ * Remove one attachment from a message, leaving the message itself.
+ *
+ * A message can be fine while a file it carries is not — a photo that should
+ * never have been posted, a document with a pupil's personal data. Same
+ * safeguards as a message removal: a reason is required, the file is detached
+ * and soft-deleted so it stops being served, and it is all audit-logged with
+ * the reason and the file name. The conversation's members get the updated
+ * message in real time.
+ */
+router.post('/conversations/:id/messages/:messageId/attachments/:fileId/remove',
+  authorizePermission('OVERSIGHT_MESSAGE_DELETE'), wrap(async (req, res) => {
+    const me = actor(req);
+    const { id, messageId, fileId } = req.params as {
+      id: string; messageId: string; fileId: string;
+    };
+
+    const reason = String(req.body?.reason ?? '').trim();
+    if (reason.length < 3) {
+      return res.status(400).json(fail('A reason is required to remove an attachment.'));
+    }
+
+    const result = await chat.oversightRemoveAttachment(id, messageId, fileId);
+
+    await audit({
+      actorId: me.id,
+      action: 'chat.oversight.attachment.remove',
+      targetType: 'message',
+      targetId: messageId,
+      metadata: {
+        conversationId: id,
+        conversationName: result.conversationName,
+        fileId,
+        fileName: result.fileName,
+        fileKind: result.fileKind,
+        authorId: result.senderId,
+        authorName: result.senderName,
+        seq: result.seq,
+        reason,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    // Everyone looking at the conversation repaints the message without its file.
+    const message = await chat.getMessage(me.id, id, messageId);
+    if (message) emitToConversation(id, 'message:updated', { conversationId: id, message });
+
+    res.json(ok({ removed: true, remaining: result.remaining, message }));
   }));
 
 export default router;

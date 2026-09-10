@@ -28,6 +28,7 @@ const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
                l.slice(l.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')]));
 
 const API = 'http://localhost:5190';
+const FILES = 'http://localhost:5192';
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
 
 const pass = [], fails = [];
@@ -62,6 +63,30 @@ const api = async (path, token, init = {}) => {
   return { status: res.status, body, data: body.data };
 };
 
+/** Ticket → PUT bytes → file id, straight at the files service. */
+async function upload(who, name, bytes, mime) {
+  const t = await fetch(`${FILES}/api/files/tickets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${who.token}` },
+    body: JSON.stringify({ name, size: bytes.length, mime }),
+  }).then((r) => r.json());
+  if (!t.data?.fileId) throw new Error(`ticket failed: ${JSON.stringify(t)}`);
+  const put = await fetch(`${FILES}${t.data.uploadUrl}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${who.token}`, 'Content-Type': mime },
+    body: bytes,
+  });
+  if (!put.ok) throw new Error(`upload failed: ${put.status}`);
+  return t.data.fileId;
+}
+
+const fileStatus = async (fileId, token) => {
+  const r = await fetch(`${FILES}/api/files/${fileId}/content`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return r.status;
+};
+
 /* ══════════════════════════════════════════════════════════════════════════ */
 
 const admin = await makeUser('Oversight Admin', 'Admin');
@@ -69,7 +94,8 @@ const teacher = await makeUser('Oversight Teacher');
 const pupilA = await makeUser('Oversight Pupil A', 'Student');
 const pupilB = await makeUser('Oversight Pupil B', 'Student');
 const reviewer = await makeUser('Oversight Reviewer');   // gets a custom view-only role
-const ids = [admin.id, teacher.id, pupilA.id, pupilB.id, reviewer.id];
+const stranger = await makeUser('Oversight Stranger');   // plain staff, no oversight, in nothing
+const ids = [admin.id, teacher.id, pupilA.id, pupilB.id, reviewer.id, stranger.id];
 
 try {
   /* ── A private group and a peer DM the admin is not in ─────────────────── */
@@ -169,14 +195,24 @@ try {
       method: 'POST', body: JSON.stringify({ reason: 'Academic dishonesty — plan to cheat in an exam' }) });
   check('a message can be removed with a reason', removed.status === 200, String(removed.status));
 
-  const { rows: gone } = await pool.query('SELECT body, deleted_by FROM messages WHERE id = $1', [targetMsg.id]);
-  check('the body is blanked and the remover recorded',
+  const { rows: gone } = await pool.query(
+    'SELECT body, deleted_by, deleted_body FROM messages WHERE id = $1', [targetMsg.id]);
+  check('the live body column is blanked and the remover recorded',
     gone[0].body === null && gone[0].deleted_by === admin.id);
+  check('but the original text is preserved out of ordinary reach',
+    gone[0].deleted_body === 'lets copy the answers in the exam', String(gone[0].deleted_body));
+
+  const memberView = await api(`/api/chat/conversations/${groupId}/messages`, pupilB.token);
+  check('an ordinary member sees a tombstone, not the text',
+    memberView.data.messages.find((m) => m.id === targetMsg.id)?.body === null
+      && memberView.data.messages.find((m) => m.id === targetMsg.id)?.deletedAt !== null);
 
   const afterView = await api(`/api/oversight/conversations/${groupId}/messages`, admin.token);
-  check('everyone now sees a tombstone, not the text',
-    afterView.data.messages.find((m) => m.id === targetMsg.id)?.body === null
-      && afterView.data.messages.find((m) => m.id === targetMsg.id)?.deletedAt !== null);
+  const revealed = afterView.data.messages.find((m) => m.id === targetMsg.id);
+  check('oversight can still read what a removed message said',
+    revealed?.body === 'lets copy the answers in the exam'
+      && revealed?.deletedAt !== null && revealed?.deletedBy === admin.id,
+    JSON.stringify({ body: revealed?.body, deletedBy: revealed?.deletedBy }));
 
   await sleep(150);
   const { rows: redactLog } = await pool.query(
@@ -193,6 +229,63 @@ try {
       method: 'POST', body: JSON.stringify({ reason: 'Academic dishonesty' }) });
   check('a message cannot be removed twice', twice.status === 409, String(twice.status));
 
+  /* ── Attachments: preview and removal ────────────────────────────────── */
+  step('attachments');
+
+  const fileId = await upload(pupilA, 'answers.pdf', Buffer.from('%PDF-1.4 leaked exam answers'), 'application/pdf');
+  const withFile = await api(`/api/chat/conversations/${dmId}/messages`, teacher.token, {
+    method: 'POST', body: JSON.stringify({ body: 'the file', nonce: nonce(), attachments: [fileId] }) });
+  // teacher is a member of the DM; pupilA owns the file. Attach via a message
+  // the pupil sends instead so ownership lines up.
+  let attMsgId = withFile.data?.message?.id;
+  if (withFile.status !== 201) {
+    const byPupil = await api(`/api/chat/conversations/${dmId}/messages`, pupilA.token, {
+      method: 'POST', body: JSON.stringify({ body: 'the file', nonce: nonce(), attachments: [fileId] }) });
+    attMsgId = byPupil.data.message.id;
+  }
+  check('a message with an attachment exists', Boolean(attMsgId), String(withFile.status));
+
+  const outsiderFile = await fileStatus(fileId, stranger.token);
+  check('a plain staff outsider cannot open the attachment', outsiderFile === 404, String(outsiderFile));
+
+  const adminFile = await fileStatus(fileId, admin.token);
+  check('an oversight admin CAN open the attachment for preview', adminFile === 200, String(adminFile));
+
+  const noReasonAtt = await api(
+    `/api/oversight/conversations/${dmId}/messages/${attMsgId}/attachments/${fileId}/remove`, admin.token, {
+      method: 'POST', body: JSON.stringify({}) });
+  check('removing an attachment needs a reason', noReasonAtt.status === 400, String(noReasonAtt.status));
+
+  const revAtt = await api(
+    `/api/oversight/conversations/${dmId}/messages/${attMsgId}/attachments/${fileId}/remove`, reviewer.token, {
+      method: 'POST', body: JSON.stringify({ reason: 'Academic dishonesty' }) });
+  check('a view-only reviewer cannot remove an attachment', revAtt.status === 403, String(revAtt.status));
+
+  const rmAtt = await api(
+    `/api/oversight/conversations/${dmId}/messages/${attMsgId}/attachments/${fileId}/remove`, admin.token, {
+      method: 'POST', body: JSON.stringify({ reason: 'Academic dishonesty — leaked exam answers' }) });
+  check('an oversight admin can remove the attachment', rmAtt.status === 200, String(rmAtt.status));
+
+  const { rows: msgAfter } = await pool.query('SELECT body, attachments, deleted_at FROM messages WHERE id = $1', [attMsgId]);
+  check('the message text stays, the attachment is gone from it',
+    msgAfter[0].body === 'the file' && msgAfter[0].deleted_at === null
+      && Array.isArray(msgAfter[0].attachments) && msgAfter[0].attachments.length === 0,
+    JSON.stringify(msgAfter[0]));
+
+  const { rows: fileAfter } = await pool.query('SELECT deleted_at FROM files WHERE id = $1', [fileId]);
+  check('and the file itself is soft-deleted so it can no longer be served', fileAfter[0].deleted_at !== null);
+
+  const goneFile = await fileStatus(fileId, admin.token);
+  check('the attachment no longer opens for anyone', goneFile === 404, String(goneFile));
+
+  await sleep(150);
+  const { rows: attLog } = await pool.query(
+    `SELECT metadata FROM audit_log WHERE action = 'chat.oversight.attachment.remove' AND target_id = $1`, [attMsgId]);
+  check('the attachment removal is audit-logged with the reason and file name',
+    attLog.length === 1 && attLog[0].metadata.fileName === 'answers.pdf'
+      && attLog[0].metadata.reason.startsWith('Academic dishonesty'),
+    JSON.stringify(attLog[0]?.metadata));
+
   /* ── No back door to participation ───────────────────────────────────── */
   step('read-and-redact only');
 
@@ -203,14 +296,16 @@ try {
   const stats = await api('/api/oversight/stats', admin.token);
   check('the overview counts are available',
     stats.status === 200 && typeof stats.data.stats.conversations === 'number'
-      && stats.data.stats.redactions >= 1,
+      && stats.data.stats.redactions >= 1 && stats.data.stats.attachmentsRemoved >= 1,
     JSON.stringify(stats.data?.stats));
 
 } catch (err) {
   fails.push(`❌ threw: ${err instanceof Error ? err.stack : err}`);
 } finally {
+  try { await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]); } catch { /* may not exist */ }
   await purgeUsers(pool, ids);
   await pool.query('DELETE FROM roles WHERE is_system = false AND name LIKE \'Reviewer %\'').catch(() => {});
+  await pool.query('DELETE FROM roles WHERE is_system = false AND name = \'Viewer Only\'').catch(() => {});
   await pool.end();
 }
 

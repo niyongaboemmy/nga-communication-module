@@ -14,6 +14,7 @@ const TONE: Record<string, 'blue' | 'green' | 'amber' | 'red' | 'slate'> = {
   'user.role.assign': 'amber', 'user.suspended': 'red', 'user.active': 'green',
   'chat.oversight.conversation.read': 'amber',
   'chat.oversight.message.remove': 'red',
+  'chat.oversight.attachment.remove': 'red',
 };
 
 export const AuditLog: React.FC = () => {

@@ -16,8 +16,11 @@
  * must never be reachable except behind those permissions.
  */
 import { getPool } from '@tupo/db';
-import type { ConversationType, WireMember } from '@tupo/shared';
-import { ChatError, listMembers, refreshPreview } from './service.js';
+import type { ConversationType, MessagePage, WireMember } from '@tupo/shared';
+import {
+  ChatError, listMembers, listMessages, refreshPreview,
+  type ListMessagesOptions,
+} from './service.js';
 
 export interface OversightConversation {
   id: string;
@@ -239,8 +242,13 @@ export async function oversightDeleteMessage(
   if (row.type === 'system') throw new ChatError('System messages cannot be removed.', 400);
 
   await pool.query(
+    // Content is preserved in deleted_* so a later review can still read it —
+    // the same move chat.deleteMessage makes.
     `UPDATE messages
-        SET deleted_at = now(), deleted_by = $3, body = NULL, attachments = '[]'::jsonb
+        SET deleted_at = now(), deleted_by = $3,
+            deleted_body = COALESCE(deleted_body, body),
+            deleted_attachments = COALESCE(deleted_attachments, attachments),
+            body = NULL, attachments = '[]'::jsonb
       WHERE conversation_id = $1 AND id = $2`,
     [conversationId, messageId, actorId],
   );
@@ -271,14 +279,110 @@ export async function oversightDeleteMessage(
   };
 }
 
+/**
+ * A page of a conversation's messages, for review.
+ *
+ * The one difference from an ordinary read: a deleted message comes back with
+ * the content it was carrying when it was deleted, not a blank tombstone —
+ * `deletedAt` and `deletedBy` still say it was removed and by whom. The caller
+ * (routes/oversight.ts) audit-logs every page.
+ */
+export async function oversightListMessages(
+  reviewerId: string, conversationId: string,
+  opts: Omit<ListMessagesOptions, 'revealDeleted'> = {},
+): Promise<MessagePage> {
+  return listMessages(reviewerId, conversationId, { ...opts, revealDeleted: true });
+}
+
+export interface OversightAttachmentRemoval {
+  fileName: string;
+  fileKind: string;
+  senderId: string | null;
+  senderName: string | null;
+  seq: number;
+  conversationName: string | null;
+  /** Attachments still on the message after this one is pulled. */
+  remaining: number;
+}
+
+/**
+ * Pull a single attachment off a message.
+ *
+ * A message can be perfectly fine while a file it carries is not — a photo that
+ * should never have been shared, a document with someone's personal data — so
+ * removing the attachment is a separate action from removing the message. The
+ * message text stays; the file is detached from it (`message_attachments` row
+ * gone, `attachments` JSON entry gone) and soft-deleted, which is what stops
+ * `canReadFile` from ever serving it again. The caller must pass a reason and
+ * write the audit row.
+ */
+export async function oversightRemoveAttachment(
+  conversationId: string, messageId: string, fileId: string,
+): Promise<OversightAttachmentRemoval> {
+  const pool = getPool();
+  const { rows } = await pool.query<{
+    sender_id: string | null; deleted_at: string | null; seq: string;
+    attachments: { fileId: string; name?: string; kind?: string }[] | null;
+    sender_name: string | null; conversation_name: string | null;
+  }>(
+    `SELECT m.sender_id, m.deleted_at, m.seq, m.attachments,
+            u.name AS sender_name, c.name AS conversation_name
+       FROM messages m
+       LEFT JOIN users u ON u.id = m.sender_id
+       JOIN conversations c ON c.id = m.conversation_id
+      WHERE m.conversation_id = $1 AND m.id = $2`,
+    [conversationId, messageId],
+  );
+  const row = rows[0];
+  if (!row) throw new ChatError('Message not found.', 404);
+  if (row.deleted_at) throw new ChatError('That message is already deleted.', 409);
+
+  const attachments = row.attachments ?? [];
+  const hit = attachments.find((a) => a.fileId === fileId);
+  if (!hit) throw new ChatError('That attachment is not on this message.', 404);
+
+  const { rows: fileRows } = await pool.query<{ original_name: string; mime_type: string }>(
+    'SELECT original_name, mime_type FROM files WHERE id = $1', [fileId],
+  );
+
+  const remaining = attachments.filter((a) => a.fileId !== fileId);
+  await pool.query(
+    `UPDATE messages
+        SET attachments = $3::jsonb,
+            type = CASE WHEN body IS NULL AND jsonb_array_length($3::jsonb) = 0
+                        THEN 'text' ELSE type END
+      WHERE conversation_id = $1 AND id = $2`,
+    [conversationId, messageId, JSON.stringify(remaining)],
+  );
+  await pool.query(
+    'DELETE FROM message_attachments WHERE message_id = $1 AND file_id = $2',
+    [messageId, fileId],
+  );
+  await pool.query(
+    'UPDATE files SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL',
+    [fileId],
+  );
+  await refreshPreview(conversationId);
+
+  return {
+    fileName: fileRows[0]?.original_name ?? hit.name ?? 'file',
+    fileKind: hit.kind ?? fileRows[0]?.mime_type ?? 'file',
+    senderId: row.sender_id,
+    senderName: row.sender_name,
+    seq: Number(row.seq),
+    conversationName: row.conversation_name,
+    remaining: remaining.length,
+  };
+}
+
 /** Headline counts for the oversight landing page. */
 export async function oversightStats(): Promise<{
   conversations: number; dms: number; groups: number; channels: number;
-  messages: number; redactions: number;
+  messages: number; redactions: number; attachmentsRemoved: number;
 }> {
   const { rows } = await getPool().query<{
     conversations: string; dms: string; groups: string; channels: string;
-    messages: string; redactions: string;
+    messages: string; redactions: string; attachments_removed: string;
   }>(
     `SELECT
        (SELECT count(*) FROM conversations WHERE deleted_at IS NULL)::text AS conversations,
@@ -286,7 +390,8 @@ export async function oversightStats(): Promise<{
        (SELECT count(*) FROM conversations WHERE deleted_at IS NULL AND type = 'group')::text AS groups,
        (SELECT count(*) FROM conversations WHERE deleted_at IS NULL AND type IN ('channel','announcement'))::text AS channels,
        (SELECT count(*) FROM messages WHERE deleted_at IS NULL AND type <> 'system')::text AS messages,
-       (SELECT count(*) FROM audit_log WHERE action = 'chat.oversight.message.remove')::text AS redactions`,
+       (SELECT count(*) FROM audit_log WHERE action = 'chat.oversight.message.remove')::text AS redactions,
+       (SELECT count(*) FROM audit_log WHERE action = 'chat.oversight.attachment.remove')::text AS attachments_removed`,
   );
   const r = rows[0]!;
   return {
@@ -296,5 +401,6 @@ export async function oversightStats(): Promise<{
     channels: Number(r.channels),
     messages: Number(r.messages),
     redactions: Number(r.redactions),
+    attachmentsRemoved: Number(r.attachments_removed),
   };
 }
