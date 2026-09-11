@@ -14,6 +14,7 @@ import mailRoutes from './routes/mail.js';
 import feedRoutes from './routes/feed.js';
 import searchRoutes from './routes/search.js';
 import oversightRoutes from './routes/oversight.js';
+import dashboardRoutes from './routes/dashboard.js';
 
 /**
  * The Express app with no side effects — no database init, no listen — so
@@ -44,6 +45,7 @@ app.use('/api/mail', mailRoutes);
 app.use('/api/feed', feedRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/oversight', oversightRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 app.use((_req, res) => res.status(404).json(fail('Not found')));
 

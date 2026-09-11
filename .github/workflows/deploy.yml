@@ -3,7 +3,19 @@ name: Deploy Tupo to EC2
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: >-
+          Also run `npm run db:seed`. Off by default: seeding replaces every
+          SYSTEM role's permission grants with whatever DEFAULT_ROLE_PERMISSIONS
+          says in code right now, so it silently discards any permission an
+          administrator has since changed on Student/Parent/Staff/Moderator/Admin
+          from the Roles & Permissions screen in production. Turn this on only
+          when a permission key was just added or removed in code and you want
+          that catalog change to take effect immediately.
+        type: boolean
+        default: false
 
 # Two deploys writing the same directory would race on npm ci and pm2 reload.
 # Queue them instead, and never cancel one midway — a half-rsynced tree is a
@@ -60,17 +72,21 @@ jobs:
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
+          # Only a manual workflow_dispatch run carries this input; a plain
+          # push to main has no `github.event.inputs` at all, which the
+          # expression below reads as unset — so ordinary deploys never seed.
+          RUN_SEED: ${{ github.event.inputs.seed }}
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
-            "$EC2_USER@$EC2_HOST" 'bash -euo pipefail -s' <<'REMOTE'
+            "$EC2_USER@$EC2_HOST" "bash -euo pipefail -s" <<REMOTE
             cd /opt/apps/nga-communication-module
 
             npm ci --no-audit --no-fund
 
-            # NOTE: deliberately no `npm prune --omit=dev`. Unlike the MIS and
+            # NOTE: deliberately no \`npm prune --omit=dev\`. Unlike the MIS and
             # TaskMentor, Tupo needs devDependencies at deploy time — vite
             # builds the web bundle and the migration runner is tsx. Pruning
-            # here is what breaks `npm run db:migrate` on the MIS box.
+            # here is what breaks \`npm run db:migrate\` on the MIS box.
             npm run build
 
             # Migrations are idempotent (each file is recorded once applied),
@@ -78,11 +94,18 @@ jobs:
             # never has to be remembered as a manual step.
             npm run db:migrate
 
-            # Re-seed the RBAC catalog and the institutional spaces. Also
-            # idempotent: new permission keys and system-role grants land
-            # automatically instead of silently failing to take effect until
-            # someone remembers to seed by hand. Custom roles are never touched.
-            npm run db:seed
+            # RBAC seeding is deliberately NOT run on every deploy. Unlike a
+            # migration, seedRbac REPLACES each system role's permission grants
+            # with DEFAULT_ROLE_PERMISSIONS from code — so seeding on every push
+            # to main was silently reverting whatever an administrator had since
+            # changed on the Roles & Permissions screen in production. Trigger
+            # this workflow manually with the "seed" input checked instead, and
+            # only when a permission key actually changed in code.
+            if [ "$RUN_SEED" = "true" ]; then
+              npm run db:seed
+            else
+              echo "skipping db:seed (run workflow_dispatch with seed=true to run it)"
+            fi
 
             # reload, not restart: pm2 replaces the processes without dropping
             # the listening socket, so an in-flight request is not killed.

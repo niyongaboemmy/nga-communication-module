@@ -112,6 +112,7 @@ export const PERMISSIONS: PermissionDefinition[] = [
   { key: 'RETENTION_MANAGE', category: PERMISSION_CATEGORIES.ADMINISTRATION, description: 'Set content retention policies.' },
   { key: 'AUDIT_VIEW', category: PERMISSION_CATEGORIES.ADMINISTRATION, description: 'View the audit log.' },
   { key: 'ANALYTICS_VIEW', category: PERMISSION_CATEGORIES.ADMINISTRATION, description: 'View platform usage analytics.' },
+  { key: 'DASHBOARD_VIEW', category: PERMISSION_CATEGORIES.ADMINISTRATION, description: 'Open the realtime monitoring dashboard, scoped to the programmes and grades you lead.' },
   { key: 'SYSTEM_HEALTH_VIEW', category: PERMISSION_CATEGORIES.ADMINISTRATION, description: 'View service health and queue status.' },
   { key: 'INTEGRATIONS_MANAGE', category: PERMISSION_CATEGORIES.ADMINISTRATION, description: 'Manage webhooks, bots and API keys.' },
   { key: 'COMPLIANCE_EXPORT', category: PERMISSION_CATEGORIES.ADMINISTRATION, description: 'Export content for legal or compliance purposes.' },
@@ -170,6 +171,11 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'FEED_COMMENT', 'FEED_POST',
     'MAIL_SEND', 'MAIL_TEMPLATE_MANAGE', 'MAIL_AI_USE',
     'DIRECTORY_VIEW',
+    // A programme lead / class teacher is a Staff role in Tupo. The dashboard
+    // they get is hard-scoped by their MIS placement — a teacher with no
+    // assignment resolves to "sees only their own row", so this is safe to
+    // hold broadly.
+    'DASHBOARD_VIEW',
   ],
 
   Moderator: [
@@ -182,7 +188,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'MODERATION_QUEUE_VIEW', 'MODERATION_ACT',
     'OVERSIGHT_VIEW_ALL', 'OVERSIGHT_MESSAGE_DELETE',
     'FILE_DELETE_ANY',
-    'USERS_VIEW', 'AUDIT_VIEW',
+    'USERS_VIEW', 'AUDIT_VIEW', 'DASHBOARD_VIEW',
   ],
 
   Admin: PERMISSIONS.map((p) => p.key),

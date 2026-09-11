@@ -6,7 +6,57 @@ import { getPool, resolveUserPermissions } from '@tupo/db';
 import { config } from '../config.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { exchangeCode, fetchMe, verifyMisSession } from '../services/misClient.js';
-import { upsertMisUser, audit } from '../services/userService.js';
+import { upsertMisUser, audit, type MisAcademic } from '../services/userService.js';
+
+/**
+ * Fold the MIS `/users/me` payload into the academic placement Tupo stores.
+ *
+ * `assignedPrograms` is a programme lead's scope; `assignedGrades` a class
+ * teacher's (grade + specific class group). A student's own class group is not
+ * on this payload, so a plain student comes back with `student` and no ids —
+ * the dashboard counts them via the leads/teachers who *do* carry the grade.
+ */
+function readAcademic(me: Record<string, unknown> | null, forceAdmin: boolean): MisAcademic {
+  const empty: MisAcademic = {
+    level: 'none', programIds: [], gradeIds: [], classGroupIds: [],
+    programNames: [], gradeNames: [], classGroupNames: [],
+  };
+  if (!me) return forceAdmin ? { ...empty, level: 'super_admin' } : empty;
+
+  const roles = Array.isArray(me.roles) ? me.roles : [];
+  const roleNames = roles.map((r) => String((r as Record<string, unknown>)?.name ?? '').toUpperCase());
+  const programs = Array.isArray(me.assignedPrograms) ? me.assignedPrograms as Record<string, unknown>[] : [];
+  const grades = Array.isArray(me.assignedGrades) ? me.assignedGrades as Record<string, unknown>[] : [];
+  const profile = (me.profile ?? {}) as Record<string, unknown>;
+  const userType = String(profile.user_type ?? '').toUpperCase();
+
+  const str = (v: unknown) => (v == null ? '' : String(v));
+  const uniq = (xs: string[]) => [...new Set(xs.filter(Boolean))];
+
+  let level: MisAcademic['level'] = 'none';
+  if (forceAdmin || roleNames.includes('SUPER_ADMIN')) level = 'super_admin';
+  else if (programs.length) level = 'program_lead';
+  else if (grades.length) level = 'class_teacher';
+  else if (userType === 'STUDENT') level = 'student';
+  else if (userType === 'PARENT') level = 'parent';
+  else if (userType === 'TEACHER' || userType === 'STAFF' || userType === 'ADMIN') level = 'staff';
+
+  return {
+    level,
+    programIds: uniq([
+      ...programs.map((p) => str(p.program_id)),
+      ...grades.map((g) => str(g.program_id)),
+    ]),
+    gradeIds: uniq(grades.map((g) => str(g.grade_id))),
+    classGroupIds: uniq(grades.map((g) => str(g.class_group_id))),
+    programNames: uniq([
+      ...programs.map((p) => str(p.name)),
+      ...grades.map((g) => str(g.program_name)),
+    ]),
+    gradeNames: uniq(grades.map((g) => str(g.name))),
+    classGroupNames: uniq(grades.map((g) => str(g.class_group_name))),
+  };
+}
 
 const router = Router();
 
@@ -97,6 +147,7 @@ router.post('/exchange', async (req: Request, res: Response) => {
       derivedRole: resolveMisRole(misUser, effectivePermissions),
       preferredTheme,
       forceAdmin,
+      academic: readAcademic(me, forceAdmin),
     });
 
     // Tupo's own session, with the MIS token nested inside so this app can act

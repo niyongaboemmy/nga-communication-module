@@ -1,6 +1,6 @@
 import {
   MessagesSquare, Megaphone, Folder, Video, Mail, Activity,
-  ShieldCheck, Users, ScrollText, Eye,
+  ShieldCheck, Users, ScrollText, Eye, LayoutDashboard,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -30,6 +30,7 @@ export const MODULES: NavEntry[] = [
 ];
 
 export const ADMIN: NavEntry[] = [
+  { to: '/app/admin/dashboard', icon: LayoutDashboard, label: 'Dashboard', perm: 'DASHBOARD_VIEW' },
   { to: '/app/admin/users', icon: Users, label: 'Users', perm: ['USERS_VIEW', 'USERS_MANAGE'] },
   {
     to: '/app/admin/roles', icon: ShieldCheck, label: 'Roles & permissions',

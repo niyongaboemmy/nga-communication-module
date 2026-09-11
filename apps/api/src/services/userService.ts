@@ -18,6 +18,27 @@ import type { Role, SessionUser } from '@tupo/shared';
  * Note what is NOT written here: no credential of any kind. The user row is a
  * mirror, not an account.
  */
+/**
+ * The MIS academic placement carried on every login, so the admin dashboard can
+ * scope activity to a programme or a grade without a live MIS call. See
+ * migration 0023 and routes/dashboard.ts.
+ */
+export interface MisAcademic {
+  level: 'super_admin' | 'program_lead' | 'class_teacher' | 'staff' | 'student' | 'parent' | 'none';
+  programIds: string[];
+  gradeIds: string[];
+  classGroupIds: string[];
+  programNames: string[];
+  gradeNames: string[];
+  classGroupNames: string[];
+}
+
+const EMPTY_ACADEMIC: MisAcademic = {
+  level: 'none',
+  programIds: [], gradeIds: [], classGroupIds: [],
+  programNames: [], gradeNames: [], classGroupNames: [],
+};
+
 export async function upsertMisUser(params: {
   misUserId: string;
   name: string;
@@ -26,6 +47,7 @@ export async function upsertMisUser(params: {
   derivedRole: Role;
   preferredTheme?: 'light' | 'dark';
   forceAdmin: boolean;
+  academic?: MisAcademic;
 }): Promise<SessionUser> {
   const pool = getPool();
   const { rows: existingRows } = await pool.query<{
@@ -48,6 +70,15 @@ export async function upsertMisUser(params: {
   const roleName = finalRole === 'unassigned' ? null : SYSTEM_ROLE_NAME_FOR[finalRole];
   const derivedRoleId = roleName ? await systemRoleIdByName(pool, roleName) : null;
 
+  const ac = params.academic ?? EMPTY_ACADEMIC;
+  // A forced/derived Tupo admin outranks whatever the MIS placement says.
+  const academicLevel = finalRole === 'admin' ? 'super_admin' : ac.level;
+  const acParams = [
+    ac.programIds, ac.gradeIds, ac.classGroupIds,
+    ac.programNames, ac.gradeNames, ac.classGroupNames,
+    academicLevel,
+  ];
+
   if (existing) {
     const updated = await pool.query<{ preferred_theme: 'light' | 'dark' | null }>(
       `UPDATE users
@@ -60,13 +91,16 @@ export async function upsertMisUser(params: {
               -- Only recompute role_id when the administrator has not pinned
               -- one; a hand-assigned custom role must survive re-login.
               role_id = CASE WHEN $8 OR NOT role_assigned_by_admin THEN $9 ELSE role_id END,
+              mis_program_ids = $10, mis_grade_ids = $11, mis_class_group_ids = $12,
+              mis_program_names = $13, mis_grade_names = $14, mis_class_group_names = $15,
+              academic_level = $16, academic_synced_at = now(),
               last_login_at = now(),
               updated_at = now()
         WHERE id = $1
       RETURNING preferred_theme`,
       [existing.id, params.name, params.email, params.avatarUrl ?? null,
        finalRole, params.forceAdmin, params.preferredTheme ?? null,
-       params.forceAdmin, derivedRoleId]
+       params.forceAdmin, derivedRoleId, ...acParams]
     );
     return {
       id: existing.id, misUserId: params.misUserId, name: params.name, email: params.email,
@@ -81,10 +115,14 @@ export async function upsertMisUser(params: {
   const id = snowflake();
   await pool.query(
     `INSERT INTO users (id, mis_user_id, name, email, avatar_url, role,
-                        role_assigned_by_admin, preferred_theme, role_id, last_login_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())`,
+                        role_assigned_by_admin, preferred_theme, role_id, last_login_at,
+                        mis_program_ids, mis_grade_ids, mis_class_group_ids,
+                        mis_program_names, mis_grade_names, mis_class_group_names,
+                        academic_level, academic_synced_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(),
+             $10, $11, $12, $13, $14, $15, $16, now())`,
     [id, params.misUserId, params.name, params.email, params.avatarUrl ?? null,
-     finalRole, params.forceAdmin, params.preferredTheme ?? null, derivedRoleId]
+     finalRole, params.forceAdmin, params.preferredTheme ?? null, derivedRoleId, ...acParams]
   );
   return {
     id, misUserId: params.misUserId, name: params.name, email: params.email,
