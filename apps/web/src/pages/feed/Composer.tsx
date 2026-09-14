@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Image as ImageIcon, BarChart3, CalendarDays, X, Loader2, Globe, ChevronDown,
   CalendarClock, Megaphone, GripVertical, Sparkles,
@@ -10,7 +10,7 @@ import { FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
 import { Avatar } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { uploadFile, probeMedia, validateFile } from '../chat/uploads';
-import { useMediaUrl, firstName } from './lib';
+import { useMediaUrl, firstName, useDismiss } from './lib';
 import * as api from './api';
 
 interface PendingMedia {
@@ -344,18 +344,20 @@ const ToolBtn: React.FC<{ active: boolean; onClick: () => void; icon: React.Reac
 
 const PagePicker: React.FC<{ pages: FeedPageSummary[]; value: string; onChange: (id: string) => void; disabled?: boolean }> = ({ pages, value, onChange, disabled }) => {
   const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useDismiss(open, close);
   const current = pages.find((p) => p.id === value);
   const avatarUrl = useMediaUrl(current?.avatarFileId);
   return (
-    <div className="relative">
-      <button onClick={() => !disabled && setOpen((v) => !v)} disabled={disabled}
+    <div ref={ref} className="relative">
+      <button onClick={() => !disabled && setOpen((v) => !v)} disabled={disabled} aria-haspopup="listbox" aria-expanded={open}
         className="flex items-center gap-2 rounded-full border border-border-light py-1 pl-1 pr-2.5 text-sm font-semibold text-text-primary-light disabled:opacity-70 dark:border-border-dark/60 dark:text-text-primary-dark">
         <Avatar name={current?.name ?? '?'} src={avatarUrl} size={24} />
         {current?.name ?? 'Choose a page'}
         {!disabled && <ChevronDown size={14} />}
       </button>
       {open && (
-        <div className="animate-pop absolute left-0 top-full z-30 mt-1 max-h-60 w-56 overflow-y-auto rounded-xl border border-border-light bg-white p-1 shadow-xl dark:border-border-dark/60 dark:bg-elevated-dark" onMouseLeave={() => setOpen(false)}>
+        <div role="listbox" className="animate-pop absolute left-0 top-full z-30 mt-1 max-h-60 w-56 overflow-y-auto rounded-xl border border-border-light bg-white p-1 shadow-xl dark:border-border-dark/60 dark:bg-elevated-dark">
           {pages.map((p) => (
             <button key={p.id} onClick={() => { onChange(p.id); setOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-surface-light dark:hover:bg-card-dark">
               <Avatar name={p.name} size={22} /> <span className="truncate">{p.name}</span>

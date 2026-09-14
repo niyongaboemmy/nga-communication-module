@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   MessageCircle, Share2, Bookmark, MoreHorizontal, Megaphone, Pin, BadgeCheck,
-  Pencil, Trash2, Flag, EyeOff, Link2, Globe, Users2, ThumbsUp,
+  Pencil, Trash2, Flag, EyeOff, Link2, Globe, Users2,
 } from 'lucide-react';
 import type { FeedPostView, FeedReaction } from '@tupo/shared';
 import { FEED_REACTION_META } from '@tupo/shared';
@@ -13,8 +13,8 @@ import { MediaGallery } from './MediaGallery';
 import { PollBlock, EventBlock } from './PollEventBlocks';
 import { Comments } from './Comments';
 import {
-  EmojiBurst, ReactionBubbles, ReactionPicker, relativeTime, renderRichText,
-  useMediaUrl, usePressToOpen,
+  ReactionBurst, ReactionBubbles, ReactionIcon, ReactionPicker, fullTime, relativeTime,
+  renderRichText, useDismiss, useMediaUrl, usePressToOpen,
 } from './lib';
 import * as api from './api';
 
@@ -34,10 +34,12 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   const { confirm: toastConfirm, notify } = useNotify();
   const [showComments, setShowComments] = useState(openComments);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [burst, setBurst] = useState<{ emoji: string; seed: number } | null>(null);
+  const [burst, setBurst] = useState<{ reaction: FeedReaction; seed: number } | null>(null);
   const [thumbPop, setThumbPop] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [menu, setMenu] = useState(false);
+  const closeMenu = useCallback(() => setMenu(false), []);
+  const menuRef = useDismiss(menu, closeMenu);
   const cardRef = useRef<HTMLElement>(null);
   const viewed = useRef(false);
   const avatarUrl = useMediaUrl(post.page.avatarFileId);
@@ -59,8 +61,8 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   const doReact = (emoji: FeedReaction) => {
     setPickerOpen(false);
     if (post.reactions.mine !== emoji) {
-      setBurst({ emoji: FEED_REACTION_META[emoji].emoji, seed: Date.now() });
-      if (emoji === 'like') setThumbPop((n) => n + 1);
+      setBurst({ reaction: emoji, seed: Date.now() });
+      setThumbPop((n) => n + 1);
     }
     void react(post.id, emoji);
   };
@@ -108,18 +110,18 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
             {post.page.verified && <BadgeCheck size={14} className="text-blue-500" aria-label="Verified" />}
           </p>
           <p className="mt-0.5 flex items-center gap-1 text-[12px] text-text-secondary-light dark:text-text-secondary-dark">
-            <Link to={`/app/feed/post/${post.id}`} className="hover:underline">{relativeTime(post.publishedAt ?? post.createdAt)}</Link>
+            <Link to={`/app/feed/post/${post.id}`} title={fullTime(post.publishedAt ?? post.createdAt)} className="hover:underline">{relativeTime(post.publishedAt ?? post.createdAt)}</Link>
             <span aria-hidden>·</span>
             <span className="flex items-center gap-0.5" title={AUDIENCE_META[post.audience]?.label}>{AUDIENCE_META[post.audience]?.icon}</span>
             {post.editedAt && <><span aria-hidden>·</span><span>Edited</span></>}
           </p>
         </div>
-        <div className="relative -mr-1">
-          <button onClick={() => setMenu((v) => !v)} aria-label="Post actions" className="feed-act grid h-9 w-9 place-items-center rounded-full text-text-secondary-light dark:text-text-secondary-dark">
+        <div ref={menuRef} className="relative -mr-1">
+          <button onClick={() => setMenu((v) => !v)} aria-label="Post actions" aria-haspopup="menu" aria-expanded={menu} className="feed-act grid h-9 w-9 place-items-center rounded-full text-text-secondary-light focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-text-secondary-dark">
             <MoreHorizontal size={20} />
           </button>
           {menu && (
-            <div className="animate-pop absolute right-0 top-full z-30 mt-1 w-52 rounded-xl bg-white p-1 shadow-[0_12px_28px_rgba(0,0,0,0.2)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10" onMouseLeave={() => setMenu(false)}>
+            <div role="menu" className="animate-pop absolute right-0 top-full z-30 mt-1 w-52 rounded-xl bg-white p-1 shadow-[0_12px_28px_rgba(0,0,0,0.2)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10">
               <MenuItem icon={<Bookmark size={16} className={post.bookmarked ? 'fill-current text-blue-600' : ''} />} label={post.bookmarked ? 'Remove from saved' : 'Save post'} onClick={() => { void toggleBookmark(post.id); setMenu(false); }} />
               <MenuItem icon={<Link2 size={16} />} label="Copy link" onClick={() => {
                 setMenu(false);
@@ -193,26 +195,27 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
           {pickerOpen && <ReactionPicker onPick={doReact} onClose={() => setPickerOpen(false)} />}
           <button
             onClick={() => doReact(primaryReaction)}
-            className="feed-act relative flex w-full items-center justify-center gap-2 rounded-md py-1.5 text-[15px] font-semibold text-[#65676b] transition-colors dark:text-text-secondary-dark"
+            aria-pressed={post.reactions.mine !== null}
+            aria-label={post.reactions.mine ? `${FEED_REACTION_META[post.reactions.mine].label} — click to remove, hold for more reactions` : 'Like — hold for more reactions'}
+            className={actionButton}
             style={mineTint ? { color: mineTint } : undefined}
           >
-            {burst && <EmojiBurst emoji={burst.emoji} seed={burst.seed} />}
-            {post.reactions.mine ? (
-              <span className="text-[18px] leading-none">{FEED_REACTION_META[post.reactions.mine].emoji}</span>
-            ) : (
-              <ThumbsUp key={thumbPop} size={18} className={thumbPop ? 'feed-thumb-pop' : ''} />
-            )}
+            {burst && <ReactionBurst reaction={burst.reaction} seed={burst.seed} />}
+            <span key={thumbPop} className={`grid place-items-center ${thumbPop ? 'feed-thumb-pop' : ''}`}>
+              <ReactionIcon reaction={primaryReaction} active={post.reactions.mine !== null} size={19} />
+            </span>
             {post.reactions.mine ? FEED_REACTION_META[post.reactions.mine].label : 'Like'}
           </button>
         </div>
         <button
           onClick={() => setShowComments((v) => !v)}
           disabled={post.commentPolicy === 'closed' && !post.canComment}
-          className="feed-act flex flex-1 items-center justify-center gap-2 rounded-md py-1.5 text-[15px] font-semibold text-[#65676b] transition-colors disabled:opacity-40 dark:text-text-secondary-dark"
+          aria-expanded={showComments}
+          className={`${actionButton} disabled:opacity-40`}
         >
           <MessageCircle size={18} /> Comment
         </button>
-        <button onClick={() => void share()} className="feed-act flex flex-1 items-center justify-center gap-2 rounded-md py-1.5 text-[15px] font-semibold text-[#65676b] transition-colors dark:text-text-secondary-dark">
+        <button onClick={() => void share()} className={actionButton}>
           <Share2 size={17} /> Share
         </button>
       </div>
@@ -221,6 +224,11 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
     </article>
   );
 };
+
+/* The three action-bar buttons share one look; the Like button adds its tint inline. */
+const actionButton =
+  'feed-act relative flex flex-1 items-center justify-center gap-2 rounded-md py-1.5 text-[15px] font-semibold text-[#65676b] transition-colors ' +
+  'focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 dark:text-text-secondary-dark';
 
 function reactionLabel(post: FeedPostView): string {
   const total = post.reactions.total;

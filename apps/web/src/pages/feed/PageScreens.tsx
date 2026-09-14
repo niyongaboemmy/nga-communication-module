@@ -17,7 +17,7 @@ import { uploadFile, validateFile } from '../chat/uploads';
 import { useFeed, useFeedList } from './FeedProvider';
 import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
 import { Composer } from './Composer';
-import { useMediaUrl } from './lib';
+import { useDismiss, useMediaUrl } from './lib';
 import * as api from './api';
 
 /**
@@ -70,20 +70,6 @@ const PAGE_TABS = [
   { id: 'team', label: 'Team' },
 ] as const;
 type PageTab = (typeof PAGE_TABS)[number]['id'];
-
-/** Close a popover on an outside click or Escape. Returns the ref to anchor it on. */
-function useDismiss(open: boolean, onClose: () => void) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
-  }, [open, onClose]);
-  return ref;
-}
 
 const MenuPanel: React.FC<{ children: React.ReactNode; align?: 'left' | 'right' }> = ({ children, align = 'right' }) => (
   <div role="menu" className={`animate-pop absolute top-full z-30 mt-1.5 w-60 rounded-xl bg-white p-1 shadow-[0_12px_28px_rgba(0,0,0,0.2)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10 ${align === 'right' ? 'right-0' : 'left-0'}`}>
