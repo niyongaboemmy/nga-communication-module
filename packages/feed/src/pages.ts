@@ -8,7 +8,8 @@
 import type { PoolClient } from 'pg';
 import { getPool, snowflake } from '@tupo/db';
 import type {
-  CreatePagePayload, FeedPageDetail, FeedPageKind, FeedPageSummary, UpdatePagePayload,
+  CreatePagePayload, FeedPageDetail, FeedPageEditor, FeedPageKind, FeedPageLink, FeedPageSummary,
+  UpdatePageEditorPayload, UpdatePagePayload,
 } from '@tupo/shared';
 import { FEED_LIMITS, FEED_PAGE_KINDS, FEED_AUDIENCES } from '@tupo/shared';
 import { FeedError } from './errors.js';
@@ -21,6 +22,7 @@ export interface PageRow {
   slug: string;
   name: string;
   bio: string;
+  links: FeedPageLink[];
   kind: string;
   audience: string;
   mandatory: boolean;
@@ -38,7 +40,7 @@ export interface PageRow {
 }
 
 const PAGE_SELECT = `
-  SELECT p.id, p.slug, p.name, p.bio, p.kind, p.audience, p.mandatory, p.verified,
+  SELECT p.id, p.slug, p.name, p.bio, p.links, p.kind, p.audience, p.mandatory, p.verified,
          p.avatar_file_id, p.cover_file_id, p.accent, p.follower_count, p.post_count,
          p.created_by, p.created_at,
          (f.user_id IS NOT NULL)               AS my_follow,
@@ -59,6 +61,7 @@ export function toPageSummary(row: PageRow, actor: FeedActor): FeedPageSummary {
     slug: row.slug,
     name: row.name,
     bio: row.bio,
+    links: Array.isArray(row.links) ? row.links : [],
     kind: row.kind as FeedPageKind,
     audience: row.audience as FeedPageSummary['audience'],
     mandatory: row.mandatory,
@@ -73,6 +76,33 @@ export function toPageSummary(row: PageRow, actor: FeedActor): FeedPageSummary {
     myRole: row.my_editor_role,
     canPost,
   };
+}
+
+/**
+ * The quick-action links under a page's title, checked at the boundary.
+ *
+ * Only http(s) and mailto survive: these render as buttons anyone can press,
+ * so a `javascript:` or `data:` URL here would be a stored XSS with a nice
+ * label on it. Malformed entries are an error rather than silently dropped —
+ * an owner who typed a URL wrong should hear about it, not lose the button.
+ */
+export function normalizeLinks(input: unknown): FeedPageLink[] {
+  if (!Array.isArray(input)) throw new FeedError('Links must be a list.', 400);
+  if (input.length > FEED_LIMITS.PAGE_LINKS_MAX) {
+    throw new FeedError(`A page can have at most ${FEED_LIMITS.PAGE_LINKS_MAX} links.`, 400);
+  }
+  return input.map((raw) => {
+    const label = String((raw as FeedPageLink)?.label ?? '').trim().slice(0, FEED_LIMITS.PAGE_LINK_LABEL_MAX);
+    const url = String((raw as FeedPageLink)?.url ?? '').trim();
+    if (!label) throw new FeedError('Every link needs a label.', 400);
+    if (url.length > FEED_LIMITS.PAGE_LINK_URL_MAX) throw new FeedError('A link address is too long.', 400);
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { throw new FeedError(`"${label}" does not have a valid address.`, 400); }
+    if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
+      throw new FeedError(`"${label}" must be a web address or an email address.`, 400);
+    }
+    return { label, url };
+  });
 }
 
 async function loadRow(actor: FeedActor, idOrSlug: string): Promise<PageRow> {
@@ -92,18 +122,18 @@ export async function getPage(actor: FeedActor, idOrSlug: string): Promise<FeedP
     throw new FeedError('Page not found.', 404);
   }
   const { rows: editors } = await getPool().query<{
-    id: string; name: string; avatar_url: string | null; role: 'owner' | 'editor';
+    id: string; name: string; avatar_url: string | null; role: FeedPageEditor['role']; title: string;
   }>(
-    `SELECT u.id, u.name, u.avatar_url, e.role
+    `SELECT u.id, u.name, u.avatar_url, e.role, e.title
        FROM feed_page_editors e JOIN users u ON u.id = e.user_id
       WHERE e.page_id = $1
-      ORDER BY e.role = 'owner' DESC, e.added_at`,
+      ORDER BY e.role = 'owner' DESC, e.title <> '' DESC, e.added_at`,
     [row.id],
   );
   return {
     ...toPageSummary(row, actor),
     createdAt: row.created_at,
-    editors: editors.map((e) => ({ id: e.id, name: e.name, avatarUrl: e.avatar_url, role: e.role })),
+    editors: editors.map((e) => ({ id: e.id, name: e.name, avatarUrl: e.avatar_url, role: e.role, title: e.title })),
   };
 }
 
@@ -143,6 +173,7 @@ export async function createPage(actor: FeedActor, payload: CreatePagePayload): 
   const audience = payload.audience && (FEED_AUDIENCES as readonly string[]).includes(payload.audience)
     ? payload.audience : 'everyone';
   const bio = (payload.bio ?? '').slice(0, FEED_LIMITS.PAGE_BIO_MAX);
+  const links = normalizeLinks(payload.links ?? []);
   const base = slugify(payload.slug || name);
 
   const client = await getPool().connect();
@@ -156,9 +187,9 @@ export async function createPage(actor: FeedActor, payload: CreatePagePayload): 
     }
     const id = snowflake();
     await client.query(
-      `INSERT INTO feed_pages (id, slug, name, bio, kind, audience, accent, avatar_file_id, cover_file_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [id, slug, name, bio, kind, audience, payload.accent ?? '#2563eb',
+      `INSERT INTO feed_pages (id, slug, name, bio, links, kind, audience, accent, avatar_file_id, cover_file_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [id, slug, name, bio, JSON.stringify(links), kind, audience, payload.accent ?? '#2563eb',
        payload.avatarFileId ?? null, payload.coverFileId ?? null, actor.id],
     );
     await client.query(
@@ -243,6 +274,7 @@ export async function updatePage(
    * admin's. A request touching both needs to satisfy both tests.
    */
   const wantsContent = patch.name !== undefined || patch.bio !== undefined
+    || patch.links !== undefined
     || patch.accent !== undefined || patch.avatarFileId !== undefined
     || patch.coverFileId !== undefined || patch.kind !== undefined
     || patch.audience !== undefined;
@@ -261,8 +293,13 @@ export async function updatePage(
   const params: unknown[] = [];
   const set = (col: string, val: unknown) => { params.push(val); sets.push(`${col} = $${params.length}`); };
 
-  if (patch.name !== undefined) set('name', patch.name.trim());
-  if (patch.bio !== undefined) set('bio', patch.bio.slice(0, FEED_LIMITS.PAGE_BIO_MAX));
+  if (patch.name !== undefined) {
+    const name = String(patch.name).trim();
+    if (name.length < 2) throw new FeedError('A page needs a name.', 400);
+    set('name', name);
+  }
+  if (patch.bio !== undefined) set('bio', String(patch.bio).slice(0, FEED_LIMITS.PAGE_BIO_MAX));
+  if (patch.links !== undefined) set('links', JSON.stringify(normalizeLinks(patch.links)));
   if (patch.accent !== undefined) set('accent', patch.accent);
   if (patch.avatarFileId !== undefined) set('avatar_file_id', patch.avatarFileId);
   if (patch.coverFileId !== undefined) set('cover_file_id', patch.coverFileId);
@@ -349,8 +386,10 @@ export async function setNotify(actor: FeedActor, pageId: string, notify: boolea
 
 /* ── Editors ───────────────────────────────────────────────────────────── */
 
+const cleanTitle = (title: unknown): string => String(title ?? '').trim().slice(0, FEED_LIMITS.EDITOR_TITLE_MAX);
+
 export async function addEditor(
-  actor: FeedActor, pageId: string, userId: string, role: 'owner' | 'editor',
+  actor: FeedActor, pageId: string, userId: string, role: FeedPageEditor['role'], title = '',
 ): Promise<void> {
   /*
    * Owners only, and this one matters most of the set: whoever can edit this
@@ -363,14 +402,49 @@ export async function addEditor(
   const { rows } = await getPool().query('SELECT 1 FROM users WHERE id = $1', [userId]);
   if (!rows.length) throw new FeedError('No such user.', 404);
   await getPool().query(
-    `INSERT INTO feed_page_editors (page_id, user_id, role, added_by) VALUES ($1,$2,$3,$4)
-     ON CONFLICT (page_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
-    [page.id, userId, role === 'owner' ? 'owner' : 'editor', actor.id],
+    `INSERT INTO feed_page_editors (page_id, user_id, role, title, added_by) VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (page_id, user_id) DO UPDATE SET role = EXCLUDED.role, title = EXCLUDED.title`,
+    [page.id, userId, role === 'owner' ? 'owner' : 'editor', cleanTitle(title), actor.id],
   );
   await getPool().query(
     `INSERT INTO feed_page_followers (page_id, user_id, notify, source) VALUES ($1,$2,true,'manual')
      ON CONFLICT DO NOTHING`,
     [page.id, userId],
+  );
+}
+
+/** Refuse anything that would leave the page with nobody who can manage it. */
+async function assertAnotherOwner(pageId: string, userId: string): Promise<void> {
+  const { rows: owners } = await getPool().query(
+    `SELECT 1 FROM feed_page_editors WHERE page_id = $1 AND role = 'owner' AND user_id <> $2`, [pageId, userId],
+  );
+  if (!owners.length) throw new FeedError('A page must keep at least one owner.', 409);
+}
+
+/** Change what the page calls someone, or how much say they have in it. Owners only. */
+export async function updateEditor(
+  actor: FeedActor, pageId: string, userId: string, patch: UpdatePageEditorPayload,
+): Promise<void> {
+  const page = await assertPageOwner(actor, pageId);
+  const { rows } = await getPool().query<{ role: string }>(
+    'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [page.id, userId],
+  );
+  if (!rows[0]) throw new FeedError('That person is not on this page.', 404);
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  const set = (col: string, val: unknown) => { params.push(val); sets.push(`${col} = $${params.length}`); };
+  if (patch.title !== undefined) set('title', cleanTitle(patch.title));
+  if (patch.role !== undefined) {
+    const role = patch.role === 'owner' ? 'owner' : 'editor';
+    if (rows[0].role === 'owner' && role === 'editor') await assertAnotherOwner(page.id, userId);
+    set('role', role);
+  }
+  if (!sets.length) return;
+  params.push(page.id, userId);
+  await getPool().query(
+    `UPDATE feed_page_editors SET ${sets.join(', ')} WHERE page_id = $${params.length - 1} AND user_id = $${params.length}`,
+    params,
   );
 }
 
@@ -380,12 +454,7 @@ export async function removeEditor(actor: FeedActor, pageId: string, userId: str
     'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [page.id, userId],
   );
   if (!rows[0]) return;
-  if (rows[0].role === 'owner') {
-    const { rows: owners } = await getPool().query(
-      `SELECT 1 FROM feed_page_editors WHERE page_id = $1 AND role = 'owner' AND user_id <> $2`, [page.id, userId],
-    );
-    if (!owners.length) throw new FeedError('A page must keep at least one owner.', 409);
-  }
+  if (rows[0].role === 'owner') await assertAnotherOwner(page.id, userId);
   await getPool().query('DELETE FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [page.id, userId]);
 }
 

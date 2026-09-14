@@ -56,6 +56,14 @@ export const FEED_LIMITS = {
   POST_BODY_MAX: 20_000,
   COMMENT_BODY_MAX: 8_000,
   PAGE_BIO_MAX: 500,
+  /** Quick-action links under a page's title. */
+  PAGE_LINKS_MAX: 5,
+  PAGE_LINK_LABEL_MAX: 40,
+  PAGE_LINK_URL_MAX: 500,
+  /** What a page calls an editor — "President", "Patron". Display only. */
+  EDITOR_TITLE_MAX: 40,
+  /** Pins are a spotlight, not a second feed. */
+  MAX_PINNED_PER_PAGE: 3,
 } as const;
 
 export type FeedSort = 'recent' | 'top';
@@ -121,11 +129,18 @@ export interface FeedPerson {
  * Pages
  * ────────────────────────────────────────────────────────────────────────── */
 
+/** A quick-action button under the page title. `url` is http(s) or mailto. */
+export interface FeedPageLink {
+  label: string;
+  url: string;
+}
+
 export interface FeedPageSummary {
   id: string;
   slug: string;
   name: string;
   bio: string;
+  links: FeedPageLink[];
   kind: FeedPageKind;
   audience: FeedAudience;
   mandatory: boolean;
@@ -143,9 +158,17 @@ export interface FeedPageSummary {
   canPost: boolean;
 }
 
+export type FeedPageEditorRole = 'owner' | 'editor';
+
+export interface FeedPageEditor extends FeedPerson {
+  role: FeedPageEditorRole;
+  /** Display title on the page's team list; empty when none was given. */
+  title: string;
+}
+
 export interface FeedPageDetail extends FeedPageSummary {
   createdAt: string;
-  editors: Array<FeedPerson & { role: 'owner' | 'editor' }>;
+  editors: FeedPageEditor[];
 }
 
 export interface CreatePagePayload {
@@ -157,6 +180,12 @@ export interface CreatePagePayload {
   accent?: string;
   avatarFileId?: string | null;
   coverFileId?: string | null;
+  links?: FeedPageLink[];
+}
+
+export interface UpdatePageEditorPayload {
+  role?: FeedPageEditorRole;
+  title?: string;
 }
 
 export type UpdatePagePayload = Partial<CreatePagePayload> & {
@@ -207,6 +236,8 @@ export interface FeedPostView {
   canComment: boolean;
   canEdit: boolean;
   canModerate: boolean;
+  /** Pinning is a claim on the page, so it needs a current say in it. */
+  canPin: boolean;
   createdAt: string;
 }
 

@@ -130,7 +130,18 @@ router.post('/pages/:id/notify', authorizePermission('FEED_VIEW'), wrap(async (r
 }));
 
 router.post('/pages/:id/editors', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
-  await feed.pages.addEditor(actorOf(req), req.params.id!, String(req.body?.userId ?? ''), req.body?.role === 'owner' ? 'owner' : 'editor');
+  await feed.pages.addEditor(
+    actorOf(req), req.params.id!, String(req.body?.userId ?? ''),
+    req.body?.role === 'owner' ? 'owner' : 'editor', String(req.body?.title ?? ''),
+  );
+  res.json(ok({ page: await feed.pages.getPage(actorOf(req), req.params.id!) }));
+}));
+
+router.patch('/pages/:id/editors/:userId', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  const patch: { role?: 'owner' | 'editor'; title?: string } = {};
+  if (req.body?.role !== undefined) patch.role = req.body.role === 'owner' ? 'owner' : 'editor';
+  if (req.body?.title !== undefined) patch.title = String(req.body.title);
+  await feed.pages.updateEditor(actorOf(req), req.params.id!, req.params.userId!, patch);
   res.json(ok({ page: await feed.pages.getPage(actorOf(req), req.params.id!) }));
 }));
 
@@ -184,6 +195,15 @@ router.patch('/posts/:id', authorizePermission('FEED_POST'), wrap(async (req, re
   await audit({ actorId: actor.id, action: 'feed.post.edit', targetType: 'feed_post', targetId: req.params.id! });
   await broadcastPost(actor, req.params.id!);
   res.json(ok({ post: await feed.getPostView(actor, req.params.id!).catch(() => null) }));
+}));
+
+router.post('/posts/:id/pin', authorizePermission('FEED_POST'), wrap(async (req, res) => {
+  const actor = actorOf(req);
+  const pinned = Boolean(req.body?.pinned);
+  await feed.posts.setPinned(actor, req.params.id!, pinned);
+  await audit({ actorId: actor.id, action: pinned ? 'feed.post.pin' : 'feed.post.unpin', targetType: 'feed_post', targetId: req.params.id! });
+  await broadcastPost(actor, req.params.id!);
+  res.json(ok({ post: await feed.getPostView(actor, req.params.id!) }));
 }));
 
 router.post('/posts/:id/publish', authorizePermission('FEED_POST'), wrap(async (req, res) => {

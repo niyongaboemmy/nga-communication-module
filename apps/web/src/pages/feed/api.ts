@@ -3,7 +3,7 @@ import type {
   ComposePostPayload, CreatePagePayload, EditPostPayload, FeedCommentView, FeedFilter,
   FeedPageAnalytics, FeedPageDetail, FeedPageSummary, FeedPollView, FeedPostView,
   FeedReaction, FeedReactionSummary, FeedReportReason, FeedSort, FeedTimelinePage,
-  UpdatePagePayload,
+  UpdatePageEditorPayload, UpdatePagePayload,
 } from '@tupo/shared';
 
 /** REST client for Tupo Feed — one thin function per endpoint. */
@@ -50,8 +50,11 @@ export const unfollowPage = (id: string) =>
 export const setPageNotify = (id: string, notify: boolean) =>
   apiPost(`/api/feed/pages/${id}/notify`, { notify });
 
-export const addEditor = (id: string, userId: string, role: 'owner' | 'editor') =>
-  apiPost<{ page: FeedPageDetail }>(`/api/feed/pages/${id}/editors`, { userId, role }).then((r) => r.data!.page);
+export const addEditor = (id: string, userId: string, role: 'owner' | 'editor', title = '') =>
+  apiPost<{ page: FeedPageDetail }>(`/api/feed/pages/${id}/editors`, { userId, role, title }).then((r) => r.data!.page);
+
+export const updateEditor = (id: string, userId: string, patch: UpdatePageEditorPayload) =>
+  apiPatch<{ page: FeedPageDetail }>(`/api/feed/pages/${id}/editors/${userId}`, patch).then((r) => r.data!.page);
 
 export const removeEditor = (id: string, userId: string) =>
   apiDelete<{ page: FeedPageDetail }>(`/api/feed/pages/${id}/editors/${userId}`).then((r) => r.data!.page);
@@ -69,6 +72,9 @@ export const createPost = (pageId: string, payload: Omit<ComposePostPayload, 'pa
 
 export const editPost = (id: string, patch: EditPostPayload) =>
   apiPatch<{ post: FeedPostView | null }>(`/api/feed/posts/${id}`, patch).then((r) => r.data!.post);
+
+export const setPostPinned = (id: string, pinned: boolean) =>
+  apiPost<{ post: FeedPostView }>(`/api/feed/posts/${id}/pin`, { pinned }).then((r) => r.data!.post);
 
 export const publishPost = (id: string) =>
   apiPost<{ post: FeedPostView }>(`/api/feed/posts/${id}/publish`).then((r) => r.data!.post);

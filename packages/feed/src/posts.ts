@@ -9,7 +9,8 @@ import type { PoolClient } from 'pg';
 import { getPool, snowflake } from '@tupo/db';
 import type {
   ComposePostPayload, EditPostPayload, FeedAudience, FeedCommentPolicy, FeedMediaItem,
-  FeedPerson, FeedPollView, FeedPostType, FeedPostView, FeedReaction, FeedReactionSummary,
+  FeedPageLink, FeedPerson, FeedPollView, FeedPostType, FeedPostView, FeedReaction,
+  FeedReactionSummary,
 } from '@tupo/shared';
 import { FEED_AUDIENCES, FEED_LIMITS, FEED_REACTIONS } from '@tupo/shared';
 import { FeedError } from './errors.js';
@@ -302,9 +303,7 @@ export async function editPost(actor: FeedActor, postId: string, patch: EditPost
    * let someone who had since been removed as an editor keep pinning their old
    * post to the top of a page they no longer had any part in.
    */
-  if (patch.pinned !== undefined
-      && (post as PostRow & { editor_role: string | null }).editor_role === null
-      && actor.roleLevel !== 'ADMIN') {
+  if (patch.pinned !== undefined && post.editor_role === null && actor.roleLevel !== 'ADMIN') {
     throw new FeedError('Only an editor of this page can pin a post.', 403);
   }
   const client = await getPool().connect();
@@ -342,8 +341,40 @@ export async function editPost(actor: FeedActor, postId: string, patch: EditPost
   }
 }
 
+/**
+ * Pin or unpin a post on its page (FR-FEED-6).
+ *
+ * Its own operation rather than a flag on editPost: pinning changes what the
+ * page shows first, not what the post says, so it must not stamp the post
+ * "Edited" or write a revision the way editPost does. The rule is editPost's,
+ * though — a current say in the page (editor, or a platform admin), never
+ * authorship alone.
+ */
+export async function setPinned(actor: FeedActor, postId: string, pinned: boolean): Promise<void> {
+  const post = await loadForWrite(actor, postId);
+  if (post.editor_role === null && actor.roleLevel !== 'ADMIN') {
+    throw new FeedError('Only an editor of this page can pin a post.', 403);
+  }
+  if (pinned && post.status !== 'published') throw new FeedError('Only a published post can be pinned.', 409);
+  if (pinned && !post.pinned) {
+    const { rows } = await getPool().query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM feed_posts
+        WHERE page_id = $1 AND pinned AND deleted_at IS NULL AND status = 'published'`,
+      [post.page_id],
+    );
+    if (Number(rows[0]?.n ?? 0) >= FEED_LIMITS.MAX_PINNED_PER_PAGE) {
+      throw new FeedError(`A page can pin at most ${FEED_LIMITS.MAX_PINNED_PER_PAGE} posts. Unpin one first.`, 409);
+    }
+  }
+  await getPool().query(
+    'UPDATE feed_posts SET pinned = $2, updated_at = now() WHERE id = $1', [postId, pinned],
+  );
+}
+
 /** Load a post for a write, checking the actor may perform it. */
-async function loadForWrite(actor: FeedActor, postId: string, moderator = false): Promise<PostRow> {
+async function loadForWrite(
+  actor: FeedActor, postId: string, moderator = false,
+): Promise<PostRow & { editor_role: string | null }> {
   const { rows } = await getPool().query<PostRow & { editor_role: string | null }>(
     `SELECT fp.*, e.role AS editor_role
        FROM feed_posts fp
@@ -373,7 +404,7 @@ export async function hydratePosts(actor: FeedActor, postIds: string[]): Promise
 
   const { rows: posts } = await pool.query<PostRow & {
     editor_role: 'owner' | 'editor' | null;
-    page_slug: string; page_name: string; page_bio: string; page_kind: string; page_audience: string;
+    page_slug: string; page_name: string; page_bio: string; page_links: FeedPageLink[]; page_kind: string; page_audience: string;
     page_mandatory: boolean; page_verified: boolean; page_avatar: string | null; page_cover: string | null;
     page_accent: string; page_followers: number; page_posts: number; page_following: boolean; page_notify: boolean;
     author_name: string; author_avatar: string | null; author_role: string | null;
@@ -381,7 +412,7 @@ export async function hydratePosts(actor: FeedActor, postIds: string[]): Promise
   }>(
     `SELECT fp.*,
             e.role AS editor_role,
-            p.slug AS page_slug, p.name AS page_name, p.bio AS page_bio, p.kind AS page_kind,
+            p.slug AS page_slug, p.name AS page_name, p.bio AS page_bio, p.links AS page_links, p.kind AS page_kind,
             p.audience AS page_audience, p.mandatory AS page_mandatory, p.verified AS page_verified,
             p.avatar_file_id AS page_avatar, p.cover_file_id AS page_cover, p.accent AS page_accent,
             p.follower_count AS page_followers, p.post_count AS page_posts,
@@ -494,7 +525,7 @@ export async function hydratePosts(actor: FeedActor, postIds: string[]): Promise
 
     const pageSummary = toPageSummary(
       {
-        id: p.page_id, slug: p.page_slug, name: p.page_name, bio: p.page_bio, kind: p.page_kind,
+        id: p.page_id, slug: p.page_slug, name: p.page_name, bio: p.page_bio, links: p.page_links, kind: p.page_kind,
         audience: p.page_audience, mandatory: p.page_mandatory, verified: p.page_verified,
         avatar_file_id: p.page_avatar, cover_file_id: p.page_cover, accent: p.page_accent,
         follower_count: p.page_followers, post_count: p.page_posts, created_by: null, created_at: p.created_at,
@@ -546,6 +577,8 @@ export async function hydratePosts(actor: FeedActor, postIds: string[]): Promise
       // FEED_POST-independent path for actually removing content.
       canEdit: (isAuthor || isPageAdmin) && can(actor, 'FEED_POST'),
       canModerate,
+      // What setPinned enforces, behind the same FEED_POST gate as the route.
+      canPin: isPageAdmin && can(actor, 'FEED_POST'),
       createdAt: p.created_at,
     });
   }

@@ -28,7 +28,7 @@ const AUDIENCE_META: Record<string, { icon: React.ReactNode; label: string }> = 
 export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; permalink?: boolean }> = ({
   post, openComments = false, permalink = false,
 }) => {
-  const { react, toggleBookmark, currentUserId } = useFeed();
+  const { react, toggleBookmark, currentUserId, patch } = useFeed();
   // Renamed on the way in: `confirm` from useNotify is a toast, not the
   // native confirm() dialog the Delete-post handler below still needs.
   const { confirm: toastConfirm, notify } = useNotify();
@@ -127,6 +127,12 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
                   .then(() => toastConfirm('Link copied'))
                   .catch(() => notify({ title: 'Could not copy the link', tone: 'error' }));
               }} />
+              {post.canPin && <MenuItem icon={<Pin size={16} className={post.pinned ? 'fill-current text-blue-600' : ''} />} label={post.pinned ? 'Unpin from page' : 'Pin to page'} onClick={() => {
+                setMenu(false);
+                api.setPostPinned(post.id, !post.pinned)
+                  .then((updated) => { patch(post.id, updated); toastConfirm(updated.pinned ? 'Pinned to the top of the page' : 'Unpinned'); })
+                  .catch((e: unknown) => notify({ title: e instanceof Error ? e.message : 'Could not pin this post', tone: 'error' }));
+              }} />}
               {post.canEdit && <MenuItem icon={<Pencil size={16} />} label="Edit post" onClick={() => { setMenu(false); window.dispatchEvent(new CustomEvent('feed:edit', { detail: post.id })); }} />}
               {post.canEdit && <MenuItem icon={<EyeOff size={16} />} label="Move to drafts" onClick={() => {
                 setMenu(false);
