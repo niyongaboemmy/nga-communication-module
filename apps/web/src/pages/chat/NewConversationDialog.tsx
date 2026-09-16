@@ -112,7 +112,6 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
   // Debounced directory search — a request per keystroke would be a request per
   // keystroke.
   useEffect(() => {
-    if (mode === 'channel') return;
     let cancelled = false;
     setSearching(true);
     const t = setTimeout(() => {
