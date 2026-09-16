@@ -457,7 +457,7 @@ export const Composer: React.FC<{
                 e.target.value = '';
               }}
             />
-            <IconButton label="Attach a file" onClick={() => fileInput.current?.click()}>
+            <IconButton label="Attach a file" tooltipSide="top" onClick={() => fileInput.current?.click()}>
               <Paperclip size={18} />
             </IconButton>
           </>
@@ -501,6 +501,7 @@ export const Composer: React.FC<{
 
         <IconButton
           label="Mention someone"
+          tooltipSide="top"
           className="hidden sm:grid"
           onClick={() => {
             insertAtCaret('@');
@@ -515,6 +516,7 @@ export const Composer: React.FC<{
         <div className="relative">
           <IconButton
             label="Insert emoji"
+            tooltipSide="top"
             active={emojiOpen}
             onClick={() => setEmojiOpen((v) => !v)}
           >
@@ -573,6 +575,7 @@ export const Composer: React.FC<{
           <div className="relative">
             <IconButton
               label="Start or schedule a meeting"
+              tooltipSide="top"
               active={meetOpen}
               onClick={() => setMeetOpen((v) => !v)}
             >
@@ -593,7 +596,7 @@ export const Composer: React.FC<{
             later" is a decision made at the moment of sending. */}
         {can('MESSAGE_SCHEDULE') && value.trim() && (
           <div className="relative">
-            <IconButton label="Schedule this message" onClick={() => setScheduling(true)}>
+            <IconButton label="Schedule this message" tooltipSide="top" onClick={() => setScheduling(true)}>
               <Clock size={18} />
             </IconButton>
             {scheduling && (
@@ -618,7 +621,7 @@ export const Composer: React.FC<{
             <Send size={17} />
           </button>
         ) : canRecordVoice() && can('FILE_UPLOAD') ? (
-          <IconButton label="Record a voice message" onClick={() => setRecording(true)}>
+          <IconButton label="Record a voice message" tooltipSide="top" onClick={() => setRecording(true)}>
             <Mic size={18} />
           </IconButton>
         ) : null}

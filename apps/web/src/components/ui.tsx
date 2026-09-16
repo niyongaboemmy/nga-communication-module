@@ -60,29 +60,48 @@ type IconButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   label: string;
   active?: boolean;
   size?: 'sm' | 'md';
+  /** Which side the hover tooltip opens on. Default 'bottom' clears toolbars
+   *  pinned to the top of the screen, where an above-button tooltip would be
+   *  clipped by the viewport edge. */
+  tooltipSide?: 'top' | 'bottom';
 };
 
 /** The square icon control used throughout the chat chrome and the top bar. */
 export const IconButton: React.FC<IconButtonProps> = ({
-  label, active = false, size = 'md', className = '', children, ...rest
+  label, active = false, size = 'md', tooltipSide = 'bottom', className = '', children, ...rest
 }) => {
   const dims = size === 'sm' ? 'h-8 w-8' : 'h-9 w-9';
+  const tooltipPos = tooltipSide === 'bottom'
+    ? 'top-full mt-2'
+    : 'bottom-full mb-2';
   return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      className={`grid ${dims} shrink-0 place-items-center rounded-full transition-colors duration-150 ` +
-        'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ' +
-        (active
-          ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-          : 'text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light ' +
-            'dark:text-text-secondary-dark dark:hover:bg-surface-dark dark:hover:text-text-primary-dark') +
-        ` ${className}`}
-      {...rest}
-    >
-      {children}
-    </button>
+    <span className="group/tooltip relative inline-flex">
+      <button
+        type="button"
+        aria-label={label}
+        className={`grid ${dims} shrink-0 place-items-center rounded-full transition-colors duration-150 ` +
+          'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ' +
+          (active
+            ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
+            : 'text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light ' +
+              'dark:text-text-secondary-dark dark:hover:bg-surface-dark dark:hover:text-text-primary-dark') +
+          ` ${className}`}
+        {...rest}
+      >
+        {children}
+      </button>
+      <span
+        role="tooltip"
+        className={`pointer-events-none absolute left-1/2 z-50 -translate-x-1/2 whitespace-nowrap rounded-md ` +
+          'bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-lg ' +
+          'shadow-black/20 transition-all duration-150 ease-out ' +
+          (tooltipSide === 'bottom' ? '-translate-y-0.5 group-hover/tooltip:translate-y-0' : 'translate-y-0.5 group-hover/tooltip:translate-y-0') +
+          ' group-hover/tooltip:opacity-100 group-focus-within/tooltip:opacity-100 ' +
+          `dark:bg-gray-700 ${tooltipPos}`}
+      >
+        {label}
+      </span>
+    </span>
   );
 };
 
