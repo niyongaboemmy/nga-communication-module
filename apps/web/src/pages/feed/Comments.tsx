@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { CornerDownRight, MoreHorizontal, Trash2, Pencil, Flag, SendHorizontal } from 'lucide-react';
+import { CornerDownRight, MoreHorizontal, Trash2, Pencil, Flag, SendHorizontal, ThumbsUp } from 'lucide-react';
 import type { FeedCommentView, FeedPostView } from '@tupo/shared';
 import { Avatar, Spinner } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
+import { useNotify } from '../../context/NotificationContext';
 import { useFeed } from './FeedProvider';
-import { relativeTime, renderRichText } from './lib';
+import { ReactionDisc, fullTime, relativeTime, renderRichText, useDismiss } from './lib';
 import * as api from './api';
 
 interface Props { post: FeedPostView; autoFocus?: boolean; }
@@ -89,7 +90,10 @@ const CommentNode: React.FC<{
   const [liked, setLiked] = useState(comment.myReaction !== null);
   const [count, setCount] = useState(comment.reactionCount);
   const [menu, setMenu] = useState(false);
+  const closeMenu = useCallback(() => setMenu(false), []);
+  const menuRef = useDismiss(menu, closeMenu);
   const [body, setBody] = useState(comment.body);
+  const { notify } = useNotify();
 
   useEffect(() => { setReplies(comment.replies ?? []); }, [comment.replies]);
   useEffect(() => { setCount(comment.reactionCount); }, [comment.reactionCount]);
@@ -130,27 +134,38 @@ const CommentNode: React.FC<{
             )}
           </div>
           {count > 0 && (
-            <span className="absolute -bottom-2 right-1 flex items-center gap-0.5 rounded-full bg-white px-1 py-0.5 text-[11px] font-medium text-text-secondary-light shadow-sm ring-1 ring-black/5 dark:bg-elevated-dark dark:text-text-secondary-dark dark:ring-white/10">
-              <span className="grid h-3.5 w-3.5 place-items-center rounded-full bg-blue-500 text-[8px]">👍</span>{count}
+            <span className="absolute -bottom-2 right-1 flex items-center gap-1 rounded-full bg-white py-0.5 pl-0.5 pr-1.5 text-[11px] font-medium text-text-secondary-light shadow-sm ring-1 ring-black/5 dark:bg-elevated-dark dark:text-text-secondary-dark dark:ring-white/10">
+              <ReactionDisc reaction="like" size={14} />{count}
             </span>
           )}
         </div>
         <div className="mt-1.5 flex items-center gap-3 pl-1 text-[12px] font-semibold text-text-secondary-light dark:text-text-secondary-dark">
-          <button onClick={toggleLike} className={`transition-colors hover:underline ${liked ? 'text-blue-600 dark:text-blue-400' : ''}`}>
-            Like
+          <button onClick={toggleLike} aria-pressed={liked} className={`flex items-center gap-1 transition-colors hover:underline ${liked ? 'text-blue-600 dark:text-blue-400' : ''}`}>
+            <ThumbsUp size={12} fill={liked ? 'currentColor' : 'none'} className="feed-react-icon" aria-hidden /> Like
           </button>
           {canComment && depth === 0 && (
             <button onClick={() => setReplying((v) => !v)} className="hover:underline">Reply</button>
           )}
-          <span className="font-normal">{relativeTime(comment.createdAt)}{comment.editedAt ? ' · edited' : ''}</span>
-          {(comment.canEdit || comment.canModerate) && (
-            <div className="relative">
-              <button onClick={() => setMenu((v) => !v)} aria-label="Comment actions" className="hover:text-text-primary-light dark:hover:text-text-primary-dark"><MoreHorizontal size={13} /></button>
+          <span className="font-normal" title={fullTime(comment.createdAt)}>{relativeTime(comment.createdAt)}{comment.editedAt ? ' · edited' : ''}</span>
+          {/*
+           * Report is offered to everyone but the author — it used to hide
+           * behind canEdit/canModerate, so the people most likely to need it
+           * (ordinary readers) never saw it, and when it did show it filed a
+           * silent "other" report with no reason asked. It now opens the same
+           * dialog a post does.
+           */}
+          {(comment.canEdit || comment.canModerate || comment.author.id !== currentUserId) && (
+            <div ref={menuRef} className="relative">
+              <button onClick={() => setMenu((v) => !v)} aria-label="Comment actions" aria-haspopup="menu" aria-expanded={menu} className="hover:text-text-primary-light dark:hover:text-text-primary-dark"><MoreHorizontal size={13} /></button>
               {menu && (
-                <div className="animate-pop absolute left-0 top-full z-20 mt-1 w-36 rounded-xl border border-border-light bg-white p-1 shadow-lg dark:border-border-dark/60 dark:bg-elevated-dark" onMouseLeave={() => setMenu(false)}>
+                <div role="menu" className="animate-pop absolute left-0 top-full z-20 mt-1 w-36 rounded-xl border border-border-light bg-white p-1 shadow-lg dark:border-border-dark/60 dark:bg-elevated-dark">
                   {comment.canEdit && <button onClick={() => { setEditing(true); setMenu(false); }} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-surface-light dark:hover:bg-card-dark"><Pencil size={12} /> Edit</button>}
-                  {(comment.canEdit || comment.canModerate) && <button onClick={() => { void api.deleteComment(comment.id); setMenu(false); }} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"><Trash2 size={12} /> Delete</button>}
-                  {comment.author.id !== currentUserId && <button onClick={() => { void api.reportComment(comment.id, 'other'); setMenu(false); }} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-surface-light dark:hover:bg-card-dark"><Flag size={12} /> Report</button>}
+                  {(comment.canEdit || comment.canModerate) && <button onClick={() => {
+                    setMenu(false);
+                    if (!window.confirm('Delete this comment?')) return;
+                    api.deleteComment(comment.id).catch(() => notify({ title: 'Could not delete this comment', tone: 'error' }));
+                  }} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"><Trash2 size={12} /> Delete</button>}
+                  {comment.author.id !== currentUserId && <button onClick={() => { setMenu(false); window.dispatchEvent(new CustomEvent('feed:report', { detail: { type: 'comment', id: comment.id } })); }} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-surface-light dark:hover:bg-card-dark"><Flag size={12} /> Report</button>}
                 </div>
               )}
             </div>
@@ -213,6 +228,7 @@ const CommentComposer: React.FC<{
   onAdded: (c: FeedCommentView) => void;
 }> = ({ postId, parentId, compact, autoFocus, onAdded }) => {
   const { user } = useAuth();
+  const { notify } = useNotify();
   const [v, setV] = useState('');
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -233,6 +249,9 @@ const CommentComposer: React.FC<{
       onAdded(c);
       setV('');
       if (ref.current) ref.current.style.height = 'auto';
+    } catch (e) {
+      // The draft stays in the box so a failed send is a retry, not a retype.
+      notify({ title: 'Your comment was not posted', body: e instanceof Error ? e.message : undefined, tone: 'error' });
     } finally { setBusy(false); }
   };
 

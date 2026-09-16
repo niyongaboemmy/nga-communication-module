@@ -32,6 +32,9 @@
 .feed-act:hover { background: rgba(0, 0, 0, 0.05); }
 :where(.dark) .feed-act:hover { background: rgba(255, 255, 255, 0.06); }
 
+/* A reaction glyph filling in when it lands — the Like thumb going solid blue. */
+.feed-react-icon { transition: fill 150ms ease, fill-opacity 150ms ease, color 150ms ease, stroke 150ms ease; }
+
 /* ── Motion ──────────────────────────────────────────────────────────── */
 
 @keyframes feed-card-in {

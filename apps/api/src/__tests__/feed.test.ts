@@ -166,6 +166,106 @@ describe('permissions', () => {
   });
 });
 
+describe('page profile', () => {
+  it('quick links save in order and refuse anything but http(s) and mailto', async () => {
+    const links = [
+      { label: 'Register', url: 'https://forms.example.com/club' },
+      { label: 'Email us', url: 'mailto:club@amashuri.com' },
+    ];
+    const r = await api(admin.token).patch(`/api/feed/pages/${pageId}`, { links });
+    expect(r.status).toBe(200);
+    expect(r.body.data.page.links).toEqual(links);
+
+    // A button anyone can press must never carry a script.
+    const xss = await api(admin.token).patch(`/api/feed/pages/${pageId}`, {
+      links: [{ label: 'Click', url: 'javascript:alert(1)' }],
+    });
+    expect(xss.status).toBe(400);
+    const junk = await api(admin.token).patch(`/api/feed/pages/${pageId}`, { links: [{ label: 'x', url: 'not a url' }] });
+    expect(junk.status).toBe(400);
+    const tooMany = await api(admin.token).patch(`/api/feed/pages/${pageId}`, {
+      links: Array.from({ length: 6 }, (_, i) => ({ label: `L${i}`, url: 'https://example.com' })),
+    });
+    expect(tooMany.status).toBe(400);
+
+    // A rejected patch leaves the previous links alone; the links travel with posts too.
+    const page = await api(admin.token).get(`/api/feed/pages/${pageId}`);
+    expect(page.body.data.page.links).toEqual(links);
+    const id = await publish(admin.token, pageId);
+    const view = await api(admin.token).get(`/api/feed/posts/${id}`);
+    expect(view.body.data.post.page.links).toEqual(links);
+
+    await api(admin.token).patch(`/api/feed/pages/${pageId}`, { links: [] });
+  });
+
+  it('a team member can carry a title; only an owner may set one', async () => {
+    const pres = await user('Student', 'Prisca');
+    const added = await api(admin.token)
+      .post(`/api/feed/pages/${pageId}/editors`, { userId: pres.id, role: 'editor', title: 'President' });
+    expect(added.status).toBe(200);
+    let me = added.body.data.page.editors.find((e: { id: string }) => e.id === pres.id);
+    expect(me.title).toBe('President');
+    expect(me.role).toBe('editor');
+
+    // Titles are the owner's to give — an editor cannot rename themselves.
+    expect((await api(pres.token).patch(`/api/feed/pages/${pageId}/editors/${pres.id}`, { title: 'Chair' })).status).toBe(403);
+
+    const renamed = await api(admin.token).patch(`/api/feed/pages/${pageId}/editors/${pres.id}`, { title: '  Vice President  ' });
+    expect(renamed.status).toBe(200);
+    me = renamed.body.data.page.editors.find((e: { id: string }) => e.id === pres.id);
+    expect(me.title).toBe('Vice President');
+
+    // Demoting the last owner is refused, same as removing them.
+    expect((await api(admin.token).patch(`/api/feed/pages/${pageId}/editors/${admin.id}`, { role: 'editor' })).status).toBe(409);
+    expect((await api(admin.token).patch(`/api/feed/pages/${pageId}/editors/${student.id}`, { title: 'x' })).status).toBe(404);
+
+    await api(admin.token).del(`/api/feed/pages/${pageId}/editors/${pres.id}`);
+  });
+
+  it('pinned posts lead the page, need a say in the page, and are capped', async () => {
+    const older = await publish(admin.token, pageId, { body: 'older' });
+    await getPool().query(`UPDATE feed_posts SET published_at = now() - interval '1 hour' WHERE id = $1`, [older]);
+    const newer = await publish(admin.token, pageId, { body: 'newer' });
+
+    // A following student may read the page but has no say in it.
+    await api(student.token).post(`/api/feed/pages/${pageId}/follow`);
+    expect((await api(student.token).post(`/api/feed/posts/${older}/pin`, { pinned: true })).status).toBe(403);
+    const asStudent = await api(student.token).get(`/api/feed/posts/${older}`);
+    expect(asStudent.body.data.post.canPin).toBe(false);
+
+    const pinned = await api(admin.token).post(`/api/feed/posts/${older}/pin`, { pinned: true });
+    expect(pinned.status).toBe(200);
+    expect(pinned.body.data.post.pinned).toBe(true);
+    // A pin is not an edit: no revision, no "Edited" stamp.
+    expect(pinned.body.data.post.editedAt).toBeNull();
+    const { rows } = await getPool().query('SELECT count(*)::int AS n FROM feed_post_edits WHERE post_id = $1', [older]);
+    expect(rows[0].n).toBe(0);
+
+    const list = await api(student.token).get(`/api/feed/pages/${pageId}/posts`);
+    const ids = list.body.data.items.map((p: { id: string }) => p.id);
+    expect(ids.indexOf(older)).toBe(0);
+    expect(ids.indexOf(newer)).toBe(1);
+    expect(ids.filter((id: string) => id === older)).toHaveLength(1);
+
+    // Only a published post can lead the page.
+    const draft = await publish(admin.token, pageId, { status: 'draft' });
+    expect((await api(admin.token).post(`/api/feed/posts/${draft}/pin`, { pinned: true })).status).toBe(409);
+
+    // Three is the spotlight; the fourth must wait for an unpin.
+    await api(admin.token).post(`/api/feed/posts/${newer}/pin`, { pinned: true });
+    const third = await publish(admin.token, pageId, { body: 'third' });
+    await api(admin.token).post(`/api/feed/posts/${third}/pin`, { pinned: true });
+    const fourth = await publish(admin.token, pageId, { body: 'fourth' });
+    expect((await api(admin.token).post(`/api/feed/posts/${fourth}/pin`, { pinned: true })).status).toBe(409);
+
+    const unpinned = await api(admin.token).post(`/api/feed/posts/${older}/pin`, { pinned: false });
+    expect(unpinned.body.data.post.pinned).toBe(false);
+    expect((await api(admin.token).post(`/api/feed/posts/${fourth}/pin`, { pinned: true })).status).toBe(200);
+
+    await api(student.token).del(`/api/feed/pages/${pageId}/follow`);
+  });
+});
+
 describe('post lifecycle', () => {
   it('a draft is invisible; publishing shows it; unpublishing hides it', async () => {
     const id = await publish(admin.token, pageId, { status: 'draft' });

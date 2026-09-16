@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowUp, Clock, Flame, Sparkles } from 'lucide-react';
+import { ArrowUp, CircleCheck, Clock, Flame, Sparkles, X } from 'lucide-react';
 import type { FeedFilter, FeedPostView, FeedSort } from '@tupo/shared';
 import { EmptyState } from '../../components/ui';
 import { useFeed, useFeedList } from './FeedProvider';
@@ -53,8 +53,8 @@ export const FeedHome: React.FC = () => {
             </div>
             <span className="flex-1" />
             {filter !== 'all' && (
-              <button onClick={() => setParams({})} className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold capitalize text-blue-600 dark:bg-blue-900/25 dark:text-blue-300">
-                {filter} ✕
+              <button onClick={() => setParams({})} aria-label={`Clear the ${filter} filter`} className="inline-flex items-center gap-1 rounded-full bg-blue-50 py-1 pl-3 pr-2 text-xs font-semibold capitalize text-blue-600 transition-colors hover:bg-blue-100 dark:bg-blue-900/25 dark:text-blue-300 dark:hover:bg-blue-900/40">
+                {filter} <X size={12} aria-hidden />
               </button>
             )}
           </div>
@@ -84,7 +84,11 @@ export const FeedHome: React.FC = () => {
               {items.map((post) => <PostCard key={post.id} post={post} />)}
               {list.hasMore
                 ? <LoadMoreSentinel onHit={list.loadMore} disabled={list.more} />
-                : <p className="py-8 text-center text-sm text-text-secondary-light dark:text-text-secondary-dark">You're all caught up 🎉</p>}
+                : (
+                  <p className="flex items-center justify-center gap-2 py-8 text-center text-sm font-medium text-text-secondary-light dark:text-text-secondary-dark">
+                    <CircleCheck size={16} className="text-emerald-500" aria-hidden /> You're all caught up
+                  </p>
+                )}
             </div>
           )}
         </div>

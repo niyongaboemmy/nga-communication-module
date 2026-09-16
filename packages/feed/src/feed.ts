@@ -10,6 +10,11 @@
  * `sort=recent` is a keyset scan on `(published_at, id)`. `sort=top` scores a
  * recent window with `rankScore` and pages by offset — pinned and announcement
  * posts always land first (FR-FEED-6).
+ *
+ * A page's own profile (`pageId`, recent) shows its pinned posts first, as a
+ * head above the chronological stream. They are read separately and kept out
+ * of the keyset scan, because "pinned first, then by date" is not an order a
+ * `(published_at, id)` cursor can resume from.
  */
 import { getPool } from '@tupo/db';
 import type { FeedFilter, FeedPostView, FeedSort, FeedTimelinePage } from '@tupo/shared';
@@ -58,11 +63,12 @@ async function candidateIds(
        WHERE bm.user_id = ${actorP} AND fp.deleted_at IS NULL AND fp.status = 'published'
          AND fp.audience = ANY(${audP})`;
   } else if (opts.pageId) {
+    const pinnedFilter = pinnedLeadsPage(opts) ? 'AND NOT fp.pinned' : '';
     source = `
       SELECT fp.id, fp.published_at
         FROM feed_posts fp
        WHERE fp.page_id = ${p(opts.pageId)} AND fp.deleted_at IS NULL AND fp.status = 'published'
-         AND fp.audience = ANY(${audP})`;
+         AND fp.audience = ANY(${audP}) ${pinnedFilter}`;
   } else {
     // timeline ∪ read-time merge of big / mandatory pages the user follows
     const followFilter = opts.filter === 'following' ? `AND t.reason = 'follow'` : '';
@@ -96,6 +102,26 @@ async function candidateIds(
   return rows;
 }
 
+/** Whether this read is a page profile whose pinned posts are served as a head. */
+const pinnedLeadsPage = (opts: GetFeedOpts): boolean =>
+  Boolean(opts.pageId) && (opts.sort ?? 'recent') === 'recent';
+
+/**
+ * A page's pinned posts, newest first, for the head of its profile. Unbounded
+ * on purpose: the cap lives in setPinned, and a pin that slipped past it must
+ * still show somewhere — the stream below excludes every pinned post.
+ */
+async function pinnedIds(actor: FeedActor, pageId: string): Promise<string[]> {
+  const { rows } = await getPool().query<{ id: string }>(
+    `SELECT id FROM feed_posts
+      WHERE page_id = $1 AND pinned AND deleted_at IS NULL AND status = 'published'
+        AND audience = ANY($2)
+      ORDER BY published_at DESC, id DESC`,
+    [pageId, visibleAudiences(actor.roleLevel)],
+  );
+  return rows.map((r) => r.id);
+}
+
 export async function getFeed(actor: FeedActor, opts: GetFeedOpts = {}): Promise<FeedTimelinePage> {
   const sort: FeedSort = opts.sort === 'top' ? 'top' : 'recent';
   const limit = clampLimit(opts.limit);
@@ -120,8 +146,11 @@ export async function getFeed(actor: FeedActor, opts: GetFeedOpts = {}): Promise
   const rows = await candidateIds(actor, opts, before, limit + 1);
   const hasMore = rows.length > limit;
   const pageRows = rows.slice(0, limit);
-  const map = await hydratePosts(actor, pageRows.map((r) => r.id));
-  const items = pageRows.map((r) => map.get(r.id)).filter((v): v is FeedPostView => Boolean(v));
+  // Only the first page carries the pinned head; later pages continue the stream.
+  const head = pinnedLeadsPage(opts) && !before ? await pinnedIds(actor, opts.pageId!) : [];
+  const map = await hydratePosts(actor, [...head, ...pageRows.map((r) => r.id)]);
+  const items = [...head, ...pageRows.map((r) => r.id)]
+    .map((id) => map.get(id)).filter((v): v is FeedPostView => Boolean(v));
   const last = pageRows[pageRows.length - 1];
   const nextCursor = hasMore && last ? encodeCursor({ key: last.published_at, id: last.id }) : null;
   return { items, nextCursor };
