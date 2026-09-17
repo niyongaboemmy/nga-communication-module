@@ -1,0 +1,16 @@
+FROM node:22-alpine
+
+WORKDIR /app
+
+COPY package*.json tsconfig.base.json ./
+COPY packages ./packages
+COPY apps ./apps
+
+RUN npm ci
+
+# @tupo/web imports @tupo/shared, which resolves via its dist/.
+RUN npm run build -w @tupo/shared
+
+EXPOSE 5194
+
+CMD ["npm", "run", "dev", "-w", "@tupo/web"]
