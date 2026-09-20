@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { ok, fail } from '@tupo/shared';
-import { feedAudienceRoom, feedPostRoom } from '@tupo/shared';
+import { feedAudienceRoom, feedPostRoom, feedReelRoom } from '@tupo/shared';
 import type { FeedActor } from '@tupo/feed';
 import * as feed from '@tupo/feed';
 import { FeedError } from '@tupo/feed';
@@ -417,6 +417,106 @@ router.post('/moderation/:id/act', authorizePermission('MODERATION_ACT'), wrap(a
     }).catch(() => {});
   }
   res.json(ok({ acted: true }));
+}));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Reels — short vertical videos, published by a person (FR-FEED-13)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/reels', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  const page = await feed.reels.getReels(
+    actorOf(req),
+    typeof req.query.cursor === 'string' ? req.query.cursor : null,
+    Number(req.query.limit) || undefined,
+  );
+  res.json(ok(page));
+}));
+
+router.post('/reels', authorizePermission('FEED_REEL_POST'), wrap(async (req, res) => {
+  const actor = actorOf(req);
+  const { reelId } = await feed.reels.createReel(actor, req.body ?? {});
+  await audit({ actorId: actor.id, action: 'feed.reel.create', targetType: 'feed_reel', targetId: reelId });
+  const reel = await feed.reels.getReel(actor, reelId);
+  emitToRooms([feedAudienceRoom(reel.audience)], 'feed:reel_new', { reel });
+  res.status(201).json(ok({ reelId, reel }));
+}));
+
+router.get('/reels/:id', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  res.json(ok({ reel: await feed.reels.getReel(actorOf(req), req.params.id!) }));
+}));
+
+router.delete('/reels/:id', authorizePermission('FEED_REEL_POST', 'MODERATION_ACT'), wrap(async (req, res) => {
+  const actor = actorOf(req);
+  await feed.reels.deleteReel(actor, req.params.id!);
+  await audit({ actorId: actor.id, action: 'feed.reel.delete', targetType: 'feed_reel', targetId: req.params.id! });
+  emitToRooms([feedReelRoom(req.params.id!)], 'feed:reel_deleted', { reelId: req.params.id! });
+  res.json(ok({ deleted: true }));
+}));
+
+router.post('/reels/:id/view', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  const counts = await feed.reels.recordView(actorOf(req), req.params.id!);
+  if (counts) emitToRooms([feedReelRoom(req.params.id!)], 'feed:reel_counter', { reelId: req.params.id!, ...counts });
+  res.json(ok(counts ?? {}));
+}));
+
+router.post('/reels/:id/like', authorizePermission('FEED_COMMENT'), wrap(async (req, res) => {
+  const r = await feed.reels.toggleLike(actorOf(req), req.params.id!);
+  emitToRooms([feedReelRoom(req.params.id!)], 'feed:reel_counter', { reelId: req.params.id!, likeCount: r.likeCount });
+  res.json(ok({ liked: r.liked, likeCount: r.likeCount }));
+}));
+
+router.get('/reels/:id/comments', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  res.json(ok({ comments: await feed.reels.listComments(actorOf(req), req.params.id!) }));
+}));
+
+router.post('/reels/:id/comments', authorizePermission('FEED_COMMENT'), wrap(async (req, res) => {
+  const comment = await feed.reels.addComment(actorOf(req), req.params.id!, req.body?.body ?? '');
+  emitToRooms([feedReelRoom(req.params.id!)], 'feed:reel_comment_new', { reelId: req.params.id!, comment });
+  res.status(201).json(ok({ comment }));
+}));
+
+router.delete('/reels/comments/:commentId', authorizePermission('FEED_COMMENT', 'MODERATION_ACT'), wrap(async (req, res) => {
+  const { reelId } = await feed.reels.deleteComment(actorOf(req), req.params.commentId!);
+  res.json(ok({ deleted: true, reelId }));
+}));
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Stories — ephemeral 24-hour statuses, grouped by author (FR-FEED-14)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/stories', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  res.json(ok({ groups: await feed.stories.getActiveStories(actorOf(req)) }));
+}));
+
+router.post('/stories', authorizePermission('FEED_STORY_POST'), wrap(async (req, res) => {
+  const actor = actorOf(req);
+  const { storyId } = await feed.stories.createStory(actor, req.body ?? {});
+  await audit({ actorId: actor.id, action: 'feed.story.create', targetType: 'feed_story', targetId: storyId });
+  const story = await feed.stories.getStory(actor, storyId);
+  emitToRooms([feedAudienceRoom(story.audience)], 'feed:story_new', { story });
+  res.status(201).json(ok({ storyId, story }));
+}));
+
+router.get('/stories/:id', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  res.json(ok({ story: await feed.stories.getStory(actorOf(req), req.params.id!) }));
+}));
+
+router.delete('/stories/:id', authorizePermission('FEED_STORY_POST', 'MODERATION_ACT'), wrap(async (req, res) => {
+  const actor = actorOf(req);
+  const { authorId } = await feed.stories.deleteStory(actor, req.params.id!);
+  await audit({ actorId: actor.id, action: 'feed.story.delete', targetType: 'feed_story', targetId: req.params.id! });
+  emitToRooms([feedAudienceRoom('everyone'), feedAudienceRoom('staff'), feedAudienceRoom('students'), feedAudienceRoom('parents')],
+    'feed:story_deleted', { storyId: req.params.id!, authorId });
+  res.json(ok({ deleted: true }));
+}));
+
+router.post('/stories/:id/view', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  const counts = await feed.stories.recordView(actorOf(req), req.params.id!);
+  res.json(ok(counts ?? {}));
+}));
+
+router.get('/stories/:id/viewers', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  res.json(ok({ viewers: await feed.stories.getViewers(actorOf(req), req.params.id!) }));
 }));
 
 /* ────────────────────────────────────────────────────────────────────────── *

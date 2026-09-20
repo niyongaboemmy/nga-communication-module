@@ -82,6 +82,11 @@ export const PERMISSIONS: PermissionDefinition[] = [
   { key: 'FEED_POST', category: PERMISSION_CATEGORIES.FEED, description: 'Publish posts on behalf of a page you administer.' },
   { key: 'FEED_PAGE_MANAGE', category: PERMISSION_CATEGORIES.FEED, description: 'Create pages and manage their editors.' },
   { key: 'FEED_ANALYTICS_VIEW', category: PERMISSION_CATEGORIES.FEED, description: 'View reach and engagement analytics for pages.' },
+  // Reels and Stories are personal, not page-scoped — everyone signed in gets
+  // these in BASELINE below, the way a normal profile can post a status or a
+  // reel without administering a page.
+  { key: 'FEED_STORY_POST', category: PERMISSION_CATEGORIES.FEED, description: 'Publish a 24-hour status to your own story.' },
+  { key: 'FEED_REEL_POST', category: PERMISSION_CATEGORIES.FEED, description: 'Publish a reel (short video) under your own name.' },
 
   // ── Mail ─────────────────────────────────────────────────────────────────
   { key: 'MAIL_READ', category: PERMISSION_CATEGORIES.MAIL, description: 'Read your mailbox.' },
@@ -143,7 +148,7 @@ const BASELINE = [
   'CHANNEL_VIEW',
   'MEET_JOIN',
   'FILE_UPLOAD', 'FILE_DOWNLOAD', 'FILE_DELETE_OWN',
-  'FEED_VIEW',
+  'FEED_VIEW', 'FEED_STORY_POST', 'FEED_REEL_POST',
   'MAIL_READ',
   'DIRECTORY_VIEW', 'PRESENCE_VIEW',
   'REPORT_SUBMIT',

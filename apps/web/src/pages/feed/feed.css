@@ -111,6 +111,10 @@
 .feed-hl-scroll > * { scroll-snap-align: start; }
 .feed-hl-scroll::-webkit-scrollbar { display: none; }
 
+/* Reels — a TikTok-style vertical feed (FR-FEED-13), scrollbar hidden. */
+.feed-reels-scroll { -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.feed-reels-scroll::-webkit-scrollbar { display: none; }
+
 /* The L-shaped connector FB draws from a comment down to its replies. */
 .feed-reply-thread { position: relative; }
 .feed-reply-thread::before {

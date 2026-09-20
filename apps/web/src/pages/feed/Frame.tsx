@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom';
 import {
   Sparkles, Bookmark, ShieldAlert, LayoutGrid, Newspaper, Megaphone, TrendingUp,
-  Plus, BadgeCheck,
+  Plus, BadgeCheck, Clapperboard,
 } from 'lucide-react';
 import type { FeedPageSummary, FeedPostView, FeedReportReason } from '@tupo/shared';
 import { FEED_REPORT_REASONS } from '@tupo/shared';
@@ -88,6 +88,7 @@ export const LeftRail: React.FC<{ following: FeedPageSummary[] }> = ({ following
     <>
       <nav className="space-y-0.5">
         <Item to="/app/feed" icon={<Newspaper size={19} className="text-blue-600 dark:text-blue-400" />} label="Home" tint="bg-[#e7f0ff]" />
+        <Item to="/app/feed/reels" icon={<Clapperboard size={19} className="text-pink-600 dark:text-pink-400" />} label="Reels" tint="bg-[#fde7f3]" />
         <Item to="/app/feed?filter=following" icon={<TrendingUp size={19} className="text-emerald-600 dark:text-emerald-400" />} label="Following" tint="bg-[#e6f6ee]" />
         <Item to="/app/feed?filter=announcements" icon={<Megaphone size={19} className="text-orange-600 dark:text-orange-400" />} label="Announcements" tint="bg-[#fdeee0]" />
         <Item to="/app/feed/saved" icon={<Bookmark size={19} className="text-violet-600 dark:text-violet-400" />} label="Saved" tint="bg-[#efe9fb]" />

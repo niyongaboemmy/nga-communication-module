@@ -7,6 +7,7 @@ import { useFeed, useFeedList } from './FeedProvider';
 import { FeedFrame, useFeedRails, ReportDialog, EditPostMount, PostSkeleton, PostCard, LoadMoreSentinel } from './Frame';
 import { Composer } from './Composer';
 import { HighlightsBar } from './HighlightsBar';
+import { StoriesBar } from './StoriesBar';
 import * as api from './api';
 
 export const FeedHome: React.FC = () => {
@@ -43,6 +44,7 @@ export const FeedHome: React.FC = () => {
     <>
       <FeedFrame left={left} right={right}>
         <div className="relative space-y-3 pt-0 sm:pt-0">
+          <StoriesBar />
           <HighlightsBar />
           <Composer pages={pages} onPublished={(post) => { if (post) { list.prepend(post.id); ingest([post]); } }} />
 

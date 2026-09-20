@@ -1,8 +1,9 @@
 import { apiGet, apiPost, apiPatch, apiDelete } from '../../lib/api';
 import type {
-  ComposePostPayload, CreatePagePayload, EditPostPayload, FeedCommentView, FeedFilter,
-  FeedPageAnalytics, FeedPageDetail, FeedPageSummary, FeedPollView, FeedPostView,
-  FeedReaction, FeedReactionSummary, FeedReportReason, FeedSort, FeedTimelinePage,
+  ComposePostPayload, ComposeReelPayload, ComposeStoryPayload, CreatePagePayload, EditPostPayload,
+  FeedCommentView, FeedFilter, FeedPageAnalytics, FeedPageDetail, FeedPageSummary, FeedPollView,
+  FeedPostView, FeedReaction, FeedReactionSummary, FeedReelCommentView, FeedReelsPage, FeedReelView,
+  FeedReportReason, FeedSort, FeedStoryGroup, FeedStoryView, FeedStoryViewer, FeedTimelinePage,
   UpdatePageEditorPayload, UpdatePagePayload,
 } from '@tupo/shared';
 
@@ -135,3 +136,47 @@ export const getModerationQueue = (status: 'open' | 'actioned' | 'dismissed' = '
 
 export const actOnReport = (id: string, action: 'remove' | 'warn' | 'dismiss', note?: string) =>
   apiPost(`/api/feed/moderation/${id}/act`, { action, note });
+
+/* ── Reels ─────────────────────────────────────────────────────────────── */
+
+export const getReels = (cursor?: string) =>
+  apiGet<FeedReelsPage>(`/api/feed/reels${qs({ cursor })}`).then((r) => r.data!);
+
+export const getReel = (id: string) =>
+  apiGet<{ reel: FeedReelView }>(`/api/feed/reels/${id}`).then((r) => r.data!.reel);
+
+export const createReel = (payload: ComposeReelPayload) =>
+  apiPost<{ reelId: string; reel: FeedReelView }>('/api/feed/reels', payload).then((r) => r.data!);
+
+export const deleteReel = (id: string) => apiDelete(`/api/feed/reels/${id}`);
+
+export const recordReelView = (id: string) => apiPost(`/api/feed/reels/${id}/view`).catch(() => {});
+
+export const likeReel = (id: string) =>
+  apiPost<{ liked: boolean; likeCount: number }>(`/api/feed/reels/${id}/like`).then((r) => r.data!);
+
+export const listReelComments = (id: string) =>
+  apiGet<{ comments: FeedReelCommentView[] }>(`/api/feed/reels/${id}/comments`).then((r) => r.data!.comments);
+
+export const addReelComment = (id: string, body: string) =>
+  apiPost<{ comment: FeedReelCommentView }>(`/api/feed/reels/${id}/comments`, { body }).then((r) => r.data!.comment);
+
+export const deleteReelComment = (commentId: string) => apiDelete(`/api/feed/reels/comments/${commentId}`);
+
+/* ── Stories ───────────────────────────────────────────────────────────── */
+
+export const getStoryGroups = () =>
+  apiGet<{ groups: FeedStoryGroup[] }>('/api/feed/stories').then((r) => r.data!.groups);
+
+export const getStory = (id: string) =>
+  apiGet<{ story: FeedStoryView }>(`/api/feed/stories/${id}`).then((r) => r.data!.story);
+
+export const createStory = (payload: ComposeStoryPayload) =>
+  apiPost<{ storyId: string; story: FeedStoryView }>('/api/feed/stories', payload).then((r) => r.data!);
+
+export const deleteStory = (id: string) => apiDelete(`/api/feed/stories/${id}`);
+
+export const recordStoryView = (id: string) => apiPost(`/api/feed/stories/${id}/view`).catch(() => {});
+
+export const getStoryViewers = (id: string) =>
+  apiGet<{ viewers: FeedStoryViewer[] }>(`/api/feed/stories/${id}/viewers`).then((r) => r.data!.viewers);

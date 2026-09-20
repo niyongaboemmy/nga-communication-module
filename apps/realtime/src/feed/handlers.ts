@@ -1,6 +1,6 @@
 import type { Server, Socket } from 'socket.io';
 import type { ClientToServerEvents, ServerToClientEvents, SessionClaims } from '@tupo/shared';
-import { feedAudienceRoom, feedAudiencesForRole, feedPostRoom } from '@tupo/shared';
+import { feedAudienceRoom, feedAudiencesForRole, feedPostRoom, feedReelRoom } from '@tupo/shared';
 
 /**
  * Feed over the socket.
@@ -30,19 +30,21 @@ export function registerFeedHandlers(_io: Server, socket: FeedSocket): void {
     void socket.join(feedAudienceRoom(audience));
   }
 
-  socket.on('feed:subscribe', async ({ postIds }, ack) => {
+  socket.on('feed:subscribe', async ({ postIds, kind }, ack) => {
+    const room = kind === 'reel' ? feedReelRoom : feedPostRoom;
     const wanted = [...new Set(postIds ?? [])].filter(Boolean).slice(0, MAX_SUBSCRIPTIONS);
     for (const id of wanted) {
       if (joined.size >= MAX_SUBSCRIPTIONS) break;
-      await socket.join(feedPostRoom(id));
+      await socket.join(room(id));
       joined.add(id);
     }
     ack?.({ ok: true, subscribed: [...joined] });
   });
 
-  socket.on('feed:unsubscribe', async ({ postIds }) => {
+  socket.on('feed:unsubscribe', async ({ postIds, kind }) => {
+    const room = kind === 'reel' ? feedReelRoom : feedPostRoom;
     for (const id of postIds ?? []) {
-      await socket.leave(feedPostRoom(id));
+      await socket.leave(room(id));
       joined.delete(id);
     }
   });

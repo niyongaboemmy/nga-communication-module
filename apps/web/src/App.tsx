@@ -34,6 +34,7 @@ import { MailSettings } from './pages/mail/MailSettings';
 import { EmptyState } from './components/ui';
 import { FeedProvider } from './pages/feed/FeedProvider';
 import { FeedHome } from './pages/feed/FeedHome';
+import { Reels } from './pages/feed/Reels';
 import { PageProfile, PageDirectory, PageInsights } from './pages/feed/PageScreens';
 import { SavedPosts, PostPermalink, ModerationQueue } from './pages/feed/Screens';
 
@@ -102,6 +103,7 @@ export const App: React.FC = () => (
             <Route path="feed" element={
               <RequirePermission anyOf={['FEED_VIEW']}><FeedProviderLayout /></RequirePermission>}>
               <Route index element={<FeedHome />} />
+              <Route path="reels" element={<Reels />} />
               <Route path="saved" element={<SavedPosts />} />
               <Route path="pages" element={<PageDirectory />} />
               <Route path="pages/:id/insights" element={<PageInsights />} />

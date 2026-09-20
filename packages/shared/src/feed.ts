@@ -64,6 +64,16 @@ export const FEED_LIMITS = {
   EDITOR_TITLE_MAX: 40,
   /** Pins are a spotlight, not a second feed. */
   MAX_PINNED_PER_PAGE: 3,
+  REEL_CAPTION_MAX: 2_200,
+  REEL_COMMENT_BODY_MAX: 2_000,
+  REEL_PAGE_SIZE: 10,
+  /** A vertical clip, not a lecture recording. */
+  REEL_MAX_DURATION_SECONDS: 90,
+  STORY_CAPTION_MAX: 500,
+  /** How long a status stays up — the whole point of a "story" (FR-FEED-14). */
+  STORY_TTL_HOURS: 24,
+  /** Facebook caps this too — beyond it a story bar stops being scannable. */
+  MAX_ACTIVE_STORIES_PER_AUTHOR: 20,
 } as const;
 
 export type FeedSort = 'recent' | 'top';
@@ -243,6 +253,7 @@ export interface FeedPostView {
 
 export interface FeedPage_<T> { items: T[]; nextCursor: string | null; }
 export type FeedTimelinePage = FeedPage_<FeedPostView>;
+export type FeedReelsPage = FeedPage_<FeedReelView>;
 
 export interface ComposePostPayload {
   pageId: string;
@@ -291,6 +302,81 @@ export interface AddCommentPayload {
   body: string;
   parentId?: string | null;
   media?: FeedMediaItem[];
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Reels — short vertical videos, published by a person (not a page)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface FeedReelView {
+  id: string;
+  author: FeedPerson;
+  caption: string;
+  media: FeedMediaItem;
+  audience: FeedAudience;
+  likeCount: number;
+  commentCount: number;
+  viewCount: number;
+  uniqueReach: number;
+  /** Whether the viewer has liked this reel. */
+  liked: boolean;
+  canDelete: boolean;
+  createdAt: string;
+}
+
+export interface ComposeReelPayload {
+  caption?: string;
+  media: FeedMediaItem;
+  audience?: FeedAudience;
+}
+
+export interface FeedReelCommentView {
+  id: string;
+  reelId: string;
+  author: FeedPerson;
+  body: string;
+  createdAt: string;
+  canDelete: boolean;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Stories — ephemeral 24-hour statuses, grouped by author
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface FeedStoryView {
+  id: string;
+  author: FeedPerson;
+  media: FeedMediaItem | null;
+  caption: string;
+  background: string;
+  audience: FeedAudience;
+  viewCount: number;
+  /** Whether the viewer has already seen this one. */
+  viewed: boolean;
+  canDelete: boolean;
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** One horizontal-bar entry: an author's still-active stories, newest last
+ *  so the viewer plays oldest → newest, Instagram-style. */
+export interface FeedStoryGroup {
+  author: FeedPerson;
+  stories: FeedStoryView[];
+  /** True once every story in the group has been viewed. */
+  allViewed: boolean;
+  latestAt: string;
+}
+
+export interface ComposeStoryPayload {
+  caption?: string;
+  media?: FeedMediaItem | null;
+  background?: string;
+  audience?: FeedAudience;
+}
+
+export interface FeedStoryViewer extends FeedPerson {
+  viewedAt: string;
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -343,6 +429,9 @@ export interface FeedPageAnalytics {
  * ────────────────────────────────────────────────────────────────────────── */
 
 export const feedPostRoom = (postId: string) => `feedpost:${postId}`;
+
+/** Live like/comment/view counters for one reel's detail view. */
+export const feedReelRoom = (reelId: string) => `feedreel:${reelId}`;
 
 /**
  * Broadcast room for every published post in a given audience band. A client

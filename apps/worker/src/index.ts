@@ -8,7 +8,7 @@ import { runScheduledMessages } from './jobs/scheduledMessages.js';
 import { runChatSweeps } from './jobs/chatSweeps.js';
 import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
 import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './jobs/mail.js';
-import { runFeedSweeps } from './jobs/feed.js';
+import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -104,6 +104,13 @@ const worker = new Worker(
         return runFeedSweeps();
       }
 
+      // Stories — expire statuses past their 24 hours (FR-FEED-14).
+      case 'story:sweep': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runStorySweeps();
+      }
+
       default:
         // Fail loudly rather than silently dropping work we don't recognise.
         throw new Error(`Unknown job type: ${job.name}`);
@@ -165,6 +172,18 @@ queue.add('feed:sweep', {}, {
   removeOnComplete: 20,
   removeOnFail: 20,
 }).catch((err) => console.error('[worker] could not register the feed sweep:', err.message));
+
+/**
+ * The story sweep — housekeeping cadence, like chat's, not the scheduled-post
+ * clock's: nobody notices a status outliving its 24 hours by up to five
+ * minutes, and polling every 30 seconds to usually find nothing is wasted work.
+ */
+queue.add('story:sweep', {}, {
+  jobId: 'story-sweep',
+  repeat: { every: 5 * 60_000 },
+  removeOnComplete: 10,
+  removeOnFail: 10,
+}).catch((err) => console.error('[worker] could not register the story sweep:', err.message));
 
 worker.on('ready', () => console.log('[worker] connected to redis, waiting for jobs'));
 

@@ -17,15 +17,16 @@
  */
 
 import type {
-  FeedCommentView, FeedPostView, FeedReactionSummary,
+  FeedCommentView, FeedPostView, FeedReactionSummary, FeedReelCommentView, FeedReelView, FeedStoryView,
 } from './feed.js';
 
 export interface FeedClientToServerEvents {
+  /** `kind` picks `feedpost:<id>` (default) or `feedreel:<id>` — see feedPostRoom/feedReelRoom. */
   'feed:subscribe': (
-    p: { postIds: string[] },
+    p: { postIds: string[]; kind?: 'post' | 'reel' },
     ack?: (r: { ok: boolean; subscribed: string[] }) => void,
   ) => void;
-  'feed:unsubscribe': (p: { postIds: string[] }) => void;
+  'feed:unsubscribe': (p: { postIds: string[]; kind?: 'post' | 'reel' }) => void;
 }
 
 export interface FeedServerToClientEvents {
@@ -53,4 +54,18 @@ export interface FeedServerToClientEvents {
   'feed:counter': (
     p: { postId: string; commentCount?: number; shareCount?: number; viewCount?: number; uniqueReach?: number },
   ) => void;
+
+  /* ── Reels ──────────────────────────────────────────────────────────────── */
+  /** A new reel reached this audience (delivered on `feedaudience:<band>`). */
+  'feed:reel_new': (p: { reel: FeedReelView }) => void;
+  'feed:reel_deleted': (p: { reelId: string }) => void;
+  'feed:reel_comment_new': (p: { reelId: string; comment: FeedReelCommentView }) => void;
+  'feed:reel_counter': (
+    p: { reelId: string; likeCount?: number; commentCount?: number; viewCount?: number; uniqueReach?: number; liked?: boolean },
+  ) => void;
+
+  /* ── Stories ────────────────────────────────────────────────────────────── */
+  /** A new story reached this audience (delivered on `feedaudience:<band>`). */
+  'feed:story_new': (p: { story: FeedStoryView }) => void;
+  'feed:story_deleted': (p: { storyId: string; authorId: string }) => void;
 }
