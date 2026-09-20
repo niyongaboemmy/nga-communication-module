@@ -343,3 +343,28 @@ export interface FeedPageAnalytics {
  * ────────────────────────────────────────────────────────────────────────── */
 
 export const feedPostRoom = (postId: string) => `feedpost:${postId}`;
+
+/**
+ * Broadcast room for every published post in a given audience band. A client
+ * joins the ones its role can see (`feedAudiencesForRole`) so a brand-new post
+ * from *anyone* the viewer follows or not lands live, not just posts from
+ * pages they already follow — the home feed shows everyone (FR-FEED-7).
+ */
+export const feedAudienceRoom = (audience: FeedAudience) => `feedaudience:${audience}`;
+
+/** Which audience bands a session role may see — mirrors `visibleAudiences`
+ *  in `@tupo/feed`, kept here too since the socket gateway has no DB access
+ *  and only knows the session's lowercase `role`, not the feed's RoleLevel. */
+export function feedAudiencesForRole(role: string | undefined): FeedAudience[] {
+  switch (role) {
+    case 'admin':
+    case 'staff':
+      return ['everyone', 'staff', 'students', 'parents'];
+    case 'student':
+      return ['everyone', 'students'];
+    case 'parent':
+      return ['everyone', 'parents'];
+    default:
+      return ['everyone'];
+  }
+}

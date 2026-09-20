@@ -38,10 +38,18 @@ const TOP_WINDOW = 150;
 /**
  * The candidate id list for a viewer + filter, newest first. Audience-scoped.
  * `before` is the keyset boundary for recent paging; ignored for top.
+ *
+ * Every row also carries `is_followed`: whether the actor follows that post's
+ * page (or it reached them through a `follow` timeline fan-out). "all" (the
+ * home feed default) no longer restricts candidates to followed/mandatory
+ * pages — every published, audience-visible post is a candidate — but
+ * `is_followed` lets the outer ORDER BY put people/pages the actor actually
+ * follows ahead of the rest, Facebook-style, instead of hiding strangers'
+ * posts outright.
  */
 async function candidateIds(
-  actor: FeedActor, opts: GetFeedOpts, before: { key: string; id: string } | null, limit: number,
-): Promise<Array<{ id: string; published_at: string }>> {
+  actor: FeedActor, opts: GetFeedOpts, before: { key: string; id: string; rank?: string } | null, limit: number,
+): Promise<Array<{ id: string; published_at: string; is_followed: boolean }>> {
   const audiences = visibleAudiences(actor.roleLevel);
   const params: unknown[] = [];
   const p = (v: unknown) => { params.push(v); return `$${params.length}`; };
@@ -57,7 +65,7 @@ async function candidateIds(
   if (opts.filter === 'bookmarks') {
     const actorP = p(actor.id);
     source = `
-      SELECT fp.id, fp.published_at
+      SELECT fp.id, fp.published_at, false AS is_followed
         FROM feed_bookmarks bm
         JOIN feed_posts fp ON fp.id = bm.post_id
        WHERE bm.user_id = ${actorP} AND fp.deleted_at IS NULL AND fp.status = 'published'
@@ -65,37 +73,53 @@ async function candidateIds(
   } else if (opts.pageId) {
     const pinnedFilter = pinnedLeadsPage(opts) ? 'AND NOT fp.pinned' : '';
     source = `
-      SELECT fp.id, fp.published_at
+      SELECT fp.id, fp.published_at, false AS is_followed
         FROM feed_posts fp
        WHERE fp.page_id = ${p(opts.pageId)} AND fp.deleted_at IS NULL AND fp.status = 'published'
          AND fp.audience = ANY(${audP}) ${pinnedFilter}`;
-  } else {
-    // timeline ∪ read-time merge of big / mandatory pages the user follows
-    const followFilter = opts.filter === 'following' ? `AND t.reason = 'follow'` : '';
-    const annFilter = opts.filter === 'announcements' ? `AND fp.type = 'announcement'` : '';
+  } else if (opts.filter === 'following') {
+    // Strictly followed content — timeline fan-out ∪ read-time merge of
+    // big/mandatory pages the user follows.
     const actorP = p(actor.id);
     source = `
-      SELECT fp.id, fp.published_at FROM feed_timeline t
+      SELECT fp.id, fp.published_at, true AS is_followed FROM feed_timeline t
         JOIN feed_posts fp ON fp.id = t.post_id
        WHERE t.user_id = ${actorP} AND fp.deleted_at IS NULL AND fp.status = 'published'
-         AND fp.audience = ANY(${audP}) ${followFilter} ${annFilter}
+         AND fp.audience = ANY(${audP}) AND t.reason = 'follow'
       UNION
-      SELECT fp.id, fp.published_at FROM feed_page_followers f
+      SELECT fp.id, fp.published_at, true AS is_followed FROM feed_page_followers f
         JOIN feed_pages pg ON pg.id = f.page_id AND pg.deleted_at IS NULL
         JOIN feed_posts fp ON fp.page_id = pg.id
        WHERE f.user_id = ${actorP} AND (pg.mandatory OR pg.follower_count > ${p(FEED_LIMITS.FANOUT_THRESHOLD)})
-         AND fp.deleted_at IS NULL AND fp.status = 'published' AND fp.audience = ANY(${audP})
-         ${opts.filter === 'announcements' ? `AND fp.type = 'announcement'` : ''}`;
+         AND fp.deleted_at IS NULL AND fp.status = 'published' AND fp.audience = ANY(${audP})`;
+  } else {
+    // "all" (default) and "announcements": every published, audience-visible
+    // post is a candidate — not just pages the actor follows — so the feed
+    // shows everyone, the way a real social feed does. `is_followed` tags
+    // which ones came from a page/author the actor follows, so they can be
+    // boosted to the top without excluding anyone else (FR-FEED-7).
+    const annFilter = opts.filter === 'announcements' ? `AND fp.type = 'announcement'` : '';
+    const actorP = p(actor.id);
+    source = `
+      SELECT fp.id, fp.published_at,
+             EXISTS (
+               SELECT 1 FROM feed_page_followers f WHERE f.user_id = ${actorP} AND f.page_id = fp.page_id
+               UNION
+               SELECT 1 FROM feed_timeline t WHERE t.user_id = ${actorP} AND t.post_id = fp.id AND t.reason = 'follow'
+             ) AS is_followed
+        FROM feed_posts fp
+       WHERE fp.deleted_at IS NULL AND fp.status = 'published'
+         AND fp.audience = ANY(${audP}) ${annFilter}`;
   }
 
   const keyset = before && (opts.sort ?? 'recent') === 'recent'
-    ? `AND (c.published_at, c.id) < (${p(before.key)}::timestamptz, ${p(before.id)})`
+    ? `AND (c.is_followed, c.published_at, c.id) < (${p(before.rank === '1')}, ${p(before.key)}::timestamptz, ${p(before.id)})`
     : '';
 
-  const { rows } = await getPool().query<{ id: string; published_at: string }>(
-    `SELECT c.id, c.published_at FROM ( ${source} ) c
+  const { rows } = await getPool().query<{ id: string; published_at: string; is_followed: boolean }>(
+    `SELECT c.id, c.published_at, c.is_followed FROM ( ${source} ) c
       WHERE true ${keyset}
-      ORDER BY c.published_at DESC, c.id DESC
+      ORDER BY c.is_followed DESC, c.published_at DESC, c.id DESC
       LIMIT ${p(limit)}`,
     params,
   );
@@ -128,11 +152,13 @@ export async function getFeed(actor: FeedActor, opts: GetFeedOpts = {}): Promise
 
   if (sort === 'top') {
     const window = await candidateIds(actor, opts, null, TOP_WINDOW);
+    const followedIds = new Set(window.filter((w) => w.is_followed).map((w) => w.id));
     const map = await hydratePosts(actor, window.map((w) => w.id));
     const scored = [...map.values()]
       .map((v) => ({ v, s: rankScore({
         reactions: v.reactions.total, comments: v.commentCount, shares: v.shareCount,
         publishedAt: new Date(v.publishedAt ?? v.createdAt), pinned: v.pinned, type: v.type,
+        followed: followedIds.has(v.id),
       }) }))
       .sort((a, b) => b.s - a.s)
       .map((x) => x.v);
@@ -152,6 +178,8 @@ export async function getFeed(actor: FeedActor, opts: GetFeedOpts = {}): Promise
   const items = [...head, ...pageRows.map((r) => r.id)]
     .map((id) => map.get(id)).filter((v): v is FeedPostView => Boolean(v));
   const last = pageRows[pageRows.length - 1];
-  const nextCursor = hasMore && last ? encodeCursor({ key: last.published_at, id: last.id }) : null;
+  const nextCursor = hasMore && last
+    ? encodeCursor({ key: last.published_at, id: last.id, rank: last.is_followed ? '1' : '0' })
+    : null;
   return { items, nextCursor };
 }

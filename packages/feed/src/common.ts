@@ -85,16 +85,28 @@ export function clampLimit(raw: unknown, fallback: number = FEED_LIMITS.PAGE_SIZ
  * A cursor is just `<iso-or-score>|<postId>` base64'd. Opaque to the client,
  * trivial to reason about here. */
 
-export interface Cursor { key: string; id: string; }
+export interface Cursor {
+  key: string;
+  id: string;
+  /** Affinity tier ('1' = followed/friend content, '0' = discovery) — see `getFeed`. */
+  rank?: string;
+}
 
 export function encodeCursor(c: Cursor): string {
-  return Buffer.from(`${c.key}|${c.id}`, 'utf8').toString('base64url');
+  const body = c.rank !== undefined ? `${c.rank}|${c.key}|${c.id}` : `${c.key}|${c.id}`;
+  return Buffer.from(body, 'utf8').toString('base64url');
 }
 
 export function decodeCursor(raw: string | undefined | null): Cursor | null {
   if (!raw) return null;
   try {
-    const [key, id] = Buffer.from(raw, 'base64url').toString('utf8').split('|');
+    const parts = Buffer.from(raw, 'base64url').toString('utf8').split('|');
+    if (parts.length === 3) {
+      const [rank, key, id] = parts;
+      if (!rank || !key || !id) return null;
+      return { rank, key, id };
+    }
+    const [key, id] = parts;
     if (!key || !id) return null;
     return { key, id };
   } catch {
@@ -111,11 +123,14 @@ export function decodeCursor(raw: string | undefined | null): Cursor | null {
 export function rankScore(input: {
   reactions: number; comments: number; shares: number;
   publishedAt: Date; pinned: boolean; type: string;
+  /** Author/page is followed, or the actor's friend — a modest nudge, not a hard sort. */
+  followed?: boolean;
 }): number {
   const ageHours = Math.max(0, (Date.now() - input.publishedAt.getTime()) / 3_600_000);
   const engagement = Math.log10(input.reactions + 2 * input.comments + 3 * input.shares + 1);
   const priority = input.pinned || input.type === 'announcement' ? 1000 : 0;
-  return priority + engagement - ageHours / 12;
+  const affinity = input.followed ? 1 : 0;
+  return priority + engagement + affinity - ageHours / 12;
 }
 
 export { FEED_LIMITS };

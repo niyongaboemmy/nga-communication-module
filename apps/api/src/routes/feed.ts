@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { ok, fail } from '@tupo/shared';
-import { feedPostRoom } from '@tupo/shared';
+import { feedAudienceRoom, feedPostRoom } from '@tupo/shared';
 import type { FeedActor } from '@tupo/feed';
 import * as feed from '@tupo/feed';
 import { FeedError } from '@tupo/feed';
@@ -185,6 +185,10 @@ router.post('/pages/:id/posts', authorizePermission('FEED_POST'), wrap(async (re
     // The author's timeline row exists; tell everyone whose timeline it hit.
     const followers = await notifyFollowersOfPost(result.postId, actor.id, post.page.name, post.type);
     emitToUsers([actor.id, ...followers.emitIds], 'feed:post_new', { post });
+    // The home feed now shows every audience-visible post, not just followed
+    // pages (FR-FEED-7) — broadcast to the audience band so it appears live
+    // for everyone who can see it, not only this page's followers.
+    emitToRooms([feedAudienceRoom(post.audience)], 'feed:post_new', { post });
   }
   res.status(201).json(ok(result));
 }));
@@ -212,6 +216,7 @@ router.post('/posts/:id/publish', authorizePermission('FEED_POST'), wrap(async (
   const post = await feed.getPostView(actor, req.params.id!);
   const followers = await notifyFollowersOfPost(req.params.id!, actor.id, post.page.name, post.type);
   emitToUsers([actor.id, ...followers.emitIds], 'feed:post_new', { post });
+  emitToRooms([feedAudienceRoom(post.audience)], 'feed:post_new', { post });
   res.json(ok({ post }));
 }));
 
