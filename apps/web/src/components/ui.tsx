@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 
 /**
  * Shared primitives, styled to the NGA design language used by the Central MIS
@@ -180,12 +180,20 @@ export const Avatar: React.FC<{
   className?: string;
 }> = ({ name, src, size = 36, presence, shape = 'circle', tintKey, className = '' }) => {
   const radius = shape === 'circle' ? 'rounded-full' : 'rounded-xl';
+  // A `src` that fails to load (an expired ticket, a dropped connection, a
+  // deleted file) must fall back to the initials disc below — never a bare
+  // broken-image icon, which is all a plain `<img>` gives you on its own.
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [src]);
   return (
     <span className={`relative inline-flex shrink-0 ${className}`} style={{ width: size, height: size }}>
-      {src ? (
+      {src && !failed ? (
         <img
           src={src}
           alt=""
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
           className={`h-full w-full object-cover ${radius} border border-black/5 dark:border-white/10`}
         />
       ) : (

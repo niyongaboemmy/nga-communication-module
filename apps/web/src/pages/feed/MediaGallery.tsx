@@ -1,15 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { X, ChevronLeft, ChevronRight, FileText, Download, Play } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, FileText, Download, Play, ImageOff } from 'lucide-react';
 import type { FeedMediaItem } from '@tupo/shared';
-import { useMediaUrl } from './lib';
+import { FeedImage, useInViewport, useResilientMediaUrl } from './lib';
 import { downloadFile } from '../chat/uploads';
 
 /** One tile inside the mosaic. */
 const Tile: React.FC<{ item: FeedMediaItem; onOpen: () => void; className?: string; overlay?: number }> = ({
   item, onOpen, className = '', overlay,
 }) => {
-  const url = useMediaUrl(item.fileId, item.kind !== 'document');
-
   if (item.kind === 'document') {
     return (
       <button
@@ -30,24 +28,53 @@ const Tile: React.FC<{ item: FeedMediaItem; onOpen: () => void; className?: stri
     );
   }
 
+  if (item.kind === 'image') {
+    return (
+      <button
+        onClick={(e) => { e.stopPropagation(); onOpen(); }}
+        className={`group relative overflow-hidden bg-slate-100 dark:bg-card-dark ${className}`}
+        style={{ aspectRatio: item.w && item.h ? `${item.w} / ${item.h}` : undefined }}
+      >
+        <FeedImage fileId={item.fileId} alt={item.name ?? ''} className="absolute inset-0" imgClassName="transition-transform duration-300 group-hover:scale-[1.03]" />
+        {overlay ? (
+          <span className="absolute inset-0 grid place-items-center bg-black/55 text-2xl font-semibold text-white">+{overlay}</span>
+        ) : null}
+      </button>
+    );
+  }
+
+  return <VideoTile item={item} onOpen={onOpen} className={className} overlay={overlay} />;
+};
+
+/** A video tile — same lazy/resilient treatment as an image, but for the
+ *  `<video>` element (which has no built-in `loading="lazy"`). */
+const VideoTile: React.FC<{ item: FeedMediaItem; onOpen: () => void; className?: string; overlay?: number }> = ({
+  item, onOpen, className = '', overlay,
+}) => {
+  const [ref, inView] = useInViewport<HTMLButtonElement>();
+  const { url, broken, onError, retry } = useResilientMediaUrl(item.fileId, inView);
+
   return (
     <button
-      onClick={(e) => { e.stopPropagation(); onOpen(); }}
+      ref={ref}
+      onClick={(e) => { e.stopPropagation(); if (broken) retry(); else onOpen(); }}
       className={`group relative overflow-hidden bg-slate-100 dark:bg-card-dark ${className}`}
       style={{ aspectRatio: item.w && item.h ? `${item.w} / ${item.h}` : undefined }}
     >
-      {url && item.kind === 'image' && (
-        <img src={url} alt={item.name ?? ''} loading="lazy" className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" />
-      )}
-      {url && item.kind === 'video' && (
+      {url && (
         <>
-          <video src={url} className="h-full w-full object-cover" muted playsInline preload="metadata" />
+          <video src={url} className="h-full w-full object-cover" muted playsInline preload="metadata" onError={onError} />
           <span className="absolute inset-0 grid place-items-center bg-black/25">
             <span className="grid h-12 w-12 place-items-center rounded-full bg-white/90 text-slate-900"><Play size={20} className="ml-0.5" /></span>
           </span>
         </>
       )}
-      {!url && <span className="feed-skeleton absolute inset-0" />}
+      {!url && !broken && <span className="feed-skeleton absolute inset-0" />}
+      {broken && (
+        <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-text-secondary-light dark:text-text-secondary-dark">
+          <ImageOff size={18} /> <span className="text-[11px] font-medium">Tap to reload</span>
+        </span>
+      )}
       {overlay ? (
         <span className="absolute inset-0 grid place-items-center bg-black/55 text-2xl font-semibold text-white">+{overlay}</span>
       ) : null}
@@ -58,7 +85,7 @@ const Tile: React.FC<{ item: FeedMediaItem; onOpen: () => void; className?: stri
 const Lightbox: React.FC<{ items: FeedMediaItem[]; index: number; onClose: () => void }> = ({ items, index, onClose }) => {
   const [i, setI] = useState(index);
   const item = items[i]!;
-  const url = useMediaUrl(item.fileId, true);
+  const { url, broken, onError, retry } = useResilientMediaUrl(item.fileId, true);
   const go = useCallback((d: number) => setI((c) => (c + d + items.length) % items.length), [items.length]);
 
   useEffect(() => {
@@ -82,9 +109,17 @@ const Lightbox: React.FC<{ items: FeedMediaItem[]; index: number; onClose: () =>
         </>
       )}
       <div className="max-h-[88vh] max-w-5xl" onClick={(e) => e.stopPropagation()}>
-        {url && item.kind === 'image' && <img src={url} alt={item.name ?? ''} className="max-h-[88vh] rounded-lg object-contain" />}
-        {url && item.kind === 'video' && <video src={url} controls autoPlay className="max-h-[88vh] rounded-lg" />}
-        {!url && <div className="feed-skeleton h-96 w-96 rounded-lg" />}
+        {url && item.kind === 'image' && <img src={url} alt={item.name ?? ''} onError={onError} className="max-h-[88vh] rounded-lg object-contain" />}
+        {url && item.kind === 'video' && <video src={url} controls autoPlay onError={onError} className="max-h-[88vh] rounded-lg" />}
+        {!url && !broken && <div className="feed-skeleton h-96 w-96 rounded-lg" />}
+        {broken && (
+          <button
+            onClick={(e) => { e.stopPropagation(); retry(); }}
+            className="flex h-96 w-96 max-w-full flex-col items-center justify-center gap-2 rounded-lg bg-white/5 text-white/70"
+          >
+            <ImageOff size={28} /> <span className="text-sm font-medium">Couldn't load. Tap to retry.</span>
+          </button>
+        )}
       </div>
       {items.length > 1 && (
         <span className="absolute bottom-4 rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-white">{i + 1} / {items.length}</span>

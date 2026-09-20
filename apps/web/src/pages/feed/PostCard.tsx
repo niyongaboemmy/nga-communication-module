@@ -248,14 +248,22 @@ const MenuItem: React.FC<{ icon: React.ReactNode; label: string; onClick: () => 
   </button>
 );
 
-const LinkPreview: React.FC<{ preview: NonNullable<FeedPostView['linkPreview']> }> = ({ preview }) => (
-  <a href={preview.url} target="_blank" rel="noopener noreferrer nofollow"
-    className="mt-3 flex overflow-hidden rounded-lg border border-border-light transition-colors hover:bg-surface-light dark:border-border-dark/50 dark:hover:bg-card-dark/40">
-    {preview.image && <img src={preview.image} alt="" className="h-24 w-24 shrink-0 object-cover sm:h-28 sm:w-40" loading="lazy" />}
-    <div className="min-w-0 flex-1 p-3">
-      <p className="text-[11px] uppercase tracking-wide text-text-secondary-light dark:text-text-secondary-dark">{preview.siteName ?? new URL(preview.url).hostname}</p>
-      <p className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">{preview.title ?? preview.url}</p>
-      {preview.description && <p className="mt-0.5 line-clamp-2 text-xs text-text-secondary-light dark:text-text-secondary-dark">{preview.description}</p>}
-    </div>
-  </a>
-);
+const LinkPreview: React.FC<{ preview: NonNullable<FeedPostView['linkPreview']> }> = ({ preview }) => {
+  // An OpenGraph thumbnail is someone else's server, not ours — it 404s or
+  // times out far more often than our own media. Facebook's own link cards
+  // just drop the image rather than show a broken one, so we do too.
+  const [imageFailed, setImageFailed] = useState(false);
+  return (
+    <a href={preview.url} target="_blank" rel="noopener noreferrer nofollow"
+      className="mt-3 flex overflow-hidden rounded-lg border border-border-light transition-colors hover:bg-surface-light dark:border-border-dark/50 dark:hover:bg-card-dark/40">
+      {preview.image && !imageFailed && (
+        <img src={preview.image} alt="" className="h-24 w-24 shrink-0 object-cover sm:h-28 sm:w-40" loading="lazy" decoding="async" onError={() => setImageFailed(true)} />
+      )}
+      <div className="min-w-0 flex-1 p-3">
+        <p className="text-[11px] uppercase tracking-wide text-text-secondary-light dark:text-text-secondary-dark">{preview.siteName ?? new URL(preview.url).hostname}</p>
+        <p className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">{preview.title ?? preview.url}</p>
+        {preview.description && <p className="mt-0.5 line-clamp-2 text-xs text-text-secondary-light dark:text-text-secondary-dark">{preview.description}</p>}
+      </div>
+    </a>
+  );
+};

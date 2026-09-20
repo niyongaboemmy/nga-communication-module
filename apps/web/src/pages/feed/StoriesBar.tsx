@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, X, Loader2, Eye, Trash2, Image as ImageIcon, Type } from 'lucide-react';
+import { Plus, X, Loader2, Eye, Trash2, Image as ImageIcon, Type, ImageOff } from 'lucide-react';
 import type { FeedMediaItem, FeedStoryGroup, FeedStoryView, FeedStoryViewer } from '@tupo/shared';
 import { FEED_LIMITS } from '@tupo/shared';
 import { Avatar } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { uploadFile, probeMedia, validateFile } from '../chat/uploads';
-import { useMediaUrl, firstName, relativeTime } from './lib';
+import { useResilientMediaUrl, firstName, relativeTime } from './lib';
 import * as api from './api';
 
 /**
@@ -74,13 +74,14 @@ export const StoriesBar: React.FC = () => {
 
 const StoryThumb: React.FC<{ group: FeedStoryGroup; isMine?: boolean; onOpen: () => void }> = ({ group, isMine, onOpen }) => {
   const cover = group.stories[group.stories.length - 1];
-  const coverMediaUrl = useMediaUrl(cover?.media?.fileId);
+  const { url: coverMediaUrl, broken: coverBroken, onError: onCoverError } = useResilientMediaUrl(cover?.media?.fileId);
+  const showCover = coverMediaUrl && !coverBroken;
   return (
     <button onClick={onOpen} className="feed-card-in group relative h-40 w-28 shrink-0 overflow-hidden rounded-2xl text-left text-white">
-      {coverMediaUrl && cover?.media?.kind === 'image'
-        ? <img src={coverMediaUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
-        : coverMediaUrl && cover?.media?.kind === 'video'
-          ? <video src={coverMediaUrl} className="absolute inset-0 h-full w-full object-cover" muted />
+      {showCover && cover?.media?.kind === 'image'
+        ? <img src={coverMediaUrl} alt="" loading="lazy" decoding="async" onError={onCoverError} className="absolute inset-0 h-full w-full object-cover" />
+        : showCover && cover?.media?.kind === 'video'
+          ? <video src={coverMediaUrl} className="absolute inset-0 h-full w-full object-cover" muted onError={onCoverError} />
           : <div className="absolute inset-0" style={{ background: cover?.background || BACKGROUNDS[0] }} />}
       <span className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/5 to-black/10" />
       <span className={`absolute left-2 top-2 grid h-9 w-9 place-items-center rounded-full ring-[3px] ${group.allViewed ? 'ring-black/20' : 'ring-blue-500'}`}>
@@ -234,7 +235,7 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
   const group = groups[groupIdx];
   const story = group?.stories[storyIdx];
   const isMine = story?.author.id === user?.id;
-  const mediaUrl = useMediaUrl(story?.media?.fileId);
+  const { url: mediaUrl, broken: mediaBroken, onError: onMediaError, retry: retryMedia } = useResilientMediaUrl(story?.media?.fileId);
 
   const advance = useCallback((dir: 1 | -1) => {
     setViewers(null);
@@ -323,8 +324,14 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
           onTouchStart={() => setPaused(true)}
           onTouchEnd={() => setPaused(false)}
         >
-          {story.media?.kind === 'image' && mediaUrl && <img src={mediaUrl} alt="" className="max-h-full max-w-full object-contain" />}
-          {story.media?.kind === 'video' && mediaUrl && <video src={mediaUrl} className="max-h-full max-w-full object-contain" autoPlay muted playsInline />}
+          {story.media?.kind === 'image' && mediaUrl && <img src={mediaUrl} alt="" onError={onMediaError} className="max-h-full max-w-full object-contain" />}
+          {story.media?.kind === 'video' && mediaUrl && <video src={mediaUrl} className="max-h-full max-w-full object-contain" autoPlay muted playsInline onError={onMediaError} />}
+          {story.media && !mediaUrl && !mediaBroken && <div className="feed-skeleton h-full w-full" />}
+          {story.media && mediaBroken && (
+            <button onClick={(e) => { e.stopPropagation(); retryMedia(); }} className="flex flex-col items-center gap-2 text-white/70">
+              <ImageOff size={28} /> <span className="text-sm font-medium">Couldn't load. Tap to retry.</span>
+            </button>
+          )}
           {story.caption && (
             <p className={`relative z-10 max-w-[85%] text-center text-2xl font-bold leading-snug ${story.media ? 'absolute bottom-16 rounded-lg bg-black/40 px-3 py-2 text-base' : ''}`}>
               {story.caption}

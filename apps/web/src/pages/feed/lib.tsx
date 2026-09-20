@@ -1,10 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ThumbsUp, Heart, PartyPopper, Handshake, Lightbulb, MessageCircleQuestion, type LucideIcon,
+  ThumbsUp, Heart, PartyPopper, Handshake, Lightbulb, MessageCircleQuestion, ImageOff, type LucideIcon,
 } from 'lucide-react';
 import { FEED_REACTIONS, FEED_REACTION_META } from '@tupo/shared';
 import type { FeedReaction } from '@tupo/shared';
-import { inlineUrl } from '../chat/uploads';
+import { inlineUrl, bustTicket } from '../chat/uploads';
 
 export { FEED_REACTIONS, FEED_REACTION_META };
 
@@ -90,7 +90,13 @@ export function fullTime(iso: string | null): string {
 
 const urlCache = new Map<string, string>();
 
-export function useMediaUrl(fileId: string | null | undefined, enabled = true): string | undefined {
+/**
+ * `retryKey` is not read inside the effect — its only job is to sit in the
+ * dependency array so bumping it (after `invalidateMediaUrl` clears the
+ * caches) forces a fresh `inlineUrl` call instead of quietly handing back the
+ * same URL that just failed to load.
+ */
+export function useMediaUrl(fileId: string | null | undefined, enabled = true, retryKey = 0): string | undefined {
   const [url, setUrl] = useState<string | undefined>(fileId ? urlCache.get(fileId) : undefined);
   useEffect(() => {
     if (!fileId || !enabled) return;
@@ -99,9 +105,128 @@ export function useMediaUrl(fileId: string | null | undefined, enabled = true): 
     let alive = true;
     inlineUrl(fileId).then((u) => { if (alive) { urlCache.set(fileId, u); setUrl(u); } }).catch(() => {});
     return () => { alive = false; };
-  }, [fileId, enabled]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileId, enabled, retryKey]);
   return url;
 }
+
+/** Clears both the resolved-URL cache here and the ticket cache in chat's
+ *  uploads module, so the next `useMediaUrl` call mints a genuinely fresh URL
+ *  instead of replaying one that just failed to load. */
+export function invalidateMediaUrl(fileId: string): void {
+  urlCache.delete(fileId);
+  bustTicket(fileId);
+}
+
+/**
+ * True once the element has entered (or nearly entered) the viewport, and
+ * stays true afterward — a feed image that has been seen once should not
+ * unmount its network request just because the user scrolled past it.
+ * `rootMargin` starts the fetch a little before the image is actually
+ * visible, the same "prefetch just ahead of scroll" behaviour Facebook and
+ * Instagram's feeds use instead of firing every request on mount.
+ */
+export function useInViewport<T extends HTMLElement>(rootMargin = '600px'): [React.RefObject<T | null>, boolean] {
+  const ref = useRef<T | null>(null);
+  const [inView, setInView] = useState(false);
+  useEffect(() => {
+    if (inView) return;
+    const el = ref.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === 'undefined') { setInView(true); return; }
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0]?.isIntersecting) { setInView(true); io.disconnect(); }
+    }, { rootMargin });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [inView, rootMargin]);
+  return [ref, inView];
+}
+
+const MEDIA_MAX_RETRIES = 2;
+
+/**
+ * `useMediaUrl` plus the failure handling a real feed needs: up to two
+ * automatic retries against a busted cache (most failures are a dropped
+ * connection or a momentarily-bad ticket, not a genuinely missing file), then
+ * a "tap to reload" state instead of a permanently broken image.
+ */
+export function useResilientMediaUrl(
+  fileId: string | null | undefined, enabled = true,
+): { url: string | undefined; broken: boolean; onError: () => void; retry: () => void } {
+  const [retryKey, setRetryKey] = useState(0);
+  const [broken, setBroken] = useState(false);
+  const url = useMediaUrl(fileId, enabled, retryKey);
+
+  useEffect(() => { setBroken(false); setRetryKey(0); }, [fileId]);
+
+  const onError = useCallback(() => {
+    if (!fileId) return;
+    if (retryKey < MEDIA_MAX_RETRIES) {
+      invalidateMediaUrl(fileId);
+      setRetryKey((k) => k + 1);
+    } else {
+      setBroken(true);
+    }
+  }, [fileId, retryKey]);
+
+  const retry = useCallback(() => {
+    if (fileId) invalidateMediaUrl(fileId);
+    setBroken(false);
+    setRetryKey(0);
+  }, [fileId]);
+
+  return { url: broken ? undefined : url, broken, onError, retry };
+}
+
+/**
+ * A lazy, resilient, fixed-box image — the shared primitive for every media
+ * tile, cover photo and thumbnail in the feed. Its network request only
+ * fires once the box nears the viewport (`useInViewport`), it shows a
+ * shimmering placeholder while that request is in flight, and a failed load
+ * gets a couple of silent retries before falling back to a "tap to reload"
+ * state — never a permanently broken image icon.
+ */
+export const FeedImage: React.FC<{
+  fileId?: string | null;
+  alt?: string;
+  className?: string;
+  imgClassName?: string;
+  onClick?: (e: React.MouseEvent) => void;
+  /** Skip the viewport gate — the image is already known to be on screen
+   *  (an open lightbox/modal), so there is nothing to wait for. */
+  eager?: boolean;
+}> = ({ fileId, alt = '', className = '', imgClassName = '', onClick, eager }) => {
+  const [ref, inView] = useInViewport<HTMLDivElement>();
+  const { url, broken, onError, retry } = useResilientMediaUrl(fileId, eager || inView);
+
+  return (
+    <div ref={ref} className={`relative overflow-hidden ${className}`}>
+      {url && (
+        <img
+          src={url}
+          alt={alt}
+          loading="lazy"
+          decoding="async"
+          onClick={onClick}
+          onError={onError}
+          className={`h-full w-full object-cover ${imgClassName}`}
+        />
+      )}
+      {!url && !broken && <span className="feed-skeleton absolute inset-0" aria-hidden />}
+      {broken && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); retry(); }}
+          className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-surface-light text-text-secondary-light dark:bg-card-dark dark:text-text-secondary-dark"
+        >
+          <ImageOff size={18} />
+          <span className="text-[11px] font-medium">Tap to reload</span>
+        </button>
+      )}
+    </div>
+  );
+};
 
 /* ── Rich-text linkify — #hashtags, @mentions and bare links become anchors,
       everything else is escaped. Safe: output is assembled from React nodes,

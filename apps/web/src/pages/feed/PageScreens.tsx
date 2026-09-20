@@ -39,9 +39,15 @@ const BrandingImageButton: React.FC<{
 }> = ({ shape, src, fallback, editable, onFile, busy, label, className = '' }) => {
   const input = useRef<HTMLInputElement>(null);
   const shapeClass = shape === 'circle' ? 'rounded-full' : '';
+  // Same reasoning as Avatar: a `src` that fails mid-load must fall back to
+  // `fallback` (initials, or the accent gradient), never sit there blank.
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [src]);
   return (
     <div className={`group relative overflow-hidden ${shapeClass} ${className}`}>
-      {src ? <img src={src} alt="" className="h-full w-full object-cover" /> : (fallback ?? <div className="h-full w-full bg-gradient-to-br from-blue-500 to-indigo-600" />)}
+      {src && !failed
+        ? <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} className="h-full w-full object-cover" />
+        : (fallback ?? <div className="h-full w-full bg-gradient-to-br from-blue-500 to-indigo-600" />)}
       {editable && (
         <button
           type="button"

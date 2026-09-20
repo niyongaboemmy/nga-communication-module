@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Heart, MessageCircle, Volume2, VolumeX, Plus, X, Loader2, MoreHorizontal, Trash2, Eye, Video,
+  Heart, MessageCircle, Volume2, VolumeX, Plus, X, Loader2, MoreHorizontal, Trash2, Eye, Video, ImageOff,
 } from 'lucide-react';
 import type { FeedMediaItem, FeedReelCommentView, FeedReelView } from '@tupo/shared';
 import { FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
@@ -9,7 +9,7 @@ import { Avatar, EmptyState } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { onSocket, getSocket } from '../../lib/socket';
 import { uploadFile, probeMedia, validateFile } from '../chat/uploads';
-import { useMediaUrl, firstName, relativeTime, useDismiss } from './lib';
+import { useResilientMediaUrl, useInViewport, firstName, relativeTime, useDismiss } from './lib';
 import * as api from './api';
 
 /**
@@ -150,7 +150,8 @@ const ReelSlide: React.FC<{
   onLike: () => void; onDelete?: () => void; isMine: boolean;
 }> = ({ reel, active, muted, onToggleMute, onLike, onDelete, isMine }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const mediaUrl = useMediaUrl(reel.media.fileId);
+  const [slideRef, nearView] = useInViewport<HTMLDivElement>();
+  const { url: mediaUrl, broken, onError, retry } = useResilientMediaUrl(reel.media.fileId, active || nearView);
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useDismiss(menuOpen, useCallback(() => setMenuOpen(false), []));
@@ -162,7 +163,7 @@ const ReelSlide: React.FC<{
   }, [active, mediaUrl]);
 
   return (
-    <div data-reel-id={reel.id} className="relative flex h-full w-full snap-start snap-always items-center justify-center">
+    <div ref={slideRef} data-reel-id={reel.id} className="relative flex h-full w-full snap-start snap-always items-center justify-center">
       {mediaUrl && (
         <video
           ref={videoRef}
@@ -172,7 +173,14 @@ const ReelSlide: React.FC<{
           muted={muted}
           playsInline
           onClick={onToggleMute}
+          onError={onError}
         />
+      )}
+      {!mediaUrl && !broken && <span className="feed-skeleton absolute inset-0" aria-hidden />}
+      {broken && (
+        <button onClick={(e) => { e.stopPropagation(); retry(); }} className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black text-white/70">
+          <ImageOff size={28} /> <span className="text-sm font-medium">Couldn't load this reel. Tap to retry.</span>
+        </button>
       )}
       <span className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
 

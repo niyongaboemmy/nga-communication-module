@@ -233,6 +233,18 @@ export async function inlineUrl(fileId: string): Promise<string> {
 }
 
 /**
+ * Force a fresh ticket next time `inlineUrl` is called for this file.
+ *
+ * A cached ticket is assumed good until it expires, but a URL can also fail
+ * for reasons that have nothing to do with the token — a dropped connection,
+ * a transient 5xx from the storage driver. Retrying with the *same* token
+ * would just replay the same failure, so a retry busts the cache first.
+ */
+export function bustTicket(fileId: string): void {
+  ticketCache.delete(fileId);
+}
+
+/**
  * `inlineUrl` as a hook, for anything that renders a stored image.
  *
  * `enabled` is what keeps it lazy: a channel with three hundred images in its
