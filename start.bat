@@ -71,7 +71,7 @@ set "MIS_REPO=https://github.com/niyongaboemmy/nga_central_mis.git"
 set "MIS_STARTED="
 call :port_open 5001
 if not errorlevel 1 (
-    echo   - Already running on http://localhost:5001
+    echo   - Already running ^(API answering on port 5001^)
     goto :mis_started
 )
 
@@ -190,8 +190,11 @@ echo   - Dependencies ready
 
 :: ----------------------------------------------------------------- 6. Launch
 :: The MIS was started in parallel above; give it until now to come up.
+:: Two ports matter: 5001 is the API this server talks to, 5173 is the
+:: login page the browser is sent to. Both come from the MIS's `npm run
+:: dev`, but the API is the slow one, so wait on it first and confirm each.
 if defined MIS_STARTED (
-    echo   - Waiting for Central MIS on port 5001 ^(first run: a few minutes^)
+    echo   - Waiting for Central MIS ^(first run: a few minutes^)
     call :wait_port 5001 900
     if errorlevel 1 (
         echo.
@@ -200,7 +203,26 @@ if defined MIS_STARTED (
         echo          starts anyway, but signing in needs the MIS running.
         echo.
     ) else (
-        echo   - Central MIS ready on http://localhost:5001
+        echo   - Central MIS API ready         http://localhost:5001
+        call :wait_port 5173 120
+        if errorlevel 1 (
+            echo.
+            echo   [warn] The MIS API is up but its login page ^(port 5173^) is not.
+            echo          Check the "Central MIS" window for a frontend error.
+            echo.
+        ) else (
+            echo   - Central MIS login page ready  http://localhost:5173/login
+        )
+    )
+) else (
+    call :port_open 5173
+    if errorlevel 1 (
+        echo.
+        echo   [warn] An MIS API answers on 5001 but nothing serves its login page
+        echo          on 5173, so Sign In will dead-end. Start the MIS frontend too.
+        echo.
+    ) else (
+        echo   - Central MIS login page ready  http://localhost:5173/login
     )
 )
 echo [6/6] Starting Tupo...
