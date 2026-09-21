@@ -1,5 +1,7 @@
 # Tupo
 
+> **Setting this up on your machine?** Start with **[LOCAL_SETUP.md](LOCAL_SETUP.md)** — it covers the whole local stack, including the Central MIS sign-in every module depends on.
+
 Unified communication platform for the NGA ecosystem — chat, meetings, files, mail and an institutional feed.
 
 Part of the NGA Digital Ecosystem alongside **NGA Central MIS**, **TaskMentor** and **Discipline & Attendance**.
