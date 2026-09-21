@@ -113,6 +113,12 @@
 @keyframes feed-story-in-left  { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
 .feed-story-in-right { animation: feed-story-in-right 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 .feed-story-in-left  { animation: feed-story-in-left 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes feed-story-arrive {
+  0%   { opacity: 0; transform: scale(0.6) translateY(10px); }
+  60%  { opacity: 1; transform: scale(1.06) translateY(-2px); }
+  100% { opacity: 1; transform: none; }
+}
+.feed-story-arrive { animation: feed-story-arrive 520ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
 .feed-story-react { transition: transform 140ms cubic-bezier(0.34, 1.56, 0.64, 1); }
 .feed-story-react:hover, .feed-story-react:focus-visible { transform: scale(1.35) translateY(-3px); }
 .feed-story-react:active { transform: scale(0.9); }

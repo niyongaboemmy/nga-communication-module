@@ -103,7 +103,7 @@ export const App: React.FC = () => (
             <Route path="feed" element={
               <RequirePermission anyOf={['FEED_VIEW']}><FeedProviderLayout /></RequirePermission>}>
               <Route index element={<FeedHome />} />
-              <Route path="reels" element={<Reels />} />
+              <Route path="reels/:reelId?" element={<Reels />} />
               <Route path="saved" element={<SavedPosts />} />
               <Route path="pages" element={<PageDirectory />} />
               <Route path="pages/:id/insights" element={<PageInsights />} />

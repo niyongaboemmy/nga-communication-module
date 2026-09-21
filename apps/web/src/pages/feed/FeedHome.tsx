@@ -8,7 +8,11 @@ import { FeedFrame, useFeedRails, ReportDialog, EditPostMount, PostSkeleton, Pos
 import { Composer } from './Composer';
 import { HighlightsBar } from './HighlightsBar';
 import { StoriesBar } from './StoriesBar';
+import { ReelsStrip } from './ReelsStrip';
 import * as api from './api';
+
+/** The reels sampler sits after this many posts (or at the end of a short feed). */
+const REELS_STRIP_AFTER = 3;
 
 export const FeedHome: React.FC = () => {
   const [params, setParams] = useSearchParams();
@@ -83,7 +87,14 @@ export const FeedHome: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-3">
-              {items.map((post) => <PostCard key={post.id} post={post} />)}
+              {items.map((post, i) => (
+                <React.Fragment key={post.id}>
+                  <PostCard post={post} />
+                  {/* Facebook slots its reels sampler a few posts down the feed. */}
+                  {i === REELS_STRIP_AFTER - 1 && <ReelsStrip />}
+                </React.Fragment>
+              ))}
+              {items.length < REELS_STRIP_AFTER && <ReelsStrip />}
               {list.hasMore
                 ? <LoadMoreSentinel onHit={list.loadMore} disabled={list.more} />
                 : (

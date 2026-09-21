@@ -28,25 +28,59 @@ const BACKGROUNDS = [
   'linear-gradient(135deg,#4f46e5,#0891b2)',
 ];
 
+/** Same ordering the API uses: me first, then unseen, then newest. */
+function sortGroups(groups: FeedStoryGroup[], me: string | undefined): FeedStoryGroup[] {
+  return [...groups].sort((a, b) => {
+    if (a.author.id === me) return -1;
+    if (b.author.id === me) return 1;
+    if (a.allViewed !== b.allViewed) return a.allViewed ? 1 : -1;
+    return Date.parse(b.latestAt) - Date.parse(a.latestAt);
+  });
+}
+
 export const StoriesBar: React.FC = () => {
   const { user } = useAuth();
   const [groups, setGroups] = useState<FeedStoryGroup[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
-  const [viewerAt, setViewerAt] = useState<number | null>(null);
+  const [viewerAuthor, setViewerAuthor] = useState<string | null>(null);
+  const [fresh, setFresh] = useState<Set<string>>(new Set()); // author ids that just got a live story
 
   const reload = useCallback(() => {
     api.getStoryGroups().then((g) => { setGroups(g); setLoaded(true); }).catch(() => setLoaded(true));
   }, []);
   useEffect(() => { reload(); }, [reload]);
 
-  // Somebody else's new/removed story shows up in the bar without a refresh.
+  // Live sync — a story someone just posted slides into the bar (and into an
+  // open viewer's group) without a refetch; a deleted one drops out.
   useEffect(() => {
-    const offs = [onSocket('feed:story_new', reload), onSocket('feed:story_deleted', reload)];
-    return () => offs.forEach((off) => off());
-  }, [reload]);
+    const offNew = onSocket('feed:story_new', ({ story }) => {
+      const mine = story.author.id === user?.id;
+      setGroups((prev) => {
+        const existing = prev.find((g) => g.author.id === story.author.id);
+        if (existing?.stories.some((st) => st.id === story.id)) return prev;
+        const next = existing
+          ? prev.map((g) => g !== existing ? g : {
+            ...g, stories: [...g.stories, story], latestAt: story.createdAt, allViewed: mine ? g.allViewed : false,
+          })
+          : [...prev, { author: story.author, stories: [story], allViewed: mine, latestAt: story.createdAt }];
+        return sortGroups(next, user?.id);
+      });
+      if (!mine) {
+        setFresh((f) => new Set(f).add(story.author.id));
+        window.setTimeout(() => setFresh((f) => { const n = new Set(f); n.delete(story.author.id); return n; }), 4000);
+      }
+    });
+    const offDel = onSocket('feed:story_deleted', ({ storyId }) => {
+      setGroups((prev) => prev
+        .map((g) => (g.stories.some((st) => st.id === storyId) ? { ...g, stories: g.stories.filter((st) => st.id !== storyId) } : g))
+        .filter((g) => g.stories.length > 0));
+    });
+    return () => { offNew(); offDel(); };
+  }, [user?.id]);
 
   const mine = user ? groups.find((g) => g.author.id === user.id) : undefined;
+  const viewerAt = viewerAuthor ? groups.findIndex((g) => g.author.id === viewerAuthor) : -1;
 
   if (!loaded) return null;
 
@@ -65,18 +99,18 @@ export const StoriesBar: React.FC = () => {
       </button>
 
       {groups.filter((g) => g.author.id !== user?.id).map((g) => (
-        <StoryThumb key={g.author.id} group={g} onOpen={() => setViewerAt(groups.indexOf(g))} />
+        <StoryThumb key={g.author.id} group={g} fresh={fresh.has(g.author.id)} onOpen={() => setViewerAuthor(g.author.id)} />
       ))}
       {mine && (
-        <StoryThumb group={mine} isMine onOpen={() => setViewerAt(groups.indexOf(mine))} />
+        <StoryThumb group={mine} isMine onOpen={() => setViewerAuthor(mine.author.id)} />
       )}
 
       {composerOpen && <StoryComposer onClose={() => setComposerOpen(false)} onPosted={() => { setComposerOpen(false); reload(); }} />}
-      {viewerAt !== null && groups[viewerAt] && (
+      {viewerAt >= 0 && (
         <StoryViewer
           groups={groups}
           startAt={viewerAt}
-          onClose={() => setViewerAt(null)}
+          onClose={() => setViewerAuthor(null)}
           onChanged={reload}
         />
       )}
@@ -84,12 +118,13 @@ export const StoriesBar: React.FC = () => {
   );
 };
 
-const StoryThumb: React.FC<{ group: FeedStoryGroup; isMine?: boolean; onOpen: () => void }> = ({ group, isMine, onOpen }) => {
+const StoryThumb: React.FC<{ group: FeedStoryGroup; isMine?: boolean; fresh?: boolean; onOpen: () => void }> = ({ group, isMine, fresh, onOpen }) => {
   const cover = group.stories[group.stories.length - 1];
   const { url: coverMediaUrl, broken: coverBroken, onError: onCoverError } = useResilientMediaUrl(cover?.media?.fileId);
   const showCover = coverMediaUrl && !coverBroken;
   return (
-    <button onClick={onOpen} className="feed-card-in group relative h-40 w-28 shrink-0 overflow-hidden rounded-2xl text-left text-white">
+    <button onClick={onOpen} className={`group relative h-40 w-28 shrink-0 overflow-hidden rounded-2xl text-left text-white ${fresh ? 'feed-story-arrive' : 'feed-card-in'}`}>
+      {fresh && <span className="feed-pill-in absolute left-1/2 top-2 z-10 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide">New</span>}
       {showCover && cover?.media?.kind === 'image'
         ? <img src={coverMediaUrl} alt="" loading="lazy" decoding="async" onError={onCoverError} className="absolute inset-0 h-full w-full object-cover" />
         : showCover && cover?.media?.kind === 'video'
@@ -280,6 +315,18 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
   const group = groups[cursor.g];
   const story = group?.stories[cursor.s];
   const isMine = story?.author.id === user?.id;
+
+  // Live updates re-sort/insert groups; follow the author+story we're on by id.
+  const placeRef = useRef<{ author?: string; story?: string }>({});
+  placeRef.current = { author: group?.author.id, story: story?.id };
+  useEffect(() => {
+    const { author, story: storyId } = placeRef.current;
+    if (!author) return;
+    const g = groups.findIndex((x) => x.author.id === author);
+    if (g < 0) { onClose(); return; }
+    const s = Math.max(0, groups[g]!.stories.findIndex((x) => x.id === storyId));
+    setCursor((c) => (c.g === g && c.s === s ? c : { g, s }));
+  }, [groups]); // eslint-disable-line react-hooks/exhaustive-deps
   const paused = holding || userPaused || overlay !== null || replyFocused || sending !== null;
   const { url: mediaUrl, broken: mediaBroken, onError: onMediaError, retry: retryMedia } = useResilientMediaUrl(story?.media?.fileId);
 
