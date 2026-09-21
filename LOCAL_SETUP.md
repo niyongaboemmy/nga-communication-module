@@ -8,25 +8,29 @@ Same guide in every NGA repo. Two steps, about fifteen minutes.
 ```
 
 `start.bat` does the rest: creates your config files, installs packages, builds
-your local database, and starts everything. Run it again any time — it skips
-whatever is already done.
+your local database, **starts your own copy of the Central MIS**, and starts
+your module. Run it again any time — it skips whatever is already done.
 
 ---
 
 ## 1. Install the prerequisites
 
-Everyone needs **[Node.js](https://nodejs.org/) 20 or newer** (the LTS
-download). Then, depending on your module:
+Everyone needs:
 
-| Your module | Also install | Database it creates |
+- **[Node.js](https://nodejs.org/) 20 or newer** (the LTS download)
+- **[Git](https://git-scm.com/)** — `start.bat` uses it to fetch the Central MIS
+- **MySQL 8, or [XAMPP](https://www.apachefriends.org/)** — the Central MIS
+  keeps its database there. If you use XAMPP, open the Control Panel and press
+  **Start** next to MySQL before running `start.bat`.
+
+Then, depending on your module:
+
+| Your module | Also install | Databases it creates (all on your machine) |
 |---|---|---|
-| **TaskMentor** | MySQL 8, or XAMPP | `taskmentor_dev` (local MySQL) |
-| **Tendo** | nothing | a SQLite file in `server/data/` |
-| **Tupo** | PostgreSQL 16 + Redis | `tupo_dev` (local Postgres) |
-| **Central MIS** | MySQL 8, or XAMPP | `ngarw_mis` (local MySQL) |
-
-If you use XAMPP, open the Control Panel and press **Start** next to MySQL
-before running `start.bat`.
+| **TaskMentor** | nothing more | `taskmentor_dev` + `ngarw_mis` (MySQL) |
+| **Tendo** | nothing more | a SQLite file in `server/data/` + `ngarw_mis` (MySQL) |
+| **Tupo** | PostgreSQL 16 + Redis | `tupo_dev` (Postgres) + `ngarw_mis` (MySQL) |
+| **Central MIS** | nothing more | `ngarw_mis` (MySQL) |
 
 **Every database is on your own machine.** Nothing you do locally can touch
 production data.
@@ -39,9 +43,10 @@ cd <the folder it made>
 start.bat
 ```
 
-First run takes a few minutes (packages and database). After that it is quick.
+First run takes a few minutes (packages and databases). After that it is quick.
 
-When it finishes it prints the address to open:
+Two windows open: your module, and **Central MIS**. Keep both. When they finish
+they print the addresses:
 
 | Module | Open this | API |
 |---|---|---|
@@ -55,28 +60,61 @@ When it finishes it prints the address to open:
 ## Signing in
 
 Your module has **no login of its own**. Click *Sign In* and you are taken to
-the NGA Central MIS, which sends you straight back, signed in:
+your own Central MIS, which sends you straight back, signed in:
 
 ```
-   your module  ──▶  MIS login page  ──▶  back to localhost, signed in
+   your module  ──▶  your Central MIS (localhost:5173)  ──▶  back, signed in
 ```
 
-**Working on TaskMentor, Tendo or Tupo?** The login page is the real MIS at
-**mis.amashuri.com**. **Ask your team lead for the admin login** — that account
-has the permissions you need to see everything while you work.
+Sign in as **`superadmin` / `Admin@1234`**. It then asks for a 6-digit code,
+which is **printed on the login page** — no email is sent in development.
 
-**Working on Central MIS itself?** Your own copy is the login page. Sign in as
-`superadmin` / `Admin@1234`. It then asks for a 6-digit code, which is
-**printed on the login page** — no email is sent in development.
+That account is the super-admin of *your* Central MIS, so it can see everything.
+It exists only in the `ngarw_mis` database on your machine; production has a
+different password. Change it any time with
+`cd backend && npm run db:setup -- --force --admin-password=...` in the MIS
+folder.
+
+---
+
+## How the Central MIS gets there
+
+The satellite modules (TaskMentor, Tendo, Tupo) need a Central MIS to sign in
+against, exactly as the Docker stack does. Their `start.bat` looks for it in
+this order and uses the first hit:
+
+1. the folder in the `NGA_MIS_DIR` environment variable, if you set one
+2. `..\nga_central_mis` — a checkout **next to** your module's folder
+3. `..\..\Central MIS\nga_central_mis` — the NGAMIS workspace layout
+
+If none exists it runs `git clone` **once** into `..\nga_central_mis`. You need
+read access to the `nga_central_mis` repository for that — ask your team lead.
+Git may open a browser window the first time to sign you in to GitHub.
+
+The MIS is started in its own window and your module waits for it (port 5001)
+before starting. If something is already listening on 5001 — the Docker stack,
+or an MIS you started yourself — it is used as-is and nothing is started twice.
+
+Inside the MIS, `npm run db:setup` builds `ngarw_mis` from the committed
+snapshot, sets the `superadmin` password, and registers each module's SSO
+client with a secret of the form `local-dev-secret-<client_id>`. That is why
+your module's committed `.env.example` already contains a working secret: it
+only means anything to the database on your machine.
 
 ---
 
 ## If something goes wrong
 
-**"Placeholder SSO secret" when start.bat runs**
-Your repo's `.env.example` has not been filled in with the dev SSO secret yet.
-Ask your team lead for it, then open `server/.env` (Tupo: `apps/api/.env`) and
-put it on the `SSO_CLIENT_SECRET=` line.
+**"Your .env files point at the production MIS" when start.bat runs**
+You ran an older `start.bat` that pointed sign-in at `mis.amashuri.com`. Move
+any API keys you added out of `server/.env` and `client/.env` (Tupo:
+`apps/api/.env` and `apps/web/.env`), delete both files, and run `start.bat`
+again — it recreates them from the current templates.
+
+**The Central MIS window shows an error**
+Read it — it says what is missing. The usual one is MySQL not running: start it
+in the XAMPP Control Panel and press a key in that window to retry. Your module
+keeps waiting for the MIS for up to 15 minutes, then starts without it.
 
 **"Redirect URI not allowed" after clicking Sign In**
 Your dev server is on a different port than the one registered with the MIS —
@@ -85,7 +123,9 @@ port in the table above and start again. Do not change the port: the MIS matches
 it exactly.
 
 **"Invalid client credentials"**
-The `SSO_CLIENT_SECRET` in your `.env` is wrong or stale. Ask your team lead.
+The `SSO_CLIENT_SECRET` in your `.env` does not match your MIS database. Both
+should be `local-dev-secret-<client_id>`; if you changed one, restore it, or
+rebuild the MIS database: `cd backend && npm run db:setup -- --force`.
 
 **Port already in use**
 Something else has the port. Find it and stop it rather than changing the port,
@@ -95,7 +135,7 @@ or sign-in breaks. `netstat -ano | findstr :5174`
 Start MySQL in the XAMPP Control Panel, or install MySQL 8, then run
 `start.bat` again.
 
-**I want to start the database over**
+**I want to start a database over**
 TaskMentor: drop `taskmentor_dev` and re-run `start.bat`.
 Tendo: delete `server/data/` and re-run.
 Tupo: `npm run db:migrate`.
@@ -106,8 +146,10 @@ Central MIS: `cd backend && npm run db:setup -- --force`.
 ## Two things worth knowing
 
 **Your `.env` is never pushed.** `start.bat` creates it from the committed
-`.env.example`, and `.env` is git-ignored in every repo. Put your secrets there
-and nowhere else — never in `.env.example`, which *is* committed.
+`.env.example`, and `.env` is git-ignored in every repo. Put your own API keys
+there and nowhere else — never in `.env.example`, which *is* committed. The
+SSO values in `.env.example` are the one exception, on purpose: they only work
+against a database on your machine, so they are not secrets.
 
 **Never add a login that skips the password.** A "dev login" button that hands
 out a session without credentials has a way of surviving into production, and
