@@ -95,9 +95,19 @@ if "!MIS_DIR!"=="" (
     )
     git clone "!MIS_REPO!" "..\nga_central_mis"
     if errorlevel 1 (
+        :: A full clone is ~30k objects and a flaky connection resets it often.
+        :: Git removes its own half-finished folder; a shallow clone is a
+        :: fraction of the size, and history is not needed to run the MIS.
         echo.
-        echo   [warn] Could not clone the Central MIS. You need access to its
-        echo          repository - ask your team lead - then run this again.
+        echo   - Download interrupted. Trying once more with a smaller download...
+        if exist "..\nga_central_mis" if not exist "..\nga_central_mis\start.bat" rmdir /s /q "..\nga_central_mis"
+        git clone --depth 1 "!MIS_REPO!" "..\nga_central_mis"
+    )
+    if not exist "..\nga_central_mis\start.bat" (
+        echo.
+        echo   [warn] Could not clone the Central MIS. Either the connection dropped
+        echo          ^(just run start.bat again^) or you do not have access to its
+        echo          repository yet ^(ask your team lead^).
         echo          Tupo will start, but SIGNING IN WILL NOT WORK until then.
         echo.
         goto :mis_started
