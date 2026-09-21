@@ -69,27 +69,50 @@ your own Central MIS, which sends you straight back, signed in:
 It then asks for a 6-digit code, which is **printed on the login page** — no
 email is sent in development.
 
-**Every local account uses the password `Admin@1234`:**
+**Every local account uses the password `Admin@1234`.** Each module has its
+own roles and works them out from the MIS account, so pick the login for the
+role you want to see in *your* module:
 
-| Username | Role | Notes |
+| | Sign in as | Lands as |
 |---|---|---|
-| `superadmin` | SUPER_ADMIN | sees everything |
-| `dev.admin` | ADMIN | |
-| `dev.headteacher` | HEAD_TEACHER | |
-| `dev.teacher` | TEACHER | 3 subjects in the current year's main class |
-| `dev.classteacher` | CLASS_TEACHER + TEACHER | class teacher of that class |
-| `dev.student` | STUDENT | enrolled in that class and its subjects |
-| `dev.parent` | PARENT | parent of `dev.student` |
-| `dev.accountant` | ACCOUNTANT | |
-| `dev.staff` | STAFF | |
-| `dev.programmanager` | PROGRAM_MANAGER | leads that class's program |
+| **Tendo** | `superadmin` / `dev.admin` | admin |
+| | `dev.teacher` / `dev.classteacher` | teacher |
+| | `dev.student` | student |
+| | `dev.accountant` | unassigned (the pending screen) |
+| **TaskMentor** | `superadmin` / `dev.admin` | admin |
+| | `dev.teacher` / `dev.classteacher` | instructor |
+| | `dev.student` | student |
+| **Tupo** | `superadmin` | super_admin |
+| | `dev.programmanager` | program_lead |
+| | `dev.classteacher` | class_teacher |
+| | `dev.teacher` / `dev.admin` | staff |
+| | `dev.student` | student |
+| | `dev.parent` | parent |
+| **Central MIS** | any of them | exactly its MIS role |
 
-The same logins work in TaskMentor, Tendo and Tupo, which read the role from
-the MIS. These accounts exist only in the `ngarw_mis` database on your machine
-(their `@nga.test` emails cannot receive mail); production has none of them.
-The MIS's `npm run db:setup` creates them, and its `start.bat` re-applies them
-on every start (`db:setup -- --refresh`), so a database built before they
-existed gets them too. A printable one-page version is `guides/START_HERE.pdf`.
+All ten accounts, with what each becomes everywhere (measured, not assumed):
+
+| MIS account | MIS role | Tendo | TaskMentor | Tupo |
+|---|---|---|---|---|
+| `superadmin` | SUPER_ADMIN | admin | admin | super_admin |
+| `dev.admin` | ADMIN | admin | admin | staff |
+| `dev.headteacher` | HEAD_TEACHER | teacher | admin | staff |
+| `dev.teacher` | TEACHER | teacher | instructor | staff |
+| `dev.classteacher` | CLASS_TEACHER + TEACHER | teacher | instructor | class_teacher |
+| `dev.student` | STUDENT | student | student | student |
+| `dev.parent` | PARENT | student | student | parent |
+| `dev.accountant` | ACCOUNTANT | unassigned | student | staff |
+| `dev.staff` | STAFF | student | student | staff |
+| `dev.programmanager` | PROGRAM_MANAGER | teacher | admin | program_lead |
+
+The accounts are wired into the current academic year's main class (teachers
+teach its subjects, the class teacher leads it, the student is enrolled, the
+parent is that student's parent, the program manager leads its program). They
+exist only in the `ngarw_mis` database on your machine (their `@nga.test`
+emails cannot receive mail); production has none of them. The MIS's
+`npm run db:setup` creates them, and its `start.bat` re-applies them on every
+start (`db:setup -- --refresh`), so a database built before they existed gets
+them too. A printable version is `guides/START_HERE.pdf`.
 
 ---
 
