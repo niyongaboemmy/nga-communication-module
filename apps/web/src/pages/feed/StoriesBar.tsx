@@ -1,10 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, X, Loader2, Eye, Trash2, Image as ImageIcon, Type, ImageOff } from 'lucide-react';
+import {
+  Plus, X, Loader2, Eye, Trash2, Image as ImageIcon, Type, ImageOff, Pause, Play, Volume2, VolumeX,
+  ChevronLeft, ChevronRight, Keyboard, Send,
+} from 'lucide-react';
 import type { FeedMediaItem, FeedStoryGroup, FeedStoryView, FeedStoryViewer } from '@tupo/shared';
 import { FEED_LIMITS } from '@tupo/shared';
 import { Avatar } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
+import { useNotify } from '../../context/NotificationContext';
+import { onSocket } from '../../lib/socket';
 import { uploadFile, probeMedia, validateFile } from '../chat/uploads';
+import * as chatApi from '../chat/api';
 import { useResilientMediaUrl, firstName, relativeTime } from './lib';
 import * as api from './api';
 
@@ -33,6 +39,12 @@ export const StoriesBar: React.FC = () => {
     api.getStoryGroups().then((g) => { setGroups(g); setLoaded(true); }).catch(() => setLoaded(true));
   }, []);
   useEffect(() => { reload(); }, [reload]);
+
+  // Somebody else's new/removed story shows up in the bar without a refresh.
+  useEffect(() => {
+    const offs = [onSocket('feed:story_new', reload), onSocket('feed:story_deleted', reload)];
+    return () => offs.forEach((off) => off());
+  }, [reload]);
 
   const mine = user ? groups.find((g) => g.author.id === user.id) : undefined;
 
@@ -217,70 +229,198 @@ const StoryComposer: React.FC<{ onClose: () => void; onPosted: () => void }> = (
 
 /* ── Viewer ───────────────────────────────────────────────────────────── */
 
-const STORY_DURATION_MS = 5000;
+const IMAGE_STORY_MS = 5000;
+const TEXT_STORY_MS = 6000;
+const VIDEO_STORY_MAX_MS = 30_000;
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
 
+const newNonce = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+interface Cursor { g: number; s: number }
+
+/**
+ * Full-screen story player. Facebook semantics: stories inside a group play
+ * oldest → newest, the player then rolls on to the next author, and at the
+ * end of the bar it loops back to the first author instead of closing.
+ *
+ * Keyboard: ← → story · ↑ ↓ author · Space pause · M mute · R reply ·
+ * ? shortcuts · Esc close. Touch: hold to pause, swipe left/right for the
+ * next/previous author, swipe down to close.
+ */
 const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose: () => void; onChanged: () => void }> = ({
   groups, startAt, onClose, onChanged,
 }) => {
   const { user } = useAuth();
-  const [groupIdx, setGroupIdx] = useState(startAt);
-  const [storyIdx, setStoryIdx] = useState(() => Math.max(0, groups[startAt]!.stories.findIndex((s) => !s.viewed)));
+  const { notify } = useNotify();
+  const [cursor, setCursor] = useState<Cursor>(() => ({
+    g: startAt, s: Math.max(0, groups[startAt]!.stories.findIndex((st) => !st.viewed)),
+  }));
   const [progress, setProgress] = useState(0);
-  const [paused, setPaused] = useState(false);
+  const [holding, setHolding] = useState(false);       // press-and-hold on the canvas
+  const [userPaused, setUserPaused] = useState(false); // Space / the ⏸ button
+  const [overlay, setOverlay] = useState<'viewers' | 'help' | null>(null);
+  const [replyFocused, setReplyFocused] = useState(false);
+  const [muted, setMuted] = useState(true);
+  const [mediaReady, setMediaReady] = useState(false);
+  const [durationMs, setDurationMs] = useState(IMAGE_STORY_MS);
   const [viewers, setViewers] = useState<FeedStoryViewer[] | null>(null);
-  const seenRef = useRef(new Set<string>());
-  const rafRef = useRef<number | undefined>(undefined);
-  const startRef = useRef(0);
+  const [reply, setReply] = useState('');
+  const [sending, setSending] = useState<string | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+  const [slideDir, setSlideDir] = useState<1 | -1>(1);
 
-  const group = groups[groupIdx];
-  const story = group?.stories[storyIdx];
+  const seenRef = useRef(new Set<string>());
+  const elapsedRef = useRef(0);
+  const lastTsRef = useRef<number | null>(null);
+  const rafRef = useRef<number | undefined>(undefined);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const replyInputRef = useRef<HTMLInputElement>(null);
+  const touchRef = useRef<{ x: number; y: number; t: number } | null>(null);
+
+  const group = groups[cursor.g];
+  const story = group?.stories[cursor.s];
   const isMine = story?.author.id === user?.id;
+  const paused = holding || userPaused || overlay !== null || replyFocused || sending !== null;
   const { url: mediaUrl, broken: mediaBroken, onError: onMediaError, retry: retryMedia } = useResilientMediaUrl(story?.media?.fileId);
 
-  const advance = useCallback((dir: 1 | -1) => {
+  // Warm the next story's image so the cut is instant, like Facebook.
+  const next = useMemo<FeedStoryView | undefined>(() => {
+    if (!group) return undefined;
+    if (cursor.s + 1 < group.stories.length) return group.stories[cursor.s + 1];
+    return groups[(cursor.g + 1) % groups.length]?.stories[0];
+  }, [groups, group, cursor]);
+  const { url: nextUrl } = useResilientMediaUrl(next?.media?.kind === 'image' ? next.media.fileId : undefined);
+
+  /* ── Navigation ─────────────────────────────────────────────────────── */
+
+  const go = useCallback((target: Cursor, dir: 1 | -1) => {
+    setSlideDir(dir);
     setViewers(null);
+    setOverlay((o) => (o === 'viewers' ? null : o));
+    setCursor(target);
+  }, []);
+
+  /** Next/previous story, rolling over into the neighbouring author and
+   *  looping around the bar at either end. */
+  const step = useCallback((dir: 1 | -1) => {
     if (!group) return;
-    const nextStoryIdx = storyIdx + dir;
-    if (nextStoryIdx >= 0 && nextStoryIdx < group.stories.length) {
-      setStoryIdx(nextStoryIdx);
-      return;
-    }
-    const nextGroupIdx = groupIdx + dir;
-    if (nextGroupIdx >= 0 && nextGroupIdx < groups.length) {
-      setGroupIdx(nextGroupIdx);
-      setStoryIdx(dir === 1 ? 0 : groups[nextGroupIdx]!.stories.length - 1);
-      return;
-    }
-    onClose();
-  }, [group, groupIdx, storyIdx, groups, onClose]);
+    const s = cursor.s + dir;
+    if (s >= 0 && s < group.stories.length) { go({ g: cursor.g, s }, dir); return; }
+    const g = (cursor.g + dir + groups.length) % groups.length;
+    go({ g, s: dir === 1 ? 0 : groups[g]!.stories.length - 1 }, dir);
+  }, [group, cursor, groups, go]);
+
+  /** Jump straight to the neighbouring author (↑/↓, swipe, side chevrons). */
+  const jumpGroup = useCallback((dir: 1 | -1) => {
+    const g = (cursor.g + dir + groups.length) % groups.length;
+    const firstUnseen = groups[g]!.stories.findIndex((st) => !st.viewed);
+    go({ g, s: Math.max(0, firstUnseen) }, dir);
+  }, [cursor.g, groups, go]);
+
+  const stepRef = useRef(step);
+  stepRef.current = step;
+
+  /* ── Per-story reset + view receipt ─────────────────────────────────── */
 
   useEffect(() => {
+    elapsedRef.current = 0;
+    lastTsRef.current = null;
     setProgress(0);
+    setReply('');
+    setSent(null);
     if (!story) return;
+    const isVideo = story.media?.kind === 'video';
+    setMediaReady(!story.media);
+    setDurationMs(story.media ? IMAGE_STORY_MS : TEXT_STORY_MS);
+    if (isVideo) setDurationMs(VIDEO_STORY_MAX_MS);
     if (!seenRef.current.has(story.id)) {
       seenRef.current.add(story.id);
       void api.recordStoryView(story.id);
     }
-  }, [story?.id]);
+  }, [story?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A broken image still has to move on eventually; count it as ready.
+  useEffect(() => { if (mediaBroken) setMediaReady(true); }, [mediaBroken]);
+
+  /* ── The clock ──────────────────────────────────────────────────────── *
+   * Accumulates wall-time only while playing, so pausing never rewinds and
+   * switching stories always starts from zero (the old implementation read a
+   * stale `progress` and skipped every story after the first).            */
   useEffect(() => {
-    if (paused || !story) return;
-    startRef.current = performance.now() - progress * STORY_DURATION_MS;
-    const tick = () => {
-      const elapsed = performance.now() - startRef.current;
-      const frac = Math.min(1, elapsed / STORY_DURATION_MS);
+    if (!story || paused || !mediaReady) { lastTsRef.current = null; return; }
+    const tick = (ts: number) => {
+      if (lastTsRef.current !== null) elapsedRef.current += ts - lastTsRef.current;
+      lastTsRef.current = ts;
+      const frac = Math.min(1, elapsedRef.current / durationMs);
       setProgress(frac);
-      if (frac >= 1) { advance(1); return; }
+      if (frac >= 1) { stepRef.current(1); return; }
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [story?.id, paused]);
+  }, [story?.id, paused, mediaReady, durationMs]);
+
+  // Keep the <video> in lock-step with the clock.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (paused) v.pause();
+    else void v.play().catch(() => {});
+  }, [paused, story?.id, mediaReady]);
+
+  /* ── Keyboard + body scroll lock ────────────────────────────────────── */
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const typing = (e.target as HTMLElement | null)?.tagName === 'INPUT' || (e.target as HTMLElement | null)?.tagName === 'TEXTAREA';
+      if (e.key === 'Escape') {
+        if (typing) { (e.target as HTMLElement).blur(); return; }
+        if (overlay) { setOverlay(null); return; }
+        onClose();
+        return;
+      }
+      if (typing) return;
+      switch (e.key) {
+        case 'ArrowRight': e.preventDefault(); stepRef.current(1); break;
+        case 'ArrowLeft': e.preventDefault(); stepRef.current(-1); break;
+        case 'ArrowDown': case 'j': e.preventDefault(); jumpGroup(1); break;
+        case 'ArrowUp': case 'k': e.preventDefault(); jumpGroup(-1); break;
+        case ' ': case 'p': e.preventDefault(); setUserPaused((p) => !p); break;
+        case 'm': setMuted((m) => !m); break;
+        case 'r': if (!isMine) { e.preventDefault(); replyInputRef.current?.focus(); } break;
+        case '?': setOverlay((o) => (o === 'help' ? null : 'help')); break;
+        case 'Home': go({ g: cursor.g, s: 0 }, -1); break;
+        case 'End': go({ g: cursor.g, s: (group?.stories.length ?? 1) - 1 }, 1); break;
+        default: return;
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    document.body.style.overflow = 'hidden';
+    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = ''; };
+  }, [onClose, jumpGroup, go, overlay, isMine, cursor.g, group?.stories.length]);
+
+  /* ── Touch: hold to pause, swipe between authors, swipe down to close ── */
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0]!;
+    touchRef.current = { x: t.clientX, y: t.clientY, t: performance.now() };
+    setHolding(true);
+  };
+  const onTouchEnd = (e: React.TouchEvent) => {
+    setHolding(false);
+    const start = touchRef.current; touchRef.current = null;
+    const t = e.changedTouches[0];
+    if (!start || !t) return;
+    const dx = t.clientX - start.x; const dy = t.clientY - start.y;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)) { e.preventDefault(); jumpGroup(dx < 0 ? 1 : -1); return; }
+    if (dy > 90 && Math.abs(dy) > Math.abs(dx)) { e.preventDefault(); onClose(); }
+  };
+
+  /* ── Actions ────────────────────────────────────────────────────────── */
 
   const openViewers = () => {
     if (!story) return;
-    setPaused(true);
+    setOverlay('viewers');
     api.getStoryViewers(story.id).then(setViewers).catch(() => setViewers([]));
   };
 
@@ -288,45 +428,117 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
     if (!story) return;
     await api.deleteStory(story.id).catch(() => {});
     onChanged();
-    advance(1);
+    if (group && group.stories.length <= 1 && groups.length <= 1) { onClose(); return; }
+    step(1);
+  };
+
+  /** Replies and quick reactions land in a DM with the author, quoting the
+   *  story — the same place Facebook puts them, and no new backend. */
+  const sendToAuthor = async (body: string, kind: 'reply' | 'reaction') => {
+    if (!story || !group || isMine || sending) return;
+    setSending(kind);
+    const quoted = story.caption ? ` “${story.caption.slice(0, 80)}${story.caption.length > 80 ? '…' : ''}”` : '';
+    const text = kind === 'reaction' ? `${body}  ·  reacted to your story${quoted}` : `↩︎ Replying to your story${quoted}\n${body}`;
+    try {
+      const conversation = await chatApi.openDirect(group.author.id);
+      await chatApi.sendMessage(conversation.id, {
+        body: text, nonce: newNonce(),
+        metadata: { storyReply: { storyId: story.id, kind, caption: story.caption, reaction: kind === 'reaction' ? body : undefined } },
+      });
+      setReply('');
+      setSent(kind === 'reaction' ? body : 'Sent');
+      window.setTimeout(() => setSent(null), 1400);
+    } catch (err) {
+      notify({ title: 'Could not send that', body: err instanceof Error ? err.message : undefined, tone: 'error' });
+    } finally {
+      setSending(null);
+      replyInputRef.current?.blur();
+    }
   };
 
   if (!group || !story) return null;
 
+  const secondsLeft = Math.max(0, Math.ceil(((1 - progress) * durationMs) / 1000));
+  const prevGroup = groups[(cursor.g - 1 + groups.length) % groups.length]!;
+  const nextGroup = groups[(cursor.g + 1) % groups.length]!;
+  const showPausedBadge = paused && overlay === null && !replyFocused && !sending;
+
   return (
-    <div className="fixed inset-0 z-[95] grid place-items-center bg-black/90 p-2 sm:p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/90 p-2 sm:p-6" onClick={onClose} role="dialog" aria-modal="true" aria-label={`${group.author.name}'s story`}>
+      {groups.length > 1 && (
+        <GroupChevron side="left" group={prevGroup} onClick={() => jumpGroup(-1)} />
+      )}
+
       <div className="relative flex h-full max-h-[860px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl bg-black text-white" onClick={(e) => e.stopPropagation()}>
+        {/* Segmented progress — one bar per story in this author's group */}
         <div className="absolute inset-x-2 top-2 z-20 flex gap-1">
           {group.stories.map((s, i) => (
             <div key={s.id} className="h-[3px] flex-1 overflow-hidden rounded-full bg-white/30">
-              <div className="h-full bg-white transition-[width] duration-100 linear"
-                style={{ width: i < storyIdx ? '100%' : i === storyIdx ? `${progress * 100}%` : '0%' }} />
+              <div className="h-full origin-left bg-white will-change-transform"
+                style={{ transform: `scaleX(${i < cursor.s ? 1 : i === cursor.s ? progress : 0})` }} />
             </div>
           ))}
         </div>
 
         <div className="absolute inset-x-3 top-6 z-20 flex items-center gap-2">
           <Avatar name={group.author.name} src={group.author.avatarUrl ?? undefined} size={30} />
-          <span className="text-sm font-semibold">{group.author.name}</span>
-          <span className="text-xs text-white/70">{relativeTime(story.createdAt)}</span>
+          <div className="min-w-0 leading-tight">
+            <span className="block truncate text-sm font-semibold">{isMine ? 'Your story' : group.author.name}</span>
+            <span className="text-[11px] text-white/70">{relativeTime(story.createdAt)} · {cursor.s + 1}/{group.stories.length}</span>
+          </div>
           <span className="flex-1" />
+          <CountdownRing progress={progress} seconds={secondsLeft} paused={paused} />
+          <button onClick={() => setUserPaused((p) => !p)} aria-label={userPaused ? 'Play' : 'Pause'} title="Space" className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/10">
+            {userPaused ? <Play size={16} /> : <Pause size={16} />}
+          </button>
+          {story.media?.kind === 'video' && (
+            <button onClick={() => setMuted((m) => !m)} aria-label={muted ? 'Unmute' : 'Mute'} title="M" className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/10">
+              {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            </button>
+          )}
           {isMine && (
             <button onClick={remove} aria-label="Delete story" className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/10"><Trash2 size={16} /></button>
           )}
-          <button onClick={onClose} aria-label="Close" className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/10"><X size={18} /></button>
+          <button onClick={() => setOverlay((o) => (o === 'help' ? null : 'help'))} aria-label="Keyboard shortcuts" title="?" className="hidden h-8 w-8 place-items-center rounded-full hover:bg-white/10 sm:grid"><Keyboard size={16} /></button>
+          <button onClick={onClose} aria-label="Close" title="Esc" className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/10"><X size={18} /></button>
         </div>
 
         <div
-          className="relative flex flex-1 items-center justify-center overflow-hidden"
+          key={story.id}
+          className={`relative flex flex-1 select-none items-center justify-center overflow-hidden ${slideDir === 1 ? 'feed-story-in-right' : 'feed-story-in-left'}`}
           style={!story.media ? { background: story.background || BACKGROUNDS[0] } : undefined}
-          onMouseDown={() => setPaused(true)}
-          onMouseUp={() => setPaused(false)}
-          onTouchStart={() => setPaused(true)}
-          onTouchEnd={() => setPaused(false)}
+          onMouseDown={() => setHolding(true)}
+          onMouseUp={() => setHolding(false)}
+          onMouseLeave={() => setHolding(false)}
+          onTouchStart={onTouchStart}
+          onTouchEnd={onTouchEnd}
+          onTouchCancel={() => { setHolding(false); touchRef.current = null; }}
         >
-          {story.media?.kind === 'image' && mediaUrl && <img src={mediaUrl} alt="" onError={onMediaError} className="max-h-full max-w-full object-contain" />}
-          {story.media?.kind === 'video' && mediaUrl && <video src={mediaUrl} className="max-h-full max-w-full object-contain" autoPlay muted playsInline onError={onMediaError} />}
-          {story.media && !mediaUrl && !mediaBroken && <div className="feed-skeleton h-full w-full" />}
+          {story.media?.kind === 'image' && mediaUrl && (
+            <img src={mediaUrl} alt="" onLoad={() => setMediaReady(true)} onError={onMediaError} className="max-h-full max-w-full object-contain" draggable={false} />
+          )}
+          {story.media?.kind === 'video' && mediaUrl && (
+            <video
+              ref={videoRef}
+              src={mediaUrl}
+              className="max-h-full max-w-full object-contain"
+              autoPlay muted={muted} playsInline
+              onLoadedMetadata={(e) => {
+                const d = e.currentTarget.duration;
+                if (Number.isFinite(d) && d > 0) setDurationMs(Math.min(VIDEO_STORY_MAX_MS, Math.round(d * 1000)));
+              }}
+              onCanPlay={() => setMediaReady(true)}
+              onWaiting={() => setMediaReady(false)}
+              onPlaying={() => setMediaReady(true)}
+              onError={onMediaError}
+            />
+          )}
+          {story.media && !mediaReady && !mediaBroken && (
+            <div className="absolute inset-0 grid place-items-center">
+              <div className="feed-skeleton absolute inset-0" />
+              <Loader2 className="relative animate-spin text-white/70" />
+            </div>
+          )}
           {story.media && mediaBroken && (
             <button onClick={(e) => { e.stopPropagation(); retryMedia(); }} className="flex flex-col items-center gap-2 text-white/70">
               <ImageOff size={28} /> <span className="text-sm font-medium">Couldn't load. Tap to retry.</span>
@@ -338,26 +550,66 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
             </p>
           )}
 
-          <button aria-label="Previous" onClick={() => advance(-1)} className="absolute inset-y-0 left-0 w-1/3" />
-          <button aria-label="Next" onClick={() => advance(1)} className="absolute inset-y-0 right-0 w-1/3" />
+          {showPausedBadge && (
+            <span className="feed-pill-in absolute left-1/2 top-16 z-10 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-black/50 px-3 py-1 text-xs font-semibold backdrop-blur">
+              <Pause size={12} /> Paused
+            </span>
+          )}
+          {sent && (
+            <span className="feed-story-sent pointer-events-none absolute inset-0 z-20 grid place-items-center">
+              <span className="rounded-full bg-black/60 px-5 py-2 text-3xl backdrop-blur">{sent === 'Sent' ? <span className="text-base font-semibold">Sent ✓</span> : sent}</span>
+            </span>
+          )}
+
+          {/* Tap zones — a click is a tap only if the pointer barely moved. */}
+          <button aria-label="Previous story" onClick={() => step(-1)} className="absolute inset-y-0 left-0 w-1/3 cursor-w-resize" />
+          <button aria-label="Next story" onClick={() => step(1)} className="absolute inset-y-0 right-0 w-1/3 cursor-e-resize" />
         </div>
 
         {isMine ? (
-          <button onClick={openViewers} className="flex items-center gap-1.5 px-4 py-3 text-sm font-medium text-white/90">
+          <button onClick={openViewers} className="flex items-center gap-1.5 px-4 py-3 text-sm font-medium text-white/90 hover:bg-white/5">
             <Eye size={16} /> {story.viewCount} {story.viewCount === 1 ? 'view' : 'views'}
           </button>
         ) : (
-          <div className="px-4 py-3 text-xs text-white/60">Story · disappears in 24 hours</div>
+          <form
+            className="flex items-center gap-1.5 px-3 py-2.5"
+            onSubmit={(e) => { e.preventDefault(); if (reply.trim()) void sendToAuthor(reply.trim(), 'reply'); }}
+          >
+            <input
+              ref={replyInputRef}
+              value={reply}
+              onChange={(e) => setReply(e.target.value.slice(0, 500))}
+              onFocus={() => setReplyFocused(true)}
+              onBlur={() => setReplyFocused(false)}
+              placeholder={`Reply to ${firstName(group.author.name)}…`}
+              className="min-w-0 flex-1 rounded-full border border-white/25 bg-white/10 px-3.5 py-2 text-sm placeholder:text-white/60 focus:border-white/60 focus:outline-none"
+            />
+            {reply.trim() ? (
+              <button type="submit" disabled={sending !== null} aria-label="Send reply" className="grid h-9 w-9 place-items-center rounded-full bg-blue-600 text-white disabled:opacity-50">
+                {sending === 'reply' ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+              </button>
+            ) : (
+              <div className="flex items-center">
+                {QUICK_REACTIONS.map((emoji) => (
+                  <button key={emoji} type="button" onClick={() => void sendToAuthor(emoji, 'reaction')} disabled={sending !== null}
+                    aria-label={`React ${emoji}`} className="feed-story-react grid h-9 w-8 place-items-center text-xl disabled:opacity-50">
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            )}
+          </form>
         )}
 
-        {viewers !== null && (
-          <div className="absolute inset-x-0 bottom-0 z-30 max-h-[50%] overflow-y-auto rounded-t-2xl bg-elevated-dark p-3" onClick={(e) => e.stopPropagation()}>
+        {overlay === 'viewers' && (
+          <div className="absolute inset-x-0 bottom-0 z-30 max-h-[50%] overflow-y-auto rounded-t-2xl bg-elevated-dark p-3 animate-pop" onClick={(e) => e.stopPropagation()}>
             <div className="mb-2 flex items-center justify-between">
-              <p className="text-sm font-semibold">Seen by {viewers.length}</p>
-              <button onClick={() => { setViewers(null); setPaused(false); }} aria-label="Close"><X size={16} /></button>
+              <p className="text-sm font-semibold">Seen by {viewers?.length ?? story.viewCount}</p>
+              <button onClick={() => setOverlay(null)} aria-label="Close"><X size={16} /></button>
             </div>
-            {viewers.length === 0 && <p className="py-4 text-center text-sm text-white/60">No views yet.</p>}
-            {viewers.map((v) => (
+            {viewers === null && <div className="py-4 text-center"><Loader2 className="mx-auto animate-spin text-white/60" /></div>}
+            {viewers?.length === 0 && <p className="py-4 text-center text-sm text-white/60">No views yet.</p>}
+            {viewers?.map((v) => (
               <div key={v.id} className="flex items-center gap-2.5 py-1.5">
                 <Avatar name={v.name} src={v.avatarUrl ?? undefined} size={30} />
                 <span className="flex-1 text-sm">{v.name}</span>
@@ -366,7 +618,72 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
             ))}
           </div>
         )}
+
+        {overlay === 'help' && (
+          <div className="absolute inset-0 z-30 grid place-items-center bg-black/70 p-6 animate-fade-in" onClick={() => setOverlay(null)}>
+            <div className="w-full max-w-xs rounded-2xl bg-elevated-dark p-4 text-sm" onClick={(e) => e.stopPropagation()}>
+              <p className="mb-3 flex items-center gap-2 font-semibold"><Keyboard size={16} /> Shortcuts</p>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
+                {([
+                  ['← →', 'Previous / next story'],
+                  ['↑ ↓', 'Previous / next person'],
+                  ['Space', 'Pause / resume'],
+                  ['M', 'Mute / unmute video'],
+                  ['R', 'Reply'],
+                  ['Home / End', 'First / last of this person'],
+                  ['Esc', 'Close'],
+                ] as const).map(([k, v]) => (
+                  <React.Fragment key={k}>
+                    <dt><kbd className="rounded bg-white/15 px-1.5 py-0.5 font-mono text-xs">{k}</kbd></dt>
+                    <dd className="text-white/80">{v}</dd>
+                  </React.Fragment>
+                ))}
+              </dl>
+              <p className="mt-3 text-xs text-white/50">Hold to pause · swipe sideways for the next person · swipe down to close.</p>
+            </div>
+          </div>
+        )}
       </div>
+
+      {groups.length > 1 && (
+        <GroupChevron side="right" group={nextGroup} onClick={() => jumpGroup(1)} />
+      )}
+
+      {nextUrl && <img src={nextUrl} alt="" aria-hidden className="hidden" />}
     </div>
   );
 };
+
+/** Circular "seconds left" indicator — the segmented bar shows position, this
+ *  shows the countdown ticking, which reads better at a glance. */
+const CountdownRing: React.FC<{ progress: number; seconds: number; paused: boolean }> = ({ progress, seconds, paused }) => {
+  const r = 11; const c = 2 * Math.PI * r;
+  return (
+    <span className={`relative grid h-8 w-8 place-items-center ${paused ? 'opacity-60' : ''}`} aria-label={`${seconds} seconds left`} title={`${seconds}s`}>
+      <svg viewBox="0 0 28 28" className="absolute inset-0 h-full w-full -rotate-90">
+        <circle cx="14" cy="14" r={r} fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2.5" />
+        <circle cx="14" cy="14" r={r} fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * progress} />
+      </svg>
+      <span key={seconds} className="feed-count-tick relative text-[10px] font-bold tabular-nums leading-none">{seconds}</span>
+    </span>
+  );
+};
+
+/** Desktop-only side arrows that carry a peek of the neighbouring author. */
+const GroupChevron: React.FC<{ side: 'left' | 'right'; group: FeedStoryGroup; onClick: () => void }> = ({ side, group, onClick }) => (
+  <button
+    onClick={(e) => { e.stopPropagation(); onClick(); }}
+    aria-label={`${side === 'left' ? 'Previous' : 'Next'}: ${group.author.name}`}
+    title={group.author.name}
+    className={`group hidden shrink-0 flex-col items-center gap-2 px-3 text-white/70 hover:text-white sm:flex ${side === 'left' ? 'mr-2' : 'ml-2'}`}
+  >
+    <span className={`grid h-11 w-11 place-items-center rounded-full bg-white/10 transition-colors group-hover:bg-white/20 ${group.allViewed ? '' : 'ring-2 ring-blue-500'}`}>
+      {side === 'left' ? <ChevronLeft size={22} /> : <ChevronRight size={22} />}
+    </span>
+    <span className="flex items-center gap-1.5 text-xs opacity-0 transition-opacity group-hover:opacity-100">
+      <Avatar name={group.author.name} src={group.author.avatarUrl ?? undefined} size={18} />
+      {firstName(group.author.name)}
+    </span>
+  </button>
+);

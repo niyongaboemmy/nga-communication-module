@@ -107,6 +107,26 @@
 }
 .feed-pill-in { animation: feed-pill-in 260ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
 
+/* Story viewer: the frame slides in from the side you're moving towards,
+   the quick-reaction emoji bounce on hover and a sent receipt blooms. */
+@keyframes feed-story-in-right { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+@keyframes feed-story-in-left  { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
+.feed-story-in-right { animation: feed-story-in-right 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+.feed-story-in-left  { animation: feed-story-in-left 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+.feed-story-react { transition: transform 140ms cubic-bezier(0.34, 1.56, 0.64, 1); }
+.feed-story-react:hover, .feed-story-react:focus-visible { transform: scale(1.35) translateY(-3px); }
+.feed-story-react:active { transform: scale(0.9); }
+@keyframes feed-story-sent {
+  0%   { opacity: 0; transform: scale(0.5); }
+  25%  { opacity: 1; transform: scale(1.1); }
+  70%  { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.2) translateY(-20px); }
+}
+.feed-story-sent { animation: feed-story-sent 1400ms ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .feed-story-in-right, .feed-story-in-left { animation: none; }
+}
+
 .feed-hl-scroll { scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }
 .feed-hl-scroll > * { scroll-snap-align: start; }
 .feed-hl-scroll::-webkit-scrollbar { display: none; }
