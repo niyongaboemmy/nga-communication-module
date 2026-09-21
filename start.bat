@@ -254,6 +254,10 @@ echo   MIS at localhost:5173. Sign in as
 echo.
 echo       superadmin  /  Admin@1234
 echo.
+echo   or as any role - dev.teacher, dev.student,
+echo   dev.admin ... same password. Full list in
+echo   guides\START_HERE.pdf
+echo.
 echo   The 6-digit code is printed on the login page.
 echo   Everything is local - production is never touched.
 echo.

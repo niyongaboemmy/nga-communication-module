@@ -66,14 +66,30 @@ your own Central MIS, which sends you straight back, signed in:
    your module  ──▶  your Central MIS (localhost:5173)  ──▶  back, signed in
 ```
 
-Sign in as **`superadmin` / `Admin@1234`**. It then asks for a 6-digit code,
-which is **printed on the login page** — no email is sent in development.
+It then asks for a 6-digit code, which is **printed on the login page** — no
+email is sent in development.
 
-That account is the super-admin of *your* Central MIS, so it can see everything.
-It exists only in the `ngarw_mis` database on your machine; production has a
-different password. Change it any time with
-`cd backend && npm run db:setup -- --force --admin-password=...` in the MIS
-folder.
+**Every local account uses the password `Admin@1234`:**
+
+| Username | Role | Notes |
+|---|---|---|
+| `superadmin` | SUPER_ADMIN | sees everything |
+| `dev.admin` | ADMIN | |
+| `dev.headteacher` | HEAD_TEACHER | |
+| `dev.teacher` | TEACHER | 3 subjects in the current year's main class |
+| `dev.classteacher` | CLASS_TEACHER + TEACHER | class teacher of that class |
+| `dev.student` | STUDENT | enrolled in that class and its subjects |
+| `dev.parent` | PARENT | parent of `dev.student` |
+| `dev.accountant` | ACCOUNTANT | |
+| `dev.staff` | STAFF | |
+| `dev.programmanager` | PROGRAM_MANAGER | leads that class's program |
+
+The same logins work in TaskMentor, Tendo and Tupo, which read the role from
+the MIS. These accounts exist only in the `ngarw_mis` database on your machine
+(their `@nga.test` emails cannot receive mail); production has none of them.
+The MIS's `npm run db:setup` creates them, and its `start.bat` re-applies them
+on every start (`db:setup -- --refresh`), so a database built before they
+existed gets them too. A printable one-page version is `guides/START_HERE.pdf`.
 
 ---
 
