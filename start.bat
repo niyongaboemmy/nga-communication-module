@@ -179,9 +179,26 @@ if errorlevel 1 (
 
 :: ----------------------------------------------------------- 5. Dependencies
 echo [5/6] Checking dependencies and database schema...
-if not exist "node_modules" (
+:: Test for the tool each dev script actually runs, not just the folder: an
+:: `npm install` cut off half-way (a dropped connection, a closed window)
+:: leaves node_modules present but without its .bin entries, and the app
+:: then dies with "'vite' is not recognized". Re-running npm install
+:: repairs such a folder, so that is the fix as well as the first-run path.
+if not exist "node_modules\.bin\concurrently.cmd" (
     echo   - Installing workspace packages ^(first run, takes a few minutes^)...
     call npm install
+    if errorlevel 1 (
+        echo   - That did not finish ^(usually the connection^) - trying once more...
+        call npm install
+        if errorlevel 1 (
+            echo.
+            echo   [X] Installing workspace packages failed twice - see the error above.
+            echo       Check your connection and run start.bat again.
+            echo.
+            pause
+            exit /b 1
+        )
+    )
 )
 echo   - Applying migrations...
 call npm run db:migrate
