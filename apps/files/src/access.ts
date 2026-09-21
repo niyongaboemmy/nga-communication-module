@@ -149,6 +149,14 @@ export async function canReadFile(userId: string, fileId: string): Promise<Acces
                 CROSS JOIN LATERAL jsonb_array_elements(c.media) m
                 WHERE c.deleted_at IS NULL AND p.deleted_at IS NULL
                   AND m->>'fileId' = $1)
+    -- Reels (single media object) and Stories (media array), FR-FEED-13/14:
+    -- person-authored, so no page/post row ever carries their file. Without
+    -- these two branches only the uploader can play them — everyone else gets
+    -- a 404 ticket and a black frame.
+    OR EXISTS (SELECT 1 FROM feed_reels r
+                WHERE r.deleted_at IS NULL AND r.media->>'fileId' = $1)
+    OR EXISTS (SELECT 1 FROM feed_stories s, jsonb_array_elements(s.media) m
+                WHERE s.deleted_at IS NULL AND m->>'fileId' = $1)
       LIMIT 1`,
     [fileId],
   );

@@ -96,14 +96,22 @@ const urlCache = new Map<string, string>();
  * caches) forces a fresh `inlineUrl` call instead of quietly handing back the
  * same URL that just failed to load.
  */
-export function useMediaUrl(fileId: string | null | undefined, enabled = true, retryKey = 0): string | undefined {
+export function useMediaUrl(
+  fileId: string | null | undefined, enabled = true, retryKey = 0, onFail?: () => void,
+): string | undefined {
   const [url, setUrl] = useState<string | undefined>(fileId ? urlCache.get(fileId) : undefined);
+  const failRef = useRef(onFail);
+  failRef.current = onFail;
   useEffect(() => {
     if (!fileId || !enabled) return;
     const cached = urlCache.get(fileId);
     if (cached) { setUrl(cached); return; }
     let alive = true;
-    inlineUrl(fileId).then((u) => { if (alive) { urlCache.set(fileId, u); setUrl(u); } }).catch(() => {});
+    inlineUrl(fileId)
+      .then((u) => { if (alive) { urlCache.set(fileId, u); setUrl(u); } })
+      // A refused ticket (403/404) must surface as "broken", not as a
+      // skeleton that shimmers forever.
+      .catch(() => { if (alive) failRef.current?.(); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileId, enabled, retryKey]);
@@ -156,9 +164,6 @@ export function useResilientMediaUrl(
 ): { url: string | undefined; broken: boolean; onError: () => void; retry: () => void } {
   const [retryKey, setRetryKey] = useState(0);
   const [broken, setBroken] = useState(false);
-  const url = useMediaUrl(fileId, enabled, retryKey);
-
-  useEffect(() => { setBroken(false); setRetryKey(0); }, [fileId]);
 
   const onError = useCallback(() => {
     if (!fileId) return;
@@ -169,6 +174,10 @@ export function useResilientMediaUrl(
       setBroken(true);
     }
   }, [fileId, retryKey]);
+
+  const url = useMediaUrl(fileId, enabled, retryKey, onError);
+
+  useEffect(() => { setBroken(false); setRetryKey(0); }, [fileId]);
 
   const retry = useCallback(() => {
     if (fileId) invalidateMediaUrl(fileId);

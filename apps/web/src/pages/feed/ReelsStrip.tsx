@@ -76,7 +76,7 @@ export const ReelsStrip: React.FC = () => {
         <button onClick={() => setMuted((m) => !m)} aria-label={muted ? 'Unmute previews' : 'Mute previews'} className="grid h-8 w-8 place-items-center rounded-full text-text-secondary-light hover:bg-black/5 dark:text-text-secondary-dark dark:hover:bg-white/10">
           {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
         </button>
-        <Link to="/app/feed/reels" className="rounded-full px-3 py-1.5 text-sm font-semibold text-blue-600 hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-900/25">See all</Link>
+        <Link to="/app/feed/reels" state={{ fromApp: true }} className="rounded-full px-3 py-1.5 text-sm font-semibold text-blue-600 hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-900/25">See all</Link>
       </header>
 
       <div className="relative">
@@ -93,6 +93,7 @@ export const ReelsStrip: React.FC = () => {
           ))}
           <Link
             to="/app/feed/reels"
+            state={{ fromApp: true }}
             className="group flex h-60 w-36 shrink-0 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border-light bg-surface-light text-text-secondary-light transition-colors hover:border-pink-400 hover:text-pink-600 dark:border-border-dark/60 dark:bg-card-dark dark:text-text-secondary-dark"
           >
             <span className="grid h-11 w-11 place-items-center rounded-full bg-white shadow transition-transform group-hover:scale-110 dark:bg-elevated-dark"><ChevronRight size={20} /></span>
@@ -130,7 +131,7 @@ const ReelTile: React.FC<{
   const onTap = () => {
     const coarse = window.matchMedia('(hover: none)').matches;
     if (coarse && !previewing) { onPreview(true); return; }
-    navigate(`/app/feed/reels/${reel.id}`);
+    navigate(`/app/feed/reels/${reel.id}`, { state: { fromApp: true } });
   };
 
   return (
@@ -140,7 +141,7 @@ const ReelTile: React.FC<{
       tabIndex={0}
       aria-label={`Reel by ${reel.author.name}`}
       onClick={onTap}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate(`/app/feed/reels/${reel.id}`); } }}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate(`/app/feed/reels/${reel.id}`, { state: { fromApp: true } }); } }}
       onMouseEnter={() => onPreview(true)}
       onMouseLeave={() => onPreview(false)}
       onFocus={() => onPreview(true)}

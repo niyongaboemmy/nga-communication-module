@@ -77,7 +77,7 @@ export const LeftRail: React.FC<{ following: FeedPageSummary[] }> = ({ following
   const { pathname, search } = useLocation();
   const active = (p: string) => pathname + search === p;
   const Item: React.FC<{ to: string; icon: React.ReactNode; label: string; tint?: string }> = ({ to, icon, label, tint }) => (
-    <Link to={to} className={`flex items-center gap-3 rounded-lg px-2 py-2 text-[15px] font-medium transition-colors ${
+    <Link to={to} state={{ fromApp: true }} className={`flex items-center gap-3 rounded-lg px-2 py-2 text-[15px] font-medium transition-colors ${
       active(to) ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/25 dark:text-blue-300' : 'text-text-primary-light hover:bg-black/5 dark:text-text-primary-dark dark:hover:bg-white/5'
     }`}>
       <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-full dark:bg-white/6 ${tint ?? 'bg-surface-light'}`}>{icon}</span>

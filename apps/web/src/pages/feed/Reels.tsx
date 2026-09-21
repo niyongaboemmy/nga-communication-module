@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   Heart, MessageCircle, Volume2, VolumeX, Plus, X, Loader2, MoreHorizontal, Trash2, Eye, Video, ImageOff,
-  Play, Pause, Share2, Link2, ChevronUp, ChevronDown, Keyboard, SkipForward, Repeat, Send,
+  Play, Pause, Share2, Link2, ChevronUp, ChevronDown, Keyboard, SkipForward, Repeat, Send, ArrowLeft,
 } from 'lucide-react';
 import type { FeedMediaItem, FeedReelCommentView, FeedReelView } from '@tupo/shared';
 import { FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
@@ -44,6 +44,10 @@ export const Reels: React.FC = () => {
   const { confirm, notify } = useNotify();
   const { reelId: deepLinkId } = useParams<{ reelId?: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Came from inside the app → go back there; landed on a shared link → feed.
+  const fromApp = Boolean((location.state as { fromApp?: boolean } | null)?.fromApp);
+  const goBack = () => { if (fromApp) navigate(-1); else navigate('/app/feed'); };
   const [items, setItems] = useState<FeedReelView[]>([]);
   const [arrived, setArrived] = useState<FeedReelView | null>(null); // the latest live reel, for the "up next" pill
   const [cursor, setCursor] = useState<string | null>(null);
@@ -100,8 +104,8 @@ export const Reels: React.FC = () => {
   // Keep the URL honest so refresh/share lands on the reel being watched.
   useEffect(() => {
     if (!activeId || loading) return;
-    navigate(`/app/feed/reels/${activeId}`, { replace: true });
-  }, [activeId, loading, navigate]);
+    navigate(`/app/feed/reels/${activeId}`, { replace: true, state: fromApp ? { fromApp: true } : undefined });
+  }, [activeId, loading, navigate, fromApp]);
 
   useEffect(() => {
     if (!activeId) return;
@@ -173,7 +177,7 @@ export const Reels: React.FC = () => {
   };
 
   const share = useCallback(async (reel: FeedReelView) => {
-    const url = `${location.origin}/app/feed/reels/${reel.id}`;
+    const url = `${window.location.origin}/app/feed/reels/${reel.id}`;
     const title = `${reel.author.name} on Tupo${reel.caption ? `: ${reel.caption.slice(0, 80)}` : ''}`;
     try {
       if (navigator.share) { await navigator.share({ title, url }); return; }
@@ -190,7 +194,11 @@ export const Reels: React.FC = () => {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+        // Esc from the comment box closes the sheet; every other key is typing.
+        if (e.key === 'Escape' && commentsFor) { (e.target as HTMLElement).blur(); setCommentsFor(null); }
+        return;
+      }
       if (composerOpen) return;
       const active = items[activeIndex];
       switch (e.key) {
@@ -205,6 +213,7 @@ export const Reels: React.FC = () => {
         case 'Escape':
           if (helpOpen) setHelpOpen(false);
           else if (commentsFor) setCommentsFor(null);
+          else goBack();
           break;
         default: return;
       }
@@ -248,6 +257,10 @@ export const Reels: React.FC = () => {
           )}
         </div>
       )}
+
+      <button onClick={goBack} aria-label="Back" title="Esc" className="absolute left-4 top-4 z-20 flex items-center gap-1.5 rounded-full bg-white/15 py-2 pl-2.5 pr-3.5 text-sm font-semibold text-white backdrop-blur hover:bg-white/25">
+        <ArrowLeft size={18} /> <span className="hidden sm:inline">Back</span>
+      </button>
 
       {/* Top-right controls */}
       <div className="absolute right-4 top-4 z-20 flex items-center gap-2">
@@ -300,7 +313,7 @@ export const Reels: React.FC = () => {
                 ['L', 'Like'],
                 ['C', 'Comments'],
                 ['S', 'Share'],
-                ['Esc', 'Close'],
+                ['Esc', 'Close / back'],
               ] as const).map(([k, v]) => (
                 <React.Fragment key={k}>
                   <dt><kbd className="rounded bg-white/15 px-1.5 py-0.5 font-mono text-xs">{k}</kbd></dt>
@@ -424,7 +437,7 @@ const ReelSlide: React.FC<{
   };
 
   const copyLink = () => {
-    navigator.clipboard.writeText(`${location.origin}/app/feed/reels/${reel.id}`).then(() => confirm('Link copied')).catch(() => {});
+    navigator.clipboard.writeText(`${window.location.origin}/app/feed/reels/${reel.id}`).then(() => confirm('Link copied')).catch(() => {});
     setMenuOpen(false);
   };
 
@@ -483,7 +496,7 @@ const ReelSlide: React.FC<{
             style={{ left: bloom.x, top: bloom.y }} />
         )}
 
-        <button onClick={onToggleMute} aria-label={muted ? 'Unmute' : 'Mute'} title="M" className="absolute left-4 top-4 z-10 grid h-9 w-9 place-items-center rounded-full bg-black/40 text-white sm:left-auto sm:right-4">
+        <button onClick={onToggleMute} aria-label={muted ? 'Unmute' : 'Mute'} title="M" className="absolute right-4 top-16 z-10 grid h-9 w-9 place-items-center rounded-full bg-black/40 text-white sm:top-4">
           {muted ? <VolumeX size={17} /> : <Volume2 size={17} />}
         </button>
 
