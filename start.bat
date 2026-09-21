@@ -41,13 +41,12 @@ if not exist "packages\db\.env" (
 findstr /C:"PASTE_DEV_SECRET_FROM_MIS_SYSTEMS_PAGE" "apps\api\.env" >nul 2>&1
 if not errorlevel 1 (
     echo.
-    echo   [X] apps\api\.env still has a placeholder SSO secret, so signing in
-    echo       will fail. Ask the team lead for the Tupo dev SSO secret, then
-    echo       put it in apps\api\.env as:
-    echo           SSO_CLIENT_SECRET=...
+    echo   [warn] apps\api\.env still has a placeholder SSO secret.
+    echo          Everything will start, but SIGNING IN WILL FAIL until
+    echo          you ask your team lead for the Tupo dev SSO secret
+    echo          and put it in apps\api\.env as:
+    echo              SSO_CLIENT_SECRET=...
     echo.
-    pause
-    exit /b 1
 )
 echo   - Configuration present
 
