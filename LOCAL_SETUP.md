@@ -4,10 +4,11 @@ Same guide in every NGA repo. Two steps, about fifteen minutes.
 
 ```
 1. Install what your module needs (table below)
-2. Double-click  start.bat
+2. Windows: double-click  start.bat
+   Mac:     open Terminal in the folder and run  ./start.sh
 ```
 
-`start.bat` does the rest: creates your config files, installs packages, builds
+The launcher does the rest: creates your config files, installs packages, builds
 your local database, **starts your own copy of the Central MIS**, and starts
 your module. Run it again any time — it skips whatever is already done.
 
@@ -18,10 +19,12 @@ your module. Run it again any time — it skips whatever is already done.
 Everyone needs:
 
 - **[Node.js](https://nodejs.org/) 20 or newer** (the LTS download)
-- **[Git](https://git-scm.com/)** — `start.bat` uses it to fetch the Central MIS
+- **[Git](https://git-scm.com/)** — the launcher uses it to fetch the Central MIS
+  (Mac: `xcode-select --install` provides it)
 - **MySQL 8, or [XAMPP](https://www.apachefriends.org/)** — the Central MIS
-  keeps its database there. If you use XAMPP, open the Control Panel and press
-  **Start** next to MySQL before running `start.bat`.
+  keeps its database there. Windows/XAMPP: open the Control Panel and press
+  **Start** next to MySQL before running the launcher. Mac:
+  `brew install mysql && brew services start mysql`.
 
 Then, depending on your module:
 
@@ -29,7 +32,7 @@ Then, depending on your module:
 |---|---|---|
 | **TaskMentor** | nothing more | `taskmentor_dev` + `ngarw_mis` (MySQL) |
 | **Tendo** | nothing more | a SQLite file in `server/data/` + `ngarw_mis` (MySQL) |
-| **Tupo** | PostgreSQL 16 + Redis | `tupo_dev` (Postgres) + `ngarw_mis` (MySQL) |
+| **Tupo** | PostgreSQL 16 + Redis (Mac: `brew install postgresql@16 redis`) | `tupo_dev` (Postgres) + `ngarw_mis` (MySQL) |
 | **Central MIS** | nothing more | `ngarw_mis` (MySQL) |
 
 **Every database is on your own machine.** Nothing you do locally can touch
@@ -40,8 +43,13 @@ production data.
 ```
 git clone <your module's repo>
 cd <the folder it made>
-start.bat
+start.bat          # Windows
+./start.sh         # Mac / Linux
 ```
+
+`start.sh` is the same launcher, step for step. On a Mac the Central MIS opens
+in a new Terminal window; on Linux in a terminal emulator if one is found,
+otherwise in the background with its output in `/tmp/central-mis.log`.
 
 First run takes a few minutes (packages and databases). After that it is quick.
 
@@ -120,7 +128,7 @@ them too. A printable version is `guides/START_HERE.pdf`.
 
 The satellite modules (TaskMentor, Tendo, Tupo) need a Central MIS to sign in
 against, exactly as the Docker stack does. Their `start.bat` looks for it in
-this order and uses the first hit:
+this order and uses the first hit (`start.sh` looks for `start.sh`):
 
 1. the folder in the `NGA_MIS_DIR` environment variable, if you set one
 2. `..\nga_central_mis` — a checkout **next to** your module's folder
@@ -152,7 +160,9 @@ again — it recreates them from the current templates.
 
 **The Central MIS window shows an error**
 Read it — it says what is missing. The usual one is MySQL not running: start it
-in the XAMPP Control Panel and press a key in that window to retry. Your module
+(XAMPP Control Panel; Mac: `brew services start mysql`) and press a key in that
+window to retry. If your MySQL root has a password, put it in the MIS's
+`backend/.env` as `DB_PASSWORD` (TaskMentor: `server/.env` `DB_PASS`). Your module
 keeps waiting for the MIS for up to 15 minutes, then starts without it.
 
 **"Redirect URI not allowed" after clicking Sign In**
