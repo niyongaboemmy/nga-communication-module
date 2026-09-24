@@ -152,11 +152,19 @@ only means anything to the database on your machine.
 
 ## If something goes wrong
 
-**"Your .env files point at the production MIS" when start.bat runs**
-You ran an older `start.bat` that pointed sign-in at `mis.amashuri.com`. Move
-any API keys you added out of `server/.env` and `client/.env` (Tupo:
-`apps/api/.env` and `apps/web/.env`), delete both files, and run `start.bat`
-again — it recreates them from the current templates.
+**Sign In sends me to `mis.amashuri.com` (the real MIS)**
+Your `.env` is from an older setup. Just run `start.bat` / `./start.sh` again:
+on every start it repairs `.env` (and `.env.local` / `.env.development`) so
+every URL points at this machine and the SSO client id and secret match the
+local MIS. It prints each value it changed and keeps your old file as
+`.env.bak`. Your own API keys, ports and database settings are not touched.
+Restart the dev server after a repair — Vite only reads `.env` when it starts.
+
+**The local MIS says "Invalid credentials" for a `dev.*` account**
+Check the address bar first: if the MIS page is not on `localhost:5173`, see
+the item above. Otherwise the local database was left half-built; `start.bat`
+now detects that and rebuilds it, or do it by hand:
+`cd backend && npm run db:setup -- --force` in the Central MIS folder.
 
 **The Central MIS window shows an error**
 Read it — it says what is missing. The usual one is MySQL not running: start it
@@ -173,8 +181,8 @@ it exactly.
 
 **"Invalid client credentials"**
 The `SSO_CLIENT_SECRET` in your `.env` does not match your MIS database. Both
-should be `local-dev-secret-<client_id>`; if you changed one, restore it, or
-rebuild the MIS database: `cd backend && npm run db:setup -- --force`.
+should be `local-dev-secret-<client_id>`; running `start.bat` again restores the
+`.env` side, and `cd backend && npm run db:setup -- --force` the database side.
 
 **Port already in use**
 Something else has the port. Find it and stop it rather than changing the port,
@@ -194,8 +202,10 @@ Central MIS: `cd backend && npm run db:setup -- --force`.
 
 ## Two things worth knowing
 
-**Your `.env` is never pushed.** `start.bat` creates it from the committed
-`.env.example`, and `.env` is git-ignored in every repo. Put your own API keys
+**Your `.env` is never pushed, and never reaches production.** `start.bat`
+creates it from the committed `.env.example`, and `.env` is git-ignored in every
+repo; the deployed servers have their own settings. Changing your local `.env`
+cannot affect the live site. Put your own API keys
 there and nowhere else — never in `.env.example`, which *is* committed. The
 SSO values in `.env.example` are the one exception, on purpose: they only work
 against a database on your machine, so they are not secrets.
