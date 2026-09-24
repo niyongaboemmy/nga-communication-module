@@ -129,8 +129,13 @@
   100% { opacity: 0; transform: scale(1.2) translateY(-20px); }
 }
 .feed-story-sent { animation: feed-story-sent 1400ms ease-out both; }
+/* Caption rises with the frame it belongs to; it scrolls on its own when long. */
+@keyframes feed-story-caption { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+.feed-story-caption { animation: feed-story-caption 300ms 90ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+.feed-story-caption > p { pointer-events: auto; scrollbar-width: none; overscroll-behavior: contain; }
+.feed-story-caption > p::-webkit-scrollbar { display: none; }
 @media (prefers-reduced-motion: reduce) {
-  .feed-story-in-right, .feed-story-in-left { animation: none; }
+  .feed-story-in-right, .feed-story-in-left, .feed-story-caption { animation: none; }
 }
 
 .feed-hl-scroll { scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }

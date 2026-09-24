@@ -562,13 +562,17 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
           onTouchCancel={() => { setHolding(false); touchRef.current = null; }}
         >
           {story.media?.kind === 'image' && mediaUrl && (
-            <img src={mediaUrl} alt="" onLoad={() => setMediaReady(true)} onError={onMediaError} className="max-h-full max-w-full object-contain" draggable={false} />
+            <>
+              {/* Blurred fill so portrait/landscape shots still cover the frame edge-to-edge. */}
+              <img src={mediaUrl} alt="" aria-hidden className="pointer-events-none absolute inset-0 h-full w-full scale-110 object-cover opacity-60 blur-2xl" draggable={false} />
+              <img src={mediaUrl} alt="" onLoad={() => setMediaReady(true)} onError={onMediaError} className="relative h-full w-full object-contain" draggable={false} />
+            </>
           )}
           {story.media?.kind === 'video' && mediaUrl && (
             <video
               ref={videoRef}
               src={mediaUrl}
-              className="max-h-full max-w-full object-contain"
+              className="relative h-full w-full object-contain"
               autoPlay muted={muted} playsInline
               onLoadedMetadata={(e) => {
                 const d = e.currentTarget.duration;
@@ -591,11 +595,20 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
               <ImageOff size={28} /> <span className="text-sm font-medium">Couldn't load. Tap to retry.</span>
             </button>
           )}
-          {story.caption && (
-            <p className={`relative z-10 max-w-[85%] text-center text-2xl font-bold leading-snug ${story.media ? 'absolute bottom-16 rounded-lg bg-black/40 px-3 py-2 text-base' : ''}`}>
+          {story.caption && (story.media ? (
+            /* Media stories: caption pinned to the bottom of the frame over a scrim,
+               so it reads on any photo. `relative` and `absolute` can't share a class
+               list — Tailwind's `.relative` wins and the caption would lay out inline. */
+            <div className="feed-story-caption pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/85 via-black/45 to-transparent px-4 pb-5 pt-12">
+              <p className="max-h-[34vh] overflow-y-auto whitespace-pre-wrap text-[15px] font-medium leading-snug text-white [text-shadow:0_1px_3px_rgb(0_0_0/0.6)]">
+                {story.caption}
+              </p>
+            </div>
+          ) : (
+            <p className="relative z-10 max-w-[85%] whitespace-pre-wrap text-center text-2xl font-bold leading-snug">
               {story.caption}
             </p>
-          )}
+          ))}
 
           {showPausedBadge && (
             <span className="feed-pill-in absolute left-1/2 top-16 z-10 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-black/50 px-3 py-1 text-xs font-semibold backdrop-blur">
