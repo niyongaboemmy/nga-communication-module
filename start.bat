@@ -22,39 +22,22 @@ if errorlevel 1 (
 for /f "tokens=*" %%V in ('node -v') do echo   - Node %%V
 
 :: -------------------------------------------------------- 2. .env from template
+:: Creating .env only when it is missing never repairs one, and an .env written
+:: during an earlier setup keeps pointing wherever it pointed then - for most
+:: people the production MIS, so sign-in redirects there and fails. The script
+:: fills in a missing file and, in one that exists, replaces only the settings
+:: that wire the modules on this machine together (URLs, SSO client id/secret).
+:: Your own keys are left alone and the old file is kept as .env.bak.
 echo [2/6] Checking configuration...
-for %%A in (api web files realtime worker) do (
-    if not exist "apps\%%A\.env" (
-        if exist "apps\%%A\.env.example" (
-            copy "apps\%%A\.env.example" "apps\%%A\.env" >nul
-            echo   - Created apps\%%A\.env
-        )
-    )
-)
-if not exist "packages\db\.env" (
-    if exist "packages\db\.env.example" (
-        copy "packages\db\.env.example" "packages\db\.env" >nul
-        echo   - Created packages\db\.env
-    )
+node scripts\sync-local-env.cjs apps\api apps\web apps\files apps\realtime apps\worker packages\db
+if errorlevel 1 (
+    echo.
+    echo   [X] Could not write the apps\*\.env files - see the error above.
+    echo.
+    pause
+    exit /b 1
 )
 :: These files are git-ignored: your local settings can never be pushed.
-:: An .env from an earlier setup pointed sign-in at the production MIS and
-:: needed a secret pasted in. Sign-in now goes through the local MIS below, so
-:: that file can never work again - say so rather than fail at the login page.
-set "STALE_ENV="
-findstr /R /C:"^NGA_MIS_BASE_URL=https://api.amashuri.com" /C:"PASTE_DEV_SECRET_FROM_MIS_SYSTEMS_PAGE" "apps\api\.env" >nul 2>&1
-if not errorlevel 1 set "STALE_ENV=1"
-findstr /R /C:"^VITE_MIS_LOGIN_URL=https://mis.amashuri.com" "apps\web\.env" >nul 2>&1
-if not errorlevel 1 set "STALE_ENV=1"
-if defined STALE_ENV (
-    echo.
-    echo   [warn] Your .env files point at the production MIS ^(an older setup^).
-    echo          Tupo now signs in through a Central MIS on this machine, so
-    echo          SIGNING IN WILL FAIL until they are updated. Easiest fix: move
-    echo          any keys you added out of apps\api\.env and apps\web\.env,
-    echo          delete both files, and run start.bat again.
-    echo.
-)
 echo   - Configuration present
 
 :: ------------------------------------------------------------ 3. Central MIS

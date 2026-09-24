@@ -47,22 +47,15 @@ command -v node >/dev/null 2>&1 || die "Node.js is not installed, or not on your
     "Install the LTS build from https://nodejs.org/ and run this again."
 say "Node $(node -v)"
 
+# Creating .env only when it is missing never repairs one, and an .env written
+# during an earlier setup keeps pointing wherever it pointed then - for most
+# people the production MIS, so sign-in redirects there and fails. The script
+# fills in a missing file and, in one that exists, replaces only the settings
+# that wire the modules on this machine together (URLs, SSO client id/secret).
+# Your own keys are left alone and the old file is kept as .env.bak.
 echo "[2/6] Checking configuration..."
-for a in api web files realtime worker; do
-    [ -f "apps/$a/.env" ] || { [ -f "apps/$a/.env.example" ] && cp "apps/$a/.env.example" "apps/$a/.env" && say "Created apps/$a/.env"; }
-done
-[ -f "packages/db/.env" ] || { [ -f "packages/db/.env.example" ] && cp "packages/db/.env.example" "packages/db/.env" && say "Created packages/db/.env"; }
+node scripts/sync-local-env.cjs apps/api apps/web apps/files apps/realtime apps/worker packages/db \n    || die "Could not write the apps/*/.env files - see the error above."
 # These files are git-ignored: your local settings can never be pushed.
-# An .env from an earlier setup pointed sign-in at the production MIS; sign-in
-# now goes through the local MIS below, so say so instead of failing at login.
-if grep -qE '^NGA_MIS_BASE_URL=https://api\.amashuri\.com|PASTE_DEV_SECRET_FROM_MIS_SYSTEMS_PAGE' "apps/api/.env" 2>/dev/null \
-   || grep -q '^VITE_MIS_LOGIN_URL=https://mis\.amashuri\.com' "apps/web/.env" 2>/dev/null; then
-    warn "Your .env files point at the production MIS (an older setup)." \
-         "Tupo now signs in through a Central MIS on this machine, so" \
-         "SIGNING IN WILL FAIL until they are updated. Easiest fix: move" \
-         "any keys you added out of apps/api/.env and apps/web/.env," \
-         "delete both files, and run ./start.sh again."
-fi
 say "Configuration present"
 
 
