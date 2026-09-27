@@ -20,6 +20,15 @@ export const config = {
     .split(',').map((o) => o.trim()).filter(Boolean),
 
   /**
+   * The SPA's public origin, for absolute links handed to other apps (the MIS
+   * Home summary deep-links into Tupo). Defaults to the first CORS origin,
+   * which is the SPA in every deployment we run.
+   */
+  appPublicUrl: (process.env.APP_PUBLIC_URL
+    ?? (process.env.CORS_ORIGINS ?? 'http://localhost:5194').split(',')[0]!.trim())
+    .replace(/\/+$/, ''),
+
+  /**
    * Bootstrap administrators. The MIS grants no Tupo-specific role, so these
    * allowlists let named accounts hold 'admin' here regardless of their MIS
    * permissions. This is an *elevation* of an already-MIS-authenticated user —

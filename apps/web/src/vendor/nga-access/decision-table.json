@@ -1,0 +1,489 @@
+{
+  "description": "Shared access decisions. Every consumer of @nga/access runs these against its vendored core; MIS runs them against the snapshots it compiles. Grants: 1 = Class Teacher of class group 7 (discipline detail); 2 = Subject Teacher of subject 31 in class group 12; 3 = Academic Insights Viewer @SCHOOL (discipline summary); 4 = Director of Studies @PROGRAM 2 (grades 4,5; class groups 7,8; subjects 31,32); 5 = Head of Department 3 (subjects 40,41 taught in class groups 7 and 12); 6 = SELF baseline for user 42; 7 = Mentor of students 900, 901.",
+  "snapshot": {
+    "v": 1,
+    "app": "test",
+    "core": "1.2.0",
+    "user": {
+      "id": 42,
+      "persona": "TEACHER",
+      "school_id": 1
+    },
+    "year": 5,
+    "home": null,
+    "systems": [],
+    "generated_at": "2026-09-27T00:00:00.000Z",
+    "grants": {},
+    "caps": {
+      "DISCIPLINE_VIEW": [
+        {
+          "depth": "detail",
+          "scope": {
+            "class_groups": [
+              7
+            ]
+          },
+          "via": [
+            1
+          ]
+        },
+        {
+          "depth": "summary",
+          "scope": {
+            "all": true
+          },
+          "via": [
+            3
+          ]
+        },
+        {
+          "depth": "detail",
+          "scope": {
+            "students": [
+              900,
+              901
+            ]
+          },
+          "via": [
+            7
+          ]
+        }
+      ],
+      "DISCIPLINE_LOG": [
+        {
+          "depth": null,
+          "scope": {
+            "class_groups": [
+              7
+            ]
+          },
+          "via": [
+            1
+          ]
+        },
+        {
+          "depth": null,
+          "scope": {
+            "pairs": [
+              [
+                31,
+                12
+              ]
+            ]
+          },
+          "via": [
+            2
+          ]
+        }
+      ],
+      "RESULTS_VIEW": [
+        {
+          "depth": "detail",
+          "scope": {
+            "programs": [
+              2
+            ],
+            "grades": [
+              4,
+              5
+            ],
+            "class_groups": [
+              7,
+              8
+            ],
+            "subjects": [
+              31,
+              32
+            ]
+          },
+          "via": [
+            4
+          ]
+        },
+        {
+          "depth": "detail",
+          "scope": {
+            "departments": [
+              3
+            ],
+            "subjects": [
+              40,
+              41
+            ],
+            "pairs": [
+              [
+                40,
+                7
+              ],
+              [
+                41,
+                12
+              ]
+            ]
+          },
+          "via": [
+            5
+          ]
+        },
+        {
+          "depth": "detail",
+          "scope": {
+            "pairs": [
+              [
+                31,
+                12
+              ]
+            ]
+          },
+          "via": [
+            2
+          ]
+        }
+      ],
+      "PROFILE_EDIT": [
+        {
+          "depth": null,
+          "scope": {
+            "self": 42
+          },
+          "via": [
+            6
+          ]
+        }
+      ],
+      "COUNSELLING_NOTES_VIEW": [
+        {
+          "depth": "sensitive",
+          "scope": {
+            "students": [
+              900
+            ]
+          },
+          "via": [
+            7
+          ]
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "name": "no capability at all",
+      "cap": "UNKNOWN_CAP",
+      "target": {},
+      "allowed": false,
+      "depth": null
+    },
+    {
+      "name": "held somewhere (empty target)",
+      "cap": "DISCIPLINE_LOG",
+      "target": {},
+      "allowed": true,
+      "depth": null
+    },
+    {
+      "name": "class teacher covers own class",
+      "cap": "DISCIPLINE_LOG",
+      "target": {
+        "classGroupId": 7
+      },
+      "allowed": true,
+      "via": [
+        1
+      ]
+    },
+    {
+      "name": "class teacher covers any subject in own class",
+      "cap": "DISCIPLINE_LOG",
+      "target": {
+        "classGroupId": 7,
+        "subjectId": 99
+      },
+      "allowed": true
+    },
+    {
+      "name": "subject teacher covers own pair",
+      "cap": "DISCIPLINE_LOG",
+      "target": {
+        "classGroupId": 12,
+        "subjectId": 31
+      },
+      "allowed": true,
+      "via": [
+        2
+      ]
+    },
+    {
+      "name": "subject teacher does not cover another subject in that class",
+      "cap": "DISCIPLINE_LOG",
+      "target": {
+        "classGroupId": 12,
+        "subjectId": 32
+      },
+      "allowed": false
+    },
+    {
+      "name": "subject teacher does not cover the whole class",
+      "cap": "DISCIPLINE_LOG",
+      "target": {
+        "classGroupId": 12
+      },
+      "allowed": false
+    },
+    {
+      "name": "subject teacher covers a student in their class (any subject)",
+      "cap": "DISCIPLINE_LOG",
+      "target": {
+        "studentId": 555,
+        "classGroupId": 12,
+        "anySubject": true
+      },
+      "allowed": true,
+      "via": [
+        2
+      ]
+    },
+    {
+      "name": "anySubject does not widen a pair to another class",
+      "cap": "DISCIPLINE_LOG",
+      "target": {
+        "studentId": 555,
+        "classGroupId": 13,
+        "anySubject": true
+      },
+      "allowed": false
+    },
+    {
+      "name": "anySubject is ignored when a subject is given",
+      "cap": "DISCIPLINE_LOG",
+      "target": {
+        "classGroupId": 12,
+        "subjectId": 32,
+        "anySubject": true
+      },
+      "allowed": false
+    },
+    {
+      "name": "summary everywhere, detail in own class",
+      "cap": "DISCIPLINE_VIEW",
+      "target": {
+        "classGroupId": 7
+      },
+      "allowed": true,
+      "depth": "detail"
+    },
+    {
+      "name": "summary only outside own class",
+      "cap": "DISCIPLINE_VIEW",
+      "target": {
+        "classGroupId": 12
+      },
+      "allowed": true,
+      "depth": "summary"
+    },
+    {
+      "name": "detail refused outside own class",
+      "cap": "DISCIPLINE_VIEW",
+      "target": {
+        "classGroupId": 12
+      },
+      "minDepth": "detail",
+      "allowed": false
+    },
+    {
+      "name": "mentee detail by student id",
+      "cap": "DISCIPLINE_VIEW",
+      "target": {
+        "studentId": 900
+      },
+      "minDepth": "detail",
+      "allowed": true,
+      "depth": "detail"
+    },
+    {
+      "name": "non-mentee student falls back to structural (school summary)",
+      "cap": "DISCIPLINE_VIEW",
+      "target": {
+        "studentId": 999
+      },
+      "allowed": true,
+      "depth": "summary"
+    },
+    {
+      "name": "student in own class via supplied class group",
+      "cap": "DISCIPLINE_VIEW",
+      "target": {
+        "studentId": 999,
+        "classGroupId": 7
+      },
+      "minDepth": "detail",
+      "allowed": true
+    },
+    {
+      "name": "DOS covers a programme node",
+      "cap": "RESULTS_VIEW",
+      "target": {
+        "programId": 2
+      },
+      "allowed": true,
+      "via": [
+        4
+      ]
+    },
+    {
+      "name": "DOS covers a grade in the programme",
+      "cap": "RESULTS_VIEW",
+      "target": {
+        "gradeId": 5
+      },
+      "allowed": true
+    },
+    {
+      "name": "DOS does not cover another programme",
+      "cap": "RESULTS_VIEW",
+      "target": {
+        "programId": 3
+      },
+      "allowed": false
+    },
+    {
+      "name": "non-pooling: DOS powers do not leak to the teacher's IGCSE class",
+      "cap": "RESULTS_VIEW",
+      "target": {
+        "classGroupId": 12
+      },
+      "allowed": false
+    },
+    {
+      "name": "HOD covers own subject in a class",
+      "cap": "RESULTS_VIEW",
+      "target": {
+        "classGroupId": 7,
+        "subjectId": 40
+      },
+      "allowed": true,
+      "via": [
+        4,
+        5
+      ]
+    },
+    {
+      "name": "HOD covers a department subject anywhere it is taught",
+      "cap": "RESULTS_VIEW",
+      "target": {
+        "classGroupId": 12,
+        "subjectId": 41
+      },
+      "allowed": true,
+      "via": [
+        5
+      ]
+    },
+    {
+      "name": "HOD does not cover a non-department subject in that class",
+      "cap": "RESULTS_VIEW",
+      "target": {
+        "classGroupId": 12,
+        "subjectId": 50
+      },
+      "allowed": false
+    },
+    {
+      "name": "HOD covers a department node",
+      "cap": "RESULTS_VIEW",
+      "target": {
+        "departmentId": 3
+      },
+      "allowed": true
+    },
+    {
+      "name": "subject-only target matched through a pair",
+      "cap": "RESULTS_VIEW",
+      "target": {
+        "subjectId": 31
+      },
+      "allowed": true,
+      "via": [
+        4,
+        2
+      ]
+    },
+    {
+      "name": "SELF covers own records",
+      "cap": "PROFILE_EDIT",
+      "target": {
+        "ownerId": 42
+      },
+      "allowed": true
+    },
+    {
+      "name": "SELF does not cover others",
+      "cap": "PROFILE_EDIT",
+      "target": {
+        "ownerId": 43
+      },
+      "allowed": false
+    },
+    {
+      "name": "SELF covers the user as a student target",
+      "cap": "PROFILE_EDIT",
+      "target": {
+        "studentId": 42
+      },
+      "allowed": true
+    },
+    {
+      "name": "sensitive depth satisfies detail",
+      "cap": "COUNSELLING_NOTES_VIEW",
+      "target": {
+        "studentId": 900
+      },
+      "minDepth": "detail",
+      "allowed": true,
+      "depth": "sensitive"
+    }
+  ],
+  "scopeFor": [
+    {
+      "name": "detail-or-deeper discipline scope excludes the school-wide summary",
+      "cap": "DISCIPLINE_VIEW",
+      "minDepth": "detail",
+      "expect": {
+        "class_groups": [
+          7
+        ],
+        "students": [
+          900,
+          901
+        ]
+      }
+    },
+    {
+      "name": "any-depth discipline scope is the whole school",
+      "cap": "DISCIPLINE_VIEW",
+      "expect": {
+        "all": true
+      }
+    },
+    {
+      "name": "union of pair and class scopes",
+      "cap": "DISCIPLINE_LOG",
+      "expect": {
+        "class_groups": [
+          7
+        ],
+        "pairs": [
+          [
+            31,
+            12
+          ]
+        ]
+      }
+    },
+    {
+      "name": "nowhere",
+      "cap": "UNKNOWN_CAP",
+      "expect": null
+    }
+  ]
+}

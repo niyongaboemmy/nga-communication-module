@@ -134,3 +134,19 @@ jobs:
             "https://tupo-live.amashuri.com/socket.io/?EIO=4&transport=polling" > /dev/null \
             || { echo "::error::realtime gateway did not complete a handshake"; exit 1; }
           echo "All services healthy."
+
+      # Access control v2: publish Tupo's capability manifest to the MIS so
+      # Access Studio can grant its capabilities. Runs on the host because the
+      # SSO client credentials live only in apps/api/.env there. Idempotent
+      # (an unchanged manifest is a no-op) and deliberately NON-FATAL: an MIS
+      # that is down, or not yet on access v2, must not fail a Tupo deploy.
+      - name: Publish access manifest to MIS (non-fatal)
+        continue-on-error: true
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" \
+            "cd /opt/apps/nga-communication-module && npm run access:publish -w @tupo/api" \
+            || echo "::warning::access manifest was not published (MIS unreachable or refused); re-run 'npm run access:publish -w @tupo/api' on the host"

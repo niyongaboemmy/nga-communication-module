@@ -15,6 +15,8 @@ import feedRoutes from './routes/feed.js';
 import searchRoutes from './routes/search.js';
 import oversightRoutes from './routes/oversight.js';
 import dashboardRoutes from './routes/dashboard.js';
+import accessRoutes from './routes/access.js';
+import integrationRoutes from './routes/integration.js';
 
 /**
  * The Express app with no side effects — no database init, no listen — so
@@ -46,11 +48,18 @@ app.use('/api/feed', feedRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/oversight', oversightRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/access', accessRoutes);
+// Called by the MIS server with the user's MIS token, not a Tupo session.
+app.use('/api/integration', integrationRoutes);
 
 app.use((_req, res) => res.status(404).json(fail('Not found')));
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  // A body express.json could not parse is the caller's mistake, not ours.
+  if ((err as { type?: string }).type === 'entity.parse.failed') {
+    return res.status(400).json(fail('The request body is not valid JSON.'));
+  }
   console.error('[api] unhandled error:', err);
   res.status(500).json(fail('An unexpected error occurred.'));
 });

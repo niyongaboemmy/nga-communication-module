@@ -144,6 +144,72 @@ describe('programme-lead scoping', () => {
   });
 });
 
+describe('class-teacher scoping (privacy fix)', () => {
+  /*
+   * A class teacher's row carries the programme of their grade in
+   * mis_program_ids (membership — so the programme lead counts them) and the
+   * grade itself. Neither may widen their OWN view: they see their class
+   * groups only, never the rest of the grade or the programme.
+   */
+  it('sees only their class group, not their grade or programme', async () => {
+    const ct = await makeUser('Staff', {
+      level: 'class_teacher', programIds: ['P1'], gradeIds: ['G1'], classGroupIds: ['C1'],
+    });
+    const myStudent = await makeUser('Student', { level: 'student', classGroupIds: ['C1'] });
+    const otherTeacherSameGrade = await makeUser('Staff', {
+      level: 'class_teacher', programIds: ['P1'], gradeIds: ['G1'], classGroupIds: ['C2'],
+    });
+    const lead = await makeUser('Staff', { level: 'program_lead', programIds: ['P1'] });
+    const studentOtherClass = await makeUser('Student', {
+      level: 'student', programIds: ['P1'], gradeIds: ['G1'], classGroupIds: ['C2'],
+    });
+
+    await seedMessage(myStudent.id);          // in scope
+    await seedMessage(studentOtherClass.id);  // same programme + grade, other class: out
+
+    const scope = await request(app).get('/api/dashboard/scope').set(auth(ct.token));
+    expect(scope.body.data.scope.unrestricted).toBe(false);
+    expect(scope.body.data.scope.programs).toEqual([]);
+    expect(scope.body.data.scope.grades).toEqual([]);
+    expect(scope.body.data.scope.classGroups.map((c: { id: string }) => c.id)).toEqual(['C1']);
+
+    const o = await request(app).get('/api/dashboard/overview').set(auth(ct.token));
+    expect(o.status).toBe(200);
+    expect(o.body.data.scopedUsers).toBe(2);        // themselves + their student
+    expect(o.body.data.chat.messages).toBe(1);
+
+    // Asking for the programme or grade does not widen it.
+    const widened = await request(app).get('/api/dashboard/overview?program=P1&grade=G1').set(auth(ct.token));
+    expect(widened.body.data.scopedUsers).toBe(2);
+
+    const online = await request(app).get('/api/dashboard/online').set(auth(ct.token));
+    expect(online.status).toBe(200);
+    void otherTeacherSameGrade; void lead;
+  });
+
+  it('the programme lead still counts the class teachers of their programme', async () => {
+    const lead = await makeUser('Staff', { level: 'program_lead', programIds: ['P1'] });
+    await makeUser('Staff', { level: 'class_teacher', programIds: ['P1'], gradeIds: ['G1'], classGroupIds: ['C1'] });
+    await makeUser('Staff', { level: 'class_teacher', programIds: ['P2'], gradeIds: ['G9'], classGroupIds: ['C9'] });
+    const o = await request(app).get('/api/dashboard/overview').set(auth(lead.token));
+    expect(o.body.data.scopedUsers).toBe(2);        // lead + the P1 class teacher
+  });
+
+  it('a programme lead who is also a class teacher elsewhere is scoped to the programme they lead', async () => {
+    // Leads P1; class teacher of C9 in programme P2 (membership carries P2).
+    const lead = await makeUser('Staff', {
+      level: 'program_lead', programIds: ['P1', 'P2'], gradeIds: ['G9'], classGroupIds: ['C9'],
+    });
+    await getPool().query(`UPDATE users SET mis_lead_program_ids = '{P1}' WHERE id = $1`, [lead.id]);
+    await makeUser('Staff', { level: 'class_teacher', programIds: ['P1'], classGroupIds: ['C1'] });
+    await makeUser('Staff', { level: 'class_teacher', programIds: ['P2'], classGroupIds: ['C8'] });
+    await makeUser('Student', { level: 'student', classGroupIds: ['C9'] });
+    const o = await request(app).get('/api/dashboard/overview').set(auth(lead.token));
+    // lead + P1 teacher + their own C9 student; not the P2/C8 teacher.
+    expect(o.body.data.scopedUsers).toBe(3);
+  });
+});
+
 describe('online roster', () => {
   it('returns a shaped list', async () => {
     const admin = await makeUser('Admin');

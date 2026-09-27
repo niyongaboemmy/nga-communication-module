@@ -7,6 +7,8 @@ import * as mailAi from '../services/mailAiService.js';
 import { MailAiError } from '../services/mailAiService.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
+import { hasPermission } from '../access/gate.js';
+import { routeCampaignForApproval } from '../access/approvers.js';
 import { audit } from '../services/userService.js';
 import { enqueueMailSend, enqueueMailCampaign, enqueueMailListSync } from '../services/queue.js';
 
@@ -22,7 +24,8 @@ const router = Router();
 router.use(authMiddleware);
 
 const actor = (req: Request) => (req as AuthenticatedRequest).user!;
-const can = (req: Request, key: string) => actor(req).permissions.has(key);
+// Shadow-compared with the v2 snapshot; the v2 set itself in enforce (access/gate.ts).
+const can = (req: Request, key: string) => hasPermission(req, key);
 
 const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
   async (req: Request, res: Response, next: NextFunction) => {
@@ -109,10 +112,10 @@ router.post('/compose', wrap(async (req, res) => {
   const isDraft = body.draft === true;
 
   // Saving a draft only needs MAIL_READ; actually sending needs MAIL_SEND.
-  if (!isDraft && !me.permissions.has('MAIL_SEND')) {
+  if (!isDraft && !hasPermission(req, 'MAIL_SEND')) {
     return res.status(403).json(fail('You do not have permission to send mail.'));
   }
-  if (isDraft && !me.permissions.has('MAIL_READ')) {
+  if (isDraft && !hasPermission(req, 'MAIL_READ')) {
     return res.status(403).json(fail('You do not have permission to use mail.'));
   }
 
@@ -318,6 +321,9 @@ router.get('/campaigns/:id/preview', authorizePermission('MAIL_BULK_SEND', 'MAIL
 router.post('/campaigns/:id/submit', authorizePermission('MAIL_BULK_SEND'), wrap(async (req, res) => {
   const campaign = await mail.submitCampaign(actor(req).id, req.params.id!, can(req, 'MAIL_APPROVE'));
   if (campaign.status === 'approved') await enqueueMailCampaign(campaign.id);
+  // Approver pool from MIS holders of MAIL_APPROVE, sender excluded
+  // (shadow: compared and recorded; enforce: notified; off: nothing).
+  await routeCampaignForApproval(actor(req), campaign);
   await audit({ actorId: actor(req).id, action: 'mail.campaign.submit', targetType: 'mail_campaign', targetId: campaign.id, metadata: { status: campaign.status } });
   res.json(ok({ campaign }));
 }));

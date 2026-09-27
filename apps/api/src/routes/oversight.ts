@@ -6,6 +6,12 @@ import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js
 import { authorizePermission } from '../middleware/authorize.js';
 import { emitToConversation, emitToUsers } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
+import { requireRestricted, forwardOversightAudit } from '../access/oversight.js';
+
+// Access control v2: in enforce these also demand the v2 capability at its
+// restricted depth, and every read/redaction is forwarded to the MIS audit log.
+const VIEW = [authorizePermission('OVERSIGHT_VIEW_ALL'), requireRestricted('OVERSIGHT_VIEW_ALL', 'sensitive')];
+const REDACT = [authorizePermission('OVERSIGHT_MESSAGE_DELETE'), requireRestricted('OVERSIGHT_MESSAGE_DELETE', null)];
 
 /**
  * Academic-conduct oversight.
@@ -51,7 +57,7 @@ const num = (v: unknown): number | undefined => {
  * Overview
  * ────────────────────────────────────────────────────────────────────────── */
 
-router.get('/stats', authorizePermission('OVERSIGHT_VIEW_ALL'), wrap(async (_req, res) => {
+router.get('/stats', ...VIEW, wrap(async (_req, res) => {
   res.json(ok({ stats: await chat.oversightStats() }));
 }));
 
@@ -59,7 +65,7 @@ router.get('/stats', authorizePermission('OVERSIGHT_VIEW_ALL'), wrap(async (_req
  * Conversations
  * ────────────────────────────────────────────────────────────────────────── */
 
-router.get('/conversations', authorizePermission('OVERSIGHT_VIEW_ALL'), wrap(async (req, res) => {
+router.get('/conversations', ...VIEW, wrap(async (req, res) => {
   const result = await chat.oversightListConversations({
     query: str(req.query.q),
     type: str(req.query.type) as never,
@@ -76,8 +82,13 @@ router.get('/conversations', authorizePermission('OVERSIGHT_VIEW_ALL'), wrap(asy
  * Metadata only — the member list and the counts — so this is not itself a read
  * of anyone's words and is not audit-logged. Fetching the messages is, below.
  */
-router.get('/conversations/:id', authorizePermission('OVERSIGHT_VIEW_ALL'), wrap(async (req, res) => {
-  res.json(ok({ conversation: await chat.oversightGetConversation(req.params.id!) }));
+router.get('/conversations/:id', ...VIEW, wrap(async (req, res) => {
+  const conversation = await chat.oversightGetConversation(req.params.id!);
+  await forwardOversightAudit(req, {
+    action: 'oversight.conversation.open',
+    target: { conversationId: conversation.id, conversationType: conversation.type },
+  });
+  res.json(ok({ conversation }));
 }));
 
 /**
@@ -88,7 +99,7 @@ router.get('/conversations/:id', authorizePermission('OVERSIGHT_VIEW_ALL'), wrap
  * cursor as the ordinary message endpoint.
  */
 router.get('/conversations/:id/messages',
-  authorizePermission('OVERSIGHT_VIEW_ALL'), wrap(async (req, res) => {
+  ...VIEW, wrap(async (req, res) => {
     const me = actor(req);
     const id = req.params.id!;
 
@@ -121,6 +132,14 @@ router.get('/conversations/:id/messages',
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+    await forwardOversightAudit(req, {
+      action: 'oversight.conversation.read',
+      target: {
+        conversationId: id, conversationType: conversation.type,
+        messagesReturned: page.messages.length,
+        deletedMessagesRevealed: page.messages.filter((m) => m.deletedAt).length,
+      },
+    });
 
     res.json(ok(page));
   }));
@@ -139,7 +158,7 @@ router.get('/conversations/:id/messages',
  * disappears for everyone without a reload.
  */
 router.post('/conversations/:id/messages/:messageId/remove',
-  authorizePermission('OVERSIGHT_MESSAGE_DELETE'), wrap(async (req, res) => {
+  ...REDACT, wrap(async (req, res) => {
     const me = actor(req);
     const { id, messageId } = req.params as { id: string; messageId: string };
 
@@ -166,6 +185,13 @@ router.post('/conversations/:id/messages/:messageId/remove',
       },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
+    });
+    // The central copy carries no message text — ids and the reason only.
+    await forwardOversightAudit(req, {
+      action: 'oversight.message.remove',
+      subjectUserId: result.senderId,
+      target: { conversationId: id, messageId, seq: result.seq },
+      reason,
     });
 
     emitToConversation(id, 'message:deleted', {
@@ -196,7 +222,7 @@ router.post('/conversations/:id/messages/:messageId/remove',
  * message in real time.
  */
 router.post('/conversations/:id/messages/:messageId/attachments/:fileId/remove',
-  authorizePermission('OVERSIGHT_MESSAGE_DELETE'), wrap(async (req, res) => {
+  ...REDACT, wrap(async (req, res) => {
     const me = actor(req);
     const { id, messageId, fileId } = req.params as {
       id: string; messageId: string; fileId: string;
@@ -227,6 +253,12 @@ router.post('/conversations/:id/messages/:messageId/attachments/:fileId/remove',
       },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
+    });
+    await forwardOversightAudit(req, {
+      action: 'oversight.attachment.remove',
+      subjectUserId: result.senderId,
+      target: { conversationId: id, messageId, fileId, seq: result.seq },
+      reason,
     });
 
     // Everyone looking at the conversation repaints the message without its file.

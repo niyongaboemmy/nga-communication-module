@@ -218,8 +218,18 @@ function mergeVarsFor(r: ResolvedCampaignRecipient): Record<string, string> {
  * Submit → approve → run (FR-MAIL-10)
  * ────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * Submit a campaign. Above MAIL_APPROVAL_THRESHOLD it always waits for a
+ * second person, even when the sender holds MAIL_APPROVE themselves: the
+ * approval step exists so no single account can reach the whole school
+ * unreviewed, and a self-approval would defeat it (four-eyes rule). Small
+ * sends go straight out as before.
+ *
+ * `_canApprove` is kept for call-site compatibility; it no longer affects the
+ * outcome.
+ */
 export async function submitCampaign(
-  userId: string, id: string, canApprove: boolean,
+  userId: string, id: string, _canApprove?: boolean,
 ): Promise<MailCampaignView> {
   const campaign = await getCampaign(userId, id);
   if (!['draft', 'pending_approval'].includes(campaign.status)) {
@@ -232,16 +242,14 @@ export async function submitCampaign(
   const scheduled = campaign.scheduledAt && new Date(campaign.scheduledAt).getTime() > Date.now();
 
   let status: MailCampaignView['status'];
-  if (needsApproval && !canApprove) status = 'pending_approval';
+  if (needsApproval) status = 'pending_approval';
   else status = scheduled ? 'scheduled' : 'approved';
 
   await getPool().query(
     `UPDATE mail_campaigns SET status = $2, requires_approval = $3, total_recipients = $4,
-           approved_by = CASE WHEN $2 IN ('approved','scheduled') AND $3 THEN $5 ELSE approved_by END,
-           approved_at = CASE WHEN $2 IN ('approved','scheduled') AND $3 THEN now() ELSE approved_at END,
            updated_at = now()
       WHERE id = $1`,
-    [id, status, needsApproval, recipients.length, userId],
+    [id, status, needsApproval, recipients.length],
   );
   return getCampaign(userId, id, true);
 }
@@ -252,6 +260,11 @@ export async function approveCampaign(approverId: string, id: string): Promise<M
   );
   if (!rows[0]) throw new MailError('Campaign not found.', 404);
   if (rows[0].status !== 'pending_approval') throw new MailError('This campaign is not awaiting approval.', 409);
+  if (rows[0].created_by === approverId) {
+    throw new MailError(
+      'You cannot approve your own bulk send. Another approver has to review it.', 403,
+    );
+  }
   const scheduled = rows[0].scheduled_at && new Date(rows[0].scheduled_at).getTime() > Date.now();
   await getPool().query(
     `UPDATE mail_campaigns SET status = $2, approved_by = $3, approved_at = now(), updated_at = now()

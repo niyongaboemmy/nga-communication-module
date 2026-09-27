@@ -41,7 +41,9 @@ const WINDOWS = new Set(['1h', '24h', '7d', '30d']);
 
 /** What the viewer may filter by, and which admin tier they are. */
 router.get('/scope', authorizePermission('DASHBOARD_VIEW'), wrap(async (req, res) => {
-  res.json(ok({ scope: await resolveScope(actor(req)) }));
+  // `v2` is the internal scope the id lists are built from — not part of the API.
+  const { v2: _internal, ...scope } = await resolveScope(actor(req));
+  res.json(ok({ scope }));
 }));
 
 /** The whole dashboard in one payload — the poll target. */

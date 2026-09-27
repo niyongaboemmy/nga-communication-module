@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { Button, IconButton, PageHeader, Spinner, EmptyState, Badge } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
+import { useAuth } from '../../context/AuthContext';
 import { RichTextEditor } from './RichTextEditor';
 import * as api from './api';
 import type { MailCampaignView, MailDistributionList, MailTemplate } from '@tupo/shared';
@@ -201,6 +202,7 @@ const PreviewModal: React.FC<{ campaignId: string; onClose: () => void; onSubmit
 export const MailCampaigns: React.FC = () => {
   const navigate = useNavigate();
   const { can } = usePermissions();
+  const { user } = useAuth();
   const canApprove = can('MAIL_APPROVE');
   const canSend = can('MAIL_BULK_SEND');
 
@@ -219,7 +221,13 @@ export const MailCampaigns: React.FC = () => {
     return () => clearInterval(iv);
   }, []);
 
-  const pending = useMemo(() => campaigns?.filter((c) => c.status === 'pending_approval') ?? [], [campaigns]);
+  // Your own bulk sends are never yours to approve — the server refuses a
+  // self-approval — so they stay out of the approval queue and simply show as
+  // "pending approval" in the list below until another approver acts.
+  const pending = useMemo(
+    () => campaigns?.filter((c) => c.status === 'pending_approval' && c.from.userId !== user?.id) ?? [],
+    [campaigns, user?.id],
+  );
 
   if (campaigns === null) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
@@ -267,6 +275,7 @@ export const MailCampaigns: React.FC = () => {
                   </div>
                   <p className="text-xs text-text-secondary-light dark:text-text-secondary-dark">
                     {c.from.name} · {c.totalRecipients || '—'} recipients{c.rejectedReason && ` · sent back: ${c.rejectedReason}`}
+                    {c.status === 'pending_approval' && c.from.userId === user?.id && ' · waiting for another approver'}
                   </p>
                   {['sending', 'sent', 'failed'].includes(c.status) && <CountsBar counts={c.counts} total={c.totalRecipients} />}
                 </div>

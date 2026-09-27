@@ -10,6 +10,7 @@ import type {
   ActivityKind, ClientToServerEvents, ServerToClientEvents, SessionClaims, TypingUser,
 } from '@tupo/shared';
 import { emitConversationPresence } from '../presence.js';
+import type { AccessCache } from '../access.js';
 
 /**
  * Chat over the socket.
@@ -38,9 +39,23 @@ type ChatServer = Server<ClientToServerEvents, ServerToClientEvents>;
 const MAX_SUBSCRIPTIONS = 500;
 
 export function registerChatHandlers(
-  io: ChatServer, socket: ChatSocket, redis: Redis | null,
+  io: ChatServer, socket: ChatSocket, redis: Redis | null, access?: AccessCache,
 ): void {
   const user = socket.data.user as SessionClaims;
+
+  /**
+   * The caller's live platform permissions, as the REST routes see them. Goes
+   * through the gateway's short-TTL cache, so a revoked permission or a
+   * suspension lands within seconds. Without a cache (tests, older wiring)
+   * there is nothing to consult and the old channel-role-only rules stand.
+   */
+  const permissions = async (): Promise<Set<string> | null> => {
+    if (!access) return null;
+    const decision = await access.get(user.id);
+    if (!decision.ok) throw new ChatError('This account has been suspended.', 403);
+    return decision.access.permissions;
+  };
+  const deny = () => new ChatError('Forbidden. You do not have permission to perform this action.', 403);
   /** What this socket has been *authorised* for — never what it claims. */
   const subscribed = new Set<string>();
 
@@ -102,11 +117,15 @@ export function registerChatHandlers(
 
   socket.on('message:send', async (p, ack) => {
     try {
+      // Same gate as POST /conversations/:id/messages (and /replies): the
+      // platform permission first, then membership, archive and announcers.
+      const perms = await permissions();
+      if (perms && !perms.has('MESSAGE_SEND')) throw deny();
       const membership = await chat.requireMembership(user.id, p.conversationId);
       if (membership.isArchived) throw new ChatError('This conversation is archived.', 409);
-      if (membership.type === 'announcement' && !chat.canManage(membership.role)) {
-        // The socket path cannot see platform permissions, so it falls back to
-        // the channel role. CHANNEL_ANNOUNCE holders reach the REST route.
+      if (membership.type === 'announcement'
+          && !perms?.has('CHANNEL_ANNOUNCE')
+          && !chat.canManage(membership.role)) {
         throw new ChatError('Only announcers can post in this channel.', 403);
       }
       if (!p.nonce) throw new ChatError('A nonce is required.', 400);
@@ -176,6 +195,9 @@ export function registerChatHandlers(
 
   socket.on('message:edit', async (p, ack) => {
     try {
+      // Mirrors PATCH /conversations/:id/messages/:messageId.
+      const perms = await permissions();
+      if (perms && !perms.has('MESSAGE_EDIT_OWN')) throw deny();
       const membership = await chat.requireMembership(user.id, p.conversationId);
       const { message, newlyMentioned } = await chat.editMessage(
         user.id, p.conversationId, p.messageId, p.body,

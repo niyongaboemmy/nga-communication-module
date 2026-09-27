@@ -5,7 +5,11 @@ import type { SessionClaims } from '@tupo/shared';
 import { getPool, resolveUserPermissions } from '@tupo/db';
 import { config } from '../config.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
-import { exchangeCode, fetchMe, verifyMisSession } from '../services/misClient.js';
+import { exchangeCode, fetchMe, verifyMisSessionDetailed } from '../services/misClient.js';
+import { accessMode } from '../access/mode.js';
+import { getAccessSnapshot, noteAccessVersion } from '../access/snapshot.js';
+import { academicFromSnapshot, placementDiffers, syncAccessProfile } from '../access/profileSync.js';
+import { recordShadowDiff } from '../access/shadow.js';
 import { upsertMisUser, audit, type MisAcademic } from '../services/userService.js';
 
 /**
@@ -16,7 +20,7 @@ import { upsertMisUser, audit, type MisAcademic } from '../services/userService.
  * on this payload, so a plain student comes back with `student` and no ids —
  * the dashboard counts them via the leads/teachers who *do* carry the grade.
  */
-function readAcademic(me: Record<string, unknown> | null, forceAdmin: boolean): MisAcademic {
+export function readAcademic(me: Record<string, unknown> | null, forceAdmin: boolean): MisAcademic {
   const empty: MisAcademic = {
     level: 'none', programIds: [], gradeIds: [], classGroupIds: [],
     programNames: [], gradeNames: [], classGroupNames: [],
@@ -33,20 +37,30 @@ function readAcademic(me: Record<string, unknown> | null, forceAdmin: boolean): 
   const str = (v: unknown) => (v == null ? '' : String(v));
   const uniq = (xs: string[]) => [...new Set(xs.filter(Boolean))];
 
-  let level: MisAcademic['level'] = 'none';
-  if (forceAdmin || roleNames.includes('SUPER_ADMIN')) level = 'super_admin';
-  else if (programs.length) level = 'program_lead';
-  else if (grades.length) level = 'class_teacher';
-  else if (userType === 'STUDENT') level = 'student';
-  else if (userType === 'PARENT') level = 'parent';
-  else if (userType === 'TEACHER' || userType === 'STAFF' || userType === 'ADMIN') level = 'staff';
+  // What the placement alone says, before the SUPER_ADMIN override — kept so a
+  // person pinned to a non-admin Tupo role still gets their real placement.
+  let placementLevel: MisAcademic['level'] = 'none';
+  if (programs.length) placementLevel = 'program_lead';
+  else if (grades.length) placementLevel = 'class_teacher';
+  else if (userType === 'STUDENT') placementLevel = 'student';
+  else if (userType === 'PARENT') placementLevel = 'parent';
+  else if (userType === 'TEACHER' || userType === 'STAFF' || userType === 'ADMIN') placementLevel = 'staff';
+
+  const level: MisAcademic['level'] =
+    forceAdmin || roleNames.includes('SUPER_ADMIN') ? 'super_admin' : placementLevel;
 
   return {
     level,
+    placementLevel,
+    // Membership: a class teacher belongs to the programme of their grade, so
+    // a programme lead's dashboard counts them. This is NOT the viewer's own
+    // scope — that is `leadProgramIds` below. Using the merged list as scope
+    // let a class teacher see their whole programme (privacy fix, Phase 7).
     programIds: uniq([
       ...programs.map((p) => str(p.program_id)),
       ...grades.map((g) => str(g.program_id)),
     ]),
+    leadProgramIds: uniq(programs.map((p) => str(p.program_id))),
     gradeIds: uniq(grades.map((g) => str(g.grade_id))),
     classGroupIds: uniq(grades.map((g) => str(g.class_group_id))),
     programNames: uniq([
@@ -117,8 +131,22 @@ router.post('/exchange', async (req: Request, res: Response) => {
     const { token: misToken, user: misUser, permissions = [] } = body.data;
 
     // Hydrate the full profile; a failure here degrades the login rather than
-    // breaking it (SRS FR-AUTH-2).
-    const me = await fetchMe(misToken);
+    // breaking it (SRS FR-AUTH-2). The access v2 snapshot is fetched alongside
+    // (shadow/enforce only; short timeout, never fails the login) — it primes
+    // the snapshot cache for this session's permission checks.
+    const mode = accessMode();
+    const earlyMisId = String(misUser.user_id ?? misUser.id ?? misUser.uuid ?? misUser.email ?? 'unknown');
+    // Sign-in is a natural refresh point: drop a cached access snapshot if
+    // MIS says this user's access changed since it was fetched.
+    const signInVersion = (body.data as { access_version?: unknown }).access_version;
+    if (typeof signInVersion === 'number') noteAccessVersion(earlyMisId, signInVersion);
+    const [me, snapResult] = await Promise.all([
+      fetchMe(misToken),
+      mode === 'off'
+        ? Promise.resolve(null)
+        : getAccessSnapshot({ misUserId: earlyMisId, misToken }).catch(() => null),
+    ]);
+    const snapshot = snapResult?.snapshot ?? null;
     const profile = (me?.profile ?? {}) as Record<string, unknown>;
     const effectivePermissions = (me?.permissions as string[] | undefined) ?? permissions;
 
@@ -142,13 +170,36 @@ router.post('/exchange', async (req: Request, res: Response) => {
       config.adminUsernames.includes(String(misUser.username ?? name).toLowerCase()) ||
       config.adminEmails.includes(email.toLowerCase());
 
+    // Placement cache (users.mis_*): derived from the v2 snapshot when v2 is
+    // enforcing and MIS supplied one; otherwise from /users/me as before. In
+    // shadow the /users/me placement still wins and a difference is recorded.
+    const legacyAcademic = readAcademic(me, forceAdmin);
+    const snapAcademic = snapshot ? academicFromSnapshot(snapshot, legacyAcademic, forceAdmin) : null;
+    const academic = mode === 'enforce' && snapAcademic ? snapAcademic : legacyAcademic;
+
     const user = await upsertMisUser({
       misUserId, name, email, avatarUrl,
       derivedRole: resolveMisRole(misUser, effectivePermissions),
       preferredTheme,
       forceAdmin,
-      academic: readAcademic(me, forceAdmin),
+      academic,
     });
+
+    if (snapshot) {
+      // Contact-policy inputs (new columns only; nothing legacy reads them).
+      await syncAccessProfile(user.id, snapshot);
+      if (mode === 'shadow' && snapAcademic && placementDiffers(legacyAcademic, snapAcademic)) {
+        void recordShadowDiff({
+          userId: user.id, misUserId,
+          capability: 'PLACEMENT', route: 'sso:placement',
+          legacyAllowed: true, v2: { allowed: false, depth: null },
+          target: {
+            legacy: { level: legacyAcademic.level, programs: legacyAcademic.leadProgramIds, grades: legacyAcademic.gradeIds, classGroups: legacyAcademic.classGroupIds },
+            v2: { level: snapAcademic.level, programs: snapAcademic.leadProgramIds, grades: snapAcademic.gradeIds, classGroups: snapAcademic.classGroupIds },
+          },
+        });
+      }
+    }
 
     // Tupo's own session, with the MIS token nested inside so this app can act
     // on the user's behalf against MIS APIs. Note for ops: this makes the
@@ -190,8 +241,12 @@ router.get('/verify-mis', authMiddleware, async (req: Request, res: Response) =>
   const misToken = (req as AuthenticatedRequest).user?.misToken;
   if (!misToken) return res.status(401).json(fail('No MIS session on this token.'));
 
-  const state = await verifyMisSession(misToken);
+  const { state, accessVersion } = await verifyMisSessionDetailed(misToken);
   if (state === 'invalid') return res.status(401).json(fail('Your MIS session has ended.'));
+  // Access control v2: a new access_version means the user's grants changed —
+  // drop the cached snapshot so the next check re-fetches it.
+  const misUserId = (req as AuthenticatedRequest).user?.misUserId;
+  if (misUserId && accessVersion !== null) noteAccessVersion(misUserId, accessVersion);
   // 'unreachable' is a network blip, not a logout — don't sign everyone out
   // over it; the next poll settles the question.
   return res.json(ok({ valid: true, degraded: state === 'unreachable' }));
@@ -234,10 +289,13 @@ router.get('/authorize', authMiddleware, async (req: Request, res: Response) => 
 /** The signed-in user, re-read from the database. */
 router.get('/me', authMiddleware, (req: Request, res: Response) => {
   const user = (req as AuthenticatedRequest).user!;
-  const { misToken: _misToken, permissions, ...safe } = user;
+  // `access` (v2 request state) is internal and never serialised. The UI keeps
+  // gating on the local RBAC set until it moves to useAccess(); in enforce
+  // mode that is `access.legacyPermissions`.
+  const { misToken: _misToken, permissions, access, ...safe } = user;
   return res.json(ok({
     user: safe,
-    rolePermissions: Array.from(permissions).sort(),
+    rolePermissions: Array.from(access?.legacyPermissions ?? permissions).sort(),
   }));
 });
 

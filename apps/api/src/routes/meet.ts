@@ -19,6 +19,7 @@ import {
   type MeetRequest,
 } from '../middleware/meetAuth.js';
 import { authorizePermission } from '../middleware/authorize.js';
+import { hasPermission } from '../access/gate.js';
 import { getIceServers, isTurnConfigured } from '../services/turnService.js';
 import * as sfu from '../services/cloudflareSfuService.js';
 import * as meet from '../services/meetService.js';
@@ -184,7 +185,8 @@ const actor = (req: Request) => (req as AuthenticatedRequest).user!;
  *  Every route here declares the param it reads, so '' can never actually
  *  escape — but it keeps the routes free of non-null assertions. */
 const param = (req: Request, name: string): string => req.params[name] ?? '';
-const can = (req: Request, key: string) => actor(req).permissions.has(key);
+// Shadow-compared with the v2 snapshot; the v2 set itself in enforce (access/gate.ts).
+const can = (req: Request, key: string) => hasPermission(req, key);
 
 /** Whether this user may run *this* meeting, as opposed to meetings in general. */
 async function resolveMeetRole(req: Request, m: meet.MeetingRow): Promise<MeetRole> {

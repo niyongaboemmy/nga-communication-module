@@ -3,7 +3,9 @@ import { getPool } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
-import { audit, getUserTheme, setUserTheme } from '../services/userService.js';
+import {
+  audit, getUserTheme, setUserTheme, roleLabelForLevel, academicLevelFromPlacement,
+} from '../services/userService.js';
 import { fetchMisTheme, updateMisTheme } from '../services/misClient.js';
 
 const router = Router();
@@ -81,8 +83,13 @@ router.put('/:id/role', authorizePermission('USERS_MANAGE'), async (req: Request
   const { roleId } = req.body ?? {};
   const pool = getPool();
 
-  const { rows: userRows } = await pool.query<{ id: string; role_id: number | null }>(
-    'SELECT id, role_id FROM users WHERE id = $1', [req.params.id]
+  const { rows: userRows } = await pool.query<{
+    id: string; role_id: number | null; role: string; academic_level: string | null;
+    mis_program_ids: string[]; mis_grade_ids: string[]; mis_class_group_ids: string[];
+  }>(
+    `SELECT id, role_id, role, academic_level, mis_program_ids, mis_grade_ids, mis_class_group_ids
+       FROM users WHERE id = $1`,
+    [req.params.id]
   );
   if (userRows.length === 0) return res.status(404).json(fail('User not found.'));
 
@@ -101,19 +108,46 @@ router.put('/:id/role', authorizePermission('USERS_MANAGE'), async (req: Request
     }
   }
 
+  let roleLevel: string | null = null;
   if (roleId !== null && roleId !== undefined) {
-    const { rows: roleRows } = await pool.query('SELECT id FROM roles WHERE id = $1', [roleId]);
+    const { rows: roleRows } = await pool.query<{ id: number; level: string }>(
+      'SELECT id, level FROM roles WHERE id = $1', [roleId]
+    );
     if (roleRows.length === 0) return res.status(400).json(fail('That role does not exist.'));
+    roleLevel = roleRows[0]!.level;
+  }
+
+  // Keep the coarse `users.role` label and the dashboard's `academic_level` in
+  // step with the new role row: both are read directly (dashboard scope, chat
+  // contact rules, feed audiences), so leaving them stale would let a demoted
+  // administrator keep an administrator's reach.
+  const target = userRows[0]!;
+  const newRole = roleLabelForLevel(roleLevel);
+  let newAcademicLevel = target.academic_level;
+  if (newRole === 'admin') {
+    newAcademicLevel = 'super_admin';
+  } else if (target.academic_level === 'super_admin') {
+    newAcademicLevel = academicLevelFromPlacement(newRole, {
+      programIds: target.mis_program_ids ?? [],
+      gradeIds: target.mis_grade_ids ?? [],
+      classGroupIds: target.mis_class_group_ids ?? [],
+    });
   }
 
   await pool.query(
-    `UPDATE users SET role_id = $2, role_assigned_by_admin = $3, updated_at = now() WHERE id = $1`,
-    [req.params.id, roleId ?? null, roleId !== null && roleId !== undefined]
+    `UPDATE users SET role_id = $2, role_assigned_by_admin = $3, role = $4, academic_level = $5,
+                      updated_at = now()
+      WHERE id = $1`,
+    [req.params.id, roleId ?? null, roleId !== null && roleId !== undefined, newRole, newAcademicLevel]
   );
 
   await audit({
     actorId: actor.id, action: 'user.role.assign', targetType: 'user', targetId: req.params.id,
-    metadata: { from: userRows[0]!.role_id, to: roleId ?? null },
+    metadata: {
+      from: target.role_id, to: roleId ?? null,
+      roleFrom: target.role, roleTo: newRole,
+      academicLevelFrom: target.academic_level, academicLevelTo: newAcademicLevel,
+    },
     ipAddress: req.ip, userAgent: req.headers['user-agent'],
   });
   return res.json(ok({ userId: req.params.id, roleId: roleId ?? null }));

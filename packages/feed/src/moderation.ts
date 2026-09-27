@@ -113,6 +113,20 @@ export async function listQueue(
   return out;
 }
 
+/**
+ * How many reports are waiting, and since when — for the MIS Home summary.
+ * A plain COUNT: no previews, no reporter names. The caller gates on
+ * MODERATION_QUEUE_VIEW exactly as the queue route does.
+ */
+export async function openReportCount(): Promise<{ count: number; oldestAt: string | null }> {
+  const { rows } = await getPool().query<{ count: string; oldest_at: Date | null }>(
+    `SELECT count(*)::text AS count, min(created_at) AS oldest_at
+       FROM feed_reports WHERE status = 'open'`,
+  );
+  const oldest = rows[0]?.oldest_at ?? null;
+  return { count: Number(rows[0]?.count ?? 0), oldestAt: oldest ? new Date(oldest).toISOString() : null };
+}
+
 export interface ActResult {
   targetType: 'post' | 'comment';
   targetId: string;

@@ -4,6 +4,7 @@ import { AlertCircle, ArrowLeft } from 'lucide-react';
 import { Logo } from '../components/Logo';
 import { useAuth } from '../context/AuthContext';
 import type { SsoExchangeResult } from '@tupo/shared';
+import { consumeSsoState } from '../lib/ssoState';
 
 /** Where the MIS sends the user back to. Exchanges the code for a Tupo session. */
 export const SsoCallback: React.FC = () => {
@@ -25,6 +26,17 @@ export const SsoCallback: React.FC = () => {
     }
     if (exchanged.current) return;
     exchanged.current = true;
+
+    // OAuth `state` (CSRF) check. Runs after the Strict Mode guard so the
+    // stored value is consumed exactly once.
+    const stateCheck = consumeSsoState(new URLSearchParams(window.location.search).get('state'));
+    if (!stateCheck.ok) {
+      setError('This sign-in link did not come from a sign-in started in this browser tab. Please sign in again.');
+      return;
+    }
+    if (stateCheck.reason !== 'match') {
+      console.warn(`SSO callback: state not verified (${stateCheck.reason}); continuing.`);
+    }
 
     (async () => {
       try {

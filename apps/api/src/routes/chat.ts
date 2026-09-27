@@ -12,6 +12,8 @@ import * as chat from '@tupo/chat';
 import { ChatError } from '@tupo/chat';
 import { emitToConversation, emitToUsers } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
+import { hasPermission } from '../access/gate.js';
+import { contactDenied } from '../access/contactGate.js';
 import { enqueueUnfurl } from '../services/queue.js';
 import {
   translateMessage, isSupportedLanguage, SUPPORTED_LANGUAGES,
@@ -238,11 +240,14 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
     [me.id, q, limit],
   );
 
-  const ids = rows.map((r) => r.id);
+  // Contact policy: the picker lists only people the viewer may contact.
+  const hidden = await contactDenied(me, rows.map((r) => r.id), 'directory');
+  const visible = hidden.size ? rows.filter((r) => !hidden.has(r.id)) : rows;
+  const ids = visible.map((r) => r.id);
   const online = await presenceFor(ids);
   const seen = await lastSeenFor(ids);
   res.json(ok({
-    people: rows.map((r) => withPresence({
+    people: visible.map((r) => withPresence({
       id: r.id, name: r.name, avatarUrl: r.avatar_url, role: r.role,
       email: r.email,
     }, r.id, online, seen)),
@@ -297,8 +302,15 @@ router.post('/conversations', authorizePermission('CHANNEL_CREATE'), wrap(async 
   }
   // Announcement channels are a broadcast surface; creating one is a separate
   // decision from creating an ordinary channel.
-  if (type === 'announcement' && !me.permissions.has('CHANNEL_ANNOUNCE')) {
+  if (type === 'announcement' && !hasPermission(req, 'CHANNEL_ANNOUNCE')) {
     return res.status(403).json(fail('You may not create announcement channels.'));
+  }
+
+  const initialMembers: string[] = Array.isArray(memberIds) ? memberIds.slice(0, 500).map(String) : [];
+  const deniedInitial = await contactDenied(me, initialMembers, 'group_create');
+  if (deniedInitial.size) {
+    return res.status(403).json(fail(
+      `You are not permitted to add ${deniedInitial.size === 1 ? 'one of these people' : `${deniedInitial.size} of these people`}.`));
   }
 
   const conversation = await chat.createConversation(me.id, {
@@ -330,12 +342,16 @@ router.post('/conversations/direct', wrap(async (req, res) => {
   if (!peerId) return res.status(400).json(fail('A user id is required.'));
 
   const existing = await chat.findDirect(me.id, peerId);
-  if (!existing && !me.permissions.has('DM_START')) {
+  if (!existing && !hasPermission(req, 'DM_START')) {
     return res.status(403).json(fail('You do not have permission to start a direct message.'));
   }
   if (!existing) {
     const allowed = await chat.contactAllowed(me.id, peerId);
     if (!allowed) {
+      return res.status(403).json(fail('You are not permitted to message this person.'));
+    }
+    // Access control v2 contact policy (shadow: recorded only; enforce: applied).
+    if ((await contactDenied(me, [peerId], 'dm')).size) {
       return res.status(403).json(fail('You are not permitted to message this person.'));
     }
   }
@@ -455,7 +471,7 @@ router.post('/conversations/:id/messages', authorizePermission('MESSAGE_SEND'),
     }
     // Announcement channels are read-only unless you are one of the announcers.
     if (membership.type === 'announcement'
-        && !me.permissions.has('CHANNEL_ANNOUNCE')
+        && !hasPermission(req, 'CHANNEL_ANNOUNCE')
         && !chat.canManage(membership.role)) {
       return res.status(403).json(fail('Only announcers can post in this channel.'));
     }
@@ -481,7 +497,7 @@ router.post('/conversations/:id/messages', authorizePermission('MESSAGE_SEND'),
       await fanOutNewMessage(id, result, {
         name: membership.name ?? 'a conversation',
         type: membership.type,
-        senderMayBroadcast: me.permissions.has('CHANNEL_ANNOUNCE'),
+        senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
       });
     }
 
@@ -517,10 +533,14 @@ async function fanOutNewMessage(
 
   // Who gets *told*, as opposed to who gets the socket event, is a different
   // question with different rules — see packages/chat/src/notifications.ts.
+  // Contact policy: a mention is contact. Denied mentions are not notified
+  // (enforce); the message itself is unaffected.
+  const deniedMentions = await contactDenied(
+    { id: result.message.senderId }, result.mentionedUserIds, 'mention').catch(() => new Set<string>());
   await chat.notifyNewMessage(result.message, {
     conversationName: context.name,
     conversationType: context.type,
-    mentionedUserIds: result.mentionedUserIds,
+    mentionedUserIds: result.mentionedUserIds.filter((u) => !deniedMentions.has(u)),
     broadcast: result.broadcast,
     senderMayBroadcast: context.senderMayBroadcast,
   }).catch(() => { /* a missed notification must not fail the send */ });
@@ -613,8 +633,10 @@ router.patch('/conversations/:id/messages/:messageId', authorizePermission('MESS
     emitToConversation(id, 'message:updated', { conversationId: id, message });
     // Editing a message to add an @mention has to reach the person mentioned —
     // otherwise "sorry, meant to tag you" silently never arrives.
-    if (newlyMentioned.length) {
-      await chat.notifyMention(message, newlyMentioned, membership.name ?? 'a conversation');
+    const deniedMentions = await contactDenied(me, newlyMentioned, 'mention');
+    const mentionable = newlyMentioned.filter((u) => !deniedMentions.has(u));
+    if (mentionable.length) {
+      await chat.notifyMention(message, mentionable, membership.name ?? 'a conversation');
     }
     res.json(ok({ message }));
   }));
@@ -632,7 +654,7 @@ router.delete('/conversations/:id/messages/:messageId', wrap(async (req, res) =>
   const membership = await chat.requireMembership(me.id, id);
 
   const result = await chat.deleteMessage(me.id, id, messageId, {
-    canDeleteAny: me.permissions.has('MESSAGE_DELETE_ANY'),
+    canDeleteAny: hasPermission(req, 'MESSAGE_DELETE_ANY'),
     memberRole: membership.role,
   });
 
@@ -704,12 +726,14 @@ router.post('/conversations/:id/messages/:messageId/replies',
        * are no quieter than the room, which is the one thing they exist to be.
        */
       const followers = await chat.threadParticipants(id, root?.id ?? messageId);
+      const deniedMentions = await contactDenied(me, reply.mentionedUserIds, 'mention');
       await chat.notifyNewMessage(reply.message, {
         conversationName: membership.name ?? 'a conversation',
         conversationType: membership.type,
-        mentionedUserIds: [...new Set([...reply.mentionedUserIds, ...followers])],
+        mentionedUserIds: [...new Set([
+          ...reply.mentionedUserIds.filter((u) => !deniedMentions.has(u)), ...followers])],
         broadcast: reply.broadcast,
-        senderMayBroadcast: me.permissions.has('CHANNEL_ANNOUNCE'),
+        senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
       }).catch(() => {});
     }
 
@@ -717,7 +741,7 @@ router.post('/conversations/:id/messages/:messageId/replies',
       await fanOutNewMessage(id, echo, {
         name: membership.name ?? 'a conversation',
         type: membership.type,
-        senderMayBroadcast: me.permissions.has('CHANNEL_ANNOUNCE'),
+        senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
       });
     }
 
@@ -799,7 +823,7 @@ router.post('/conversations/:id/messages/:messageId/forward',
       await fanOutNewMessage(conversationId, result, {
         name: target.name ?? 'a conversation',
         type: target.type,
-        senderMayBroadcast: me.permissions.has('CHANNEL_ANNOUNCE'),
+        senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
       });
     }
 
@@ -963,7 +987,7 @@ router.post('/conversations/:id/polls', authorizePermission('MESSAGE_SEND'),
     const membership = await chat.requireMembership(me.id, id);
     if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
     if (membership.type === 'announcement'
-        && !me.permissions.has('CHANNEL_ANNOUNCE')
+        && !hasPermission(req, 'CHANNEL_ANNOUNCE')
         && !chat.canManage(membership.role)) {
       return res.status(403).json(fail('Only announcers can post in this channel.'));
     }
@@ -1071,6 +1095,12 @@ router.post('/conversations/:id/members', authorizePermission('CHANNEL_MEMBERS_M
     const id = req.params.id!;
     const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds.map(String) : [];
 
+    const denied = await contactDenied(me, userIds, 'member_add');
+    if (denied.size) {
+      return res.status(403).json(fail(
+        `You are not permitted to add ${denied.size === 1 ? 'one of these people' : `${denied.size} of these people`}.`));
+    }
+
     const { added, memberCount } = await chat.addMembersTo(me.id, id, userIds);
     if (added.length) {
       const names = await chat.namesOf(added);
@@ -1093,7 +1123,7 @@ router.delete('/conversations/:id/members/:userId', wrap(async (req, res) => {
   const { id, userId } = req.params as { id: string; userId: string };
   const leaving = userId === me.id;
 
-  if (!leaving && !me.permissions.has('CHANNEL_MEMBERS_MANAGE')) {
+  if (!leaving && !hasPermission(req, 'CHANNEL_MEMBERS_MANAGE')) {
     return res.status(403).json(fail('You cannot remove people from this conversation.'));
   }
 

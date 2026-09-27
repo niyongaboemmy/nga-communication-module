@@ -4,6 +4,8 @@ import * as chat from '@tupo/chat';
 import { pages as feedPages, visibleAudiences, type FeedActor } from '@tupo/feed';
 import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
+import { hasPermission } from '../access/gate.js';
+import { contactDenied } from '../access/contactGate.js';
 
 /**
  * One search box for the whole product.
@@ -32,7 +34,9 @@ const router = Router();
 router.use(authMiddleware);
 
 const actor = (req: Request) => (req as AuthenticatedRequest).user!;
-const can = (req: Request, key: string) => actor(req).permissions.has(key);
+// In shadow mode each check is also compared with the v2 snapshot; in enforce
+// `permissions` already is the v2 set (see access/gate.ts).
+const can = (req: Request, key: string) => hasPermission(req, key);
 const feedActorOf = (req: Request): FeedActor => {
   const u = actor(req);
   return { id: u.id, roleLevel: u.roleLevel, permissions: u.permissions };
@@ -171,7 +175,9 @@ async function searchPeopleSection(req: Request, q: string, limit: number): Prom
       LIMIT $3`,
     [actor(req).id, q, limit],
   );
-  return rows.map((r) => ({
+  // Contact policy (v2): only people the viewer may contact are findable.
+  const hidden = await contactDenied(actor(req), rows.map((r) => r.id), 'directory');
+  return rows.filter((r) => !hidden.has(r.id)).map((r) => ({
     id: `person:${r.id}`,
     type: 'person' as const,
     title: markMatches(r.name, q),

@@ -23,9 +23,29 @@ import type { Role, SessionUser } from '@tupo/shared';
  * scope activity to a programme or a grade without a live MIS call. See
  * migration 0023 and routes/dashboard.ts.
  */
+export type AcademicLevel =
+  'super_admin' | 'program_lead' | 'class_teacher' | 'staff' | 'student' | 'parent' | 'none';
+
 export interface MisAcademic {
-  level: 'super_admin' | 'program_lead' | 'class_teacher' | 'staff' | 'student' | 'parent' | 'none';
+  level: AcademicLevel;
+  /**
+   * The level the MIS placement alone implies, ignoring a MIS SUPER_ADMIN role
+   * (and forced admin). Used when an administrator has pinned the person to a
+   * non-admin Tupo role: their MIS super-admin status must not re-promote them
+   * to an unrestricted dashboard scope. Optional so older callers still work.
+   */
+  placementLevel?: AcademicLevel;
+  /**
+   * Programme membership: the programmes the person belongs to, including the
+   * programme of a class teacher's grade. What OTHER viewers match against.
+   */
   programIds: string[];
+  /**
+   * Programmes the person LEADS (MIS assignedPrograms) — their own dashboard
+   * scope. Kept apart from `programIds` so a class teacher's scope is not
+   * widened to their whole programme. Optional for older callers (stored NULL).
+   */
+  leadProgramIds?: string[];
   gradeIds: string[];
   classGroupIds: string[];
   programNames: string[];
@@ -39,6 +59,42 @@ const EMPTY_ACADEMIC: MisAcademic = {
   programNames: [], gradeNames: [], classGroupNames: [],
 };
 
+/**
+ * The coarse `users.role` label for an RBAC role level. `users.role` is still
+ * read directly by the dashboard scope, chat's contact rules and the feed, so
+ * it has to follow `role_id` whenever an administrator changes it.
+ */
+export function roleLabelForLevel(level: string | null | undefined): Role {
+  switch (String(level ?? '').toUpperCase()) {
+    case 'ADMIN': return 'admin';
+    case 'STAFF': return 'staff';
+    case 'STUDENT': return 'student';
+    case 'PARENT': return 'parent';
+    default: return 'unassigned';
+  }
+}
+
+/**
+ * The academic level implied by the stored MIS placement arrays alone, for a
+ * person who is not (or is no longer) a Tupo administrator.
+ *
+ * `mis_program_ids` also carries the programme of every class-teacher grade,
+ * so it cannot tell a programme lead from a class teacher. When grades are
+ * present we therefore pick the narrower `class_teacher` — under-scoping is
+ * safe, over-scoping is not — and the person's next MIS login restores the
+ * precise level from the live payload.
+ */
+export function academicLevelFromPlacement(
+  role: Role,
+  placement: { programIds: string[]; gradeIds: string[]; classGroupIds: string[] },
+): AcademicLevel {
+  if (role === 'admin') return 'super_admin';
+  if (placement.gradeIds.length > 0 || placement.classGroupIds.length > 0) return 'class_teacher';
+  if (placement.programIds.length > 0) return 'program_lead';
+  if (role === 'staff' || role === 'student' || role === 'parent') return role;
+  return 'none';
+}
+
 export async function upsertMisUser(params: {
   misUserId: string;
   name: string;
@@ -51,18 +107,25 @@ export async function upsertMisUser(params: {
 }): Promise<SessionUser> {
   const pool = getPool();
   const { rows: existingRows } = await pool.query<{
-    id: string; role: Role; role_assigned_by_admin: boolean;
+    id: string; role: Role; role_assigned_by_admin: boolean; pinned_level: string | null;
   }>(
-    'SELECT id, role, role_assigned_by_admin FROM users WHERE mis_user_id = $1',
+    `SELECT u.id, u.role, u.role_assigned_by_admin, r.level AS pinned_level
+       FROM users u LEFT JOIN roles r ON r.id = u.role_id
+      WHERE u.mis_user_id = $1`,
     [params.misUserId]
   );
   const existing = existingRows[0];
 
+  // A pinned role's label is read from the role row it points at, not from the
+  // text column: rows demoted before the role-change route kept `users.role`
+  // in sync could still say 'admin' here, and must not be re-promoted.
+  const pinnedRole: Role | undefined = existing?.role_assigned_by_admin
+    ? (existing.pinned_level ? roleLabelForLevel(existing.pinned_level) : existing.role)
+    : undefined;
+
   const finalRole: Role = params.forceAdmin
     ? 'admin'
-    : existing?.role_assigned_by_admin
-      ? existing.role
-      : params.derivedRole;
+    : pinnedRole ?? params.derivedRole;
 
   // Resolve the RBAC role row that carries the actual permission set.
   // 'unassigned' deliberately maps to NULL: the user exists but holds nothing
@@ -72,11 +135,20 @@ export async function upsertMisUser(params: {
 
   const ac = params.academic ?? EMPTY_ACADEMIC;
   // A forced/derived Tupo admin outranks whatever the MIS placement says.
-  const academicLevel = finalRole === 'admin' ? 'super_admin' : ac.level;
+  // Conversely, someone an administrator pinned to a non-admin role must not
+  // be lifted back to an unrestricted scope by their MIS SUPER_ADMIN role.
+  const pinnedNonAdmin = !params.forceAdmin && pinnedRole !== undefined && pinnedRole !== 'admin';
+  const academicLevel: AcademicLevel = finalRole === 'admin'
+    ? 'super_admin'
+    : pinnedNonAdmin && ac.level === 'super_admin'
+      ? (ac.placementLevel && ac.placementLevel !== 'super_admin'
+          ? ac.placementLevel
+          : academicLevelFromPlacement(finalRole, ac))
+      : ac.level;
   const acParams = [
     ac.programIds, ac.gradeIds, ac.classGroupIds,
     ac.programNames, ac.gradeNames, ac.classGroupNames,
-    academicLevel,
+    academicLevel, ac.leadProgramIds ?? null,
   ];
 
   if (existing) {
@@ -93,7 +165,7 @@ export async function upsertMisUser(params: {
               role_id = CASE WHEN $8 OR NOT role_assigned_by_admin THEN $9 ELSE role_id END,
               mis_program_ids = $10, mis_grade_ids = $11, mis_class_group_ids = $12,
               mis_program_names = $13, mis_grade_names = $14, mis_class_group_names = $15,
-              academic_level = $16, academic_synced_at = now(),
+              academic_level = $16, mis_lead_program_ids = $17, academic_synced_at = now(),
               last_login_at = now(),
               updated_at = now()
         WHERE id = $1
@@ -118,9 +190,9 @@ export async function upsertMisUser(params: {
                         role_assigned_by_admin, preferred_theme, role_id, last_login_at,
                         mis_program_ids, mis_grade_ids, mis_class_group_ids,
                         mis_program_names, mis_grade_names, mis_class_group_names,
-                        academic_level, academic_synced_at)
+                        academic_level, mis_lead_program_ids, academic_synced_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(),
-             $10, $11, $12, $13, $14, $15, $16, now())`,
+             $10, $11, $12, $13, $14, $15, $16, $17, now())`,
     [id, params.misUserId, params.name, params.email, params.avatarUrl ?? null,
      finalRole, params.forceAdmin, params.preferredTheme ?? null, derivedRoleId, ...acParams]
   );

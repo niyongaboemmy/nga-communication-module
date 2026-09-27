@@ -14,6 +14,7 @@ import { rooms as meetRooms } from './meet/state.js';
 import * as chat from '@tupo/chat';
 import { registerChatHandlers } from './chat/handlers.js';
 import { registerFeedHandlers } from './feed/handlers.js';
+import { createAccessCache, findInactiveUsers } from './access.js';
 import {
   broadcastPresence, markOffline, markOnline, readPresence, toStatus,
 } from './presence.js';
@@ -109,6 +110,31 @@ async function connectRedis(): Promise<void> {
 }
 
 /**
+ * Live account state (status + permission set), shared by the handshake, the
+ * per-event guard and the chat handlers. See access.ts.
+ */
+const accessCache = createAccessCache();
+
+/** `null` to admit, or the error to reject the handshake with. */
+async function admitUser(userId: string | undefined): Promise<Error | null> {
+  if (!userId) return new Error('unauthorized: malformed session token');
+  try {
+    const decision = await accessCache.get(userId, { fresh: true });
+    return decision.ok ? null : new Error(decision.message);
+  } catch (err) {
+    // The lookup itself failed (database blip). A handshake rejected by
+    // middleware is NOT retried by the socket.io client, so failing closed
+    // here would strand every tab that connected during the blip without
+    // chat until a reload. Admit instead: the JWT is valid, every handler
+    // needs the database anyway, and the periodic sweep disconnects a
+    // suspended account as soon as the database answers again.
+    console.warn('[realtime] account check failed at handshake, admitting:',
+      err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
  * Handshake authentication. The gateway accepts the SAME session JWT the API
  * issues — there is no separate socket credential, and no anonymous socket.
  */
@@ -119,13 +145,20 @@ io.use((socket, next) => {
 
   if (!token) return next(new Error('unauthorized: no session token'));
 
+  let claims: SessionClaims;
   try {
-    const claims = jwt.verify(token, config.jwtSecret) as SessionClaims;
+    claims = jwt.verify(token, config.jwtSecret) as SessionClaims;
+  } catch {
+    return next(new Error('unauthorized: invalid or expired session token'));
+  }
+
+  // A valid signature is not enough: the account must still exist and be
+  // active, exactly as the API's auth middleware requires on every request.
+  void admitUser(claims.id).then((err) => {
+    if (err) return next(err);
     socket.data.user = claims;
     next();
-  } catch {
-    next(new Error('unauthorized: invalid or expired session token'));
-  }
+  });
 });
 
 /**
@@ -135,6 +168,52 @@ io.use((socket, next) => {
  * only asked for chat presence.
  */
 const meetNsp = registerMeetNamespace(io);
+
+// Runs after the namespace's own JWT middleware has set `socket.data.user`.
+// Guests hold a meeting ticket, not an account, so they have no row to check.
+meetNsp.use((socket, next) => {
+  if (socket.data.guest) return next();
+  const user = socket.data.user as SessionClaims | undefined;
+  void admitUser(user?.id).then((err) => next(err ?? undefined));
+});
+
+/**
+ * Suspension has to reach sockets that are sitting idle, not only ones that
+ * send something. One batched status query per pass over this instance's own
+ * sockets (both namespaces); anyone no longer active is cut off.
+ */
+const ACCESS_SWEEP_MS = 60_000;
+function startAccessSweep(): NodeJS.Timeout {
+  return setInterval(() => {
+    void (async () => {
+      try {
+        const sockets = [
+          ...(await io.local.fetchSockets()),
+          ...(await meetNsp.local.fetchSockets()),
+        ];
+        const ids = new Set<string>();
+        for (const s of sockets) {
+          const u = s.data.user as SessionClaims | undefined;
+          if (u?.id && !s.data.guest) ids.add(u.id);
+        }
+        const inactive = await findInactiveUsers([...ids]);
+        for (const s of sockets) {
+          const u = s.data.user as SessionClaims | undefined;
+          if (u?.id && inactive.has(u.id)) {
+            accessCache.invalidate(u.id);
+            // A server-side disconnect: the client does not auto-reconnect,
+            // and if it tries, the handshake check refuses it.
+            s.disconnect(true);
+          }
+        }
+        accessCache.prune();
+      } catch {
+        // A failed sweep is retried next pass; per-event checks still apply.
+      }
+    })();
+  }, ACCESS_SWEEP_MS);
+}
+const accessSweep = startAccessSweep();
 
 /**
  * Keep the presence keys of everyone still connected from expiring.
@@ -197,9 +276,27 @@ io.on('connection', (socket) => {
   // is what waits for the real answer; nothing is broadcast before then.
   socket.data.presenceVisible = true;
 
+  /*
+   * Every inbound event re-checks the account through the short-lived cache,
+   * so a suspension lands within ACCESS_CACHE_TTL_MS even on a busy socket.
+   * A suspended or deleted account is disconnected and the event dropped.
+   * Registered synchronously, before the handlers, for the reason above.
+   */
+  socket.use((_packet, next) => {
+    accessCache.get(user.id).then((decision) => {
+      if (decision.ok) return next();
+      socket.disconnect(true);
+    }, () => {
+      // Could not reach the database: let the event through rather than
+      // turning a DB blip into a dead chat; the handlers still enforce
+      // membership and the sweep catches a suspension once the DB is back.
+      next();
+    });
+  });
+
   // Chat rides the default namespace alongside presence: it is the baseline
   // traffic of the product, and it shares the per-user room with the shell.
-  registerChatHandlers(io, socket, redisReady ? presence : null);
+  registerChatHandlers(io, socket, redisReady ? presence : null, accessCache);
   registerFeedHandlers(io, socket);
 
   /*
@@ -341,6 +438,7 @@ server.listen(config.port, () => {
 
 const shutdown = async (signal: string) => {
   clearInterval(presenceHeartbeat);
+  clearInterval(accessSweep);
   console.log(`\n[realtime] ${signal} received — telling clients to reconnect elsewhere`);
   io.emit('system:reconnect_required', { reason: 'server shutting down' });
   io.close();

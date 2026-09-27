@@ -3,6 +3,10 @@ import { getPool } from '@tupo/db';
 import { presenceKey, lastSeenKey } from '@tupo/shared';
 import { config } from '../config.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
+import { scopeFor, type AccessSnapshot, type ScopeEntry } from '../vendor/nga-access/index.js';
+import { accessMode } from '../access/mode.js';
+import { getAccessSnapshot } from '../access/snapshot.js';
+import { recordShadowDiff } from '../access/shadow.js';
 
 /**
  * The realtime admin dashboard.
@@ -27,6 +31,14 @@ export interface DashboardScope {
   programs: Array<{ id: string; name: string }>;
   grades: Array<{ id: string; name: string }>;
   classGroups: Array<{ id: string; name: string }>;
+  /**
+   * Access control v2 (ACCESS_V2_MODE=enforce only; absent otherwise, so the
+   * legacy response is unchanged). `detail` false = summary-only viewer: the
+   * aggregates are served, per-person panels are not.
+   */
+  detail?: boolean;
+  /** Internal: the v2 scopes the id lists are built from. Not serialised. */
+  v2?: { summary: ScopeEntry | null; detail: ScopeEntry | null };
 }
 
 export interface ScopeFilter {
@@ -90,14 +102,87 @@ async function lastSeenFor(ids: string[]): Promise<Record<string, string>> {
  * scoped to nothing but their own row.
  */
 export async function resolveScope(actor: Actor): Promise<DashboardScope> {
+  if (actor.access?.mode === 'enforce') return resolveScopeV2(actor, actor.access.snapshot);
+  return resolveScopeLegacy(actor);
+}
+
+async function institutionOptions(): Promise<Pick<DashboardScope, 'programs' | 'grades' | 'classGroups'>> {
+  // Offer the whole institution's programmes and grades as filters, pulled
+  // from what every synced user carries.
+  const opts = await getPool().query<{ kind: string; id: string; name: string }>(
+    `SELECT 'program' AS kind, pid AS id, pname AS name
+       FROM users, unnest(mis_program_ids, mis_program_names) AS t(pid, pname)
+      WHERE pid <> '' GROUP BY pid, pname
+     UNION
+     SELECT 'grade', gid, gname
+       FROM users, unnest(mis_grade_ids, mis_grade_names) AS t(gid, gname)
+      WHERE gid <> '' GROUP BY gid, gname
+     UNION
+     SELECT 'classGroup', cid, cname
+       FROM users, unnest(mis_class_group_ids, mis_class_group_names) AS t(cid, cname)
+      WHERE cid <> '' GROUP BY cid, cname
+     ORDER BY name`,
+  );
+  return {
+    programs: opts.rows.filter((r) => r.kind === 'program').map((r) => ({ id: r.id, name: r.name })),
+    grades: opts.rows.filter((r) => r.kind === 'grade').map((r) => ({ id: r.id, name: r.name })),
+    classGroups: opts.rows.filter((r) => r.kind === 'classGroup').map((r) => ({ id: r.id, name: r.name })),
+  };
+}
+
+/**
+ * v2 (enforce): what the viewer may see is `scopeFor(snapshot, DASHBOARD_VIEW)`
+ * — no `USERS_MANAGE` / role==='admin' shortcut. `summary` depth drives the
+ * aggregates, `detail` depth the per-person panels.
+ */
+async function resolveScopeV2(actor: Actor, snap: AccessSnapshot | null): Promise<DashboardScope> {
+  const summary = scopeFor(snap, 'DASHBOARD_VIEW', 'summary');
+  const detail = scopeFor(snap, 'DASHBOARD_VIEW', 'detail');
+  const v2 = { summary, detail };
+  if (summary?.all) {
+    return { level: 'super_admin', unrestricted: true, ...(await institutionOptions()), detail: !!detail, v2 };
+  }
+  const ids = (xs?: number[]) => (xs ?? []).map(String);
+  const programIds = ids(summary?.programs);
+  const gradeIds = ids(summary?.grades);
+  const classGroupIds = ids(summary?.class_groups);
+  // Names come from whatever synced users carry; the id stands in otherwise.
+  const { rows } = await getPool().query<{ kind: string; id: string; name: string }>(
+    `SELECT DISTINCT 'program' AS kind, pid AS id, pname AS name
+       FROM users, unnest(mis_program_ids, mis_program_names) AS t(pid, pname) WHERE pid = ANY($1::text[])
+     UNION SELECT DISTINCT 'grade', gid, gname
+       FROM users, unnest(mis_grade_ids, mis_grade_names) AS t(gid, gname) WHERE gid = ANY($2::text[])
+     UNION SELECT DISTINCT 'classGroup', cid, cname
+       FROM users, unnest(mis_class_group_ids, mis_class_group_names) AS t(cid, cname) WHERE cid = ANY($3::text[])`,
+    [programIds, gradeIds, classGroupIds],
+  );
+  const named = (kind: string, list: string[]) => list.map((id) => ({
+    id, name: rows.find((r) => r.kind === kind && r.id === id && r.name)?.name ?? id,
+  }));
+  const { rows: meRows } = await getPool().query<{ academic_level: string | null }>(
+    'SELECT academic_level FROM users WHERE id = $1', [actor.id]);
+  const level = meRows[0]?.academic_level === 'super_admin' ? 'staff' : (meRows[0]?.academic_level ?? 'none');
+  return {
+    level,
+    unrestricted: false,
+    programs: named('program', programIds),
+    grades: named('grade', gradeIds),
+    classGroups: named('classGroup', classGroupIds),
+    detail: !!detail,
+    v2,
+  };
+}
+
+async function resolveScopeLegacy(actor: Actor): Promise<DashboardScope> {
   const pool = getPool();
   const { rows } = await pool.query<{
     academic_level: string | null;
     mis_program_ids: string[]; mis_grade_ids: string[]; mis_class_group_ids: string[];
     mis_program_names: string[]; mis_grade_names: string[]; mis_class_group_names: string[];
+    mis_lead_program_ids: string[] | null;
   }>(
     `SELECT academic_level, mis_program_ids, mis_grade_ids, mis_class_group_ids,
-            mis_program_names, mis_grade_names, mis_class_group_names
+            mis_program_names, mis_grade_names, mis_class_group_names, mis_lead_program_ids
        FROM users WHERE id = $1`,
     [actor.id],
   );
@@ -137,10 +222,37 @@ export async function resolveScope(actor: Actor): Promise<DashboardScope> {
     .map((id, i) => ({ id, name: names[i] ?? id }))
     .filter((x) => x.id);
 
+  const programIds = me?.mis_program_ids ?? [];
+  const programNames = me?.mis_program_names ?? [];
+  const nameOfProgram = (id: string) => programNames[programIds.indexOf(id)] ?? id;
+
+  // PRIVACY: `mis_program_ids` is programme *membership* — a class teacher
+  // carries the programme of their grade so that programme leads count them.
+  // It must not become the class teacher's own scope, and neither may their
+  // grade (that would show every class group of the grade): a class teacher
+  // sees only their class groups. A programme lead's scope is the programmes
+  // they lead (`mis_lead_program_ids`; NULL on rows synced before migration
+  // 0028, where the stored list is the best available until next login).
+  if (level === 'class_teacher') {
+    return {
+      level, unrestricted: false, programs: [], grades: [],
+      classGroups: zip(me?.mis_class_group_ids ?? [], me?.mis_class_group_names ?? []),
+    };
+  }
+  if (level === 'program_lead') {
+    const lead = me?.mis_lead_program_ids ?? programIds;
+    return {
+      level, unrestricted: false,
+      programs: lead.filter(Boolean).map((id) => ({ id, name: nameOfProgram(id) })),
+      grades: [],
+      classGroups: zip(me?.mis_class_group_ids ?? [], me?.mis_class_group_names ?? []),
+    };
+  }
+
   return {
     level,
     unrestricted: false,
-    programs: zip(me?.mis_program_ids ?? [], me?.mis_program_names ?? []),
+    programs: zip(programIds, programNames),
     grades: zip(me?.mis_grade_ids ?? [], me?.mis_grade_names ?? []),
     classGroups: zip(me?.mis_class_group_ids ?? [], me?.mis_class_group_names ?? []),
   };
@@ -157,6 +269,7 @@ export async function resolveScope(actor: Actor): Promise<DashboardScope> {
 export async function resolveUserIds(
   actor: Actor, scope: DashboardScope, filter: ScopeFilter,
 ): Promise<string[] | null> {
+  if (scope.v2) return idsForEntry(actor, scope.v2.summary, filter);
   const pool = getPool();
 
   // Which ids is the *selection* allowed to touch?
@@ -205,6 +318,92 @@ export async function resolveUserIds(
   return ids;
 }
 
+/**
+ * v2: the Tupo user ids a scope entry covers, narrowed by the (clamped)
+ * filter. Matches the same GIN-indexed membership arrays as the legacy path,
+ * plus student / self entries by MIS id. `null` = everyone. A null entry
+ * (nothing at this depth) covers only the viewer themselves.
+ * Subject-in-class pairs do not cover the whole class (same rule as the core).
+ */
+async function idsForEntry(actor: Actor, entry: ScopeEntry | null, filter: ScopeFilter): Promise<string[] | null> {
+  const all = entry?.all === true;
+  const str = (xs?: number[]) => (xs ?? []).map(String);
+  const programs = str(entry?.programs);
+  const grades = str(entry?.grades);
+  const classGroups = str(entry?.class_groups);
+  const allow = (list: string[], id?: string) => (id && (all || list.includes(id)) ? id : undefined);
+  const programId = allow(programs, filter.programId);
+  const gradeId = allow(grades, filter.gradeId);
+  const classGroupId = allow(classGroups, filter.classGroupId);
+  if (all && !programId && !gradeId && !classGroupId) return null;
+
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  const next = (v: unknown) => { params.push(v); return `$${params.length}`; };
+  if (!all) {
+    const students = [...str(entry?.students), ...(entry?.self != null ? [String(entry.self)] : [])];
+    clauses.push(`(mis_program_ids && ${next(programs)}::text[]
+      OR mis_grade_ids && ${next(grades)}::text[]
+      OR mis_class_group_ids && ${next(classGroups)}::text[]
+      OR mis_user_id = ANY(${next(students)}::text[])
+      OR id = ${next(actor.id)})`);
+  }
+  if (programId) clauses.push(`mis_program_ids && ARRAY[${next(programId)}]::text[]`);
+  if (gradeId) clauses.push(`mis_grade_ids && ARRAY[${next(gradeId)}]::text[]`);
+  if (classGroupId) clauses.push(`mis_class_group_ids && ARRAY[${next(classGroupId)}]::text[]`);
+  const { rows } = await getPool().query<{ id: string }>(
+    `SELECT id FROM users${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''}`, params);
+  const ids = rows.map((r) => r.id);
+  if (!ids.includes(actor.id)) ids.push(actor.id);
+  return ids;
+}
+
+/**
+ * Ids whose per-person rows (most active, recent activity, quiet, online
+ * roster) the viewer may see. Legacy: the same list as the aggregates.
+ * v2: the `detail`-depth scope; `false` = summary-only viewer, no rows at all.
+ */
+async function resolvePersonIds(
+  actor: Actor, scope: DashboardScope, filter: ScopeFilter, aggregateIds: string[] | null,
+): Promise<string[] | null | false> {
+  if (!scope.v2) return aggregateIds;
+  if (!scope.v2.detail) return false;
+  return idsForEntry(actor, scope.v2.detail, filter);
+}
+
+/**
+ * Shadow mode: work out what v2 would have scoped this viewer to and record a
+ * difference (unrestricted vs not, or a different set of users). Called
+ * without await after the legacy answer is computed; never throws.
+ */
+export function shadowDashboardScope(actor: Actor, legacy: DashboardScope, legacyIds: string[] | null, filter: ScopeFilter): void {
+  if (accessMode() !== 'shadow' || !actor.misUserId) return;
+  void (async () => {
+    try {
+      const { snapshot } = await getAccessSnapshot({ misUserId: actor.misUserId, misToken: actor.misToken });
+      if (!snapshot) return;
+      const v2Scope = await resolveScopeV2(actor, snapshot);
+      const v2Ids = await idsForEntry(actor, v2Scope.v2!.summary, filter);
+      const sameIds = legacyIds === null || v2Ids === null
+        ? legacyIds === v2Ids
+        : legacyIds.length === v2Ids.length && legacyIds.every((id) => v2Ids.includes(id));
+      if (legacy.unrestricted === v2Scope.unrestricted && sameIds) return;
+      const extra = legacyIds && v2Ids ? v2Ids.filter((id) => !legacyIds.includes(id)).length : null;
+      const missing = legacyIds && v2Ids ? legacyIds.filter((id) => !v2Ids.includes(id)).length : null;
+      await recordShadowDiff({
+        userId: actor.id, misUserId: actor.misUserId,
+        capability: 'DASHBOARD_VIEW', route: 'dashboard:scope',
+        legacyAllowed: true, v2: { allowed: v2Scope.v2!.summary !== null, depth: v2Scope.detail ? 'detail' : 'summary' },
+        target: {
+          legacy: { unrestricted: legacy.unrestricted, users: legacyIds?.length ?? null },
+          v2: { unrestricted: v2Scope.unrestricted, users: v2Ids?.length ?? null, detail: v2Scope.detail },
+          onlyInV2: extra, onlyInLegacy: missing,
+        },
+      });
+    } catch { /* never affects the response */ }
+  })();
+}
+
 /* ────────────────────────────────────────────────────────────────────────── *
  * The aggregate — one payload, one poll
  * ────────────────────────────────────────────────────────────────────────── */
@@ -249,12 +448,18 @@ export async function overview(
   const pool = getPool();
   const scope = await resolveScope(actor);
   const userIds = await resolveUserIds(actor, scope, filter);
+  shadowDashboardScope(actor, scope, userIds, filter);
+  // Per-person panels: the same list in legacy; the detail scope in v2.
+  const personIds = await resolvePersonIds(actor, scope, filter, userIds);
   const w = WINDOWS[windowKey] ?? 24;
   const win = `${w} hours`;
   const bucket = w <= 24 ? 'hour' : 'day';
 
-  // $1 everywhere = the scoped id list (or NULL).
+  // $1 everywhere = the scoped id list (or NULL). Per-person queries use
+  // `pp` instead; a summary-only (v2) viewer gets none of them.
   const p = [userIds];
+  const pp = [personIds === false ? [] : personIds];
+  const noRows = Promise.resolve({ rows: [] as unknown[] });
 
   const [people, chat, mail, feed, meet, series, top, recent, quiet] = await Promise.all([
     pool.query(
@@ -335,7 +540,7 @@ export async function overview(
            WHERE date_trunc('${bucket}', coalesce(published_at, created_at)) = b.b AND deleted_at IS NULL
              AND ${scopeSql('author_id', 1)})::int AS feed
        FROM buckets b ORDER BY b.b`, p),
-    pool.query(
+    personIds === false ? noRows : pool.query(
       `WITH activity AS (
          SELECT sender_id AS uid, count(*) AS messages, 0 AS mails, 0 AS posts
            FROM messages
@@ -359,8 +564,8 @@ export async function overview(
          FROM activity a JOIN users u ON u.id = a.uid
         GROUP BY u.id, u.name, u.avatar_url, u.role, u.academic_level
         ORDER BY total DESC
-        LIMIT 8`, p),
-    pool.query(
+        LIMIT 8`, pp),
+    personIds === false ? noRows : pool.query(
       `(SELECT 'message' AS kind, m.created_at AS at, m.sender_id AS actor_id,
                su.name AS actor_name, coalesce(c.name, 'a direct message') AS ctx
           FROM messages m JOIN users su ON su.id = m.sender_id
@@ -387,8 +592,8 @@ export async function overview(
          WHERE a.action = 'auth.login' AND a.created_at > now() - interval '${win}'
            AND ${scopeSql('a.actor_id', 1)}
          ORDER BY a.created_at DESC LIMIT 8)
-       ORDER BY at DESC LIMIT 20`, p),
-    pool.query(
+       ORDER BY at DESC LIMIT 20`, pp),
+    personIds === false ? noRows : pool.query(
       `SELECT id, name, avatar_url, role, last_seen_at
          FROM users
         WHERE ${scopeSql('id', 1)}
@@ -396,7 +601,7 @@ export async function overview(
           AND (last_seen_at IS NULL OR last_seen_at < now() - interval '7 days')
           AND academic_level IN ('student', 'staff', 'class_teacher', 'program_lead')
         ORDER BY last_seen_at ASC NULLS FIRST
-        LIMIT 8`, p),
+        LIMIT 8`, pp),
   ]);
 
   const topRows = top.rows as Array<{
@@ -497,6 +702,8 @@ export async function onlineRoster(actor: Actor, filter: ScopeFilter): Promise<{
   const pool = getPool();
   const scope = await resolveScope(actor);
   const userIds = await resolveUserIds(actor, scope, filter);
+  // v2: the count covers the summary scope; names only the detail scope.
+  const personIds = await resolvePersonIds(actor, scope, filter, userIds);
 
   const { rows } = await pool.query<{
     id: string; name: string; avatar_url: string | null; role: string | null;
@@ -523,5 +730,10 @@ export async function onlineRoster(actor: Actor, filter: ScopeFilter): Promise<{
     .filter((r) => r.status !== 'offline')
     .sort((a, b) => a.name.localeCompare(b.name));
 
+  if (scope.v2) {
+    const visible = personIds === false ? [] : personIds === null
+      ? people : people.filter((p) => personIds.includes(p.id));
+    return { people: visible, total: people.length };
+  }
   return { people, total: people.length };
 }

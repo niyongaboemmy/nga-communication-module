@@ -4,6 +4,7 @@ import { getPool, resolveUserPermissions } from '@tupo/db';
 import { fail } from '@tupo/shared';
 import type { Role, RoleLevel, SessionClaims } from '@tupo/shared';
 import { config } from '../config.js';
+import { attachAccess, type RequestAccess } from '../access/gate.js';
 
 export interface AuthenticatedRequest extends Request {
   user?: SessionClaims & {
@@ -15,6 +16,10 @@ export interface AuthenticatedRequest extends Request {
     roleName: string | null;
     roleLevel: RoleLevel | null;
     permissions: Set<string>;
+    /** Access control v2 state for this request (see access/gate.ts). In
+     *  ACCESS_V2_MODE=enforce `permissions` above is the v2 set and the local
+     *  one is kept here as `legacyPermissions`. */
+    access?: RequestAccess;
   };
 }
 
@@ -32,8 +37,8 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
 
   const pool = getPool();
-  const { rows } = await pool.query<{ role: Role; status: string }>(
-    'SELECT role, status FROM users WHERE id = $1',
+  const { rows } = await pool.query<{ role: Role; status: string; mis_user_id: string }>(
+    'SELECT role, status, mis_user_id FROM users WHERE id = $1',
     [decoded.id]
   );
   const user = rows[0];
@@ -50,13 +55,18 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
 
   const resolved = await resolveUserPermissions(pool, decoded.id);
 
-  (req as AuthenticatedRequest).user = {
+  const authed: NonNullable<AuthenticatedRequest['user']> = {
     ...decoded,
+    // The stored MIS id, not the claim: it keys the v2 snapshot cache.
+    misUserId: user.mis_user_id ?? decoded.misUserId,
     role: user.role,
     roleId: resolved?.roleId ?? null,
     roleName: resolved?.roleName ?? null,
     roleLevel: (resolved?.roleLevel ?? null) as RoleLevel | null,
     permissions: resolved?.permissions ?? new Set<string>(),
   };
+  // off/shadow: no-op beyond recording the mode. enforce: swaps in the v2 set.
+  await attachAccess(authed);
+  (req as AuthenticatedRequest).user = authed;
   next();
 }
