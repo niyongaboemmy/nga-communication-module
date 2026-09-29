@@ -1,5 +1,5 @@
 {
-  "name": "Tupo \u2014 NGA Communication",
+  "name": "Tupo — NGA Communication",
   "short_name": "Tupo",
   "description": "Chat, meetings, files, mail and the institutional feed for NGA.",
   "id": "/",
@@ -44,5 +44,11 @@
       "type": "image/png",
       "purpose": "maskable"
     }
-  ]
+  ],
+  "launch_handler": {
+    "client_mode": [
+      "navigate-existing",
+      "auto"
+    ]
+  }
 }
