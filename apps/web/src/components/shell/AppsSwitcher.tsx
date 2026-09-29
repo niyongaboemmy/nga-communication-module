@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { LayoutGrid, Search, X, ArrowRight } from 'lucide-react';
 import { apiGet } from '../../lib/api';
 import { IconButton } from '../ui';
+import { withLaunchMarker } from '../../pwa/ngaLaunch';
 
 /**
  * The cross-app "waffle".
@@ -65,9 +66,13 @@ const AppTile: React.FC<{
 
   return (
     <a
-      href={href}
+      // A real new-tab link (not window.open) so Chrome can open the app in
+      // its installed window; the marker makes it offer to install otherwise
+      // (src/pwa/ngaLaunch.ts).
+      href={href === '#' ? href : withLaunchMarker(href)}
       target="_blank"
-      rel="noreferrer"
+      rel="noopener noreferrer"
+      title={`Open ${name}`}
       style={{ animationDelay: `${index * 30}ms` }}
       className={`animate-fade-in group relative flex flex-col items-center rounded-xl p-1.5 pt-2 text-center transition-all duration-200 ${hover}`}
     >
