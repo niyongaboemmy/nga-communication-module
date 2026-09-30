@@ -10,6 +10,6 @@ initNgaInstall();
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
-    <NgaInstallPrompt appName="Tupo" accent="#005EF9" />
+    <NgaInstallPrompt appName="Tupo" accent="#005EF9" startPath="/app" />
   </React.StrictMode>
 );
