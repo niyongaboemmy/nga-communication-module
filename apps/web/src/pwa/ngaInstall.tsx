@@ -14,8 +14,12 @@ import React, { useEffect, useState, useSyncExternalStore } from "react";
  * - the app already runs installed (standalone), or the browser reports it
  *   installed here (manifest related_applications + getInstalledRelatedApps),
  * - the browser can't install web apps at all (desktop Firefox off Windows),
- * - the user said "Not now" in the last 24 hours (unless the NGA installer
- *   sent them here on purpose with `nga_install=1`).
+ * - the user said "Not now" in this browser session (unless the NGA
+ *   installer sent them here on purpose with `nga_install=1`).
+ *
+ * Whenever the card is closed and the app is installable, a small corner
+ * "Install" button stays available -- dismissing never removes the way to
+ * install (no DevTools, no waiting).
  *
  * URL markers:
  * - `nga_launch=app`  opened from another installed NGA app (wording only)
@@ -34,9 +38,13 @@ interface BeforeInstallPromptEvent extends Event {
 const FLAG_KEY = "nga.launchedFromApp";
 const FORCED_KEY = "nga.installRequested";
 const RETURN_KEY = "nga.installReturn";
-const SNOOZE_KEY = "nga.installSnoozedUntil";
+/** Legacy 24 h snooze (removed: it hid the only way to install for a day). */
+const LEGACY_SNOOZE_KEY = "nga.installSnoozedUntil";
+/** "Not now" hides the big card until the browser is reopened. */
+const DISMISS_KEY = "nga.installDismissedThisSession";
+/** The small corner button can be hidden for the session too. */
+const PILL_HIDDEN_KEY = "nga.installPillHidden";
 const INSTALLED_KEY = "nga.appInstalled";
-export const SNOOZE_MS = 24 * 3_600_000;
 /** Where "Install all NGA apps" lives. */
 export const DEFAULT_INSTALLER_URL = "https://mis.amashuri.com/apps";
 
@@ -80,6 +88,7 @@ export const safeReturnUrl = (raw: string | null, installerUrl = DEFAULT_INSTALL
 /** Call first thing in main.tsx, before React renders. */
 export const initNgaInstall = () => {
   if (typeof window === "undefined") return;
+  safe(() => localStorage.removeItem(LEGACY_SNOOZE_KEY), undefined);
   const url = new URL(window.location.href);
   let changed = false;
   if (url.searchParams.get("nga_launch") === "app") {
@@ -130,19 +139,38 @@ export const detectPlatform = (ua = navigator.userAgent, touch = navigator.maxTo
   return "other";
 };
 
-/** Pure decision, unit-tested: should the card open on this load? */
+/** Pure decision, unit-tested: should the big card open on this load? */
 export const shouldOffer = (s: {
   standalone: boolean;
   knownInstalled: boolean;
   platform: Platform;
   forced: boolean;
-  snoozedUntil: number;
-  now: number;
+  dismissedThisSession: boolean;
 }) => {
   if (s.standalone || s.knownInstalled) return false;
   if (s.platform === "firefox-other") return false; // can't install web apps
   if (s.forced) return true;
-  return s.snoozedUntil <= s.now;
+  return !s.dismissedThisSession;
+};
+
+/**
+ * Pure decision, unit-tested: show the small always-available "Install"
+ * button? On Chromium only when the browser itself says the app is
+ * installable (beforeinstallprompt) -- so never for an installed app. Where
+ * there's no such signal (iPhone/iPad, Safari on Mac, Firefox on Windows) it
+ * shows unless running installed.
+ */
+export const shouldShowInstallButton = (s: {
+  standalone: boolean;
+  installed: boolean;
+  platform: Platform;
+  canPrompt: boolean;
+  cardOpen: boolean;
+  hidden: boolean;
+}) => {
+  if (s.standalone || s.installed || s.cardOpen || s.hidden) return false;
+  if (s.canPrompt) return true;
+  return s.platform === "ios" || s.platform === "mac-safari" || s.platform === "firefox-windows";
 };
 
 /** Does the browser say this app is installed here? (manifest related_applications) */
@@ -196,6 +224,7 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
   const [done, setDone] = useState(false);
   const [dark, setDark] = useState(false);
   const [closedThisLoad, setClosedThisLoad] = useState(false);
+  const [pillHidden, setPillHidden] = useState(() => safe(() => sessionStorage.getItem(PILL_HIDDEN_KEY) === "1", false));
   const platform = detectPlatform();
   const fromApp = safe(() => sessionStorage.getItem(FLAG_KEY) === "1", false);
   const forced = safe(() => sessionStorage.getItem(FORCED_KEY) === "1", false);
@@ -209,8 +238,7 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
       knownInstalled: safe(() => localStorage.getItem(INSTALLED_KEY) === "1", false),
       platform,
       forced,
-      snoozedUntil: safe(() => Number(localStorage.getItem(SNOOZE_KEY) || 0), 0),
-      now: Date.now(),
+      dismissedThisSession: safe(() => sessionStorage.getItem(DISMISS_KEY) === "1", false),
     };
     if (!shouldOffer(base)) return;
     relatedAppInstalled().then((isInstalled) => {
@@ -241,14 +269,62 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
       knownInstalled: false,
       platform,
       forced,
-      snoozedUntil: safe(() => Number(localStorage.getItem(SNOOZE_KEY) || 0), 0),
-      now: Date.now(),
+      dismissedThisSession: safe(() => sessionStorage.getItem(DISMISS_KEY) === "1", false),
     });
     if (ok) setOpen(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canPrompt]);
 
-  if (!open) return null;
+  if (!open) {
+    const knownInstalled = safe(() => localStorage.getItem(INSTALLED_KEY) === "1", false);
+    const showButton = shouldShowInstallButton({
+      standalone: isStandalone(),
+      // Chromium's own signal outranks any remembered note.
+      installed: installed || (knownInstalled && !deferred),
+      platform,
+      canPrompt: Boolean(deferred),
+      cardOpen: open,
+      hidden: pillHidden,
+    });
+    if (!showButton) return null;
+    return (
+      <div
+        style={{
+          position: "fixed",
+          right: 16,
+          bottom: "calc(16px + env(safe-area-inset-bottom))",
+          zIndex: 2147482000,
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
+          padding: 4,
+          borderRadius: 999,
+          background: accent,
+          boxShadow: "0 10px 30px -8px rgba(0,0,0,.45)",
+          fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif",
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          style={{ border: 0, background: "transparent", color: "#fff", fontSize: 14, fontWeight: 700, padding: "8px 12px", cursor: "pointer", borderRadius: 999 }}
+        >
+          ⤓ Install {appName}
+        </button>
+        <button
+          type="button"
+          aria-label={`Hide the install ${appName} button`}
+          onClick={() => {
+            safe(() => sessionStorage.setItem(PILL_HIDDEN_KEY, "1"), undefined);
+            setPillHidden(true);
+          }}
+          style={{ border: 0, background: "rgba(255,255,255,.18)", color: "#fff", width: 28, height: 28, borderRadius: 999, cursor: "pointer", fontSize: 14, lineHeight: "28px" }}
+        >
+          ×
+        </button>
+      </div>
+    );
+  }
 
   const close = () => {
     safe(() => sessionStorage.removeItem(FORCED_KEY), undefined);
@@ -256,7 +332,8 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
     setOpen(false);
   };
   const notNow = () => {
-    safe(() => localStorage.setItem(SNOOZE_KEY, String(Date.now() + SNOOZE_MS)), undefined);
+    // Until the browser is reopened; the corner button stays available.
+    safe(() => sessionStorage.setItem(DISMISS_KEY, "1"), undefined);
     close();
   };
   const install = async () => {
