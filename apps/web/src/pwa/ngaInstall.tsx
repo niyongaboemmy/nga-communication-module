@@ -172,6 +172,8 @@ export const initNgaInstall = () => {
   };
   document.addEventListener("visibilitychange", recheck);
   window.addEventListener("focus", recheck);
+  // Installed or removed while the page stays on screen: re-check every 10 s.
+  window.setInterval(recheck, 10_000);
   // A real fetch handler is what lets Chromium offer its one-click install.
   if ("serviceWorker" in navigator) {
     const base = ((import.meta as any).env?.BASE_URL as string | undefined) || "/";
@@ -233,16 +235,14 @@ let liveCheck: LiveCheck = "unknown";
 export const getLiveCheck = () => liveCheck;
 export const refreshLiveCheck = async (): Promise<LiveCheck> => {
   if (isStandalone()) return (liveCheck = "yes");
-  // Chrome offering to install outranks getInstalledRelatedApps, which still
-  // says "yes" for an app synced to the Chrome account but not installed on
-  // this device.
-  if (deferred) return (liveCheck = "no");
   const fn = (navigator as any).getInstalledRelatedApps;
   if (typeof fn !== "function") return liveCheck;
   try {
     const apps = await fn.call(navigator);
-    const next: LiveCheck =
-      !deferred && Array.isArray(apps) && apps.some((a: any) => a?.platform === "webapp") ? "yes" : "no";
+    const next: LiveCheck = Array.isArray(apps) && apps.some((a: any) => a?.platform === "webapp") ? "yes" : "no";
+    // Installed since this page loaded (Chrome menu, address bar, another
+    // tab): the old install offer is dead.
+    if (next === "yes") deferred = null;
     if (next === "yes") safe(() => localStorage.setItem(INSTALLED_KEY, "1"), undefined);
     else safe(() => localStorage.removeItem(INSTALLED_KEY), undefined);
     if (next !== liveCheck) {
@@ -257,7 +257,7 @@ export const refreshLiveCheck = async (): Promise<LiveCheck> => {
 };
 /** Installed, as best we know: the browser's answer, else the remembered note. */
 const believedInstalled = () =>
-  !deferred && (liveCheck === "yes" || (liveCheck === "unknown" && safe(() => localStorage.getItem(INSTALLED_KEY) === "1", false)));
+  liveCheck === "yes" || (liveCheck === "unknown" && !deferred && safe(() => localStorage.getItem(INSTALLED_KEY) === "1", false));
 
 const useInstallState = () =>
   useSyncExternalStore(
