@@ -48,6 +48,18 @@ function getPublisher(): Redis | null {
   return publisher;
 }
 
+/**
+ * Single sign-out: tell the realtime gateway to drop every socket of these
+ * users (their sessions just ended via MIS back-channel logout).
+ */
+export const LOGOUT_CHANNEL = 'tupo:logout';
+export function publishSessionEnd(userIds: string[]): void {
+  if (!userIds.length) return;
+  const client = getPublisher();
+  if (!client) return;
+  void client.publish(LOGOUT_CHANNEL, JSON.stringify({ userIds })).catch(() => {});
+}
+
 function relay(msg: ChatRelayMessage): void {
   if (!msg.rooms.length) return;
   const client = getPublisher();

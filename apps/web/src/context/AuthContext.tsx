@@ -99,12 +99,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   /**
    * Tupo's session is self-contained for its full 24h life, so logging out of
-   * the MIS would otherwise leave this app open. Poll the MIS through our own
-   * backend so a revoked MIS session ends this one too.
+   * the MIS would otherwise leave this app open. The MIS tells our API
+   * directly (back-channel logout), which also drops open sockets; this check
+   * is the backstop -- on load, whenever the tab comes back into view, and
+   * every minute -- so switching accounts in the MIS never leaves this tab
+   * signed in as the previous person.
    */
   useEffect(() => {
     if (!token) return;
+    let last = 0;
     const check = async () => {
+      if (Date.now() - last < 5000) return;
+      last = Date.now();
       try {
         const res = await fetch('/api/sso/verify-mis', { headers: { Authorization: `Bearer ${token}` } });
         if (res.status === 401) signOut();
@@ -112,8 +118,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // A network blip is not a logout; the next poll settles it.
       }
     };
-    const id = setInterval(check, 3 * 60 * 1000);
-    return () => clearInterval(id);
+    const onVisible = () => { if (document.visibilityState === 'visible') void check(); };
+    void check();
+    const id = setInterval(check, 60 * 1000);
+    window.addEventListener('focus', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [token, signOut]);
 
 

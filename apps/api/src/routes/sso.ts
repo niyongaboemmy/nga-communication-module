@@ -1,4 +1,6 @@
-import { Router, type Request, type Response } from 'express';
+import express, { Router, type Request, type Response } from 'express';
+import { LogoutTokenError, verifyLogoutToken } from '../utils/ssoLogout.js';
+import { publishSessionEnd } from '../services/chatRealtime.js';
 import jwt from 'jsonwebtoken';
 import { ok, fail, resolveMisRole, ssoExchangeSchema } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
@@ -237,6 +239,36 @@ router.post('/exchange', async (req: Request, res: Response) => {
  * an administrator disabling the account there — ends this session too.
  * Fails CLOSED: a MIS rejection kills the local session.
  */
+/**
+ * POST /api/sso/backchannel-logout -- OpenID Connect Back-Channel Logout.
+ * NGA MIS calls this (server to server) when a user signs out there; we end
+ * that user's Tupo sessions and drop their open sockets
+ * (nga_central_mis/docs/SINGLE_SIGN_OUT.md).
+ */
+router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: '20kb' }), async (req: Request, res: Response) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const misUserId = await verifyLogoutToken((req.body || {}).logout_token, {
+      misBaseUrl: config.misBaseUrl,
+      clientId: config.ssoClientId,
+    });
+    const { rows } = await getPool().query<{ id: string }>(
+      `INSERT INTO session_revocations (user_id, revoked_at)
+         SELECT id, now() FROM users WHERE mis_user_id = $1
+       ON CONFLICT (user_id) DO UPDATE SET revoked_at = EXCLUDED.revoked_at
+       RETURNING user_id AS id`,
+      [String(misUserId)],
+    );
+    publishSessionEnd(rows.map((r) => r.id));
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    if (error instanceof LogoutTokenError) {
+      return res.status(400).json({ error: 'invalid_request', error_description: error.message });
+    }
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 router.get('/verify-mis', authMiddleware, async (req: Request, res: Response) => {
   const misToken = (req as AuthenticatedRequest).user?.misToken;
   if (!misToken) return res.status(401).json(fail('No MIS session on this token.'));

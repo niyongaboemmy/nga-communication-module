@@ -14,7 +14,7 @@ import { rooms as meetRooms } from './meet/state.js';
 import * as chat from '@tupo/chat';
 import { registerChatHandlers } from './chat/handlers.js';
 import { registerFeedHandlers } from './feed/handlers.js';
-import { createAccessCache, findInactiveUsers } from './access.js';
+import { createAccessCache, findInactiveUsers, sessionEnded } from './access.js';
 import {
   broadcastPresence, markOffline, markOnline, readPresence, toStatus,
 } from './presence.js';
@@ -61,6 +61,15 @@ const notifySub = pubClient.duplicate();
 const CHAT_CHANNEL = 'tupo:chat';
 const chatSub = pubClient.duplicate();
 
+/**
+ * Single sign-out: tupo-api publishes `{ userIds }` here after NGA MIS tells
+ * it the person signed out. Every open socket of theirs -- chat and meetings,
+ * on every device -- is closed at once.
+ */
+const LOGOUT_CHANNEL = 'tupo:logout';
+const logoutSub = pubClient.duplicate();
+const SESSION_ENDED = 'unauthorized: you signed out of NGA MIS, please sign in again';
+
 async function connectRedis(): Promise<void> {
   try {
     await Promise.all([pubClient.connect(), subClient.connect(), presence.connect()]);
@@ -99,6 +108,29 @@ async function connectRedis(): Promise<void> {
       } catch {
         // A malformed relay message must not take the gateway down with it.
       }
+    });
+
+    await logoutSub.connect();
+    await logoutSub.subscribe(LOGOUT_CHANNEL);
+    logoutSub.on('message', (_channel, payload) => {
+      void (async () => {
+        try {
+          const { userIds } = JSON.parse(payload) as { userIds: string[] };
+          const ended = new Set(userIds ?? []);
+          if (ended.size === 0) return;
+          const sockets = [
+            ...(await io.local.fetchSockets()),
+            ...(await meetNsp.local.fetchSockets()),
+          ];
+          for (const s of sockets) {
+            const u = s.data.user as SessionClaims | undefined;
+            if (!u?.id || s.data.guest || !ended.has(u.id)) continue;
+            s.disconnect(true);
+          }
+        } catch {
+          // A malformed message must not take the gateway down with it.
+        }
+      })();
     });
 
     redisReady = true;
@@ -154,8 +186,9 @@ io.use((socket, next) => {
 
   // A valid signature is not enough: the account must still exist and be
   // active, exactly as the API's auth middleware requires on every request.
-  void admitUser(claims.id).then((err) => {
+  void admitUser(claims.id).then(async (err) => {
     if (err) return next(err);
+    if (await sessionEnded(claims.id, (claims as { iat?: number }).iat)) return next(new Error(SESSION_ENDED));
     socket.data.user = claims;
     next();
   });
@@ -174,7 +207,11 @@ const meetNsp = registerMeetNamespace(io);
 meetNsp.use((socket, next) => {
   if (socket.data.guest) return next();
   const user = socket.data.user as SessionClaims | undefined;
-  void admitUser(user?.id).then((err) => next(err ?? undefined));
+  void admitUser(user?.id).then(async (err) => {
+    if (err) return next(err);
+    if (user?.id && await sessionEnded(user.id, (user as { iat?: number }).iat)) return next(new Error(SESSION_ENDED));
+    next();
+  });
 });
 
 /**
