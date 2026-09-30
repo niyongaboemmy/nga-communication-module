@@ -24,6 +24,7 @@ import { getIceServers, isTurnConfigured } from '../services/turnService.js';
 import * as sfu from '../services/cloudflareSfuService.js';
 import * as meet from '../services/meetService.js';
 import * as notifications from '@tupo/notify';
+import { reminders } from '@tupo/notify';
 import * as ai from '../services/meetAiService.js';
 import * as notes from '../services/meetNotesService.js';
 import { getProviderStatus, isAnyProviderConfigured } from '../services/aiProviders/index.js';
@@ -482,6 +483,10 @@ router.post('/', denyGuests, authorizePermission('MEET_SCHEDULE', 'MEET_START'),
         ),
       startNow: !input.scheduledStart,
     });
+    // Scheduled for later: hand it to the MIS Reminder Hub. Fire-and-forget —
+    // an unreachable MIS costs the reminder (the worker sweep retries), never
+    // the meeting. An instant meeting has already started; nothing to remind.
+    if (input.scheduledStart) reminders.queueMeetingReminderSync(meeting.id);
     res.status(201).json(ok({ ...meeting, settings: parseMeetSettings(meeting.settings) }));
   } catch (err) {
     res.status(400).json(fail(err instanceof Error ? err.message : 'Could not create the meeting.'));
@@ -560,6 +565,8 @@ router.patch('/:id', denyGuests, async (req: Request, res: Response) => {
   );
 
   if (p.settings) await meet.updateSettings(m.id, meetSettingsSchema.partial().parse(p.settings));
+  // Rescheduled, renamed or cancelled via status: the sync works out which.
+  reminders.queueMeetingReminderSync(m.id);
   const fresh = await meet.findMeeting(m.id);
   res.json(ok({ ...rows[0], settings: parseMeetSettings(fresh?.settings) }));
 });
@@ -585,6 +592,7 @@ router.put('/:id/name', denyGuests, async (req: Request, res: Response) => {
   await meet.logMeetEvent(m.id, 'meeting.renamed', {
     actorId: actor(req).id, payload: { from: m.title, to: parsed.data.title },
   });
+  reminders.queueMeetingReminderSync(m.id);
   res.json(ok({ title: rows[0]!.title }));
 });
 
@@ -610,6 +618,7 @@ router.delete('/:id', denyGuests, async (req: Request, res: Response) => {
       `UPDATE meetings SET status = 'cancelled', updated_at = now() WHERE id = $1`, [m.id]);
     await meet.logMeetEvent(m.id, 'meeting.ended',
       { actorId: actor(req).id, payload: { cancelled: true } });
+    reminders.queueMeetingReminderCancel(m.id);
     return res.json(ok({ cancelled: true, deleted: false }));
   }
 
@@ -629,6 +638,7 @@ router.delete('/:id', denyGuests, async (req: Request, res: Response) => {
   // Everything else does cascade from the meetings row.
   await getPool().query('DELETE FROM meeting_events WHERE meeting_id = $1', [m.id]);
   await getPool().query('DELETE FROM meetings WHERE id = $1', [m.id]);
+  reminders.queueMeetingReminderCancel(m.id);
   res.json(ok({ cancelled: false, deleted: true }));
 });
 
@@ -830,6 +840,9 @@ router.post('/:id/end', authorizePermission('MEET_HOST_CONTROLS'), async (req: R
   await meet.endMeeting(m.id, actor(req).id);
   // A meeting that has ended must stop inviting people into it.
   void notifications.revokeSubject('meeting', m.id).catch(() => {});
+  // Ended before its scheduled start (the host ran it early): withdraw the
+  // reminders that would otherwise still fire.
+  reminders.queueMeetingReminderCancel(m.id);
 
   // Minutes, chapters and action items are generated off the request, so
   // ending a meeting stays instant and a Redis outage costs the minutes rather
@@ -1725,6 +1738,7 @@ router.post('/:id/invites', authorizePermission('MEET_SCHEDULE'), async (req: Re
      SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
     [m.id, userIds],
   );
+  reminders.queueMeetingReminderSync(m.id);
   res.json(ok({ invited: userIds.length }));
 });
 
@@ -1738,6 +1752,8 @@ router.put('/:id/invites/me', async (req: Request, res: Response) => {
     [param(req, 'id'), actor(req).id, response],
   );
   if (!rowCount) return res.status(404).json(fail('You were not invited to this meeting.'));
+  // Declining takes you out of the reminder audience; accepting puts you back.
+  reminders.queueMeetingReminderSync(param(req, 'id'));
   res.json(ok({ response }));
 });
 

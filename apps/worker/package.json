@@ -19,7 +19,8 @@
     "ioredis": "^5.4.2",
     "@tupo/chat": "*",
     "@tupo/mail": "*",
-    "@tupo/feed": "*"
+    "@tupo/feed": "*",
+    "@tupo/notify": "*"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
