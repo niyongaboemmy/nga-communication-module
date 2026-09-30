@@ -50,5 +50,11 @@
       "navigate-existing",
       "auto"
     ]
-  }
+  },
+  "related_applications": [
+    {
+      "platform": "webapp",
+      "url": "/manifest.webmanifest"
+    }
+  ]
 }
