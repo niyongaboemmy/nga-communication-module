@@ -72,6 +72,31 @@ export const isStandalone = () =>
       (m) => window.matchMedia?.(`(display-mode: ${m})`).matches,
     ));
 
+/**
+ * Tell the NGA installer (the tab that opened this one) how it went, so its
+ * list updates live -- the installer can't see other sites' installed apps on
+ * desktop, only what the app itself reports. Message goes only to the
+ * installer's origin; no-op without an opener or return URL.
+ */
+export type InstallReport = "installed" | "already" | "skipped";
+export const installerKeyFrom = (returnUrl: string | null) => {
+  if (!returnUrl) return null;
+  const url = safe(() => new URL(returnUrl), null);
+  return url?.searchParams.get("done") ?? null;
+};
+export const notifyInstaller = (status: InstallReport, returnUrl: string | null) => {
+  const key = installerKeyFrom(returnUrl);
+  if (!returnUrl || !key) return false;
+  const opener = safe(() => window.opener as Window | null, null);
+  if (!opener) return false;
+  return safe(() => {
+    opener.postMessage({ type: "nga-install", app: key, status }, new URL(returnUrl).origin);
+    return true;
+  }, false);
+};
+/** The way back after skipping: never reported as installed. */
+export const skipReturnUrl = (returnUrl: string) => returnUrl.replace(/([?&])done=/, "$1skipped=");
+
 /** Only ever send people back to an NGA page (never an arbitrary URL). */
 export const safeReturnUrl = (raw: string | null, installerUrl = DEFAULT_INSTALLER_URL): string | null => {
   if (!raw) return null;
@@ -121,6 +146,7 @@ export const initNgaInstall = () => {
     deferred = null;
     installed = true;
     safe(() => localStorage.setItem(INSTALLED_KEY, "1"), undefined);
+    notifyInstaller("installed", safe(() => sessionStorage.getItem(RETURN_KEY), null));
     emit();
   });
   // A real fetch handler is what lets Chromium offer its one-click install.
@@ -222,6 +248,8 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  // The installer sent us here, but this app is already installed.
+  const [already, setAlready] = useState(false);
   const [dark, setDark] = useState(false);
   const [closedThisLoad, setClosedThisLoad] = useState(false);
   const [pillHidden, setPillHidden] = useState(() => safe(() => sessionStorage.getItem(PILL_HIDDEN_KEY) === "1", false));
@@ -240,11 +268,24 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
       forced,
       dismissedThisSession: safe(() => sessionStorage.getItem(DISMISS_KEY) === "1", false),
     };
+    // Sent by the installer but installed already: say so (and tell the
+    // installer) instead of showing nothing -- a silent page looked broken.
+    const answerInstaller = () => {
+      if (!forced) return;
+      setAlready(true);
+      setOpen(true);
+      notifyInstaller("already", returnUrl);
+    };
+    if (forced && (base.standalone || base.knownInstalled)) {
+      answerInstaller();
+      return;
+    }
     if (!shouldOffer(base)) return;
     relatedAppInstalled().then((isInstalled) => {
       if (!alive) return;
       if (isInstalled) {
         safe(() => localStorage.setItem(INSTALLED_KEY, "1"), undefined);
+        answerInstaller();
         return;
       }
       setOpen(true);
@@ -263,6 +304,9 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
   // first render -- open then too (still honouring "Not now").
   const canPrompt = Boolean(deferred);
   useEffect(() => {
+    // Chromium only offers installation when the app is NOT installed here,
+    // so a remembered "installed" note was stale: show the install view.
+    if (canPrompt && already) setAlready(false);
     if (!canPrompt || open || closedThisLoad) return;
     const ok = shouldOffer({
       standalone: isStandalone(),
@@ -347,12 +391,27 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
       if (outcome === "accepted") {
         installed = true;
         safe(() => localStorage.setItem(INSTALLED_KEY, "1"), undefined);
+        notifyInstaller("installed", returnUrl);
         if (returnUrl) setDone(true);
         else close();
       }
     } finally {
       setBusy(false);
       emit();
+    }
+  };
+
+  /**
+   * Back to the installer: when it opened this tab, report and close (the
+   * installer tab is right behind); otherwise navigate there.
+   */
+  const backToInstaller = (status: InstallReport) => (e: React.MouseEvent) => {
+    if (!returnUrl) return;
+    const reported = notifyInstaller(status, returnUrl);
+    if (reported) {
+      e.preventDefault();
+      safe(() => (window.opener as Window).focus(), undefined);
+      window.close();
     }
   };
 
@@ -403,16 +462,18 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
           {done ? "✓" : "⤓"}
         </div>
 
-        {done ? (
+        {done || already ? (
           <>
             <h2 id="nga-install-title" style={{ margin: 0, fontSize: 20, fontWeight: 700, lineHeight: 1.25 }}>
-              {appName} is installed
+              {done ? `${appName} is installed` : `${appName} is already installed`}
             </h2>
             <p style={{ margin: "8px 0 0", fontSize: 14, lineHeight: 1.5, color: muted }}>
-              It now opens in its own window. Continue with the next NGA app.
+              {done
+                ? "It now opens in its own window. Continue with the next NGA app."
+                : `Nothing to do here — open ${appName} from your dock, taskbar or app launcher. Continue with the next NGA app.`}
             </p>
             {returnUrl ? (
-              <a href={returnUrl} style={button(true)}>
+              <a href={returnUrl} onClick={backToInstaller(done ? "installed" : "already")} style={button(true)}>
                 Back to the NGA installer
               </a>
             ) : null}
@@ -450,7 +511,7 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
             )}
 
             {returnUrl ? (
-              <a href={returnUrl} style={button(false)}>
+              <a href={skipReturnUrl(returnUrl)} onClick={backToInstaller("skipped")} style={button(false)}>
                 Skip — back to the NGA installer
               </a>
             ) : (
