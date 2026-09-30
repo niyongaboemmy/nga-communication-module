@@ -84,9 +84,24 @@ export const installerKeyFrom = (returnUrl: string | null) => {
   const url = safe(() => new URL(returnUrl), null);
   return url?.searchParams.get("done") ?? null;
 };
+/**
+ * The cookie channel: every NGA app lives under amashuri.com, so a cookie on
+ * that parent domain reaches the installer even when there is no opener --
+ * which is the normal case, because Chrome only opens a link in an installed
+ * app's window when it has no opener. Short-lived; the installer clears it.
+ */
+export const reportCookieName = (key: string) => `nga_inst_${key.replace(/[^a-z0-9_-]/gi, "")}`;
+export const writeReportCookie = (key: string, status: InstallReport, host = window.location.hostname, now = Date.now()) => {
+  const domain = host === "amashuri.com" || host.endsWith(".amashuri.com") ? "; domain=.amashuri.com; secure" : "";
+  safe(() => {
+    document.cookie = `${reportCookieName(key)}=${status}.${now}; path=/; max-age=900; samesite=lax${domain}`;
+  }, undefined);
+};
+
 export const notifyInstaller = (status: InstallReport, returnUrl: string | null) => {
   const key = installerKeyFrom(returnUrl);
   if (!returnUrl || !key) return false;
+  writeReportCookie(key, status);
   const opener = safe(() => window.opener as Window | null, null);
   if (!opener) return false;
   return safe(() => {
@@ -239,11 +254,13 @@ const STEPS: Record<Platform, string[]> = {
 };
 
 /** The install card. Renders nothing unless it should ask. */
-export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; installerUrl?: string }> = ({
-  appName,
-  accent = "#2563eb",
-  installerUrl = DEFAULT_INSTALLER_URL,
-}) => {
+export const NgaInstallPrompt: React.FC<{
+  appName: string;
+  accent?: string;
+  installerUrl?: string;
+  /** Where the installed app starts (in scope), used by "Open the app". */
+  startPath?: string;
+}> = ({ appName, accent = "#2563eb", installerUrl = DEFAULT_INSTALLER_URL, startPath = "/" }) => {
   useInstallState();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -268,8 +285,17 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
       forced,
       dismissedThisSession: safe(() => sessionStorage.getItem(DISMISS_KEY) === "1", false),
     };
-    // Sent by the installer but installed already: say so (and tell the
-    // installer) instead of showing nothing -- a silent page looked broken.
+    // Running as the installed app (e.g. the installer's link opened it
+    // straight in its window): nothing to ask -- just tell the installer.
+    if (base.standalone) {
+      if (forced) {
+        notifyInstaller("already", returnUrl);
+        safe(() => sessionStorage.removeItem(FORCED_KEY), undefined);
+      }
+      return;
+    }
+    // Sent by the installer, installed already, but opened in a browser tab:
+    // offer to open the app window (and tell the installer).
     const answerInstaller = () => {
       if (!forced) return;
       setAlready(true);
@@ -300,6 +326,24 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
     if (installed && open) setDone(true);
   });
 
+  // Installing from a tab: Chrome moves this very page into the new app
+  // window. The card has done its job -- get out of the way.
+  useEffect(() => {
+    const mq = safe(() => window.matchMedia("(display-mode: standalone)"), null);
+    if (!mq) return;
+    const onChange = () => {
+      if (!mq.matches) return;
+      if (safe(() => sessionStorage.getItem(FORCED_KEY) === "1", false)) {
+        notifyInstaller("installed", returnUrl);
+        safe(() => sessionStorage.removeItem(FORCED_KEY), undefined);
+      }
+      setOpen(false);
+    };
+    mq.addEventListener?.("change", onChange);
+    return () => mq.removeEventListener?.("change", onChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // The browser's "not installed, installable" signal can arrive after the
   // first render -- open then too (still honouring "Not now").
   const canPrompt = Boolean(deferred);
@@ -321,6 +365,35 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
 
   if (!open) {
     const knownInstalled = safe(() => localStorage.getItem(INSTALLED_KEY) === "1", false);
+    // Installed, but this is a browser tab: a one-click way into the app.
+    if (!isStandalone() && !pillHidden && (installed || (knownInstalled && !deferred))) {
+      const url = safe(() => new URL(startPath, window.location.origin).toString(), "/");
+      return (
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener"
+          onClick={() => window.setTimeout(() => window.close(), 600)}
+          style={{
+            position: "fixed",
+            right: 16,
+            bottom: "calc(16px + env(safe-area-inset-bottom))",
+            zIndex: 2147482000,
+            padding: "10px 16px",
+            borderRadius: 999,
+            background: accent,
+            color: "#fff",
+            fontSize: 14,
+            fontWeight: 700,
+            textDecoration: "none",
+            boxShadow: "0 10px 30px -8px rgba(0,0,0,.45)",
+            fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif",
+          }}
+        >
+          ↗ Open in the {appName} app
+        </a>
+      );
+    }
     const showButton = shouldShowInstallButton({
       standalone: isStandalone(),
       // Chromium's own signal outranks any remembered note.
@@ -415,6 +488,22 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
     }
   };
 
+  /**
+   * "Open the app": a real link click. Chrome's navigation capturing sends a
+   * user-clicked link into an installed app's window (window.open and
+   * redirects are never captured), then this browser tab can go.
+   */
+  const openUrl = safe(() => new URL(startPath, window.location.origin).toString(), "/");
+  const openApp = () => {
+    notifyInstaller(done ? "installed" : "already", returnUrl);
+    safe(() => sessionStorage.removeItem(FORCED_KEY), undefined);
+    window.setTimeout(() => {
+      window.close();
+      // Not closable (opened by the person, not by a script): tidy up.
+      setOpen(false);
+    }, 600);
+  };
+
   const fg = dark ? "#f1f5f9" : "#0f172a";
   const muted = dark ? "#cbd5e1" : "#475569";
   const card = dark ? "#0f172a" : "#ffffff";
@@ -465,15 +554,16 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
         {done || already ? (
           <>
             <h2 id="nga-install-title" style={{ margin: 0, fontSize: 20, fontWeight: 700, lineHeight: 1.25 }}>
-              {done ? `${appName} is installed` : `${appName} is already installed`}
+              {appName} is installed
             </h2>
             <p style={{ margin: "8px 0 0", fontSize: 14, lineHeight: 1.5, color: muted }}>
-              {done
-                ? "It now opens in its own window. Continue with the next NGA app."
-                : `Nothing to do here — open ${appName} from your dock, taskbar or app launcher. Continue with the next NGA app.`}
+              Open it in its own window — no browser tabs. If it opens here instead, use “Open in app” in the address bar.
             </p>
+            <a href={openUrl} target="_blank" rel="noopener" onClick={openApp} autoFocus style={button(true)}>
+              Open the {appName} app
+            </a>
             {returnUrl ? (
-              <a href={returnUrl} onClick={backToInstaller(done ? "installed" : "already")} style={button(true)}>
+              <a href={returnUrl} onClick={backToInstaller(done ? "installed" : "already")} style={button(false)}>
                 Back to the NGA installer
               </a>
             ) : null}
@@ -493,7 +583,7 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
 
             {deferred ? (
               <button type="button" onClick={install} disabled={busy} autoFocus style={{ ...button(true), opacity: busy ? 0.7 : 1 }}>
-                {busy ? "Opening…" : `Install ${appName}`}
+                {busy ? "Waiting for your browser…" : `Install & open ${appName}`}
               </button>
             ) : (
               <ol style={{ margin: "16px 0 0", padding: 14, listStyle: "none", background: soft, borderRadius: 16 }}>
