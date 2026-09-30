@@ -384,3 +384,9 @@ export const meetingNotes = pgTable('meeting_notes', {
 }, (t) => ({
   meetingIdx: index('meeting_notes_meeting_idx').on(t.meetingId, t.createdAt),
 }));
+
+/** Single sign-out: sessions of this user issued before revoked_at are over (0029). */
+export const sessionRevocations = pgTable('session_revocations', {
+  userId: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }).notNull(),
+});

@@ -5,6 +5,7 @@ import { fail } from '@tupo/shared';
 import type { Role, RoleLevel, SessionClaims } from '@tupo/shared';
 import { config } from '../config.js';
 import { attachAccess, type RequestAccess } from '../access/gate.js';
+import { issuedBeforeRevocation } from '../utils/ssoLogout.js';
 
 export interface AuthenticatedRequest extends Request {
   user?: SessionClaims & {
@@ -37,8 +38,10 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
 
   const pool = getPool();
-  const { rows } = await pool.query<{ role: Role; status: string; mis_user_id: string }>(
-    'SELECT role, status, mis_user_id FROM users WHERE id = $1',
+  const { rows } = await pool.query<{ role: Role; status: string; mis_user_id: string; revoked_at: Date | null }>(
+    `SELECT u.role, u.status, u.mis_user_id, r.revoked_at
+       FROM users u LEFT JOIN session_revocations r ON r.user_id = u.id
+      WHERE u.id = $1`,
     [decoded.id]
   );
   const user = rows[0];
@@ -51,6 +54,11 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
   if (user.status !== 'active') {
     return res.status(403).json(fail('This account has been suspended.'));
+  }
+  // Single sign-out: this person signed out of NGA MIS after this token was
+  // issued (back-channel logout) -- the session is over everywhere.
+  if (issuedBeforeRevocation((decoded as { iat?: number }).iat, user.revoked_at)) {
+    return res.status(401).json({ ...fail('You signed out of NGA. Please sign in again.'), code: 'SESSION_ENDED' });
   }
 
   const resolved = await resolveUserPermissions(pool, decoded.id);

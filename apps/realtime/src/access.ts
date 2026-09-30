@@ -1,4 +1,5 @@
 import { getPool, resolveUserPermissions } from '@tupo/db';
+import { issuedBeforeRevocation } from './utils/ssoLogout.js';
 
 /**
  * Live account state for a socket.
@@ -109,4 +110,20 @@ export async function findInactiveUsers(userIds: string[]): Promise<Set<string>>
   );
   const active = new Set(rows.filter((r) => r.status === 'active').map((r) => r.id));
   return new Set(userIds.filter((id) => !active.has(id)));
+}
+
+/**
+ * Single sign-out (nga_central_mis/docs/SINGLE_SIGN_OUT.md): was this session
+ * token issued before the user signed out of NGA MIS? Fails open -- a lookup
+ * error never locks anyone out; the API refuses the token on every request.
+ */
+export async function sessionEnded(userId: string, iatSeconds: number | undefined): Promise<boolean> {
+  try {
+    const { rows } = await getPool().query<{ revoked_at: Date }>(
+      'SELECT revoked_at FROM session_revocations WHERE user_id = $1', [userId]
+    );
+    return issuedBeforeRevocation(iatSeconds, rows[0]?.revoked_at ?? null);
+  } catch {
+    return false;
+  }
 }
