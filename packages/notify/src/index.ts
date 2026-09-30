@@ -249,3 +249,9 @@ export async function notifyAndPush(
   await push(rows);
   return rows;
 }
+
+/**
+ * Meeting reminders via the NGA MIS Reminder Hub. Namespaced, because
+ * `syncMeeting` means nothing next to `notify` without it.
+ */
+export * as reminders from './reminders.js';

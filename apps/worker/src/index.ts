@@ -9,6 +9,8 @@ import { runChatSweeps } from './jobs/chatSweeps.js';
 import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
 import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './jobs/mail.js';
 import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
+import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
+import { reminders } from '@tupo/notify';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -111,6 +113,13 @@ const worker = new Worker(
         return runStorySweeps();
       }
 
+      // Meeting reminders — re-sync upcoming meetings to the MIS Reminder Hub.
+      case 'reminders:sync': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runReminderSync();
+      }
+
       default:
         // Fail loudly rather than silently dropping work we don't recognise.
         throw new Error(`Unknown job type: ${job.name}`);
@@ -184,6 +193,33 @@ queue.add('story:sweep', {}, {
   removeOnComplete: 10,
   removeOnFail: 10,
 }).catch((err) => console.error('[worker] could not register the story sweep:', err.message));
+
+/**
+ * The meeting-reminder backstop, every 30 minutes plus once a minute after
+ * boot (so a deploy re-syncs promptly). The API syncs each change as it
+ * happens; this only catches what that missed, so a slow cadence is right.
+ * Not registered when switched off (REMINDERS_SYNC=false), under test, or
+ * without the SSO client credentials — and the job itself re-checks, so a
+ * repeatable left in Redis from an earlier, enabled run is a no-op.
+ */
+const borrowed = borrowApiCredentials();
+if (borrowed.length) console.log(`[worker] reminders: using ${borrowed.join(', ')} from apps/api/.env`);
+const reminderCfg = reminders.reminderConfig();
+if (reminderCfg.enabled) {
+  queue.add('reminders:sync', {}, {
+    jobId: 'reminders-sync',
+    repeat: { every: 30 * 60_000 },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  }).catch((err) => console.error('[worker] could not register the reminders sync:', err.message));
+  queue.add('reminders:sync', { boot: true }, {
+    delay: 60_000,
+    removeOnComplete: true,
+    removeOnFail: 10,
+  }).catch((err) => console.error('[worker] could not queue the boot reminders sync:', err.message));
+} else {
+  console.log(`[worker] reminders sync disabled: ${reminderCfg.disabledReason}`);
+}
 
 worker.on('ready', () => console.log('[worker] connected to redis, waiting for jobs'));
 
