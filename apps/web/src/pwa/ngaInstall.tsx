@@ -101,6 +101,11 @@ export const initNgaInstall = () => {
   window.addEventListener("beforeinstallprompt", (e) => {
     e.preventDefault(); // our card decides when to ask
     deferred = e as BeforeInstallPromptEvent;
+    // Chromium only fires this when the app is NOT installed here -- the
+    // authoritative answer. Forget a stale "installed" note (e.g. the app
+    // was installed once and later uninstalled), or the card never returns.
+    installed = false;
+    safe(() => localStorage.removeItem(INSTALLED_KEY), undefined);
     emit();
   });
   window.addEventListener("appinstalled", () => {
@@ -190,6 +195,7 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
   const [dark, setDark] = useState(false);
+  const [closedThisLoad, setClosedThisLoad] = useState(false);
   const platform = detectPlatform();
   const fromApp = safe(() => sessionStorage.getItem(FLAG_KEY) === "1", false);
   const forced = safe(() => sessionStorage.getItem(FORCED_KEY) === "1", false);
@@ -225,10 +231,28 @@ export const NgaInstallPrompt: React.FC<{ appName: string; accent?: string; inst
     if (installed && open) setDone(true);
   });
 
+  // The browser's "not installed, installable" signal can arrive after the
+  // first render -- open then too (still honouring "Not now").
+  const canPrompt = Boolean(deferred);
+  useEffect(() => {
+    if (!canPrompt || open || closedThisLoad) return;
+    const ok = shouldOffer({
+      standalone: isStandalone(),
+      knownInstalled: false,
+      platform,
+      forced,
+      snoozedUntil: safe(() => Number(localStorage.getItem(SNOOZE_KEY) || 0), 0),
+      now: Date.now(),
+    });
+    if (ok) setOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canPrompt]);
+
   if (!open) return null;
 
   const close = () => {
     safe(() => sessionStorage.removeItem(FORCED_KEY), undefined);
+    setClosedThisLoad(true);
     setOpen(false);
   };
   const notNow = () => {
