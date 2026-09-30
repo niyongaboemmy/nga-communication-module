@@ -232,6 +232,8 @@ export const shouldShowInstallButton = (s: {
  */
 export type LiveCheck = "yes" | "no" | "unknown";
 let liveCheck: LiveCheck = "unknown";
+/** The browser answered "not installed" at least once this visit. */
+let sawNotInstalled = false;
 export const getLiveCheck = () => liveCheck;
 export const refreshLiveCheck = async (): Promise<LiveCheck> => {
   if (isStandalone()) return (liveCheck = "yes");
@@ -239,7 +241,12 @@ export const refreshLiveCheck = async (): Promise<LiveCheck> => {
   if (typeof fn !== "function") return liveCheck;
   try {
     const apps = await fn.call(navigator);
-    const next: LiveCheck = Array.isArray(apps) && apps.some((a: any) => a?.platform === "webapp") ? "yes" : "no";
+    const listed = Array.isArray(apps) && apps.some((a: any) => a?.platform === "webapp");
+    if (!listed) sawNotInstalled = true;
+    // Listed while Chrome also offers to install it here, and never "not
+    // installed" this visit: a leftover record (removed from this device,
+    // still in Chrome's list) -- it can't open as an app, so not installed.
+    const next: LiveCheck = listed && !(deferred && !sawNotInstalled) ? "yes" : "no";
     // Installed since this page loaded (Chrome menu, address bar, another
     // tab): the old install offer is dead.
     if (next === "yes") deferred = null;
