@@ -154,16 +154,24 @@ export const initNgaInstall = () => {
     // authoritative answer. Forget a stale "installed" note (e.g. the app
     // was installed once and later uninstalled), or the card never returns.
     installed = false;
+    liveCheck = "no";
     safe(() => localStorage.removeItem(INSTALLED_KEY), undefined);
     emit();
   });
   window.addEventListener("appinstalled", () => {
     deferred = null;
     installed = true;
+    liveCheck = "yes";
     safe(() => localStorage.setItem(INSTALLED_KEY, "1"), undefined);
     notifyInstaller("installed", safe(() => sessionStorage.getItem(RETURN_KEY), null));
     emit();
   });
+  // Installed or removed elsewhere while this page was open: ask again.
+  const recheck = () => {
+    if (document.visibilityState === "visible") void refreshLiveCheck();
+  };
+  document.addEventListener("visibilitychange", recheck);
+  window.addEventListener("focus", recheck);
   // A real fetch handler is what lets Chromium offer its one-click install.
   if ("serviceWorker" in navigator) {
     const base = ((import.meta as any).env?.BASE_URL as string | undefined) || "/";
@@ -214,17 +222,37 @@ export const shouldShowInstallButton = (s: {
   return s.platform === "ios" || s.platform === "mac-safari" || s.platform === "firefox-windows";
 };
 
-/** Does the browser say this app is installed here? (manifest related_applications) */
-const relatedAppInstalled = async () => {
+/**
+ * The browser's live answer to "is this app installed here right now?"
+ * (getInstalledRelatedApps + manifest related_applications with the app id;
+ * desktop Chrome 140+, Android). A remembered note goes stale when the app
+ * is uninstalled, so it only counts where the browser can't answer.
+ */
+export type LiveCheck = "yes" | "no" | "unknown";
+let liveCheck: LiveCheck = "unknown";
+export const getLiveCheck = () => liveCheck;
+export const refreshLiveCheck = async (): Promise<LiveCheck> => {
+  if (isStandalone()) return (liveCheck = "yes");
   const fn = (navigator as any).getInstalledRelatedApps;
-  if (typeof fn !== "function") return false;
+  if (typeof fn !== "function") return liveCheck;
   try {
     const apps = await fn.call(navigator);
-    return Array.isArray(apps) && apps.some((a: any) => a?.platform === "webapp");
+    const next: LiveCheck = Array.isArray(apps) && apps.some((a: any) => a?.platform === "webapp") ? "yes" : "no";
+    if (next === "yes") safe(() => localStorage.setItem(INSTALLED_KEY, "1"), undefined);
+    else safe(() => localStorage.removeItem(INSTALLED_KEY), undefined);
+    if (next !== liveCheck) {
+      liveCheck = next;
+      if (next === "no") installed = false;
+      emit();
+    }
+    return next;
   } catch {
-    return false;
+    return liveCheck;
   }
 };
+/** Installed, as best we know: the browser's answer, else the remembered note. */
+const believedInstalled = () =>
+  liveCheck === "yes" || (liveCheck === "unknown" && safe(() => localStorage.getItem(INSTALLED_KEY) === "1", false));
 
 const useInstallState = () =>
   useSyncExternalStore(
@@ -280,7 +308,7 @@ export const NgaInstallPrompt: React.FC<{
     setDark(Boolean(window.matchMedia?.("(prefers-color-scheme: dark)").matches) || document.documentElement.classList.contains("dark"));
     const base = {
       standalone: isStandalone(),
-      knownInstalled: safe(() => localStorage.getItem(INSTALLED_KEY) === "1", false),
+      knownInstalled: false,
       platform,
       forced,
       dismissedThisSession: safe(() => sessionStorage.getItem(DISMISS_KEY) === "1", false),
@@ -302,19 +330,15 @@ export const NgaInstallPrompt: React.FC<{
       setOpen(true);
       notifyInstaller("already", returnUrl);
     };
-    if (forced && (base.standalone || base.knownInstalled)) {
-      answerInstaller();
-      return;
-    }
-    if (!shouldOffer(base)) return;
-    relatedAppInstalled().then((isInstalled) => {
+    // Ask the browser first: a remembered "installed" may be stale.
+    refreshLiveCheck().then(() => {
       if (!alive) return;
-      if (isInstalled) {
-        safe(() => localStorage.setItem(INSTALLED_KEY, "1"), undefined);
+      const knownInstalled = believedInstalled();
+      if (knownInstalled) {
         answerInstaller();
         return;
       }
-      setOpen(true);
+      if (shouldOffer({ ...base, knownInstalled })) setOpen(true);
     });
     return () => {
       alive = false;
@@ -364,9 +388,10 @@ export const NgaInstallPrompt: React.FC<{
   }, [canPrompt]);
 
   if (!open) {
-    const knownInstalled = safe(() => localStorage.getItem(INSTALLED_KEY) === "1", false);
-    // Installed, but this is a browser tab: a one-click way into the app.
-    if (!isStandalone() && !pillHidden && (installed || (knownInstalled && !deferred))) {
+    const knownInstalled = believedInstalled();
+    // Installed -- confirmed by the browser, never a remembered note -- but
+    // this is a browser tab: a one-click way into the app.
+    if (!isStandalone() && !pillHidden && (installed || liveCheck === "yes") && !deferred) {
       const url = safe(() => new URL(startPath, window.location.origin).toString(), "/");
       return (
         <a
