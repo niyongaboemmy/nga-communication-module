@@ -183,7 +183,7 @@ const PreviewModal: React.FC<{ campaignId: string; onClose: () => void; onSubmit
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <Button variant="ghost" onClick={onClose}>Cancel</Button>
-              <Button disabled={busy || preview.totalRecipients === 0} onClick={async () => {
+              <Button data-track="tupo.mail.campaign_submit" disabled={busy || preview.totalRecipients === 0} onClick={async () => {
                 setBusy(true);
                 try { await api.submitCampaign(campaignId); onSubmitted(); }
                 catch { setBusy(false); }

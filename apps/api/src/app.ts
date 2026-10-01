@@ -17,6 +17,7 @@ import oversightRoutes from './routes/oversight.js';
 import dashboardRoutes from './routes/dashboard.js';
 import accessRoutes from './routes/access.js';
 import integrationRoutes from './routes/integration.js';
+import activityRoutes from './routes/activity.js';
 
 /**
  * The Express app with no side effects — no database init, no listen — so
@@ -25,8 +26,12 @@ import integrationRoutes from './routes/integration.js';
 export const app = express();
 
 app.disable('x-powered-by');
+// nginx (and the Vite dev proxy) sit on the same host, so the client address is
+// the one they put in X-Forwarded-For. Without this every request's req.ip was
+// 127.0.0.1: the per-IP guest and sign-in throttles were one global bucket, and
+// audit rows and analytics recorded the proxy instead of the person.
+app.set('trust proxy', 'loopback');
 app.use(cors({ origin: config.corsOrigins, credentials: true }));
-app.use(express.json({ limit: '1mb' }));
 
 app.use((_req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -34,6 +39,12 @@ app.use((_req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   next();
 });
+
+// Usage analytics. Before the global parser: it has its own (256 kB, and the
+// text/plain bodies sendBeacon sends) and no auth middleware (routes/activity.ts).
+app.use('/api/activity', activityRoutes);
+
+app.use(express.json({ limit: '1mb' }));
 
 app.use(healthRoutes);
 app.use('/api/sso', ssoRoutes);

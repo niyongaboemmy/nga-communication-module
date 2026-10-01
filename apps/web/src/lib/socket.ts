@@ -1,6 +1,7 @@
 import { io, type Socket } from 'socket.io-client';
 import type { ClientToServerEvents, ServerToClientEvents } from '@tupo/shared';
 import { SESSION_KEY } from './api';
+import { getDeviceId } from '../vendor/nga-activity';
 
 /**
  * The application socket — one connection for the whole app.
@@ -64,7 +65,9 @@ export function getSocket(): AppSocket | null {
   if (!socket) {
     currentToken = token;
     socket = io(socketUrl('/'), {
-      auth: { token },
+      // `did`: the shared NGA device id, for the chat key events the gateway
+      // records (usage analytics). Not a credential.
+      auth: { token, did: getDeviceId() },
       // Polling stays as a fallback: some school and mobile networks block
       // WebSocket upgrades outright.
       transports: ['websocket', 'polling'],

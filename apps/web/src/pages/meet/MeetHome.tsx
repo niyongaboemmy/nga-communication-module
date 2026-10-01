@@ -237,6 +237,7 @@ export const MeetHome: React.FC = () => {
             <div className="relative flex flex-1 sm:flex-none">
               <button
                 onClick={() => void startInstant()}
+                data-track="tupo.meet.instant_start"
                 disabled={!canStart || starting}
                 className="tupo-press flex flex-1 items-center justify-center gap-2 rounded-l-full bg-blue-600 hover:bg-blue-500 py-2.5 pl-4 pr-3 text-sm font-semibold text-white transition-colors duration-150 disabled:opacity-40 sm:flex-none"
               >
@@ -280,6 +281,7 @@ export const MeetHome: React.FC = () => {
                         key={c}
                         role="menuitem"
                         onClick={() => void startInstant(c)}
+                        data-track="tupo.meet.instant_start"
                         className="w-full rounded-xl px-3 py-2 text-left transition-colors hover:bg-surface-light dark:hover:bg-card-dark/60"
                       >
                         <span className="flex items-center gap-1.5 text-sm font-medium text-text-primary-light dark:text-text-primary-dark">

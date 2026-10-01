@@ -54,7 +54,7 @@ export const Sidebar: React.FC<Props> = ({
 
   return (
     <div className="flex h-full flex-col gap-1 overflow-y-auto p-3">
-      <Button className="mb-2 w-full justify-center" onClick={() => { onCompose(); onNavigate?.(); }}>
+      <Button className="mb-2 w-full justify-center" data-track="tupo.mail.compose_open" onClick={() => { onCompose(); onNavigate?.(); }}>
         <PenSquare size={16} /> Compose
       </Button>
 

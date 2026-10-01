@@ -37,6 +37,7 @@ export const SignIn: React.FC = () => {
 
           <button
             onClick={signIn}
+            data-track="tupo.sign_in.click"
             className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-800"
           >
             Sign in with NGA MIS <ArrowRight size={16} />

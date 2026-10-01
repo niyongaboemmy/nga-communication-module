@@ -7,5 +7,7 @@ interface ImportMetaEnv {
   readonly VITE_TASKMENTOR_HOME_URL?: string;
   /** Origin of the realtime gateway. Empty/unset means same-origin. */
   readonly VITE_SOCKET_URL?: string;
+  /** Build identifier reported with usage analytics (optional). */
+  readonly VITE_RELEASE?: string;
 }
 interface ImportMeta { readonly env: ImportMetaEnv }

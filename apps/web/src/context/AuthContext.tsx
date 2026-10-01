@@ -5,6 +5,7 @@ import {
 } from '../lib/api';
 import { THEME_KEY, readStoredTheme, storeTheme, patchCachedUserTheme } from '../lib/theme';
 import { beginSsoState } from '../lib/ssoState';
+import { endActivity } from '../activity';
 
 type Theme = 'light' | 'dark';
 
@@ -88,6 +89,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [theme]);
 
   const signOut = useCallback(() => {
+    // Tell usage analytics this tab's session is over while the token that
+    // identifies it still exists (it is read synchronously, before the clear).
+    void endActivity();
     clearSession();
     setToken(null);
     setUser(null);

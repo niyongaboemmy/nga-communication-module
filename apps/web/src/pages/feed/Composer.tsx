@@ -308,7 +308,7 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
               Save draft
             </button>
           )}
-          <button onClick={() => void submit('published')} disabled={!canSubmit}
+          <button onClick={() => void submit('published')} disabled={!canSubmit} data-track={editing ? undefined : 'tupo.feed.publish_click'}
             className="inline-flex items-center gap-1.5 rounded-full bg-blue-600 px-5 py-1.5 text-sm font-semibold text-white transition-opacity hover:bg-blue-700 disabled:opacity-40">
             {busy && <Loader2 size={14} className="animate-spin" />}
             {editing ? 'Save' : scheduleAt ? 'Schedule' : 'Post'}

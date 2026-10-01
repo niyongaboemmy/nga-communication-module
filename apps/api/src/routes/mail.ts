@@ -11,6 +11,7 @@ import { hasPermission } from '../access/gate.js';
 import { routeCampaignForApproval } from '../access/approvers.js';
 import { audit } from '../services/userService.js';
 import { enqueueMailSend, enqueueMailCampaign, enqueueMailListSync } from '../services/queue.js';
+import { activity } from '../activity/relay.js';
 
 /**
  * Mail REST (FR-MAIL-1…11).
@@ -137,6 +138,13 @@ router.post('/compose', wrap(async (req, res) => {
     // dispatches its email once its time comes; only send now for an immediate one.
     if (!result.scheduled) await enqueueMailSend(result.messageId);
     await audit({ actorId: me.id, action: result.scheduled ? 'mail.schedule' : 'mail.send', targetType: 'mail_message', targetId: result.messageId });
+    // Counts only -- never the subject, body or addresses.
+    activity().trackFor(req, 'tupo.mail.send', {
+      recipients: arr(body.to).length + arr(body.cc).length + arr(body.bcc).length,
+      attachments: Array.isArray(body.attachments) ? Math.min(body.attachments.length, 20) : 0,
+      scheduled: Boolean(result.scheduled),
+      reply: Boolean(body.threadId),
+    });
   }
   res.status(201).json(ok(result));
 }));

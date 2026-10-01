@@ -1,0 +1,60 @@
+{
+  "app": "tupo",
+  "version": "2026.10.01",
+  "features": [
+    { "key": "tupo.sign_in", "label": "Sign-in page", "module": "Public", "patterns": ["/"], "public": true },
+    { "key": "tupo.sso_callback", "label": "Signing in from NGA MIS", "module": "Public", "patterns": ["/sso/callback"], "public": true },
+    { "key": "tupo.meet.guest", "label": "Guest meeting (public link)", "module": "Public", "patterns": ["/meet/:idOrCode"], "public": true },
+
+    { "key": "tupo.launch", "label": "Opening the app", "module": "Home", "patterns": ["/app"] },
+
+    { "key": "tupo.chat", "label": "Chat", "module": "Chat", "patterns": ["/app/chat"] },
+
+    { "key": "tupo.feed.home", "label": "Home feed", "module": "Feed", "patterns": ["/app/feed"] },
+    { "key": "tupo.feed.reels", "label": "Reels", "module": "Feed", "patterns": ["/app/feed/reels/:reelId?"] },
+    { "key": "tupo.feed.saved", "label": "Saved posts", "module": "Feed", "patterns": ["/app/feed/saved"] },
+    { "key": "tupo.feed.pages", "label": "Pages directory", "module": "Feed", "patterns": ["/app/feed/pages"] },
+    { "key": "tupo.feed.page_insights", "label": "Page insights", "module": "Feed", "patterns": ["/app/feed/pages/:id/insights"] },
+    { "key": "tupo.feed.page", "label": "Page profile", "module": "Feed", "patterns": ["/app/feed/p/:slug"] },
+    { "key": "tupo.feed.permalink", "label": "Single post", "module": "Feed", "patterns": ["/app/feed/post/:id"] },
+    { "key": "tupo.feed.moderation", "label": "Moderation queue", "module": "Feed", "patterns": ["/app/feed/moderation"] },
+
+    { "key": "tupo.files", "label": "Files (coming soon)", "module": "Files", "patterns": ["/app/files"] },
+
+    { "key": "tupo.meet.home", "label": "Meet", "module": "Meet", "patterns": ["/app/meet"] },
+    { "key": "tupo.meet.schedule", "label": "Schedule a meeting", "module": "Meet", "patterns": ["/app/meet/new"] },
+    { "key": "tupo.meet.history", "label": "Meeting history", "module": "Meet", "patterns": ["/app/meet/history"] },
+    { "key": "tupo.meet.summary", "label": "Meeting summary", "module": "Meet", "patterns": ["/app/meet/:id/summary"] },
+    { "key": "tupo.meet.room", "label": "In a meeting", "module": "Meet", "patterns": ["/app/meet/:idOrCode"] },
+
+    { "key": "tupo.mail.mailbox", "label": "Mailbox", "module": "Mail", "patterns": ["/app/mail", "/app/mail/t/:threadId"] },
+    { "key": "tupo.mail.campaigns", "label": "Bulk mail campaigns", "module": "Mail", "patterns": ["/app/mail/campaigns"] },
+    { "key": "tupo.mail.lists", "label": "Distribution lists", "module": "Mail", "patterns": ["/app/mail/lists"] },
+    { "key": "tupo.mail.templates", "label": "Mail templates", "module": "Mail", "patterns": ["/app/mail/templates"] },
+    { "key": "tupo.mail.settings", "label": "Mail settings", "module": "Mail", "patterns": ["/app/mail/settings"] },
+
+    { "key": "tupo.admin.dashboard", "label": "Admin dashboard", "module": "Administration", "patterns": ["/app/admin/dashboard"] },
+    { "key": "tupo.admin.users", "label": "Users", "module": "Administration", "patterns": ["/app/admin/users"] },
+    { "key": "tupo.admin.roles", "label": "Roles & permissions", "module": "Administration", "patterns": ["/app/admin/roles"] },
+    { "key": "tupo.admin.audit", "label": "Audit log", "module": "Administration", "patterns": ["/app/admin/audit"] },
+    { "key": "tupo.admin.oversight", "label": "Conversation oversight", "module": "Administration", "patterns": ["/app/admin/oversight"] },
+    { "key": "tupo.admin.system", "label": "System status", "module": "Administration", "patterns": ["/app/system"] },
+
+    { "key": "tupo.chat.send", "label": "Chat message sent", "module": "Chat", "event": true, "key_event": true },
+    { "key": "tupo.mail.send", "label": "Mail sent", "module": "Mail", "event": true, "key_event": true },
+    { "key": "tupo.feed.post", "label": "Feed post published", "module": "Feed", "event": true, "key_event": true },
+    { "key": "tupo.meet.join", "label": "Joined a meeting", "module": "Meet", "event": true, "key_event": true },
+    { "key": "tupo.meet.guest_join", "label": "Guest asked to join a meeting", "module": "Meet", "event": true, "key_event": true },
+
+    { "key": "tupo.sign_in.click", "label": "Pressed \"Sign in with NGA MIS\"", "module": "Public", "event": true },
+    { "key": "tupo.meet.guest_ask", "label": "Guest pressed \"Ask to join\"", "module": "Public", "event": true },
+    { "key": "tupo.meet.instant_start", "label": "Pressed \"Start instant meeting\"", "module": "Meet", "event": true },
+    { "key": "tupo.meet.schedule_submit", "label": "Pressed \"Schedule\" (new meeting)", "module": "Meet", "event": true },
+    { "key": "tupo.meet.history_export", "label": "Exported meeting history (CSV)", "module": "Meet", "event": true },
+    { "key": "tupo.mail.compose_open", "label": "Opened the mail composer", "module": "Mail", "event": true },
+    { "key": "tupo.mail.send_click", "label": "Pressed \"Send\" (mail)", "module": "Mail", "event": true },
+    { "key": "tupo.mail.campaign_submit", "label": "Submitted a bulk mail campaign", "module": "Mail", "event": true },
+    { "key": "tupo.feed.publish_click", "label": "Pressed \"Post\" (feed)", "module": "Feed", "event": true },
+    { "key": "tupo.feed.page_create", "label": "Pressed \"Create page\"", "module": "Feed", "event": true }
+  ]
+}

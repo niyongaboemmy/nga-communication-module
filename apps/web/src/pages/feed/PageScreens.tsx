@@ -773,7 +773,7 @@ export const PageDirectory: React.FC = () => {
         <div className="mb-4 flex items-center justify-between">
           <h1 className="text-lg font-bold text-text-primary-light dark:text-text-primary-dark">Pages</h1>
           {can(['FEED_PAGE_MANAGE']) && (
-            <button onClick={() => setCreating(true)} className="inline-flex items-center gap-1.5 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700">
+            <button onClick={() => setCreating(true)} data-track="tupo.feed.page_create" className="inline-flex items-center gap-1.5 rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700">
               <Plus size={16} /> Create page
             </button>
           )}

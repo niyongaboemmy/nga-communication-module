@@ -257,7 +257,7 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
 
         <div className="flex flex-wrap items-center gap-2 border-t border-border-light px-4 py-2.5 dark:border-border-dark/60">
           <div className="relative flex items-center">
-            <Button size="sm" onClick={() => doSend('send')} disabled={busy !== null}>
+            <Button size="sm" data-track="tupo.mail.send_click" onClick={() => doSend('send')} disabled={busy !== null}>
               {busy === 'send' ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
               Send
             </Button>

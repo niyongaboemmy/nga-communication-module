@@ -30,6 +30,7 @@ import * as notes from '../services/meetNotesService.js';
 import { getProviderStatus, isAnyProviderConfigured } from '../services/aiProviders/index.js';
 import { enqueueMeetWrapUp } from '../services/queue.js';
 import { audit } from '../services/userService.js';
+import { activity } from '../activity/relay.js';
 
 /**
  * Meet's REST surface (SRS §6.5).
@@ -157,6 +158,11 @@ router.post('/:idOrCode/guest', async (req: Request, res: Response) => {
   await meet.logMeetEvent(m.id, 'participant.knocked', {
     participantId: participant.id,
     payload: { guest: true, name: parsed.data.displayName },
+  });
+  // A visitor (no account), so no user id. The display name is the one piece
+  // of free text analytics ever carries: it is how a guest is recognised.
+  activity().track(null, req, 'tupo.meet.guest_join', {
+    meeting_id: m.id, display_name: parsed.data.displayName.slice(0, 120),
   });
 
   const ticket: MeetJoinTicket = {
@@ -745,6 +751,12 @@ router.post('/:idOrCode/join', async (req: Request, res: Response) => {
     actorId: user.id,
     payload: { role: admission.role, reason: admission.reason, transport },
   });
+  // Guests are counted once, as tupo.meet.guest_join, when they knock.
+  if (!isGuestRequest(req)) {
+    activity().trackFor(req, 'tupo.meet.join', {
+      meeting_id: m.id, role: admission.role, state: admission.state, transport,
+    });
+  }
 
   const fresh = (await meet.findMeeting(m.id))!;
   const ticket: MeetJoinTicket = {
