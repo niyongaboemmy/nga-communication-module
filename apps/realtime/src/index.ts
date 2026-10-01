@@ -15,6 +15,7 @@ import * as chat from '@tupo/chat';
 import { registerChatHandlers } from './chat/handlers.js';
 import { registerFeedHandlers } from './feed/handlers.js';
 import { createAccessCache, findInactiveUsers, sessionEnded } from './access.js';
+import { stopActivity } from './activity.js';
 import {
   broadcastPresence, markOffline, markOnline, readPresence, toStatus,
 } from './presence.js';
@@ -480,6 +481,7 @@ const shutdown = async (signal: string) => {
   io.emit('system:reconnect_required', { reason: 'server shutting down' });
   io.close();
   await getMeetPool().end().catch(() => {});
+  await stopActivity();
   server.close(() => process.exit(0));
 };
 process.on('SIGINT', () => void shutdown('SIGINT'));

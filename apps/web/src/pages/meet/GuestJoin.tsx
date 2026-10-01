@@ -141,6 +141,7 @@ export const GuestJoin: React.FC<{ onReady: (p: {
 
             <button
               type="submit"
+              data-track="tupo.meet.guest_ask"
               disabled={name.trim().length < 2 || joining}
               className="flex w-full items-center justify-center gap-2 rounded-full bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors duration-150 hover:bg-blue-500 disabled:opacity-40"
             >

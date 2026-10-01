@@ -152,6 +152,7 @@ export const MeetHistory: React.FC = () => {
         {rows.length > 0 && (
           <button
             onClick={exportCsv}
+            data-track="tupo.meet.history_export"
             className="flex items-center gap-1.5 rounded-full border border-border-light px-3 py-2 text-xs font-medium text-text-secondary-light transition-colors duration-150 hover:border-blue-300 hover:text-text-primary-light dark:border-border-dark/60 dark:text-text-secondary-dark dark:hover:border-blue-800 dark:hover:text-text-primary-dark"
           >
             <Download size={14} /> Export CSV

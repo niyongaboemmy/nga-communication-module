@@ -1,5 +1,6 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom';
+import { ActivityRouterTracker } from './vendor/nga-activity/react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { MeetCallProvider } from './context/MeetCallContext';
 import { NotificationProvider } from './context/NotificationContext';
@@ -73,6 +74,10 @@ const RequirePermission: React.FC<{ anyOf: string[]; children: React.ReactNode }
 export const App: React.FC = () => (
   <AuthProvider>
     <BrowserRouter>
+      {/* Usage analytics: one page view per route change, on every route --
+          the public sign-in and guest-meeting pages as well as /app/*. Here,
+          not in AppShell, so those public routes are covered. */}
+      <ActivityRouterTracker />
       {/* Notifications wrap the call, not the other way round: the call raises
           them, and the toast stack must outlive any route that triggered it. */}
       <NotificationProvider>

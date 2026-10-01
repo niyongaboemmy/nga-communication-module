@@ -1,6 +1,8 @@
 import { pingDb, closeDb } from '@tupo/db';
 import { config } from './config.js';
 import { app } from './app.js';
+import { activity } from './activity/relay.js';
+import activityCatalog from './activity/catalog.json' with { type: 'json' };
 
 async function start(): Promise<void> {
   try {
@@ -14,6 +16,9 @@ async function start(): Promise<void> {
   const server = app.listen(config.port, () => {
     console.log(`🚀 tupo-api listening on http://localhost:${config.port}  (env: ${config.env})`);
     console.log(`   MIS: ${config.misBaseUrl}  ·  client_id: ${config.ssoClientId}`);
+    // Publish the feature catalog (route patterns → named features) so the MIS
+    // usage console can label Tupo's pages. Non-fatal: it only logs.
+    if (activity().enabled) void activity().pushCatalog(activityCatalog);
   });
 
   server.on('error', (err: NodeJS.ErrnoException) => {
@@ -27,6 +32,8 @@ async function start(): Promise<void> {
 const shutdown = async (signal: string) => {
     console.log(`\n[api] ${signal} received — draining connections`);
     server.close(async () => {
+      // Forward whatever analytics is still queued; bounded by the relay's own timeout.
+      await activity().stop().catch(() => {});
       await closeDb();
       process.exit(0);
     });

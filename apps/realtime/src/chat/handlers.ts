@@ -11,6 +11,7 @@ import type {
 } from '@tupo/shared';
 import { emitConversationPresence } from '../presence.js';
 import type { AccessCache } from '../access.js';
+import { trackSocketEvent } from '../activity.js';
 
 /**
  * Chat over the socket.
@@ -148,6 +149,10 @@ export function registerChatHandlers(
       ack?.({ ok: true, message: result.message });
 
       if (result.created) {
+        // Usage analytics: counted, never read -- the conversation's kind only.
+        trackSocketEvent(socket, user.misUserId, 'tupo.chat.send', {
+          conversation_type: membership.type, thread: Boolean(p.threadRootId), via: 'socket',
+        });
         // Sending is the strongest possible signal that you are not typing.
         await clearTyping(p.conversationId);
         await fanOutMessage(io, p.conversationId, result);

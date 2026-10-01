@@ -1,4 +1,5 @@
 import type { Envelope } from '@tupo/shared';
+import { getDeviceId } from '../vendor/nga-activity';
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -22,11 +23,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<Envelop
   // A signed-in session always wins; the guest ticket is only used by someone
   // who has no session at all, and only reaches Meet routes.
   const token = localStorage.getItem(SESSION_KEY) ?? localStorage.getItem(MEET_GUEST_KEY);
+  // The shared NGA device id, so key events the server records (a message sent,
+  // a meeting joined) land on the same device as this browser's page views.
+  const deviceId = getDeviceId();
   const res = await fetch(path, {
     ...init,
     headers: {
       ...(init.body ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(deviceId ? { 'X-NGA-Device': deviceId } : {}),
       ...(init.headers ?? {}),
     },
   });

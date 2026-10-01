@@ -15,6 +15,7 @@ import { audit } from '../services/userService.js';
 import { hasPermission } from '../access/gate.js';
 import { contactDenied } from '../access/contactGate.js';
 import { enqueueUnfurl } from '../services/queue.js';
+import { activity } from '../activity/relay.js';
 import {
   translateMessage, isSupportedLanguage, SUPPORTED_LANGUAGES,
 } from '../services/translateService.js';
@@ -494,6 +495,10 @@ router.post('/conversations/:id/messages', authorizePermission('MESSAGE_SEND'),
     });
 
     if (result.created) {
+      // Counted, never read: the conversation's kind only, no ids or content.
+      activity().trackFor(req, 'tupo.chat.send', {
+        conversation_type: membership.type, thread: Boolean(threadRootId), via: 'rest',
+      });
       await fanOutNewMessage(id, result, {
         name: membership.name ?? 'a conversation',
         type: membership.type,
@@ -711,6 +716,9 @@ router.post('/conversations/:id/messages/:messageId/replies',
     });
 
     if (reply.created) {
+      activity().trackFor(req, 'tupo.chat.send', {
+        conversation_type: membership.type, thread: true, via: 'rest',
+      });
       emitToConversation(id, 'thread:reply', {
         conversationId: id, rootId: root?.id ?? messageId, message: reply.message,
       });

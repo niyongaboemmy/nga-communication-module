@@ -9,6 +9,7 @@ import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js
 import { authorizePermission } from '../middleware/authorize.js';
 import { emitToRooms, emitToUsers } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
+import { activity } from '../activity/relay.js';
 
 /**
  * Feed REST (SRS §8 "Feed").
@@ -179,6 +180,10 @@ router.post('/pages/:id/posts', authorizePermission('FEED_POST'), wrap(async (re
   const actor = actorOf(req);
   const result = await feed.posts.createPost(actor, { ...(req.body ?? {}), pageId: req.params.id! });
   await audit({ actorId: actor.id, action: 'feed.post.create', targetType: 'feed_post', targetId: result.postId, metadata: { status: result.status } });
+  // A draft is not a post yet; it is counted when it is published (below).
+  if (result.status !== 'draft') {
+    activity().trackFor(req, 'tupo.feed.post', { post_id: result.postId, page_id: req.params.id!, status: result.status });
+  }
 
   if (result.status === 'published') {
     const post = await feed.getPostView(actor, result.postId);
@@ -214,6 +219,7 @@ router.post('/posts/:id/publish', authorizePermission('FEED_POST'), wrap(async (
   const actor = actorOf(req);
   await feed.posts.publishPost(actor, req.params.id!);
   const post = await feed.getPostView(actor, req.params.id!);
+  activity().trackFor(req, 'tupo.feed.post', { post_id: req.params.id!, page_id: post.page.id, status: 'published' });
   const followers = await notifyFollowersOfPost(req.params.id!, actor.id, post.page.name, post.type);
   emitToUsers([actor.id, ...followers.emitIds], 'feed:post_new', { post });
   emitToRooms([feedAudienceRoom(post.audience)], 'feed:post_new', { post });
