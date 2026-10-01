@@ -1,6 +1,6 @@
 // VENDORED from nga_central_mis/packages/activity/src/relay.ts -- do not edit.
 // Re-sync with: node nga_central_mis/packages/activity/sync.mjs --relay <this dir>
-// sha256:28f2f0e83feada13f7124999f0db6e45c12c6dfa3facd01abb154bd08965b027
+// sha256:c424305c4d11b8ab9cb990d38cb5e2a27644e2ad349b0d1029a6116bcca96b20
 /**
  * nga-activity relay: the server half each satellite app mounts
  * (USAGE_ANALYTICS_IMPLEMENTATION_PLAN.md §5.2).
@@ -17,6 +17,10 @@
  *
  * Framework-agnostic: handlers take Express-like (req, res).
  */
+/* eslint-disable @typescript-eslint/no-explicit-any --
+ * The relay is framework-agnostic: it takes whatever request/response objects the host
+ * app's framework hands it (Express in all three apps today) and touches only a few
+ * well-known members. `any` is confined to that boundary. */
 import { gzipSync } from "zlib";
 import { randomBytes } from "crypto";
 
