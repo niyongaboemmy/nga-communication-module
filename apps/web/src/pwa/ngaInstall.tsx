@@ -19,7 +19,8 @@ import React, { useEffect, useState, useSyncExternalStore } from "react";
  *
  * Whenever the card is closed and the app is installable, a small corner
  * "Install" button stays available -- dismissing never removes the way to
- * install (no DevTools, no waiting).
+ * install (no DevTools, no waiting). Once installed, a browser tab shows
+ * nothing at all: no "Open in the app" button.
  *
  * URL markers:
  * - `nga_launch=app`  opened from another installed NGA app (wording only)
@@ -401,36 +402,10 @@ export const NgaInstallPrompt: React.FC<{
 
   if (!open) {
     const knownInstalled = believedInstalled();
-    // Installed -- confirmed by the browser, never a remembered note -- but
-    // this is a browser tab: a one-click way into the app.
-    if (!isStandalone() && !pillHidden && (installed || liveCheck === "yes") && !deferred) {
-      const url = safe(() => new URL(startPath, window.location.origin).toString(), "/");
-      return (
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener"
-          onClick={() => window.setTimeout(() => window.close(), 600)}
-          style={{
-            position: "fixed",
-            right: 16,
-            bottom: "calc(16px + env(safe-area-inset-bottom))",
-            zIndex: 2147482000,
-            padding: "10px 16px",
-            borderRadius: 999,
-            background: accent,
-            color: "#fff",
-            fontSize: 14,
-            fontWeight: 700,
-            textDecoration: "none",
-            boxShadow: "0 10px 30px -8px rgba(0,0,0,.45)",
-            fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif",
-          }}
-        >
-          ↗ Open in the {appName} app
-        </a>
-      );
-    }
+    // Installed -- confirmed by the browser -- but used in a browser tab:
+    // that's the user's choice, so nothing floats in the corner pushing them
+    // into the app (Task Mentor's quiz pages were covered by it).
+    if (!isStandalone() && (installed || liveCheck === "yes") && !deferred) return null;
     const showButton = shouldShowInstallButton({
       standalone: isStandalone(),
       // Chromium's own signal outranks any remembered note.
