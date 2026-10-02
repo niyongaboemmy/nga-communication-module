@@ -11,7 +11,7 @@ export const isQuotaError = (err: unknown): boolean => {
     raw.includes('429') ||
     raw.includes('413') ||
     /quota/i.test(raw) ||
-    /insufficient balance/i.test(raw) ||
+    /insufficient (balance|credits)/i.test(raw) ||
     /rate.?limit/i.test(raw) ||
     /tokens per minute|tokens per day|TPM|TPD/i.test(raw)
   );
