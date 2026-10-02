@@ -4,13 +4,14 @@
  */
 export const isQuotaError = (err: unknown): boolean => {
   const e = err as { status?: number; message?: string; error?: { message?: string } };
-  if (e?.status === 429 || e?.status === 413) return true;
+  if (e?.status === 429 || e?.status === 413 || e?.status === 402) return true;
   const raw = String(e?.message ?? e?.error?.message ?? '');
   return (
     raw.includes('RESOURCE_EXHAUSTED') ||
     raw.includes('429') ||
     raw.includes('413') ||
     /quota/i.test(raw) ||
+    /insufficient balance/i.test(raw) ||
     /rate.?limit/i.test(raw) ||
     /tokens per minute|tokens per day|TPM|TPD/i.test(raw)
   );
