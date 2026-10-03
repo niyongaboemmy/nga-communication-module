@@ -84,11 +84,11 @@ describe('OpenRouter provider: free models only', () => {
 
   it('treats the free-tier limit (HTTP 429) and a 200-with-error 429 as quota errors', async () => {
     reply = () => ({ status: 429, json: { error: { code: 429, message: 'Rate limit exceeded: free-models-per-day' } } });
-    const httpErr = await openrouterProvider.generateJSON({ prompt: 'hi', schema } as any).catch((e: any) => e);
+    const httpErr: any = await openrouterProvider.generateJSON({ prompt: 'hi', schema } as any).catch((e: any) => e);
     expect(isQuotaError(httpErr)).toBe(true);
 
     reply = () => ({ status: 200, json: { model: 'a/one:free', error: { code: 429, message: 'upstream rate-limited' }, choices: [] } });
-    const bodyErr = await openrouterProvider.generateJSON({ prompt: 'hi', schema } as any).catch((e: any) => e);
+    const bodyErr: any = await openrouterProvider.generateJSON({ prompt: 'hi', schema } as any).catch((e: any) => e);
     expect(bodyErr.status).toBe(429);
     expect(isQuotaError(bodyErr)).toBe(true);
   });
