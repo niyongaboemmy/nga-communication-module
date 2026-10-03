@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Mic, Square, Trash2, Send } from 'lucide-react';
 import { IconButton } from '../../components/ui';
+import { pickVoiceFormat, voiceExtension } from '../../lib/voiceFormat';
 
 /**
  * Recording a voice note (FR-MSG-20).
@@ -78,11 +79,9 @@ export const VoiceRecorder: React.FC<{
         ctx.createMediaStreamSource(stream).connect(analyser);
         const buffer = new Uint8Array(analyser.frequencyBinCount);
 
-        const recorder = new MediaRecorder(stream, {
-          mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-            ? 'audio/webm;codecs=opus'
-            : 'audio/webm',
-        });
+        // WebM where supported, MP4/AAC on older Safari / the macOS desktop app.
+        const mimeType = pickVoiceFormat((m) => MediaRecorder.isTypeSupported(m));
+        const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
         recorderRef.current = recorder;
         recorder.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data); };
         recorder.start(250);
@@ -138,7 +137,9 @@ export const VoiceRecorder: React.FC<{
       if (cancelledRef.current) return;
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType });
       if (blob.size === 0) { onCancel(); return; }
-      const file = new File([blob], `voice-message-${Date.now()}.webm`, { type: recorder.mimeType });
+      const file = new File([blob], `voice-message-${Date.now()}.${voiceExtension(recorder.mimeType)}`, {
+        type: recorder.mimeType,
+      });
       onDone({ file, durationMs, waveform });
     };
     recorder.stop();
