@@ -4,6 +4,7 @@ import { groqProvider } from './groqProvider.js';
 import { glmProvider } from './glmProvider.js';
 import { openaiProvider } from './openaiProvider.js';
 import { deepseekProvider } from './deepseekProvider.js';
+import { openrouterProvider } from './openrouterProvider.js';
 
 const ALL_PROVIDERS: Record<string, AIProvider> = {
   gemini: geminiProvider,
@@ -11,9 +12,10 @@ const ALL_PROVIDERS: Record<string, AIProvider> = {
   glm: glmProvider,
   openai: openaiProvider,
   deepseek: deepseekProvider,
+  openrouter: openrouterProvider,
 };
 
-const DEFAULT_ORDER = 'openai,gemini,groq,deepseek,glm';
+const DEFAULT_ORDER = 'openai,gemini,groq,deepseek,openrouter,glm';
 
 /**
  * Providers to try, in order. `overrideOrder` is for a feature with a genuine
