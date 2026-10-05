@@ -44,6 +44,7 @@
     "verify:mail:ui": "node scripts/verify-mail-ui.mjs",
     "verify:feed": "node scripts/verify-feed.mjs",
     "verify:feed:ui": "node scripts/verify-feed-ui.mjs",
+    "verify:feed:media": "node scripts/verify-feed-media-ui.mjs",
     "verify:oversight": "node scripts/verify-oversight.mjs",
     "activity:catalog": "node -e \"require('fs').copyFileSync('apps/api/src/activity/catalog.json','apps/web/src/activity/tupo.catalog.json')\""
   },

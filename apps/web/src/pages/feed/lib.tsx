@@ -205,12 +205,17 @@ export const FeedImage: React.FC<{
   /** Skip the viewport gate — the image is already known to be on screen
    *  (an open lightbox/modal), so there is nothing to wait for. */
   eager?: boolean;
-}> = ({ fileId, alt = '', className = '', imgClassName = '', onClick, eager }) => {
+  /** Reports the decoded image's natural size, so callers can lay out by
+   *  the real aspect ratio when the post carries no stored dimensions. */
+  onDims?: (w: number, h: number) => void;
+}> = ({ fileId, alt = '', className = '', imgClassName = '', onClick, eager, onDims }) => {
   const [ref, inView] = useInViewport<HTMLDivElement>();
   const { url, broken, onError, retry } = useResilientMediaUrl(fileId, eager || inView);
 
   return (
-    <div ref={ref} className={`relative overflow-hidden ${className}`}>
+    // `relative` is only a default: a caller asking for `absolute` must win,
+    // and Tailwind would otherwise resolve the clash in favour of `relative`.
+    <div ref={ref} className={`${/\b(absolute|fixed)\b/.test(className) ? '' : 'relative '}overflow-hidden ${className}`}>
       {url && (
         <img
           src={url}
@@ -219,6 +224,7 @@ export const FeedImage: React.FC<{
           decoding="async"
           onClick={onClick}
           onError={onError}
+          onLoad={onDims ? (e) => onDims(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight) : undefined}
           className={`h-full w-full object-cover ${imgClassName}`}
         />
       )}
