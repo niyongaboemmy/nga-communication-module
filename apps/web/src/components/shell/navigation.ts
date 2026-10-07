@@ -1,5 +1,5 @@
 import {
-  MessagesSquare, Megaphone, Folder, Video, Mail, Activity,
+  MessagesSquare, Megaphone, Video, Mail, Activity,
   ShieldCheck, Users, ScrollText, Eye, LayoutDashboard,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -13,7 +13,8 @@ export interface NavEntry {
 }
 
 /**
- * The five product modules (SRS §15.1). Order is deliberate: it is the order of
+ * The product modules (SRS §15.1). Files is left out until it exists (its
+ * route is only a Coming Soon page). Order is deliberate: it is the order of
  * the rail on desktop, the bottom tab bar on mobile, and the ⌘K module results,
  * so a user's muscle memory carries between form factors.
  *
@@ -24,7 +25,6 @@ export interface NavEntry {
 export const MODULES: NavEntry[] = [
   { to: '/app/chat', icon: MessagesSquare, label: 'Chat', perm: 'MESSAGE_READ' },
   { to: '/app/feed', icon: Megaphone, label: 'Feed', perm: 'FEED_VIEW' },
-  { to: '/app/files', icon: Folder, label: 'Files', perm: 'FILE_DOWNLOAD' },
   { to: '/app/meet', icon: Video, label: 'Meet', perm: 'MEET_JOIN' },
   { to: '/app/mail', icon: Mail, label: 'Mail', perm: 'MAIL_READ' },
 ];

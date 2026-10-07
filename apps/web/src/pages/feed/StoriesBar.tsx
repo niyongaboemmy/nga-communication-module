@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Plus, X, Loader2, Eye, Trash2, Image as ImageIcon, Type, ImageOff, Pause, Play, Volume2, VolumeX,
-  ChevronLeft, ChevronRight, Keyboard, Send,
+  ChevronLeft, ChevronRight, Send,
 } from 'lucide-react';
 import type { FeedMediaItem, FeedStoryGroup, FeedStoryView, FeedStoryViewer } from '@tupo/shared';
 import { FEED_LIMITS } from '@tupo/shared';
@@ -20,13 +20,13 @@ import * as api from './api';
  * above it on the home feed.
  */
 
-const BACKGROUNDS = [
-  'linear-gradient(135deg,#2563eb,#7c3aed)',
-  'linear-gradient(135deg,#db2777,#f97316)',
-  'linear-gradient(135deg,#059669,#0ea5e9)',
-  'linear-gradient(135deg,#d97706,#dc2626)',
-  'linear-gradient(135deg,#4f46e5,#0891b2)',
-];
+/** Solid, calm backgrounds for text stories (the old two-hue gradients read
+ *  as generated). Stored as a CSS value (max 40 chars server-side), so stories
+ *  posted with a gradient keep rendering as they were. */
+const BACKGROUNDS = ['#1d4ed8', '#111827', '#047857', '#b91c1c', '#c2410c', '#6d28d9', '#0e7490', '#be185d'];
+
+const initialsOf = (name: string) =>
+  name.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0]!.toUpperCase()).join('') || '?';
 
 /** Same ordering the API uses: me first, then unseen, then newest. */
 function sortGroups(groups: FeedStoryGroup[], me: string | undefined): FeedStoryGroup[] {
@@ -84,26 +84,15 @@ export const StoriesBar: React.FC = () => {
 
   if (!loaded) return null;
 
+  const others = groups.filter((g) => g.author.id !== user?.id);
   return (
-    <div className="feed-hl-scroll -mx-1 flex gap-3 overflow-x-auto px-1 pb-1">
-      <button onClick={() => setComposerOpen(true)} className="feed-card-in group relative h-40 w-28 shrink-0 overflow-hidden rounded-2xl border border-border-light bg-card-light text-left dark:border-border-dark/40 dark:bg-elevated-dark">
-        <div className="grid h-28 w-full place-items-center overflow-hidden bg-surface-light dark:bg-card-dark">
-          <Avatar name={user?.name ?? '?'} src={user?.avatarUrl} size={72} />
-        </div>
-        <span className="absolute left-1/2 top-24 grid h-8 w-8 -translate-x-1/2 place-items-center rounded-full border-4 border-card-light bg-blue-600 text-white dark:border-elevated-dark">
-          <Plus size={16} />
-        </span>
-        <span className="absolute inset-x-0 bottom-0 h-12 bg-card-light px-1.5 pt-4 text-center text-xs font-semibold text-text-primary-light dark:bg-elevated-dark dark:text-text-primary-dark">
-          {mine ? 'Add to story' : 'Create story'}
-        </span>
-      </button>
-
-      {groups.filter((g) => g.author.id !== user?.id).map((g) => (
+    <ScrollRow>
+      <CreateStoryCard name={user?.name ?? '?'} avatarUrl={user?.avatarUrl} hasStory={Boolean(mine)} onClick={() => setComposerOpen(true)} />
+      {/* Your own story first, as on Facebook; then everyone else, unseen first. */}
+      {mine && <StoryThumb group={mine} isMine onOpen={() => setViewerAuthor(mine.author.id)} />}
+      {others.map((g) => (
         <StoryThumb key={g.author.id} group={g} fresh={fresh.has(g.author.id)} onOpen={() => setViewerAuthor(g.author.id)} />
       ))}
-      {mine && (
-        <StoryThumb group={mine} isMine onOpen={() => setViewerAuthor(mine.author.id)} />
-      )}
 
       {composerOpen && <StoryComposer onClose={() => setComposerOpen(false)} onPosted={() => { setComposerOpen(false); reload(); }} />}
       {viewerAt >= 0 && (
@@ -114,31 +103,91 @@ export const StoriesBar: React.FC = () => {
           onChanged={reload}
         />
       )}
+    </ScrollRow>
+  );
+};
+
+/** Horizontal strip with round prev/next buttons that appear only when there is more to scroll. */
+const ScrollRow: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ left: false, right: false });
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    setEdges({ left: el.scrollLeft > 4, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 4 });
+  }, []);
+  useEffect(() => {
+    measure();
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measure]);
+  const scrollBy = (dir: 1 | -1) => ref.current?.scrollBy({ left: dir * 360, behavior: 'smooth' });
+  const arrow = 'absolute top-1/2 z-10 hidden h-10 w-10 -translate-y-1/2 place-items-center rounded-full border border-border-light bg-card-light text-text-primary-light shadow-md transition hover:bg-surface-light sm:grid dark:border-border-dark/40 dark:bg-elevated-dark dark:text-text-primary-dark dark:hover:bg-card-dark';
+  return (
+    <div className="relative">
+      <div ref={ref} onScroll={measure} className="feed-hl-scroll -mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+        {children}
+      </div>
+      {edges.left && <button type="button" onClick={() => scrollBy(-1)} aria-label="Earlier stories" className={`${arrow} -left-3`}><ChevronLeft size={20} /></button>}
+      {edges.right && <button type="button" onClick={() => scrollBy(1)} aria-label="More stories" className={`${arrow} -right-3`}><ChevronRight size={20} /></button>}
     </div>
   );
 };
+
+const CARD = 'relative h-[200px] w-[112px] shrink-0 overflow-hidden rounded-xl';
+
+/** "Create story": your photo (or initials) filling the top, a blue + on the seam. */
+const CreateStoryCard: React.FC<{ name: string; avatarUrl?: string; hasStory: boolean; onClick: () => void }> = ({ name, avatarUrl, hasStory, onClick }) => (
+  <button onClick={onClick} className={`${CARD} feed-card-in group flex flex-col justify-start border border-border-light bg-card-light text-left shadow-sm dark:border-border-dark/40 dark:bg-elevated-dark`}>
+    <div className="h-[150px] w-full overflow-hidden bg-surface-light dark:bg-card-dark">
+      {avatarUrl
+        ? <img src={avatarUrl} alt="" className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105" />
+        : <span className="grid h-full w-full place-items-center text-4xl font-semibold text-text-secondary-light transition-transform duration-300 group-hover:scale-105 dark:text-text-secondary-dark">{initialsOf(name)}</span>}
+    </div>
+    <span className="absolute left-1/2 top-[134px] grid h-8 w-8 -translate-x-1/2 place-items-center rounded-full border-4 border-card-light bg-blue-600 text-white dark:border-elevated-dark">
+      <Plus size={16} strokeWidth={2.5} />
+    </span>
+    <span className="absolute inset-x-0 bottom-0 pb-2.5 text-center text-xs font-semibold text-text-primary-light dark:text-text-primary-dark">
+      {hasStory ? 'Add to story' : 'Create story'}
+    </span>
+  </button>
+);
 
 const StoryThumb: React.FC<{ group: FeedStoryGroup; isMine?: boolean; fresh?: boolean; onOpen: () => void }> = ({ group, isMine, fresh, onOpen }) => {
   const cover = group.stories[group.stories.length - 1];
   const { url: coverMediaUrl, broken: coverBroken, onError: onCoverError } = useResilientMediaUrl(cover?.media?.fileId);
   const showCover = coverMediaUrl && !coverBroken;
   return (
-    <button onClick={onOpen} className={`group relative h-40 w-28 shrink-0 overflow-hidden rounded-2xl text-left text-white ${fresh ? 'feed-story-arrive' : 'feed-card-in'}`}>
-      {fresh && <span className="feed-pill-in absolute left-1/2 top-2 z-10 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide">New</span>}
-      {showCover && cover?.media?.kind === 'image'
-        ? <img src={coverMediaUrl} alt="" loading="lazy" decoding="async" onError={onCoverError} className="absolute inset-0 h-full w-full object-cover" />
-        : showCover && cover?.media?.kind === 'video'
-          ? <video src={coverMediaUrl} className="absolute inset-0 h-full w-full object-cover" muted onError={onCoverError} />
-          : <div className="absolute inset-0" style={{ background: cover?.background || BACKGROUNDS[0] }} />}
-      <span className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/5 to-black/10" />
-      <span className={`absolute left-2 top-2 grid h-9 w-9 place-items-center rounded-full ring-[3px] ${group.allViewed ? 'ring-black/20' : 'ring-blue-500'}`}>
-        <Avatar name={group.author.name} src={group.author.avatarUrl ?? undefined} size={32} />
+    <button
+      onClick={onOpen}
+      aria-label={`${isMine ? 'Your story' : `${group.author.name}'s story`}${group.allViewed ? '' : ', new'}`}
+      className={`${CARD} group text-left text-white shadow-sm ${fresh ? 'feed-story-arrive' : 'feed-card-in'}`}
+    >
+      <span className="absolute inset-0 transition-transform duration-300 group-hover:scale-105">
+        {showCover && cover?.media?.kind === 'image'
+          ? <img src={coverMediaUrl} alt="" loading="lazy" decoding="async" onError={onCoverError} className="h-full w-full object-cover" />
+          : showCover && cover?.media?.kind === 'video'
+            ? <video src={coverMediaUrl} className="h-full w-full object-cover" muted onError={onCoverError} />
+            : (
+              <span className="grid h-full w-full place-items-center px-3 text-center" style={{ background: cover?.background || BACKGROUNDS[0] }}>
+                {cover?.caption && <span className="line-clamp-5 text-[13px] font-semibold leading-snug">{cover.caption}</span>}
+              </span>
+            )}
       </span>
-      {cover?.caption && !cover.media && (
-        <span className="absolute inset-x-2 top-1/2 -translate-y-1/2 line-clamp-4 text-center text-[11px] font-bold leading-tight">{cover.caption}</span>
-      )}
-      <span className="absolute inset-x-1.5 bottom-1.5 line-clamp-2 text-[11px] font-semibold">
-        {isMine ? 'Your story' : firstName(group.author.name)}
+      {/* Only a light top and bottom shade, so the avatar and name read on any background. */}
+      <span className="absolute inset-0 bg-gradient-to-b from-black/30 via-transparent to-black/55" />
+      <span className="absolute inset-0 bg-black/0 transition-colors group-hover:bg-black/10" />
+      <span className={`absolute left-2.5 top-2.5 rounded-full p-[2px] ${group.allViewed ? 'bg-white/50' : 'bg-blue-600'}`}>
+        <span className="block rounded-full border-2 border-black/10 bg-white">
+          <Avatar name={group.author.name} src={group.author.avatarUrl ?? undefined} size={32} />
+        </span>
+      </span>
+      {fresh && <span className="feed-pill-in absolute right-2 top-3 rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold">New</span>}
+      <span className="absolute inset-x-2.5 bottom-2.5 line-clamp-2 break-words text-[13px] font-semibold leading-tight [text-shadow:0_1px_2px_rgb(0_0_0/0.5)]">
+        {isMine ? 'Your story' : group.author.name}
       </span>
     </button>
   );
@@ -188,71 +237,116 @@ const StoryComposer: React.FC<{ onClose: () => void; onPosted: () => void }> = (
     }
   };
 
+  const { user } = useAuth();
+  const tab = (active: boolean) =>
+    `flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-colors ${active
+      ? 'bg-card-light text-text-primary-light shadow-sm dark:bg-elevated-dark dark:text-text-primary-dark'
+      : 'text-text-secondary-light hover:text-text-primary-light dark:text-text-secondary-dark dark:hover:text-text-primary-dark'}`;
+
   return (
-    <div className="fixed inset-0 z-[95] grid place-items-center bg-black/60 p-4" onClick={onClose}>
-      <div className="w-full max-w-sm animate-pop overflow-hidden rounded-2xl bg-card-light dark:bg-elevated-dark" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-border-light px-4 py-3 dark:border-border-dark/40">
-          <h2 className="text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">Create story</h2>
-          <button onClick={onClose} aria-label="Close" className="grid h-8 w-8 place-items-center rounded-full hover:bg-surface-light dark:hover:bg-card-dark"><X size={18} /></button>
+    <div className="fixed inset-0 z-[95] grid place-items-center bg-black/60 p-3 sm:p-6" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label="Create story"
+        className="flex max-h-full w-full max-w-3xl animate-pop flex-col overflow-hidden rounded-2xl bg-card-light shadow-2xl dark:bg-elevated-dark" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border-light px-5 py-3.5 dark:border-border-dark/40">
+          <h2 className="text-base font-semibold text-text-primary-light dark:text-text-primary-dark">Create story</h2>
+          <button onClick={onClose} aria-label="Close" className="grid h-9 w-9 place-items-center rounded-full bg-surface-light hover:bg-border-light dark:bg-card-dark dark:hover:bg-border-dark/40"><X size={18} /></button>
         </div>
 
-        <div
-          className="relative flex h-72 items-center justify-center overflow-hidden p-4 text-center text-white"
-          style={mode === 'text' ? { background } : undefined}
-        >
-          {mode === 'media' && media?.previewUrl && media.kind === 'image' && <img src={media.previewUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />}
-          {mode === 'media' && media?.previewUrl && media.kind === 'video' && <video src={media.previewUrl} className="absolute inset-0 h-full w-full object-cover" muted autoPlay loop />}
-          {mode === 'media' && media && media.progress < 1 && !media.error && (
-            <div className="absolute inset-0 grid place-items-center bg-black/40"><Loader2 className="animate-spin" /></div>
-          )}
-          {mode === 'text' && (
-            <textarea
-              value={caption}
-              onChange={(e) => setCaption(e.target.value.slice(0, FEED_LIMITS.STORY_CAPTION_MAX))}
-              placeholder="What's on your mind?"
-              className="relative z-10 w-full resize-none bg-transparent text-center text-xl font-bold leading-snug text-white placeholder:text-white/70 outline-none"
-              rows={4}
-              autoFocus
-            />
-          )}
-        </div>
+        <div className="grid min-h-0 flex-1 overflow-y-auto sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          {/* Controls */}
+          <div className="space-y-4 p-5">
+            <div className="flex items-center gap-2.5">
+              <Avatar name={user?.name ?? '?'} src={user?.avatarUrl} size={40} />
+              <div className="leading-tight">
+                <p className="text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">{user?.name}</p>
+                <p className="text-xs text-text-secondary-light dark:text-text-secondary-dark">Visible for 24 hours</p>
+              </div>
+            </div>
 
-        {mode === 'text' && (
-          <div className="flex items-center justify-center gap-2 border-b border-border-light px-4 py-2.5 dark:border-border-dark/40">
-            {BACKGROUNDS.map((bg) => (
-              <button key={bg} onClick={() => setBackground(bg)} aria-label="Choose background"
-                className={`h-6 w-6 rounded-full ring-2 transition-all ${background === bg ? 'ring-blue-500 scale-110' : 'ring-transparent'}`}
-                style={{ background: bg }} />
-            ))}
-          </div>
-        )}
-
-        {mode === 'media' && (
-          <div className="border-b border-border-light px-4 py-2 dark:border-border-dark/40">
-            <input
-              value={caption}
-              onChange={(e) => setCaption(e.target.value.slice(0, FEED_LIMITS.STORY_CAPTION_MAX))}
-              placeholder="Add a caption…"
-              className="w-full bg-transparent text-sm outline-none"
-            />
-          </div>
-        )}
-
-        {error && <p className="px-4 pt-2 text-xs font-medium text-red-600 dark:text-red-400">{error}</p>}
-
-        <div className="flex items-center justify-between gap-2 px-4 py-3">
-          <div className="flex items-center gap-1">
-            <button onClick={() => fileInput.current?.click()} title="Photo/video" className="grid h-9 w-9 place-items-center rounded-full text-emerald-500 hover:bg-surface-light dark:hover:bg-card-dark">
-              <ImageIcon size={18} />
-            </button>
-            {mode === 'media' && (
-              <button onClick={() => { setMode('text'); setMedia(null); }} title="Text status" className="grid h-9 w-9 place-items-center rounded-full text-blue-500 hover:bg-surface-light dark:hover:bg-card-dark">
-                <Type size={18} />
+            <div className="flex gap-1 rounded-xl bg-surface-light p-1 dark:bg-card-dark" role="tablist" aria-label="Story type">
+              <button role="tab" aria-selected={mode === 'text'} onClick={() => { setMode('text'); setMedia(null); }} className={tab(mode === 'text')}>
+                <Type size={16} /> Text
               </button>
+              <button role="tab" aria-selected={mode === 'media'} onClick={() => fileInput.current?.click()} className={tab(mode === 'media')}>
+                <ImageIcon size={16} /> Photo or video
+              </button>
+            </div>
+
+            {mode === 'text' ? (
+              <>
+                <label className="block">
+                  <span className="sr-only">Story text</span>
+                  <textarea
+                    value={caption}
+                    onChange={(e) => setCaption(e.target.value.slice(0, FEED_LIMITS.STORY_CAPTION_MAX))}
+                    placeholder="Start typing"
+                    rows={5}
+                    autoFocus
+                    className="w-full resize-none rounded-xl border border-border-light bg-transparent px-3.5 py-3 text-sm text-text-primary-light outline-none placeholder:text-text-secondary-light focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 dark:border-border-dark/50 dark:text-text-primary-dark"
+                  />
+                  <span className="mt-1 block text-right text-[11px] text-text-secondary-light dark:text-text-secondary-dark">{caption.length}/{FEED_LIMITS.STORY_CAPTION_MAX}</span>
+                </label>
+                <div>
+                  <p className="mb-2 text-xs font-medium text-text-secondary-light dark:text-text-secondary-dark">Background</p>
+                  <div className="flex flex-wrap gap-2">
+                    {BACKGROUNDS.map((bg) => (
+                      <button key={bg} onClick={() => setBackground(bg)} aria-label={`Background ${bg}`} aria-pressed={background === bg}
+                        className={`h-8 w-8 rounded-full ring-offset-2 ring-offset-card-light transition dark:ring-offset-elevated-dark ${background === bg ? 'ring-2 ring-blue-600' : 'hover:scale-105'}`}
+                        style={{ background: bg }} />
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <button onClick={() => fileInput.current?.click()} className="w-full rounded-xl border border-dashed border-border-light px-4 py-3 text-sm font-medium text-text-secondary-light hover:border-blue-400 hover:text-blue-600 dark:border-border-dark/50 dark:text-text-secondary-dark">
+                  Choose a different photo or video
+                </button>
+                <label className="block">
+                  <span className="sr-only">Caption</span>
+                  <input
+                    value={caption}
+                    onChange={(e) => setCaption(e.target.value.slice(0, FEED_LIMITS.STORY_CAPTION_MAX))}
+                    placeholder="Add a caption (optional)"
+                    className="w-full rounded-xl border border-border-light bg-transparent px-3.5 py-2.5 text-sm text-text-primary-light outline-none placeholder:text-text-secondary-light focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 dark:border-border-dark/50 dark:text-text-primary-dark"
+                  />
+                </label>
+              </>
             )}
+
+            {error && <p className="text-xs font-medium text-red-600 dark:text-red-400">{error}</p>}
           </div>
+
+          {/* Preview, shaped like the story itself */}
+          <div className="flex flex-col items-center gap-2 bg-surface-light p-5 dark:bg-card-dark/60">
+            <p className="self-start text-xs font-medium text-text-secondary-light dark:text-text-secondary-dark">Preview</p>
+            <div
+              className="relative grid aspect-[9/16] w-full max-w-[230px] place-items-center overflow-hidden rounded-xl bg-black text-center text-white shadow-lg"
+              style={mode === 'text' ? { background } : undefined}
+            >
+              {mode === 'media' && media?.previewUrl && media.kind === 'image' && <img src={media.previewUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />}
+              {mode === 'media' && media?.previewUrl && media.kind === 'video' && <video src={media.previewUrl} className="absolute inset-0 h-full w-full object-cover" muted autoPlay loop />}
+              {mode === 'media' && media && media.progress < 1 && !media.error && (
+                <div className="absolute inset-0 grid place-items-center bg-black/40"><Loader2 className="animate-spin" /></div>
+              )}
+              {mode === 'text' && (
+                <p className="max-w-[85%] whitespace-pre-wrap text-lg font-semibold leading-snug">
+                  {caption.trim() || <span className="text-white/60">Start typing</span>}
+                </p>
+              )}
+              {mode === 'media' && caption.trim() && (
+                <p className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-3 pb-3 pt-8 text-left text-[13px] font-medium">{caption}</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-border-light px-5 py-3 dark:border-border-dark/40">
+          <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm font-semibold text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-card-dark">
+            Discard
+          </button>
           <button onClick={() => void submit()} disabled={!canSubmit}
-            className="inline-flex items-center gap-1.5 rounded-full bg-blue-600 px-5 py-1.5 text-sm font-semibold text-white disabled:opacity-40">
+            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-40">
             {busy && <Loader2 size={14} className="animate-spin" />} Share to story
           </button>
         </div>
@@ -267,7 +361,7 @@ const StoryComposer: React.FC<{ onClose: () => void; onPosted: () => void }> = (
 const IMAGE_STORY_MS = 5000;
 const TEXT_STORY_MS = 6000;
 const VIDEO_STORY_MAX_MS = 30_000;
-const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
+const QUICK_REACTIONS = ['👍', '❤️', '😆', '😮', '😢', '😡'];
 
 const newNonce = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -505,36 +599,35 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
 
   if (!group || !story) return null;
 
-  const secondsLeft = Math.max(0, Math.ceil(((1 - progress) * durationMs) / 1000));
   const prevGroup = groups[(cursor.g - 1 + groups.length) % groups.length]!;
   const nextGroup = groups[(cursor.g + 1) % groups.length]!;
-  const showPausedBadge = paused && overlay === null && !replyFocused && !sending;
 
   return (
-    <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/90 p-2 sm:p-6" onClick={onClose} role="dialog" aria-modal="true" aria-label={`${group.author.name}'s story`}>
+    <div className="fixed inset-0 z-[95] flex items-center justify-center bg-neutral-950 p-0 sm:p-6" onClick={onClose} role="dialog" aria-modal="true" aria-label={`${group.author.name}'s story`}>
       {groups.length > 1 && (
         <GroupChevron side="left" group={prevGroup} onClick={() => jumpGroup(-1)} />
       )}
 
-      <div className="relative flex h-full max-h-[860px] w-full max-w-[420px] flex-col overflow-hidden rounded-2xl bg-black text-white" onClick={(e) => e.stopPropagation()}>
+      <div className="relative flex h-full max-h-[860px] w-full max-w-[420px] flex-col overflow-hidden bg-black text-white sm:rounded-xl" onClick={(e) => e.stopPropagation()}>
+        {/* Top shade so the header reads on light photos and colours. */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-24 bg-gradient-to-b from-black/55 to-transparent" />
         {/* Segmented progress — one bar per story in this author's group */}
-        <div className="absolute inset-x-2 top-2 z-20 flex gap-1">
+        <div className="absolute inset-x-3 top-3 z-20 flex gap-1">
           {group.stories.map((s, i) => (
-            <div key={s.id} className="h-[3px] flex-1 overflow-hidden rounded-full bg-white/30">
+            <div key={s.id} className="h-[2px] flex-1 overflow-hidden rounded-full bg-white/35">
               <div className="h-full origin-left bg-white will-change-transform"
                 style={{ transform: `scaleX(${i < cursor.s ? 1 : i === cursor.s ? progress : 0})` }} />
             </div>
           ))}
         </div>
 
-        <div className="absolute inset-x-3 top-6 z-20 flex items-center gap-2">
-          <Avatar name={group.author.name} src={group.author.avatarUrl ?? undefined} size={30} />
+        <div className="absolute inset-x-3 top-6 z-20 flex items-center gap-2.5">
+          <Avatar name={group.author.name} src={group.author.avatarUrl ?? undefined} size={36} />
           <div className="min-w-0 leading-tight">
             <span className="block truncate text-sm font-semibold">{isMine ? 'Your story' : group.author.name}</span>
-            <span className="text-[11px] text-white/70">{relativeTime(story.createdAt)} · {cursor.s + 1}/{group.stories.length}</span>
+            <span className="text-xs text-white/75">{relativeTime(story.createdAt)}</span>
           </div>
           <span className="flex-1" />
-          <CountdownRing progress={progress} seconds={secondsLeft} paused={paused} />
           <button onClick={() => setUserPaused((p) => !p)} aria-label={userPaused ? 'Play' : 'Pause'} title="Space" className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/10">
             {userPaused ? <Play size={16} /> : <Pause size={16} />}
           </button>
@@ -546,7 +639,6 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
           {isMine && (
             <button onClick={remove} aria-label="Delete story" className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/10"><Trash2 size={16} /></button>
           )}
-          <button onClick={() => setOverlay((o) => (o === 'help' ? null : 'help'))} aria-label="Keyboard shortcuts" title="?" className="hidden h-8 w-8 place-items-center rounded-full hover:bg-white/10 sm:grid"><Keyboard size={16} /></button>
           <button onClick={onClose} aria-label="Close" title="Esc" className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/10"><X size={18} /></button>
         </div>
 
@@ -605,16 +697,11 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
               </p>
             </div>
           ) : (
-            <p className="relative z-10 max-w-[85%] whitespace-pre-wrap text-center text-2xl font-bold leading-snug">
+            <p className="relative z-10 max-w-[85%] whitespace-pre-wrap text-center text-[26px] font-semibold leading-snug tracking-tight">
               {story.caption}
             </p>
           ))}
 
-          {showPausedBadge && (
-            <span className="feed-pill-in absolute left-1/2 top-16 z-10 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-black/50 px-3 py-1 text-xs font-semibold backdrop-blur">
-              <Pause size={12} /> Paused
-            </span>
-          )}
           {sent && (
             <span className="feed-story-sent pointer-events-none absolute inset-0 z-20 grid place-items-center">
               <span className="rounded-full bg-black/60 px-5 py-2 text-3xl backdrop-blur">{sent === 'Sent' ? <span className="text-base font-semibold">Sent ✓</span> : sent}</span>
@@ -642,7 +729,7 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
               onFocus={() => setReplyFocused(true)}
               onBlur={() => setReplyFocused(false)}
               placeholder={`Reply to ${firstName(group.author.name)}…`}
-              className="min-w-0 flex-1 rounded-full border border-white/25 bg-white/10 px-3.5 py-2 text-sm placeholder:text-white/60 focus:border-white/60 focus:outline-none"
+              className="min-w-0 flex-1 rounded-full border border-white/50 bg-transparent px-4 py-2 text-sm placeholder:text-white/70 focus:border-white focus:outline-none"
             />
             {reply.trim() ? (
               <button type="submit" disabled={sending !== null} aria-label="Send reply" className="grid h-9 w-9 place-items-center rounded-full bg-blue-600 text-white disabled:opacity-50">
@@ -682,7 +769,7 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
         {overlay === 'help' && (
           <div className="absolute inset-0 z-30 grid place-items-center bg-black/70 p-6 animate-fade-in" onClick={() => setOverlay(null)}>
             <div className="w-full max-w-xs rounded-2xl bg-elevated-dark p-4 text-sm" onClick={(e) => e.stopPropagation()}>
-              <p className="mb-3 flex items-center gap-2 font-semibold"><Keyboard size={16} /> Shortcuts</p>
+              <p className="mb-3 font-semibold">Keyboard shortcuts</p>
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
                 {([
                   ['← →', 'Previous / next story'],
@@ -714,36 +801,14 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
   );
 };
 
-/** Circular "seconds left" indicator — the segmented bar shows position, this
- *  shows the countdown ticking, which reads better at a glance. */
-const CountdownRing: React.FC<{ progress: number; seconds: number; paused: boolean }> = ({ progress, seconds, paused }) => {
-  const r = 11; const c = 2 * Math.PI * r;
-  return (
-    <span className={`relative grid h-8 w-8 place-items-center ${paused ? 'opacity-60' : ''}`} aria-label={`${seconds} seconds left`} title={`${seconds}s`}>
-      <svg viewBox="0 0 28 28" className="absolute inset-0 h-full w-full -rotate-90">
-        <circle cx="14" cy="14" r={r} fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2.5" />
-        <circle cx="14" cy="14" r={r} fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round"
-          strokeDasharray={c} strokeDashoffset={c * progress} />
-      </svg>
-      <span key={seconds} className="feed-count-tick relative text-[10px] font-bold tabular-nums leading-none">{seconds}</span>
-    </span>
-  );
-};
-
-/** Desktop-only side arrows that carry a peek of the neighbouring author. */
+/** Desktop-only side arrows to the previous / next person's stories. */
 const GroupChevron: React.FC<{ side: 'left' | 'right'; group: FeedStoryGroup; onClick: () => void }> = ({ side, group, onClick }) => (
   <button
     onClick={(e) => { e.stopPropagation(); onClick(); }}
     aria-label={`${side === 'left' ? 'Previous' : 'Next'}: ${group.author.name}`}
     title={group.author.name}
-    className={`group hidden shrink-0 flex-col items-center gap-2 px-3 text-white/70 hover:text-white sm:flex ${side === 'left' ? 'mr-2' : 'ml-2'}`}
+    className={`hidden h-12 w-12 shrink-0 place-items-center rounded-full bg-white text-neutral-900 shadow-lg transition hover:bg-neutral-200 sm:grid ${side === 'left' ? 'mr-4' : 'ml-4'}`}
   >
-    <span className={`grid h-11 w-11 place-items-center rounded-full bg-white/10 transition-colors group-hover:bg-white/20 ${group.allViewed ? '' : 'ring-2 ring-blue-500'}`}>
-      {side === 'left' ? <ChevronLeft size={22} /> : <ChevronRight size={22} />}
-    </span>
-    <span className="flex items-center gap-1.5 text-xs opacity-0 transition-opacity group-hover:opacity-100">
-      <Avatar name={group.author.name} src={group.author.avatarUrl ?? undefined} size={18} />
-      {firstName(group.author.name)}
-    </span>
+    {side === 'left' ? <ChevronLeft size={24} /> : <ChevronRight size={24} />}
   </button>
 );
