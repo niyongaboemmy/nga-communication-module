@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
-  Bell, LogOut, Sun, Moon, Search, MoreHorizontal, Command,
+  LogOut, Sun, Moon, Search, MoreHorizontal, Command,
 } from 'lucide-react';
 import { Logo } from '../components/Logo';
 import { useAuth } from '../context/AuthContext';
@@ -11,6 +11,7 @@ import { AppsSwitcher } from '../components/shell/AppsSwitcher';
 import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
 import { GlobalSearch } from '../components/GlobalSearch';
+import { NotificationBell } from '../components/shell/NotificationBell';
 import { usePresenceReporter } from '../hooks/usePresenceReporter';
 import { toPresence } from './chat/types';
 import type { Presence } from './chat/types';
@@ -317,11 +318,7 @@ const TopBar: React.FC<{ onOpenSearch: () => void; myPresence: Presence }> = ({ 
           <Search size={18} />
         </IconButton>
 
-        <IconButton label="Notifications" className="relative">
-          <Bell size={18} />
-          {/* Placeholder dot until the Phase 5 notification centre feeds it. */}
-          <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-red-500 ring-2 ring-white dark:ring-border-dark" />
-        </IconButton>
+        <NotificationBell />
 
         <IconButton label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} onClick={toggleTheme}>
           {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
