@@ -176,6 +176,11 @@ export interface FeedPageEditor extends FeedPerson {
   title: string;
 }
 
+/** One follower of a page, as only that page's owners may see them. */
+export interface FeedPageFollower extends FeedPerson {
+  followedAt: string;
+}
+
 export interface FeedPageDetail extends FeedPageSummary {
   createdAt: string;
   editors: FeedPageEditor[];

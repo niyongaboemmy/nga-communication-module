@@ -125,6 +125,14 @@ router.delete('/pages/:id/follow', authorizePermission('FEED_VIEW'), wrap(async 
   res.json(ok({ page: await feed.pages.unfollow(actorOf(req), req.params.id!) }));
 }));
 
+// Owners only -- decided in listFollowers, where the page is loaded.
+router.get('/pages/:id/followers', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  res.json(ok(await feed.pages.listFollowers(actorOf(req), req.params.id!, {
+    q: typeof req.query.q === 'string' ? req.query.q : '',
+    before: typeof req.query.before === 'string' ? req.query.before : null,
+  })));
+}));
+
 router.post('/pages/:id/notify', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
   await feed.pages.setNotify(actorOf(req), req.params.id!, Boolean(req.body?.notify));
   res.json(ok({ updated: true }));
