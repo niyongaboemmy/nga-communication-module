@@ -628,7 +628,7 @@ export const Composer: React.FC<{
       </div>
 
       <div className="mt-1 flex items-center justify-between gap-2 px-2">
-        <p className={`hidden text-[11px] text-text-secondary-light/80 dark:text-text-secondary-dark/70 ${value.trim() ? 'md:block' : ''}`}>
+        <p className="hidden text-[11px] text-text-secondary-light/80 md:block dark:text-text-secondary-dark/70">
           {enterToSend ? (
             <>
               <kbd className="font-sans font-semibold">Enter</kbd> to send ·{' '}
