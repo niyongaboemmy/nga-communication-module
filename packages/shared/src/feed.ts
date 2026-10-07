@@ -176,6 +176,12 @@ export interface FeedPageEditor extends FeedPerson {
   title: string;
 }
 
+/** One person who reacted to a post, and how. */
+export interface FeedPostReactor extends FeedPerson {
+  reaction: FeedReaction;
+  reactedAt: string;
+}
+
 /** One follower of a page, as only that page's owners may see them. */
 export interface FeedPageFollower extends FeedPerson {
   followedAt: string;

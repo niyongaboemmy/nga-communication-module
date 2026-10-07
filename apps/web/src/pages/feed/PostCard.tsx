@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import {
   MessageCircle, Share2, Bookmark, MoreHorizontal, Megaphone, Pin, BadgeCheck,
-  Pencil, Trash2, Flag, EyeOff, Link2, Globe, Users2,
+  Pencil, Trash2, Flag, EyeOff, Link2, Globe, Users2, X, Loader2,
 } from 'lucide-react';
-import type { FeedPostView, FeedReaction } from '@tupo/shared';
+import type { FeedPostReactor, FeedPostView, FeedReaction } from '@tupo/shared';
 import { FEED_REACTION_META } from '@tupo/shared';
 import { Avatar } from '../../components/ui';
 import { useNotify } from '../../context/NotificationContext';
@@ -13,7 +14,7 @@ import { MediaGallery } from './MediaGallery';
 import { PollBlock, EventBlock } from './PollEventBlocks';
 import { Comments } from './Comments';
 import {
-  ReactionBurst, ReactionBubbles, ReactionIcon, ReactionPicker, fullTime, relativeTime,
+  ReactionBurst, ReactionBubbles, ReactionDisc, ReactionIcon, ReactionPicker, fullTime, relativeTime,
   renderRichText, useDismiss, useMediaUrl, usePressToOpen,
 } from './lib';
 import * as api from './api';
@@ -38,6 +39,7 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   const [thumbPop, setThumbPop] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [reactorsOpen, setReactorsOpen] = useState(false);
   const closeMenu = useCallback(() => setMenu(false), []);
   const menuRef = useDismiss(menu, closeMenu);
   const cardRef = useRef<HTMLElement>(null);
@@ -176,12 +178,14 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
       {/* Engagement summary */}
       {(post.reactions.total > 0 || post.commentCount > 0 || post.shareCount > 0) && (
         <div className="mt-2.5 flex items-center justify-between px-3 pb-0.5 text-[13px] text-text-secondary-light sm:px-4 dark:text-text-secondary-dark">
-          <div className="flex items-center">
-            {post.reactions.top.length > 0 && <ReactionBubbles reactions={post.reactions.top} />}
-            {post.reactions.total > 0 && (
-              <span className="feed-count-tick hover:underline" key={post.reactions.total}>{reactionLabel(post)}</span>
-            )}
-          </div>
+          {/* Who reacted: open to anyone who can see the post, as on Facebook. */}
+          {post.reactions.total > 0 ? (
+            <button type="button" onClick={() => setReactorsOpen(true)} aria-label="See who reacted"
+              className="flex items-center rounded hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+              {post.reactions.top.length > 0 && <ReactionBubbles reactions={post.reactions.top} />}
+              <span className="feed-count-tick" key={post.reactions.total}>{reactionLabel(post)}</span>
+            </button>
+          ) : <span />}
           <div className="flex gap-3">
             {post.commentCount > 0 && <button onClick={() => setShowComments(true)} className="hover:underline">{post.commentCount} {post.commentCount === 1 ? 'comment' : 'comments'}</button>}
             {post.shareCount > 0 && <span>{post.shareCount} {post.shareCount === 1 ? 'share' : 'shares'}</span>}
@@ -221,6 +225,12 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
       </div>
 
       {(showComments || permalink) && <Comments post={post} autoFocus={showComments && !permalink} />}
+      {/* Portalled to <body>: the card's entrance animation makes it the box
+          that `fixed` is measured against, which trapped the dialog inside the post. */}
+      {reactorsOpen && createPortal(
+        <ReactorsDialog postId={post.id} total={post.reactions.total} onClose={() => setReactorsOpen(false)} />,
+        document.body,
+      )}
     </article>
   );
 };
@@ -265,5 +275,91 @@ const LinkPreview: React.FC<{ preview: NonNullable<FeedPostView['linkPreview']> 
         {preview.description && <p className="mt-0.5 line-clamp-2 text-xs text-text-secondary-light dark:text-text-secondary-dark">{preview.description}</p>}
       </div>
     </a>
+  );
+};
+
+/** Who reacted to a post: "All" plus one tab per reaction kind, newest first, 50 at a time. */
+const ReactorsDialog: React.FC<{ postId: string; total: number; onClose: () => void }> = ({ postId, total, onClose }) => {
+  const [tab, setTab] = useState<FeedReaction | null>(null);
+  const [rows, setRows] = useState<FeedPostReactor[] | null>(null);
+  const [counts, setCounts] = useState<Partial<Record<FeedReaction, number>>>({});
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [more, setMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const seq = useRef(0);
+
+  useEffect(() => {
+    const mine = ++seq.current;
+    setRows(null); setError(null);
+    api.listReactors(postId, { reaction: tab })
+      .then((r) => { if (mine === seq.current) { setRows(r.reactors); setCounts(r.counts); setCursor(r.nextCursor); } })
+      .catch((e) => { if (mine === seq.current) setError(e instanceof Error ? e.message : 'Could not load reactions.'); });
+  }, [postId, tab]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const loadMore = () => {
+    if (!cursor || more) return;
+    setMore(true);
+    api.listReactors(postId, { reaction: tab, before: cursor })
+      .then((r) => { setRows((x) => [...(x ?? []), ...r.reactors]); setCursor(r.nextCursor); })
+      .catch(() => {})
+      .finally(() => setMore(false));
+  };
+
+  const kinds = (Object.entries(counts) as Array<[FeedReaction, number]>).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+  const tabCls = (active: boolean) =>
+    `flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-sm font-semibold transition-colors ${active
+      ? 'border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400'
+      : 'border-transparent text-text-secondary-light hover:text-text-primary-light dark:text-text-secondary-dark dark:hover:text-text-primary-dark'}`;
+
+  return (
+    <div className="fixed inset-0 z-[110] grid place-items-center bg-black/50 p-4" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label="Reactions"
+        className="flex max-h-[80vh] w-full max-w-md animate-pop flex-col overflow-hidden rounded-2xl border border-border-light bg-white shadow-2xl dark:border-border-dark/50 dark:bg-elevated-dark" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1 border-b border-border-light pl-2 pr-3 dark:border-border-dark/40">
+          <div className="flex min-w-0 flex-1 overflow-x-auto" role="tablist" aria-label="Filter by reaction">
+            <button role="tab" aria-selected={tab === null} onClick={() => setTab(null)} className={tabCls(tab === null)}>All {total}</button>
+            {kinds.map(([k, n]) => (
+              <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)} className={tabCls(tab === k)}
+                aria-label={`${FEED_REACTION_META[k].label} ${n}`}>
+                <ReactionDisc reaction={k} size={18} /> <span className="tabular-nums">{n}</span>
+              </button>
+            ))}
+          </div>
+          <button onClick={onClose} aria-label="Close" className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-text-secondary-light hover:bg-surface-light dark:hover:bg-card-dark"><X size={18} /></button>
+        </div>
+
+        <ul className="min-h-[8rem] flex-1 overflow-y-auto p-2" aria-label="People who reacted" aria-busy={rows === null}>
+          {error && <li className="px-3 py-6 text-center text-sm text-red-600 dark:text-red-400">{error}</li>}
+          {!error && rows === null && <li className="grid place-items-center py-8"><Loader2 className="animate-spin text-text-secondary-light" /></li>}
+          {!error && rows?.length === 0 && <li className="px-3 py-8 text-center text-sm text-text-secondary-light dark:text-text-secondary-dark">No reactions yet.</li>}
+          {rows?.map((r) => (
+            <li key={r.id} className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-surface-light dark:hover:bg-card-dark/50">
+              <span className="relative shrink-0">
+                <Avatar name={r.name} src={r.avatarUrl ?? undefined} size={40} />
+                <ReactionDisc reaction={r.reaction} size={18} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-white dark:ring-elevated-dark" />
+              </span>
+              <div className="min-w-0 flex-1 leading-tight">
+                <p className="truncate text-sm font-medium text-text-primary-light dark:text-text-primary-dark">{r.name}</p>
+                {r.roleName && <p className="truncate text-xs capitalize text-text-secondary-light dark:text-text-secondary-dark">{r.roleName}</p>}
+              </div>
+              <span className="shrink-0 text-xs text-text-secondary-light dark:text-text-secondary-dark" title={fullTime(r.reactedAt)}>{relativeTime(r.reactedAt)}</span>
+            </li>
+          ))}
+          {cursor && (
+            <li className="px-3 py-2">
+              <button onClick={loadMore} disabled={more} className="flex w-full items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-60 dark:text-blue-400 dark:hover:bg-blue-900/20">
+                {more && <Loader2 size={14} className="animate-spin" />} Show more
+              </button>
+            </li>
+          )}
+        </ul>
+      </div>
+    </div>
   );
 };

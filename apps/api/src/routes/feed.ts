@@ -278,6 +278,14 @@ router.get('/posts/:id', authorizePermission('FEED_VIEW'), wrap(async (req, res)
 
 /* ── Reactions ─────────────────────────────────────────────────────────── */
 
+// Who reacted: anyone who can see the post (checked in listReactors).
+router.get('/posts/:id/reactions', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
+  res.json(ok(await feed.reactions.listReactors(actorOf(req), req.params.id!, {
+    reaction: typeof req.query.reaction === 'string' ? req.query.reaction : null,
+    before: typeof req.query.before === 'string' ? req.query.before : null,
+  })));
+}));
+
 router.post('/posts/:id/reactions', authorizePermission('FEED_COMMENT'), wrap(async (req, res) => {
   const actor = actorOf(req);
   const emoji = req.body?.emoji ?? null;
