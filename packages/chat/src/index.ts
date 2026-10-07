@@ -13,3 +13,4 @@ export * from './oversight.js';
 export * from './presence.js';
 export * from './notifications.js';
 export * from './unfurl.js';
+export * from './subjects.js';

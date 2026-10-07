@@ -15,6 +15,7 @@ import { SsoCallback } from './pages/SsoCallback';
 import { PendingAccess } from './pages/PendingAccess';
 import { AppShell, ComingSoon } from './pages/AppShell';
 import { ChatLayout } from './pages/chat/ChatLayout';
+import { ChannelsLayout } from './pages/channels/ChannelsLayout';
 import { MeetHome } from './pages/meet/MeetHome';
 import { Scheduler } from './pages/meet/Scheduler';
 import { MeetHistory } from './pages/meet/MeetHistory';
@@ -105,6 +106,7 @@ export const App: React.FC = () => (
           <Route path="/app" element={<Protected><AppShell /></Protected>}>
             <Route index element={<Navigate to="/app/feed" replace />} />
             <Route path="chat" element={<ChatLayout />} />
+            <Route path="channels" element={<ChannelsLayout />} />
             <Route path="feed" element={
               <RequirePermission anyOf={['FEED_VIEW']}><FeedProviderLayout /></RequirePermission>}>
               <Route index element={<FeedHome />} />

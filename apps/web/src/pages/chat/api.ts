@@ -1,6 +1,6 @@
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../../lib/api';
 import type {
-  ConversationSummary, MessagePage, NotificationLevel, WireMember, WireMessage,
+  ConversationSummary, SubjectSummary, MessagePage, NotificationLevel, WireMember, WireMessage,
 } from '@tupo/shared';
 
 /**
@@ -378,3 +378,14 @@ export const translateMessage = (
 ) => apiPost<{ language: LanguageCode; text: string; cached: boolean }>(
   `/api/chat/conversations/${conversationId}/messages/${messageId}/translate`, { language },
 ).then((r) => r.data!);
+
+/* ── Subject channels (the Channels page) ──────────────────────────────── */
+
+export const listSubjects = () =>
+  apiGet<{ subjects: SubjectSummary[] }>('/api/chat/subjects').then((r) => r.data!.subjects);
+
+/** Teachers of the subject (or admins) only; the server refuses anyone else. */
+export const createSubjectChannel = (subjectId: string, input: { name: string; topic?: string }) =>
+  apiPost<{ conversation: ConversationSummary }>(`/api/chat/subjects/${subjectId}/channels`, input)
+    .then((r) => r.data!.conversation);
+

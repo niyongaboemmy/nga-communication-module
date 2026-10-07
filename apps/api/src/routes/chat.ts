@@ -282,6 +282,23 @@ router.get('/conversations', authorizePermission('MESSAGE_READ'), wrap(async (re
   }));
 }));
 
+/* ── Subject channels (the Channels page) ──────────────────────────────── */
+
+router.get('/subjects', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  res.json(ok({ subjects: await chat.listMySubjects(me.id, me.roleLevel === 'ADMIN') }));
+}));
+
+// Teachers of the subject (or admins) -- decided in createSubjectChannel.
+router.post('/subjects/:id/channels', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  const conversation = await chat.createSubjectChannel(me.id, me.roleLevel === 'ADMIN', req.params.id!, {
+    name: String(req.body?.name ?? ''),
+    topic: typeof req.body?.topic === 'string' ? req.body.topic : null,
+  });
+  res.status(201).json(ok({ conversation }));
+}));
+
 router.get('/conversations/:id', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
   const me = actor(req);
   await chat.requireMembership(me.id, req.params.id!);

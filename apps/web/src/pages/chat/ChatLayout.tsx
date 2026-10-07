@@ -65,9 +65,12 @@ const SidePanel: React.FC<{
 
 const ChatWorkspace: React.FC = () => {
   const {
-    conversations, conversationsLoading, activeId, setActiveId, active,
+    conversations: allConversations, conversationsLoading, activeId, setActiveId, active: activeAny,
     threadRootId, openThread, markReadTo, markEverythingRead,
   } = useChat();
+  // Subject channels belong to the Channels page; Chat never shows one.
+  const conversations = useMemo(() => allConversations.filter((c) => !c.subjectId), [allConversations]);
+  const active = activeAny?.subjectId ? null : activeAny;
 
   /*
    * One slot, one occupant.

@@ -11,6 +11,7 @@ import { exchangeCode, fetchMe, verifyMisSessionDetailed } from '../services/mis
 import { accessMode } from '../access/mode.js';
 import { getAccessSnapshot, noteAccessVersion } from '../access/snapshot.js';
 import { academicFromSnapshot, placementDiffers, syncAccessProfile } from '../access/profileSync.js';
+import { syncSubjectsFromMis } from '../services/subjectSync.js';
 import { recordShadowDiff } from '../access/shadow.js';
 import { upsertMisUser, audit, type MisAcademic } from '../services/userService.js';
 
@@ -186,6 +187,10 @@ router.post('/exchange', async (req: Request, res: Response) => {
       forceAdmin,
       academic,
     });
+
+    // Subjects for the Channels page. Awaited so the first page load already
+    // shows them, but bounded (5 s per MIS call) and it never throws.
+    await syncSubjectsFromMis(user.id, misUserId, misToken);
 
     if (snapshot) {
       // Contact-policy inputs (new columns only; nothing legacy reads them).

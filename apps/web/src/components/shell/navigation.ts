@@ -1,5 +1,5 @@
 import {
-  MessagesSquare, Megaphone, Video, Mail, Activity,
+  MessagesSquare, Megaphone, Video, Mail, Activity, Hash,
   ShieldCheck, Users, ScrollText, Eye, LayoutDashboard,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -25,6 +25,7 @@ export interface NavEntry {
 export const MODULES: NavEntry[] = [
   { to: '/app/feed', icon: Megaphone, label: 'Feed', perm: 'FEED_VIEW' },
   { to: '/app/chat', icon: MessagesSquare, label: 'Chat', perm: 'MESSAGE_READ' },
+  { to: '/app/channels', icon: Hash, label: 'Channels', perm: 'MESSAGE_READ' },
   { to: '/app/meet', icon: Video, label: 'Meet', perm: 'MEET_JOIN' },
   { to: '/app/mail', icon: Mail, label: 'Mail', perm: 'MAIL_READ' },
 ];
