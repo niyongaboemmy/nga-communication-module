@@ -136,7 +136,7 @@ export const RightRail: React.FC<{ suggestions: FeedPageSummary[]; onFollow: (id
         </Link>
       )}
       <p className="px-2 text-[12px] leading-relaxed text-text-secondary-light/80 dark:text-text-secondary-dark/70">
-        Tupo Feed · Nyanza Green Academy. Be kind, stay on topic, and report anything that breaks the rules.
+        Tupo Feed · New Generation Academy. Be kind, stay on topic, and report anything that breaks the rules.
       </p>
     </>
   );

@@ -90,7 +90,7 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   const mineTint = post.reactions.mine ? FEED_REACTION_META[post.reactions.mine].tint : undefined;
 
   return (
-    <article ref={cardRef} className="feed-card feed-card-in relative overflow-hidden">
+    <article ref={cardRef} className={`feed-card feed-card-in relative ${menu ? 'z-20' : ''}`}>
       {(post.pinned || post.type === 'announcement') && (
         <div className="flex items-center gap-1.5 border-b border-black/5 bg-blue-50/70 px-4 py-1.5 text-[11px] font-semibold text-blue-700 dark:border-white/5 dark:bg-blue-900/20 dark:text-blue-300">
           {post.type === 'announcement' ? <Megaphone size={12} /> : <Pin size={12} />}
