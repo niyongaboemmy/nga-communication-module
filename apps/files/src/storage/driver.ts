@@ -1,6 +1,6 @@
 import { createWriteStream, createReadStream } from 'node:fs';
 import { mkdir, stat, unlink } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -67,7 +67,8 @@ export class LocalStorageDriver implements StorageDriver {
    */
   private pathFor(key: string): string {
     const full = resolve(join(this.root, key));
-    if (full !== this.root && !full.startsWith(this.root + '/')) {
+    // `sep`, not '/': on Windows (local dev) resolved paths use backslashes.
+    if (full !== this.root && !full.startsWith(this.root + sep)) {
       throw new Error('Invalid storage key');
     }
     return full;
