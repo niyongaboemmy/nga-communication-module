@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Languages, X } from 'lucide-react';
 import { Spinner } from '../../components/ui';
 import { useNotify } from '../../context/NotificationContext';
@@ -21,11 +21,14 @@ export const TranslateControl: React.FC<{
   conversationId: string;
   messageId: string;
   onDark: boolean;
-}> = ({ conversationId, messageId, onDark }) => {
+  /** Bumped by the message's hover toolbar to open the language menu. */
+  openSignal: number;
+}> = ({ conversationId, messageId, onDark, openSignal }) => {
   const { notify } = useNotify();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ language: LanguageCode; text: string } | null>(null);
+  useEffect(() => { if (openSignal > 0) setOpen(true); }, [openSignal]);
 
   const translate = async (language: LanguageCode) => {
     setOpen(false);
@@ -67,22 +70,21 @@ export const TranslateControl: React.FC<{
     );
   }
 
+  // Nothing under the message until someone asks (from the hover toolbar).
+  if (!open && !busy) return null;
+
   return (
     <span className="relative">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        disabled={busy}
-        className={`mt-1 flex items-center gap-1 text-[11px] font-medium ${
-          onDark ? 'text-white/80 hover:text-white' : 'text-blue-600 hover:underline dark:text-blue-400'
-        }`}
-      >
-        {busy ? <Spinner className="h-2.5 w-2.5" /> : <Languages size={11} />}
-        {busy ? 'Translating…' : 'Translate'}
-      </button>
+      {busy && (
+        <span className={`mt-1 flex items-center gap-1 text-[11px] font-medium ${onDark ? 'text-white/80' : 'text-text-secondary-light dark:text-text-secondary-dark'}`}>
+          <Spinner className="h-2.5 w-2.5" /> Translating…
+        </span>
+      )}
 
       {open && (
         <span
           role="menu"
+          onMouseLeave={() => setOpen(false)}
           className="absolute left-0 top-full z-50 mt-1 w-40 overflow-hidden rounded-xl border border-border-light bg-white py-1 shadow-xl dark:border-border-dark/50 dark:bg-elevated-dark"
         >
           {(Object.entries(TRANSLATION_LANGUAGES) as Array<[LanguageCode, string]>).map(

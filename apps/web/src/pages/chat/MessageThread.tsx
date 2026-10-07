@@ -3,7 +3,7 @@ import {
   Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
   RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
-  X, Bookmark, Forward, PinOff, Link2, Quote, Settings,
+  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Languages,
 } from 'lucide-react';
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -141,7 +141,7 @@ const ThreadHeader: React.FC<{
             {c.isPrivate && c.type !== 'dm' && <Lock size={12} className="shrink-0 opacity-60" />}
           </span>
           <span
-            className={`block truncate text-xs ${
+            className={`block truncate text-xs first-letter:uppercase ${
               typingText
                 ? 'text-blue-600 dark:text-blue-400'
                 : 'text-text-secondary-light dark:text-text-secondary-dark'
@@ -198,12 +198,21 @@ const StatusIcon: React.FC<{ status: Message['delivery'] }> = ({ status }) => {
   }
 };
 
+/**
+ * One message, Messenger-style: your own on the right with no avatar or name;
+ * other people's on the left with one avatar at the foot of each run. Names
+ * only appear in groups and channels (a DM's header already says who it is),
+ * once per run, and the time sits once under the last bubble of the run.
+ */
 const MessageRow: React.FC<{
   message: Message;
   newGroup: boolean;
+  /** Last message of a run from the same sender (the avatar and time go here). */
+  lastInGroup: boolean;
+  isDirect: boolean;
   names: Record<string, string>;
   onRetry: (nonce: string) => void;
-}> = ({ message: m, newGroup, names, onRetry }) => {
+}> = ({ message: m, newGroup, lastInGroup, isDirect, names, onRetry }) => {
   const { can } = usePermissions();
   const { user } = useAuth();
   const {
@@ -216,6 +225,7 @@ const MessageRow: React.FC<{
   const [draft, setDraft] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [translateAsk, setTranslateAsk] = useState(0);
   const editRef = useRef<HTMLTextAreaElement>(null);
 
   const mine = m.senderId === user?.id;
@@ -251,8 +261,8 @@ const MessageRow: React.FC<{
 
   if (m.deletedAt) {
     return (
-      <li className={`flex gap-2.5 px-2 sm:px-4 ${newGroup ? 'mt-3' : 'mt-0.5'} ${mine ? 'flex-row-reverse' : ''}`}>
-        <span className="w-9 shrink-0" />
+      <li className={`flex gap-2 px-2 sm:px-4 ${newGroup ? 'mt-4' : 'mt-0.5'} ${mine ? 'flex-row-reverse' : ''}`}>
+        {!mine && <span className="w-7 shrink-0" />}
         <span className="rounded-2xl border border-dashed border-border-light px-3 py-1.5 text-xs italic text-text-secondary-light dark:border-border-dark/50 dark:text-text-secondary-dark">
           This message was deleted
         </span>
@@ -284,32 +294,29 @@ const MessageRow: React.FC<{
     <li
       id={`msg-${m.id}`}
       data-message-row=""
-      className={`group relative flex gap-2.5 px-2 sm:px-4 ${newGroup ? 'mt-3' : 'mt-0.5'} ${
+      className={`group relative flex gap-2 px-2 sm:px-4 ${newGroup ? 'mt-4' : 'mt-0.5'} ${
         mine ? 'flex-row-reverse' : ''
       } ${m.mentionsMe ? 'bg-amber-50/60 dark:bg-amber-500/5' : ''} ${
         highlightedId === m.id ? 'animate-fade-in rounded-xl bg-blue-100/70 dark:bg-blue-500/15' : ''
       }`}
     >
-      {/* The gutter keeps its width when the avatar is hidden, so a grouped run
-          stays aligned instead of stepping left. */}
-      <span className="w-9 shrink-0">
-        {newGroup && <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={36} />}
-      </span>
+      {/* Other people only: one avatar at the foot of a run. The gutter keeps
+          its width without it, so the run stays aligned. */}
+      {!mine && (
+        <span className={`w-7 shrink-0 self-end ${lastInGroup && !editing ? 'mb-5' : ''}`}>
+          {lastInGroup && <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={28} />}
+        </span>
+      )}
 
-      <div className={`min-w-0 max-w-[min(46rem,85%)] ${mine ? 'items-end' : 'items-start'} flex flex-col`}>
-        {newGroup && (
-          <div className={`mb-1 flex items-baseline gap-2 ${mine ? 'flex-row-reverse' : ''}`}>
-            <span className="text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
-              {mine ? 'You' : m.senderName}
-            </span>
-            {m.senderRole && !mine && (
-              <span className="hidden text-[11px] capitalize text-text-secondary-light sm:inline dark:text-text-secondary-dark">
-                {m.senderRole}
+      <div className={`min-w-0 max-w-[min(42rem,78%)] ${mine ? 'items-end' : 'items-start'} flex flex-col`}>
+        {newGroup && !mine && !isDirect && (
+          <div className="mb-1 ml-3 flex items-baseline gap-1.5">
+            <span className="text-xs font-medium text-text-secondary-light dark:text-text-secondary-dark">{m.senderName}</span>
+            {m.senderRole && (
+              <span className="hidden text-[11px] capitalize text-text-secondary-light/70 sm:inline dark:text-text-secondary-dark/70">
+                · {m.senderRole}
               </span>
             )}
-            <span className="text-[11px] tabular-nums text-text-secondary-light dark:text-text-secondary-dark">
-              {timeOf(m.createdAt)}
-            </span>
           </div>
         )}
 
@@ -347,10 +354,10 @@ const MessageRow: React.FC<{
               bigEmoji
                 // No bubble, no padding: the emoji *is* the message.
                 ? `text-4xl leading-tight ${pending ? 'opacity-75' : ''}`
-                : `message-body px-3.5 py-2 text-sm ${
+                : `message-body px-3 py-2 text-[15px] leading-snug ${
                     mine
-                      ? 'bubble-out bg-blue-600 text-white'
-                      : 'bubble-in border border-border-light bg-white text-text-primary-light dark:border-border-dark/40 dark:bg-elevated-dark dark:text-text-primary-dark'
+                      ? `${lastInGroup ? 'bubble-out' : 'rounded-2xl'} bg-blue-600 text-white`
+                      : `${lastInGroup ? 'bubble-in' : 'rounded-2xl'} bg-gray-100 text-text-primary-light dark:bg-white/10 dark:text-text-primary-dark`
                   } ${failed ? 'ring-1 ring-red-400' : ''} ${pending ? 'opacity-75' : ''}`
             }
           >
@@ -431,13 +438,21 @@ const MessageRow: React.FC<{
         )}
 
         {/* Offered only on other people's messages with real text: translating
-            your own words tells you nothing. */}
+            your own words tells you nothing. Asked for from the hover toolbar;
+            only the language menu and the translation itself show here. */}
         {!mine && m.body && !meetMeta && m.body.trim().length > 8 && (
           <TranslateControl
             conversationId={m.conversationId}
             messageId={m.id}
             onDark={false}
+            openSignal={translateAsk}
           />
+        )}
+
+        {lastInGroup && !editing && (
+          <span className={`mt-1 text-[11px] tabular-nums text-text-secondary-light dark:text-text-secondary-dark ${mine ? 'mr-1' : 'ml-3'}`}>
+            {timeOf(m.createdAt)}
+          </span>
         )}
 
         {/* UX-1: a failure is never silent, and the retry sits on the message
@@ -491,7 +506,7 @@ const MessageRow: React.FC<{
                own message put the toolbar at the far left of a full-width row,
                half a screen away from the message it acted on — easy to miss,
                and easy to hit for the wrong message. */
-            mine ? 'right-14' : 'left-14'
+            mine ? 'right-4' : 'left-12'
           } ${picking || menuOpen ? 'opacity-100' : ''}`}
         >
           {/* One tap for the common few, the picker for everything else. Most
@@ -520,6 +535,12 @@ const MessageRow: React.FC<{
               />
             )}
           </div>
+
+          {!mine && m.body && !meetMeta && m.body.trim().length > 8 && (
+            <IconButton label="Translate" size="sm" onClick={() => setTranslateAsk((n) => n + 1)}>
+              <Languages size={15} />
+            </IconButton>
+          )}
 
           <IconButton label="Quote reply" size="sm" onClick={() => setReplyTarget(m)}>
             <Quote size={15} />
@@ -856,6 +877,8 @@ export const MessageThread: React.FC<{
                     <MessageRow
                       message={m}
                       newGroup={startsNewGroup(m, messages[i - 1])}
+                      lastInGroup={!messages[i + 1] || startsNewGroup(messages[i + 1]!, m)}
+                      isDirect={conversation.type === 'dm'}
                       names={names}
                       onRetry={retry}
                     />
