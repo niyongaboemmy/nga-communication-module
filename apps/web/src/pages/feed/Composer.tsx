@@ -148,13 +148,9 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
     }
   };
 
-  if (!postable.length && !editing) {
-    return (
-      <div className="feed-card p-4 text-center text-sm text-text-secondary-light dark:text-text-secondary-dark">
-        You are not an editor of any page yet. Ask an admin to add you, or create a page from <span className="font-medium">Pages</span>.
-      </div>
-    );
-  }
+  // Most people (every student) never post as a page; for them there is simply
+  // no composer, rather than a notice on top of their feed.
+  if (!postable.length && !editing) return null;
 
   if (!open) {
     return (
