@@ -46,6 +46,20 @@ export async function fetchMe(misToken: string): Promise<Record<string, unknown>
   }
 }
 
+/**
+ * The user's central NGA profile picture (256 px) from a MIS payload -- /sso/token,
+ * /users/me or /auth/verify. null = MIS says there is none; undefined = this payload
+ * says nothing about pictures (an older MIS), so keep what we have.
+ */
+export function misAvatarUrl(data: unknown): string | null | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const d = data as { avatar?: { md?: unknown } | null; user?: { avatar_url?: unknown } };
+  const valid = (u: unknown) => (typeof u === 'string' && /^https?:\/\//.test(u) ? u : null);
+  if (d.avatar !== undefined) return d.avatar ? valid(d.avatar.md) : null;
+  if (d.user && d.user.avatar_url !== undefined) return valid(d.user.avatar_url);
+  return undefined;
+}
+
 /** Is this MIS session still alive? Used by the /verify-mis poll. */
 export async function verifyMisSession(misToken: string): Promise<'valid' | 'invalid' | 'unreachable'> {
   return (await verifyMisSessionDetailed(misToken)).state;
@@ -58,6 +72,8 @@ export async function verifyMisSession(misToken: string): Promise<'valid' | 'inv
  */
 export async function verifyMisSessionDetailed(misToken: string): Promise<{
   state: 'valid' | 'invalid' | 'unreachable'; accessVersion: number | null;
+  /** The current profile picture, when this MIS reports one (see misAvatarUrl). */
+  avatarUrl?: string | null;
 }> {
   try {
     // Bounded: a hung MIS must not hold the caller (the Home relay gives up
@@ -68,12 +84,14 @@ export async function verifyMisSessionDetailed(misToken: string): Promise<{
     });
     if (!response.ok) return { state: 'invalid', accessVersion: null };
     let accessVersion: number | null = null;
+    let avatarUrl: string | null | undefined;
     try {
       const body = (await response.json()) as { data?: { access_version?: unknown } };
       const v = Number(body?.data?.access_version);
       accessVersion = body?.data?.access_version != null && Number.isFinite(v) ? v : null;
+      avatarUrl = misAvatarUrl(body?.data);
     } catch { /* older MIS / empty body: no version */ }
-    return { state: 'valid', accessVersion };
+    return { state: 'valid', accessVersion, avatarUrl };
   } catch {
     return { state: 'unreachable', accessVersion: null };
   }
