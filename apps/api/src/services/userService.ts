@@ -99,7 +99,8 @@ export async function upsertMisUser(params: {
   misUserId: string;
   name: string;
   email: string;
-  avatarUrl?: string;
+  /** undefined = keep the stored picture; null = MIS says there is none. */
+  avatarUrl?: string | null;
   derivedRole: Role;
   preferredTheme?: 'light' | 'dark';
   forceAdmin: boolean;
@@ -152,11 +153,11 @@ export async function upsertMisUser(params: {
   ];
 
   if (existing) {
-    const updated = await pool.query<{ preferred_theme: 'light' | 'dark' | null }>(
+    const updated = await pool.query<{ preferred_theme: 'light' | 'dark' | null; avatar_url: string | null }>(
       `UPDATE users
           SET name = $2,
               email = COALESCE(NULLIF($3, ''), email),
-              avatar_url = COALESCE($4, avatar_url),
+              avatar_url = CASE WHEN $18 THEN NULL ELSE COALESCE($4, avatar_url) END,
               role = $5,
               role_assigned_by_admin = CASE WHEN $6 THEN true ELSE role_assigned_by_admin END,
               preferred_theme = COALESCE($7, preferred_theme),
@@ -169,14 +170,14 @@ export async function upsertMisUser(params: {
               last_login_at = now(),
               updated_at = now()
         WHERE id = $1
-      RETURNING preferred_theme`,
+      RETURNING preferred_theme, avatar_url`,
       [existing.id, params.name, params.email, params.avatarUrl ?? null,
        finalRole, params.forceAdmin, params.preferredTheme ?? null,
-       params.forceAdmin, derivedRoleId, ...acParams]
+       params.forceAdmin, derivedRoleId, ...acParams, params.avatarUrl === null]
     );
     return {
       id: existing.id, misUserId: params.misUserId, name: params.name, email: params.email,
-      role: finalRole, avatarUrl: params.avatarUrl,
+      role: finalRole, avatarUrl: updated.rows[0]?.avatar_url ?? undefined,
       // The stored value, not the incoming one: a returning user whose MIS
       // payload carried no theme still has their saved choice honoured, which
       // is why the COALESCE above keeps it.
@@ -198,8 +199,20 @@ export async function upsertMisUser(params: {
   );
   return {
     id, misUserId: params.misUserId, name: params.name, email: params.email,
-    role: finalRole, avatarUrl: params.avatarUrl, preferredTheme: params.preferredTheme,
+    role: finalRole, avatarUrl: params.avatarUrl ?? undefined, preferredTheme: params.preferredTheme,
   };
+}
+
+/**
+ * Keeps the stored picture in step with MIS (the /verify-mis poll). Returns true
+ * when it changed, so the caller can tell the browser.
+ */
+export async function setUserAvatar(userId: string, avatarUrl: string | null): Promise<boolean> {
+  const { rowCount } = await getPool().query(
+    'UPDATE users SET avatar_url = $2, updated_at = now() WHERE id = $1 AND avatar_url IS DISTINCT FROM $2',
+    [userId, avatarUrl]
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**
