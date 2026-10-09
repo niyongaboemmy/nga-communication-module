@@ -274,7 +274,7 @@ export const MeetHome: React.FC = () => {
                   />
                   <div
                     role="menu"
-                    className="absolute right-0 top-full z-30 mt-1.5 w-72 overflow-hidden rounded-2xl border border-border-light bg-white p-1 shadow-xl dark:border-border-dark/60 dark:bg-elevated-dark"
+                    className="absolute left-0 top-full z-30 mt-1.5 w-[min(18rem,calc(100vw-2rem))] overflow-hidden rounded-2xl lg:left-auto lg:right-0 border border-border-light bg-white p-1 shadow-xl dark:border-border-dark/60 dark:bg-elevated-dark"
                   >
                     {(["loggedIn", "public"] as const).map((c) => (
                       <button

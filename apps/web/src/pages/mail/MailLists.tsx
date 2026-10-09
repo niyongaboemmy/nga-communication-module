@@ -48,7 +48,7 @@ export const MailLists: React.FC = () => {
   const active = lists.find((l) => l.id === open);
 
   return (
-    <div className="mx-auto max-w-4xl p-6">
+    <div className="mx-auto max-w-4xl px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
       <button onClick={() => navigate('/app/mail')} className="mb-3 inline-flex items-center gap-1 text-sm text-blue-600"><ArrowLeft size={15} /> Back to mail</button>
       <PageHeader
         title="Distribution lists"

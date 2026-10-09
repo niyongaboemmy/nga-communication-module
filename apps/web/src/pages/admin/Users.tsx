@@ -64,7 +64,7 @@ export const Users: React.FC = () => {
   };
 
   return (
-    <div className="p-6">
+    <div className="px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
       <PageHeader
         title="Users"
         subtitle="Everyone who has signed in through the NGA Central MIS. Accounts appear here on first sign-in — they are never created in Tupo."
@@ -77,7 +77,7 @@ export const Users: React.FC = () => {
       )}
 
       <div className="mb-4 flex items-center gap-2">
-        <div className="relative flex-1 max-w-sm">
+        <div className="relative min-w-0 flex-1 sm:max-w-sm">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             value={query}
@@ -97,7 +97,7 @@ export const Users: React.FC = () => {
           <EmptyState title="No users yet" hint="Users appear here the first time they sign in through the MIS." />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="table-stack w-full text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-border-dark dark:bg-chrome-dark/50 dark:text-slate-400">
                 <tr>
                   <th className="px-4 py-3 font-medium">User</th>
@@ -110,11 +110,12 @@ export const Users: React.FC = () => {
               <tbody className="divide-y divide-slate-100 dark:divide-border-dark">
                 {users.map((u) => (
                   <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-card-dark/40">
-                    <td className="px-4 py-3">
+                    <td data-primary className="px-4 py-3">
                       <div className="font-medium text-slate-900 dark:text-slate-100">{u.name}</div>
-                      <div className="text-xs text-slate-400">{u.email || `MIS #${u.mis_user_id}`}</div>
+                      <div className="break-all text-xs text-slate-400 md:max-w-[16rem] md:truncate md:break-normal">{u.email || `MIS #${u.mis_user_id}`}</div>
                     </td>
-                    <td className="px-4 py-3">
+                    <td data-label="Role" className="px-4 py-3">
+                      <span className="inline-flex items-center">
                       {canManage ? (
                         <select
                           value={u.role_id ?? ''}
@@ -133,15 +134,16 @@ export const Users: React.FC = () => {
                         <span title="Set by an administrator; a MIS re-login will not change it"
                           className="ml-2 inline-flex align-middle text-slate-400"><UserCog size={12} /></span>
                       )}
+                      </span>
                     </td>
-                    <td className="px-4 py-3">
+                    <td data-label="Status" className="px-4 py-3">
                       <Badge tone={u.status === 'active' ? 'green' : 'red'}>{u.status}</Badge>
                     </td>
-                    <td className="px-4 py-3 text-xs text-slate-400 tabular-nums">
-                      {u.last_login_at ? new Date(u.last_login_at).toLocaleString() : '—'}
+                    <td data-label="Last sign-in" className="px-4 py-3 text-xs text-slate-400 tabular-nums">
+                      <span>{u.last_login_at ? new Date(u.last_login_at).toLocaleString() : '—'}</span>
                     </td>
                     {canManage && (
-                      <td className="px-4 py-3 text-right">
+                      <td data-actions className="px-4 py-3 text-right">
                         <Button variant="ghost" size="sm" onClick={() => toggleStatus(u)}>
                           {u.status === 'active'
                             ? <><Ban size={13} /> Suspend</>

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Menu, X, Mails } from 'lucide-react';
+import { Menu, X, Mails, PenSquare } from 'lucide-react';
 import { EmptyState, IconButton, Spinner } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { onSocket } from '../../lib/socket';
@@ -107,6 +107,16 @@ export const MailLayout: React.FC = () => {
         <div className="flex items-center gap-2 border-b border-border-light px-2 py-1.5 lg:hidden dark:border-border-dark/50">
           <IconButton label="Folders" size="sm" onClick={() => setDrawer(true)}><Menu size={18} /></IconButton>
           <span className="text-sm font-semibold">Mail</span>
+          {/* The folders drawer holds Compose too, but writing a message is
+              the main action on a phone — it must not be two taps away. */}
+          <button
+            type="button"
+            data-track="tupo.mail.compose_open"
+            onClick={() => setComposer({})}
+            className="ml-auto inline-flex h-9 items-center gap-1.5 rounded-full bg-blue-600 px-3.5 text-sm font-medium text-white shadow-sm shadow-blue-600/20 transition-colors hover:bg-blue-500 active:scale-[0.98]"
+          >
+            <PenSquare size={15} /> Compose
+          </button>
         </div>
         <div className="min-h-0 flex-1">
           <MailList

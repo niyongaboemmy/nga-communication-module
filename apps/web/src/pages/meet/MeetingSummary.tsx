@@ -137,7 +137,9 @@ export const MeetingSummary: React.FC = () => {
   return (
     <div className="tupo-aurora mx-auto max-w-7xl space-y-5 p-4 sm:p-6 lg:px-8">
       <header className="flex flex-wrap items-start gap-3">
-        <div className="min-w-0 flex-1">
+        {/* Full width on a phone, so the actions drop to their own row
+            instead of squeezing the title into a two-word column. */}
+        <div className="min-w-0 basis-full sm:basis-0 sm:flex-1">
           {/* The way back. This page is reached from four different places and
               offered no route out of any of them. */}
           <button
@@ -147,7 +149,7 @@ export const MeetingSummary: React.FC = () => {
             <ArrowLeft size={13} /> Meet
           </button>
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-2xl font-semibold tracking-tight text-text-primary-light dark:text-text-primary-dark">
+            <h1 className="min-w-0 break-words text-xl font-semibold tracking-tight text-text-primary-light sm:text-2xl dark:text-text-primary-dark">
               {minutes?.title || meeting.title}
             </h1>
             <StatusChip status={meeting.status} />
