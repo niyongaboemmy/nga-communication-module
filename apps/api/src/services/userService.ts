@@ -215,6 +215,15 @@ export async function setUserAvatar(userId: string, avatarUrl: string | null): P
   return (rowCount ?? 0) > 0;
 }
 
+/** Same as setUserAvatar, for the profile cover. */
+export async function setUserCover(userId: string, coverUrl: string | null): Promise<boolean> {
+  const { rowCount } = await getPool().query(
+    'UPDATE users SET cover_url = $2, updated_at = now() WHERE id = $1 AND cover_url IS DISTINCT FROM $2',
+    [userId, coverUrl]
+  );
+  return (rowCount ?? 0) > 0;
+}
+
 /**
  * Tupo's own copy of the appearance preference. The MIS remains the source of
  * truth across the app family; this row is what keeps the UI correct while the
