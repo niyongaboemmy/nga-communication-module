@@ -227,7 +227,7 @@ export const Reels: React.FC = () => {
       {loading ? (
         <div className="grid h-full place-items-center text-white"><Loader2 className="animate-spin" size={28} /></div>
       ) : items.length === 0 ? (
-        <div className="grid h-full place-items-center px-6 text-white">
+        <div className="dark grid h-full place-items-center px-6 text-white">
           <EmptyState title="No reels yet" hint="Be the first to share a short video." />
         </div>
       ) : (

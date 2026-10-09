@@ -144,7 +144,13 @@ const DockInner: React.FC = () => {
    * so `sm:${bottom}` produces a class at runtime that was never compiled and
    * silently does nothing.
    */
-  const launcherPos = shouldShowMini ? 'bottom-[13.5rem] right-5' : 'bottom-5 right-5';
+  /*
+   * Below md the shell has a bottom tab bar, so the launcher sits above it
+   * (bar height + the home-indicator inset) instead of on top of the "More" tab.
+   */
+  const launcherPos = shouldShowMini
+    ? 'bottom-[18.5rem] right-4 md:bottom-[13.5rem] md:right-5'
+    : 'bottom-[calc(4.5rem+env(safe-area-inset-bottom))] right-4 md:bottom-5 md:right-5';
   const panelPos = shouldShowMini
     ? 'sm:bottom-[13.5rem] sm:right-5'
     : 'sm:bottom-5 sm:right-5';
@@ -254,13 +260,14 @@ const DockInner: React.FC = () => {
         }
         title="Messages  (Ctrl/⌘ ⇧ M)"
         className={
-          `group fixed z-90 ${launcherPos} grid h-14 w-14 place-items-center rounded-full `
+          `group fixed z-90 ${launcherPos} grid h-12 w-12 place-items-center rounded-full md:h-14 md:w-14 `
           + 'bg-blue-600 text-white shadow-lg shadow-blue-600/25 outline-none transition-all duration-200 '
           + 'hover:scale-105 hover:bg-blue-500 focus-visible:ring-4 focus-visible:ring-blue-500/40 '
           + 'active:scale-95 dark:bg-blue-600 dark:hover:bg-blue-500 '
-          /* Hidden behind the sheet on a phone, where the panel is the screen
-             and a button floating over it would just cover a message. */
-          + (open ? 'hidden sm:grid' : '')
+          /* Hidden while the panel is open: on a phone the panel is the
+             screen, and on a desktop the launcher sits in the same corner and
+             would cover the panel's last row. The panel has its own close. */
+          + (open ? 'hidden' : '')
         }
       >
         <MessageSquare size={22} className="transition-transform duration-200 group-hover:-rotate-6" />

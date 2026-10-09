@@ -24,7 +24,7 @@ export const MailSettings: React.FC = () => {
   };
 
   return (
-    <div className="mx-auto max-w-2xl p-6">
+    <div className="mx-auto max-w-2xl px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
       <button onClick={() => navigate('/app/mail')} className="mb-3 inline-flex items-center gap-1 text-sm text-blue-600"><ArrowLeft size={15} /> Back to mail</button>
       <PageHeader title="Mail settings" subtitle="Your display name, signature and delivery preferences." />
 

@@ -29,7 +29,7 @@ export const AuditLog: React.FC = () => {
   }, []);
 
   return (
-    <div className="p-6">
+    <div className="px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
       <PageHeader
         title="Audit log"
         subtitle="Append-only record of privileged actions. Nothing in Tupo updates or deletes these rows."
@@ -41,35 +41,35 @@ export const AuditLog: React.FC = () => {
           <EmptyState title="No audit entries yet" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="table-stack w-full text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-border-dark dark:bg-chrome-dark/50 dark:text-slate-400">
                 <tr>
                   <th className="px-4 py-3 font-medium">When</th>
                   <th className="px-4 py-3 font-medium">Actor</th>
                   <th className="px-4 py-3 font-medium">Action</th>
                   <th className="px-4 py-3 font-medium">Target</th>
-                  <th className="px-4 py-3 font-medium">IP</th>
+                  <th className="hidden px-4 py-3 font-medium lg:table-cell">IP</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-border-dark">
                 {entries.map((e) => (
                   <tr key={e.id} className="hover:bg-slate-50 dark:hover:bg-card-dark/40">
-                    <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500 tabular-nums dark:text-slate-400">
-                      {new Date(e.created_at).toLocaleString()}
+                    <td data-label="When" className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                      <span>{new Date(e.created_at).toLocaleString()}</span>
                     </td>
-                    <td className="px-4 py-2.5 text-slate-700 dark:text-slate-200">
+                    <td data-label="Actor" className="px-4 py-2.5 text-slate-700 dark:text-slate-200">
                       {e.actor_name ? (
                         <span className="inline-flex items-center gap-2">
                           <Avatar name={e.actor_name} src={e.actor_avatar ?? undefined} size={24} tintKey={e.actor_id ?? undefined} />
                           {e.actor_name}
                         </span>
-                      ) : '—'}
+                      ) : <span>—</span>}
                     </td>
-                    <td className="px-4 py-2.5"><Badge tone={TONE[e.action] ?? 'slate'}>{e.action}</Badge></td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-slate-400">
-                      {e.target_type ? `${e.target_type}:${e.target_id}` : '—'}
+                    <td data-label="Action" className="px-4 py-2.5"><Badge tone={TONE[e.action] ?? 'slate'}>{e.action}</Badge></td>
+                    <td data-label="Target" className="px-4 py-2.5 font-mono text-xs text-slate-400">
+                      <span>{e.target_type ? `${e.target_type}:${e.target_id}` : '—'}</span>
                     </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-slate-400">{e.ip_address ?? '—'}</td>
+                    <td data-label="IP" {...(e.ip_address ? {} : { 'data-empty': '' })} className="hidden px-4 py-2.5 font-mono text-xs text-slate-400 lg:table-cell"><span>{e.ip_address ?? '—'}</span></td>
                   </tr>
                 ))}
               </tbody>

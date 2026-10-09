@@ -89,11 +89,11 @@ export const MailList: React.FC<Props> = ({
           </>
         ) : (
           <>
-            <h2 className="text-sm font-semibold">{title}</h2>
-            <div className="relative ml-auto hidden sm:block">
+            <h2 className="shrink-0 text-sm font-semibold">{title}</h2>
+            <div className="relative ml-auto min-w-0">
               <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-secondary-light" />
               <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search mail"
-                className="w-44 rounded-full border border-border-light bg-transparent py-1.5 pl-8 pr-3 text-xs outline-none focus:w-56 focus:border-blue-400 dark:border-border-dark/60" />
+                className="w-36 max-w-full rounded-full border border-border-light bg-transparent py-1.5 pl-8 pr-3 text-xs outline-none transition-[width] duration-150 focus:w-48 focus:border-blue-400 sm:w-44 sm:focus:w-56 dark:border-border-dark/60" />
             </div>
             <IconButton label="Refresh" size="sm" onClick={() => load(true)}><RefreshCw size={15} /></IconButton>
           </>
