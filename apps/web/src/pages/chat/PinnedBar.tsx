@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Pin, X, ChevronDown } from 'lucide-react';
-import { IconButton } from '../../components/ui';
+import { IconButton, Avatar } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useChat } from './ChatProvider';
 import * as chatApi from './api';
@@ -56,6 +56,7 @@ export const PinnedBar: React.FC<{ conversation: Conversation }> = ({ conversati
               onClick={() => void jumpTo(m.id)}
               className="min-w-0 flex-1 truncate text-left text-xs text-text-primary-light hover:underline dark:text-text-primary-dark"
             >
+              <Avatar name={m.senderName ?? '?'} src={m.senderAvatarUrl ?? undefined} size={16} className="mr-1.5 inline-flex align-middle" />
               <span className="font-medium">{m.senderName}</span>
               <span className="mx-1 opacity-50">·</span>
               <span className="opacity-80">{m.body ?? 'Attachment'}</span>
