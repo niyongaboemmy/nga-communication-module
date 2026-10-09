@@ -255,3 +255,6 @@ export async function notifyAndPush(
  * `syncMeeting` means nothing next to `notify` without it.
  */
 export * as reminders from './reminders.js';
+
+/** Everyone's NGA profile photo + cover, refreshed from MIS by the worker. */
+export * as profileMedia from './profileMedia.js';

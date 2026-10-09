@@ -2,10 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { Search, UserCog, Ban, CheckCircle2 } from 'lucide-react';
 import { apiGet, apiPut } from '../../lib/api';
 import { usePermissions } from '../../hooks/usePermissions';
-import { Button, Card, Badge, PageHeader, Spinner, EmptyState } from '../../components/ui';
+import { Avatar, Button, Card, Badge, PageHeader, Spinner, EmptyState } from '../../components/ui';
 
 interface RosterUser {
-  id: string; mis_user_id: string; name: string; email: string; role: string; status: string;
+  id: string; mis_user_id: string; name: string; email: string; avatar_url: string | null; role: string; status: string;
   role_id: number | null; role_name: string | null; role_level: string | null;
   role_assigned_by_admin: boolean; last_login_at: string | null;
 }
@@ -111,8 +111,13 @@ export const Users: React.FC = () => {
                 {users.map((u) => (
                   <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-card-dark/40">
                     <td className="px-4 py-3">
-                      <div className="font-medium text-slate-900 dark:text-slate-100">{u.name}</div>
-                      <div className="text-xs text-slate-400">{u.email || `MIS #${u.mis_user_id}`}</div>
+                      <div className="flex items-center gap-3">
+                        <Avatar name={u.name} src={u.avatar_url ?? undefined} size={36} tintKey={u.id} preview previewCaption={u.role_name ?? u.role} />
+                        <div className="min-w-0">
+                          <div className="font-medium text-slate-900 dark:text-slate-100">{u.name}</div>
+                          <div className="text-xs text-slate-400">{u.email || `MIS #${u.mis_user_id}`}</div>
+                        </div>
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       {canManage ? (

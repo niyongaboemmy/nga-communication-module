@@ -3121,6 +3121,8 @@ export interface UserProfile {
   id: string;
   name: string;
   avatarUrl: string | null;
+  /** Wide profile cover from NGA MIS (null = none: the card shows the system blue). */
+  coverUrl: string | null;
   role: string;
   title: string | null;
   pronouns: string | null;
@@ -3138,12 +3140,12 @@ export interface UserProfile {
 
 export async function getProfile(viewerId: string, userId: string): Promise<UserProfile> {
   const { rows } = await getPool().query<{
-    id: string; name: string; avatar_url: string | null; role: string;
+    id: string; name: string; avatar_url: string | null; cover_url: string | null; role: string;
     title: string | null; pronouns: string | null; timezone: string | null;
     status_emoji: string | null; status_text: string | null; status_expires_at: string | null;
     last_seen_at: Date | null;
   }>(
-    `SELECT id, name, avatar_url, role, title, pronouns, timezone,
+    `SELECT id, name, avatar_url, cover_url, role, title, pronouns, timezone,
             status_emoji, status_text, status_expires_at, last_seen_at
        FROM users WHERE id = $1 AND status = 'active'`,
     [userId],
@@ -3160,6 +3162,7 @@ export async function getProfile(viewerId: string, userId: string): Promise<User
     id: u.id,
     name: u.name,
     avatarUrl: u.avatar_url,
+    coverUrl: u.cover_url,
     role: u.role,
     title: u.title,
     pronouns: u.pronouns,

@@ -60,6 +60,16 @@ export function misAvatarUrl(data: unknown): string | null | undefined {
   return undefined;
 }
 
+/** The profile cover's large (1920x640) link, with the same null/undefined meaning. */
+export function misCoverUrl(data: unknown): string | null | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const d = data as { cover?: { lg?: unknown } | null; user?: { cover_url?: unknown } };
+  const valid = (u: unknown) => (typeof u === 'string' && /^https?:\/\//.test(u) ? u : null);
+  if (d.cover !== undefined) return d.cover ? valid(d.cover.lg) : null;
+  if (d.user && d.user.cover_url !== undefined) return valid(d.user.cover_url);
+  return undefined;
+}
+
 /** Is this MIS session still alive? Used by the /verify-mis poll. */
 export async function verifyMisSession(misToken: string): Promise<'valid' | 'invalid' | 'unreachable'> {
   return (await verifyMisSessionDetailed(misToken)).state;
@@ -74,6 +84,7 @@ export async function verifyMisSessionDetailed(misToken: string): Promise<{
   state: 'valid' | 'invalid' | 'unreachable'; accessVersion: number | null;
   /** The current profile picture, when this MIS reports one (see misAvatarUrl). */
   avatarUrl?: string | null;
+  coverUrl?: string | null;
 }> {
   try {
     // Bounded: a hung MIS must not hold the caller (the Home relay gives up
@@ -85,13 +96,15 @@ export async function verifyMisSessionDetailed(misToken: string): Promise<{
     if (!response.ok) return { state: 'invalid', accessVersion: null };
     let accessVersion: number | null = null;
     let avatarUrl: string | null | undefined;
+    let coverUrl: string | null | undefined;
     try {
       const body = (await response.json()) as { data?: { access_version?: unknown } };
       const v = Number(body?.data?.access_version);
       accessVersion = body?.data?.access_version != null && Number.isFinite(v) ? v : null;
       avatarUrl = misAvatarUrl(body?.data);
+      coverUrl = misCoverUrl(body?.data);
     } catch { /* older MIS / empty body: no version */ }
-    return { state: 'valid', accessVersion, avatarUrl };
+    return { state: 'valid', accessVersion, avatarUrl, coverUrl };
   } catch {
     return { state: 'unreachable', accessVersion: null };
   }

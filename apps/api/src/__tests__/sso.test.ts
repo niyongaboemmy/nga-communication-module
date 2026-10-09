@@ -254,3 +254,40 @@ describe('central NGA profile picture', () => {
     expect(res.body.data.user.avatarUrl).toBeUndefined();
   });
 });
+
+describe('central NGA profile cover', () => {
+  const COVER = { version: 1, md: 'https://api.amashuri.com/covers/991/1/md.webp?s=c', lg: 'https://api.amashuri.com/covers/991/1/lg.webp?s=c' };
+  const meWithCover = (cover: unknown) => ({
+    success: true,
+    data: { user: { user_id: 991 }, cover, profile: { name: 'Aline Uwase', email: 'aline@amashuri.com' }, permissions: [] },
+  });
+  const storedCover = async () =>
+    (await getPool().query("SELECT cover_url FROM users WHERE mis_user_id = '991'")).rows[0]?.cover_url ?? null;
+
+  it('stores the MIS cover at sign-in, and the profile card reads it', async () => {
+    mockMis({ meBody: meWithCover(COVER) });
+    const res = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(res.status).toBe(200);
+    expect(await storedCover()).toBe(COVER.lg);
+    const chat = await import('@tupo/chat');
+    const profile = await chat.getProfile(res.body.data.user.id, res.body.data.user.id);
+    expect(profile.coverUrl).toBe(COVER.lg);
+  });
+
+  it('the verify-mis poll follows a cover changed or removed in MIS', async () => {
+    mockMis({ meBody: meWithCover(null) });
+    const login = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(await storedCover()).toBeNull();
+    const base = globalThis.fetch as any;
+    const verifyWith = (cover: unknown) => vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) =>
+      String(input).endsWith('/auth/verify')
+        ? new Response(JSON.stringify({ success: true, data: { userId: 991, cover } }), { status: 200 })
+        : base(input, init)));
+    verifyWith(COVER);
+    await request(app).get('/api/sso/verify-mis').set('Authorization', `Bearer ${login.body.data.token}`);
+    expect(await storedCover()).toBe(COVER.lg);
+    verifyWith(null);
+    await request(app).get('/api/sso/verify-mis').set('Authorization', `Bearer ${login.body.data.token}`);
+    expect(await storedCover()).toBeNull();
+  });
+});

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { AvatarLightbox } from './AvatarPreview';
 
 /**
  * Shared primitives, styled to the NGA design language used by the Central MIS
@@ -178,15 +179,41 @@ export const Avatar: React.FC<{
    */
   tintKey?: string;
   className?: string;
-}> = ({ name, src, size = 36, presence, shape = 'circle', tintKey, className = '' }) => {
+  /**
+   * Click (or Enter) opens the photo full size. Only where the avatar is not itself
+   * part of a clickable row; ignored when there is no photo to show.
+   */
+  preview?: boolean;
+  /** Line under the name in the preview (e.g. their role). */
+  previewCaption?: string;
+}> = ({ name, src, size = 36, presence, shape = 'circle', tintKey, className = '', preview = false, previewCaption }) => {
   const radius = shape === 'circle' ? 'rounded-full' : 'rounded-xl';
+  const [open, setOpen] = useState(false);
   // A `src` that fails to load (an expired ticket, a dropped connection, a
   // deleted file) must fall back to the initials disc below — never a bare
   // broken-image icon, which is all a plain `<img>` gives you on its own.
   const [failed, setFailed] = useState(false);
   useEffect(() => { setFailed(false); }, [src]);
+  const canPreview = preview && !!src && !failed;
+  const openPreview = (e: React.SyntheticEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setOpen(true);
+  };
   return (
-    <span className={`relative inline-flex shrink-0 ${className}`} style={{ width: size, height: size }}>
+    <span
+      className={`relative inline-flex shrink-0 ${canPreview ? 'cursor-zoom-in rounded-full transition hover:brightness-105 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2' : ''} ${className}`}
+      style={{ width: size, height: size }}
+      {...(canPreview
+        ? {
+            role: 'button',
+            tabIndex: 0,
+            'aria-label': `View ${name}'s photo`,
+            onClick: openPreview,
+            onKeyDown: (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') openPreview(e); },
+          }
+        : {})}
+    >
       {src && !failed ? (
         <img
           src={src}
@@ -212,6 +239,9 @@ export const Avatar: React.FC<{
           /* Scales with the avatar so a 24px avatar does not get a 12px dot. */
           style={{ width: Math.max(8, size * 0.28), height: Math.max(8, size * 0.28) }}
         />
+      )}
+      {open && src && (
+        <AvatarLightbox src={src} name={name} caption={previewCaption} onClose={() => setOpen(false)} />
       )}
     </span>
   );
