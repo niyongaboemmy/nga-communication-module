@@ -10,7 +10,7 @@ import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
 import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './jobs/mail.js';
 import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
-import { reminders } from '@tupo/notify';
+import { reminders, profileMedia } from '@tupo/notify';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -44,6 +44,16 @@ const worker = new Worker(
       // Post-meeting minutes, action items, chapters and lesson follow-up.
       // Slow (four model calls) and not worth making anyone wait for, which is
       // exactly what the queue is for.
+      // Everyone's NGA photo + cover from MIS, so lists show people as they are now
+      // rather than as they were the last time they signed in to Tupo.
+      case 'avatars:sync': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        const result = await profileMedia.runProfileMediaSync();
+        if (result.errors.length) console.warn('[worker] avatars:sync —', result.errors.slice(0, 3).join(' | '));
+        return result;
+      }
+
       case 'meet:wrap-up': {
         processed++;
         lastJobAt = new Date().toISOString();
@@ -219,6 +229,26 @@ if (reminderCfg.enabled) {
   }).catch((err) => console.error('[worker] could not queue the boot reminders sync:', err.message));
 } else {
   console.log(`[worker] reminders sync disabled: ${reminderCfg.disabledReason}`);
+}
+
+/**
+ * Profile photos and covers from NGA MIS, every 15 minutes plus once a minute after
+ * boot. A photo changed in MIS reaches the person's own Tupo within a minute (their
+ * verify-mis poll); this is what brings it to everyone else's lists. Needs the same
+ * SSO client credentials as the reminders sync; without them the job is a no-op.
+ */
+if (reminderCfg.clientId && reminderCfg.clientSecret && process.env.NODE_ENV !== 'test') {
+  queue.add('avatars:sync', {}, {
+    jobId: 'avatars-sync',
+    repeat: { every: 15 * 60_000 },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  }).catch((err) => console.error('[worker] could not register the avatars sync:', err.message));
+  queue.add('avatars:sync', { boot: true }, {
+    delay: 60_000,
+    removeOnComplete: true,
+    removeOnFail: 10,
+  }).catch((err) => console.error('[worker] could not queue the boot avatars sync:', err.message));
 }
 
 worker.on('ready', () => console.log('[worker] connected to redis, waiting for jobs'));

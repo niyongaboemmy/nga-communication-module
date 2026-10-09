@@ -11,7 +11,8 @@ router.get('/', authorizePermission('AUDIT_VIEW'), async (req: Request, res: Res
   const limit = Math.min(Number(req.query.limit ?? 100), 500);
   const { rows } = await getPool().query(
     `SELECT a.id, a.action, a.target_type, a.target_id, a.metadata,
-            a.ip_address, a.created_at, u.name AS actor_name, u.email AS actor_email
+            a.ip_address, a.created_at, u.name AS actor_name, u.email AS actor_email,
+            u.avatar_url AS actor_avatar, a.actor_id
        FROM audit_log a
        LEFT JOIN users u ON u.id = a.actor_id
       ORDER BY a.created_at DESC

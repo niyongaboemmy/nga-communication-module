@@ -23,7 +23,9 @@ export const ConversationAvatar: React.FC<{
   /** Tailwind radius for the non-DM tile; people are always round. */
   radius?: string;
   className?: string;
-}> = ({ conversation: c, size, fallback, radius = 'rounded-xl', className = '' }) => {
+  /** For a DM: click opens the person's photo full size (see Avatar `preview`). */
+  preview?: boolean;
+}> = ({ conversation: c, size, fallback, radius = 'rounded-xl', className = '', preview = false }) => {
   // A DM shows the peer's own avatar, which is a plain URL — no ticket needed,
   // so don't mint one.
   const { url } = useMediaUrl(c.type === 'dm' ? null : c.avatarFileId);
@@ -36,6 +38,7 @@ export const ConversationAvatar: React.FC<{
         size={size}
         presence={toPresence(c.peer?.presence)}
         className={className}
+        preview={preview}
       />
     );
   }

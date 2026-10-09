@@ -7,12 +7,12 @@ import type { SessionClaims } from '@tupo/shared';
 import { getPool, resolveUserPermissions } from '@tupo/db';
 import { config } from '../config.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
-import { exchangeCode, fetchMe, verifyMisSessionDetailed } from '../services/misClient.js';
+import { exchangeCode, fetchMe, misAvatarUrl, misCoverUrl, verifyMisSessionDetailed } from '../services/misClient.js';
 import { accessMode } from '../access/mode.js';
 import { getAccessSnapshot, noteAccessVersion } from '../access/snapshot.js';
 import { academicFromSnapshot, placementDiffers, syncAccessProfile } from '../access/profileSync.js';
 import { recordShadowDiff } from '../access/shadow.js';
-import { upsertMisUser, audit, type MisAcademic } from '../services/userService.js';
+import { upsertMisUser, audit, setUserAvatar, setUserCover, type MisAcademic } from '../services/userService.js';
 
 /**
  * Fold the MIS `/users/me` payload into the academic placement Tupo stores.
@@ -157,7 +157,12 @@ router.post('/exchange', async (req: Request, res: Response) => {
     );
     const name = String(profile.name ?? misUser.name ?? misUser.username ?? 'Tupo User');
     const email = String(profile.email ?? misUser.email ?? '');
-    const avatarUrl = (profile.avatar_url ?? misUser.avatar_url) as string | undefined;
+    // The central NGA MIS picture: the live /users/me read wins over the exchange
+    // payload; null (MIS has none) clears ours.
+    const fromMe = misAvatarUrl(me);
+    const avatarUrl = fromMe !== undefined ? fromMe : misAvatarUrl(body.data);
+    const coverFromMe = misCoverUrl(me);
+    const coverUrl = coverFromMe !== undefined ? coverFromMe : misCoverUrl(body.data);
 
     // Appearance follows the MIS. The hydrated `/users/me` copy is preferred
     // over the one baked into the exchange payload because it is read live,
@@ -186,6 +191,10 @@ router.post('/exchange', async (req: Request, res: Response) => {
       forceAdmin,
       academic,
     });
+
+    if (coverUrl !== undefined) {
+      await setUserCover(user.id, coverUrl).catch((err) => console.error('[sso] cover sync failed:', err));
+    }
 
     if (snapshot) {
       // Contact-policy inputs (new columns only; nothing legacy reads them).
@@ -273,7 +282,7 @@ router.get('/verify-mis', authMiddleware, async (req: Request, res: Response) =>
   const misToken = (req as AuthenticatedRequest).user?.misToken;
   if (!misToken) return res.status(401).json(fail('No MIS session on this token.'));
 
-  const { state, accessVersion } = await verifyMisSessionDetailed(misToken);
+  const { state, accessVersion, avatarUrl, coverUrl } = await verifyMisSessionDetailed(misToken);
   if (state === 'invalid') return res.status(401).json(fail('Your MIS session has ended.'));
   // Access control v2: a new access_version means the user's grants changed —
   // drop the cached snapshot so the next check re-fetches it.
@@ -281,6 +290,17 @@ router.get('/verify-mis', authMiddleware, async (req: Request, res: Response) =>
   if (misUserId && accessVersion !== null) noteAccessVersion(misUserId, accessVersion);
   // 'unreachable' is a network blip, not a logout — don't sign everyone out
   // over it; the next poll settles the question.
+  // The poll carries the current NGA profile picture: store it, and hand it to the
+  // browser so the shell follows a change made in MIS within a minute.
+  if (state === 'valid' && coverUrl !== undefined) {
+    await setUserCover((req as AuthenticatedRequest).user!.id, coverUrl)
+      .catch((err) => console.error('[sso] cover sync failed:', err));
+  }
+  if (state === 'valid' && avatarUrl !== undefined) {
+    const userId = (req as AuthenticatedRequest).user!.id;
+    await setUserAvatar(userId, avatarUrl).catch((err) => console.error('[sso] avatar sync failed:', err));
+    return res.json(ok({ valid: true, degraded: false, avatarUrl }));
+  }
   return res.json(ok({ valid: true, degraded: state === 'unreachable' }));
 });
 

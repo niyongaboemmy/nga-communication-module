@@ -7,6 +7,7 @@ import { Logo } from '../components/Logo';
 import { useAuth } from '../context/AuthContext';
 import { usePermissions } from '../hooks/usePermissions';
 import { Avatar, IconButton, UnreadBadge } from '../components/ui';
+import { avatarPreviewOpen } from '../components/AvatarPreview';
 import { AppsSwitcher } from '../components/shell/AppsSwitcher';
 import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
@@ -209,9 +210,10 @@ const UserMenu: React.FC<{ presence: Presence }> = ({ presence }) => {
   useEffect(() => {
     if (!open) return;
     const onClick = (e: MouseEvent) => {
+      if (avatarPreviewOpen()) return; // clicks in the photo preview belong to it
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !avatarPreviewOpen()) setOpen(false); };
     document.addEventListener('mousedown', onClick);
     document.addEventListener('keydown', onKey);
     return () => {
@@ -251,7 +253,7 @@ const UserMenu: React.FC<{ presence: Presence }> = ({ presence }) => {
           className="animate-pop absolute right-0 z-60 mt-2 w-60 origin-top-right rounded-2xl border border-border-light bg-white p-1.5   dark:border-border-dark/50 dark:bg-elevated-dark dark:"
         >
           <div className="flex items-center gap-3 rounded-xl px-2.5 py-2.5">
-            <Avatar name={user.name} src={user.avatarUrl} size={38} />
+            <Avatar name={user.name} src={user.avatarUrl} size={38} preview previewCaption={roleName ?? undefined} />
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
                 {user.name}

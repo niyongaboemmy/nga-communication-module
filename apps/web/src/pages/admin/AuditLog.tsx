@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { apiGet } from '../../lib/api';
-import { Card, PageHeader, Spinner, EmptyState, Badge } from '../../components/ui';
+import { Card, PageHeader, Spinner, EmptyState, Badge, Avatar } from '../../components/ui';
 
 interface AuditEntry {
   id: string; action: string; target_type: string | null; target_id: string | null;
   metadata: Record<string, unknown>; ip_address: string | null; created_at: string;
   actor_name: string | null; actor_email: string | null;
+  actor_avatar?: string | null; actor_id?: string | null;
 }
 
 const TONE: Record<string, 'blue' | 'green' | 'amber' | 'red' | 'slate'> = {
@@ -56,7 +57,14 @@ export const AuditLog: React.FC = () => {
                     <td data-label="When" className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500 tabular-nums dark:text-slate-400">
                       <span>{new Date(e.created_at).toLocaleString()}</span>
                     </td>
-                    <td data-label="Actor" className="px-4 py-2.5 text-slate-700 dark:text-slate-200"><span>{e.actor_name ?? '—'}</span></td>
+                    <td data-label="Actor" className="px-4 py-2.5 text-slate-700 dark:text-slate-200">
+                      {e.actor_name ? (
+                        <span className="inline-flex items-center gap-2">
+                          <Avatar name={e.actor_name} src={e.actor_avatar ?? undefined} size={24} tintKey={e.actor_id ?? undefined} />
+                          {e.actor_name}
+                        </span>
+                      ) : <span>—</span>}
+                    </td>
                     <td data-label="Action" className="px-4 py-2.5"><Badge tone={TONE[e.action] ?? 'slate'}>{e.action}</Badge></td>
                     <td data-label="Target" className="px-4 py-2.5 font-mono text-xs text-slate-400">
                       <span>{e.target_type ? `${e.target_type}:${e.target_id}` : '—'}</span>
