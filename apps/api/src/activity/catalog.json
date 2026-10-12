@@ -8,7 +8,7 @@
 
     { "key": "tupo.launch", "label": "Opening the app", "module": "Home", "patterns": ["/app"] },
 
-    { "key": "tupo.chat", "label": "Chat", "module": "Chat", "patterns": ["/app/chat"] },
+    { "key": "tupo.chat", "label": "Chat", "module": "Chat", "patterns": ["/app/chat", "/app/chat/invite/:code", "/app/chat/:conversationId/:messageId?"] },
 
     { "key": "tupo.feed.home", "label": "Home feed", "module": "Feed", "patterns": ["/app/feed"] },
     { "key": "tupo.feed.reels", "label": "Reels", "module": "Feed", "patterns": ["/app/feed/reels/:reelId?"] },

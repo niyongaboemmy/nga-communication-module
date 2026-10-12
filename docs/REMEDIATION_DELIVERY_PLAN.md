@@ -402,3 +402,13 @@ Sizes are t-shirt sizes (S, M, L, XL); refine them during grooming.
 3. **Leads:** assign named owners to workstreams A to G and create the tracker issues for Phase 0.
 4. **QA:** set up the staging run of the existing `verify:*` suites and the `gap-*` probes as the baseline.
 5. **Kick-off on Tuesday 13 Oct:** walk through Phase 0, agree estimates, start A-01, A-02 and G-01 first.
+
+---
+
+## 15. Follow-ups found during delivery
+
+| Item | Why it is open | When |
+|---|---|---|
+| Upgrade `nodemailer` 6.10.1 → 10.x (npm audit: high) | The only fixed release, 10.1.0, was published 10 Oct 2026 — a major bump too new to adopt immediately. Usage is `createTransport` + `sendMail` only (`packages/mail/src/smtp.ts`). | From 24 Oct 2026; then raise the CI audit gate to `--audit-level=high`. |
+| Flaky API tests (accessV2, homeSummary, reels, rateLimit) | Fail intermittently in full runs, pass alone; also flaky on the pre-remediation baseline (timing-sensitive caches/rate windows). | Phase 1, with G-03. |
+| `verify:chat:ui` upload/Files-tab checks | Expectations drifted (tray shows a thumbnail, not the file name); failed before remediation too. | Phase 1, with G-03. |
