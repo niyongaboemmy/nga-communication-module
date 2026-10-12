@@ -556,7 +556,7 @@ async function fanOutNewMessage(
   for (const [userId, c] of Object.entries(counts)) {
     emitToUsers([userId], 'conversation:unread', {
       conversationId, unread: c.unread, unreadMentions: c.unreadMentions,
-      lastReadSeq: c.lastReadSeq,
+      lastReadSeq: c.lastReadSeq, lastSeq: c.lastSeq,
     });
   }
 }
@@ -566,7 +566,9 @@ router.post('/conversations/:id/read', wrap(async (req, res) => {
   const id = req.params.id!;
   await chat.requireMembership(me.id, id);
 
-  const seq = Number(req.body?.seq);
+  // `latest` marks read to the conversation's end as the server knows it —
+  // for "Mark as read" on a row whose newest seq this client never saw.
+  const seq = req.body?.latest === true ? await chat.lastSeqOf(id) : Number(req.body?.seq);
   if (!Number.isFinite(seq)) return res.status(400).json(fail('A sequence number is required.'));
 
   const result = await chat.advanceRead(me.id, id, seq);
@@ -726,6 +728,11 @@ router.post('/conversations/:id/messages/:messageId/replies',
       // main flow, even those who never opened the thread.
       if (root) emitToConversation(id, 'message:updated', { conversationId: id, message: root });
 
+      // Followers' "N new replies" markers. A thread reply never moves anyone's
+      // conversation badge (see unreadCountSql), so this is the only counter it
+      // touches — and it goes to each follower's own room, open or not.
+      await pushThreadUnread(id, root?.id ?? messageId);
+
       /*
        * A thread reply notifies the people who have written in it.
        *
@@ -733,15 +740,13 @@ router.post('/conversations/:id/messages/:messageId/replies',
        * means threads notify nobody; notifying the whole channel means threads
        * are no quieter than the room, which is the one thing they exist to be.
        */
-      const followers = await chat.threadParticipants(id, root?.id ?? messageId);
+      const rootKey = root?.id ?? messageId;
       const deniedMentions = await contactDenied(me, reply.mentionedUserIds, 'mention');
-      await chat.notifyNewMessage(reply.message, {
+      await chat.notifyThreadReply(reply.message, {
         conversationName: membership.name ?? 'a conversation',
-        conversationType: membership.type,
-        mentionedUserIds: [...new Set([
-          ...reply.mentionedUserIds.filter((u) => !deniedMentions.has(u)), ...followers])],
-        broadcast: reply.broadcast,
-        senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
+        rootId: rootKey,
+        followerIds: await chat.threadFollowers(id, rootKey),
+        mentionedUserIds: reply.mentionedUserIds.filter((u) => !deniedMentions.has(u)),
       }).catch(() => {});
     }
 
@@ -757,6 +762,55 @@ router.post('/conversations/:id/messages/:messageId/replies',
       message: reply.message, root, duplicate: !reply.created,
     }));
   }));
+
+/** Send every follower of a thread their own new-reply count for it. */
+async function pushThreadUnread(conversationId: string, rootId: string): Promise<void> {
+  const counts = await chat.threadUnreadFor(conversationId, rootId).catch(() => []);
+  for (const c of counts) {
+    emitToUsers([c.userId], 'thread:unread', { conversationId, rootId, unread: c.unread });
+  }
+}
+
+/** The reader has seen a thread up to `seq` (the ThreadPanel, scrolled to its end). */
+router.post('/conversations/:id/threads/:rootId/read', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, rootId } = req.params as { id: string; rootId: string };
+  await chat.requireMembership(me.id, id);
+  const seq = Number(req.body?.seq);
+  if (!Number.isFinite(seq) || seq < 0) return res.status(400).json(fail('A sequence number is required.'));
+  const lastReadSeq = await chat.markThreadRead(me.id, id, rootId, seq);
+  // Every device this person owns drops the marker together.
+  emitToUsers([me.id], 'thread:unread', { conversationId: id, rootId, unread: 0 });
+  res.json(ok({ lastReadSeq }));
+}));
+
+/** New-reply counts for the threads in one conversation, keyed by root id. */
+router.get('/conversations/:id/threads/unread', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id } = req.params as { id: string };
+  await chat.requireMembership(me.id, id);
+  res.json(ok({ threads: await chat.threadUnreadIn(me.id, id) }));
+}));
+
+/** The Threads inbox: every thread this person follows, newest activity first. */
+router.get('/threads', wrap(async (req, res) => {
+  const me = actor(req);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  res.json(ok({ threads: await chat.followedThreads(me.id, limit) }));
+}));
+
+/** "Mark as unread" — bring a conversation back to the reader's attention. */
+router.post('/conversations/:id/unread', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id } = req.params as { id: string };
+  await chat.requireMembership(me.id, id);
+  const result = await chat.markConversationUnread(me.id, id);
+  emitToUsers([me.id], 'conversation:unread', {
+    conversationId: id, unread: result.unread, unreadMentions: result.unreadMentions,
+    lastReadSeq: result.lastReadSeq,
+  });
+  res.json(ok(result));
+}));
 
 /* ────────────────────────────────────────────────────────────────────────── *
  * Pins

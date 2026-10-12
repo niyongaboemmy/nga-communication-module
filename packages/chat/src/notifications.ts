@@ -135,6 +135,70 @@ export async function notifyNewMessage(
   return notified;
 }
 
+/**
+ * A reply in a thread notifies the thread, not the room (FR-MSG-6).
+ *
+ * Followers — the root's author, everyone who has replied, everyone who has
+ * opened it — hear "replied in a thread". Someone actually @mentioned hears
+ * "mentioned you", follower or not. Nobody else in the conversation is pinged:
+ * notifying the whole channel would make threads no quieter than the room,
+ * which is the one thing they exist to be. Mutes are honoured as everywhere.
+ */
+export async function notifyThreadReply(
+  message: WireMessage,
+  opts: {
+    conversationName: string;
+    rootId: string;
+    followerIds: string[];
+    mentionedUserIds: string[];
+  },
+): Promise<string[]> {
+  const candidates = [...new Set([...opts.followerIds, ...opts.mentionedUserIds])]
+    .filter((id) => id !== message.senderId);
+  if (!candidates.length) return [];
+
+  const { rows } = await getPool().query<Recipient>(
+    `SELECT user_id, notification, muted_until
+       FROM conversation_members
+      WHERE conversation_id = $1 AND user_id = ANY($2::text[]) AND left_at IS NULL`,
+    [message.conversationId, candidates],
+  );
+  const now = Date.now();
+  const mentioned = new Set(opts.mentionedUserIds);
+  const mentions: string[] = [];
+  const followers: string[] = [];
+  for (const r of rows) {
+    if (r.muted_until && new Date(r.muted_until).getTime() > now) continue;
+    if (r.notification === 'none') continue;
+    if (mentioned.has(r.user_id)) mentions.push(r.user_id);
+    else followers.push(r.user_id);
+  }
+
+  const preview = previewFor(message);
+  const link = `/app/chat?c=${message.conversationId}&thread=${opts.rootId}`;
+  if (mentions.length) {
+    await notifyAndPush(mentions, {
+      kind: 'chat.mention',
+      title: `${message.senderName} mentioned you in a thread`,
+      body: preview,
+      link,
+      subjectType: 'thread',
+      subjectId: opts.rootId,
+    });
+  }
+  if (followers.length) {
+    await notifyAndPush(followers, {
+      kind: 'chat.thread',
+      title: `${message.senderName} replied in a thread`,
+      body: `${opts.conversationName}: ${preview}`,
+      link,
+      subjectType: 'thread',
+      subjectId: opts.rootId,
+    });
+  }
+  return [...mentions, ...followers];
+}
+
 /** A mention added by editing an existing message (FR-MSG-8 meets FR-MSG-4). */
 export async function notifyMention(
   message: WireMessage, userIds: string[], conversationName: string,

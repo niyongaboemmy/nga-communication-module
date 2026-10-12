@@ -169,7 +169,12 @@ export interface ChatServerToClientEvents {
    * what makes reading on your phone clear the badge on your laptop.
    */
   'conversation:unread': (
-    p: { conversationId: string; unread: number; unreadMentions: number; lastReadSeq: number },
+    p: {
+      conversationId: string; unread: number; unreadMentions: number; lastReadSeq: number;
+      /** The conversation's newest seq, so a client that is not subscribed to
+       *  the room still knows what "read to the end" means. */
+      lastSeq?: number;
+    },
   ) => void;
 
   /** Metadata changed (topic, name, archive, member count) or a conversation
@@ -202,6 +207,13 @@ export interface ChatServerToClientEvents {
   /** A reply landed in a thread. Delivered separately from `message:new` so a
    *  client can update the thread pane without the reply appearing in the main
    *  flow, which is the entire point of a thread. */
+  /**
+   * This user's count of new replies in one thread they follow moved
+   * (delivered on `user:<id>`). Drives the "N new replies" marker and the
+   * Threads inbox; thread replies never move the conversation's own badge.
+   */
+  'thread:unread': (p: { conversationId: string; rootId: string; unread: number }) => void;
+
   'thread:reply': (
     p: { conversationId: string; rootId: string; message: WireMessage },
   ) => void;

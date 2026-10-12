@@ -156,6 +156,9 @@ describe('permissions', () => {
 
     // Institutional flags stay with the institution, owner or not.
     expect((await api(owner.token).patch(`/api/feed/pages/${pageId}`, { verified: true })).status).toBe(403);
+
+    // Leave the page with the one owner the later tests assume.
+    await api(admin.token).del(`/api/feed/pages/${pageId}/editors/${owner.id}`);
   });
 
   it('addressing a page by slug updates that page rather than silently nothing', async () => {

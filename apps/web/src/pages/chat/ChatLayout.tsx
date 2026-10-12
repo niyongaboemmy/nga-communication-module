@@ -8,6 +8,7 @@ import { ContextPanel } from './ContextPanel';
 import { useChat } from './ChatProvider';
 import { ThreadPanel } from './ThreadPanel';
 import { SavedItems } from './SavedItems';
+import { ThreadsInbox } from './ThreadsInbox';
 import { NotificationSettings } from './NotificationSettings';
 import { SearchPanel } from './SearchPanel';
 import { ScheduledPanel } from './ScheduledPanel';
@@ -18,6 +19,7 @@ import { BrowseChannels } from './BrowseChannels';
 import { ChannelSettings } from './ChannelSettings';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import * as chatApi from './api';
+import { useChatUrl } from './useChatUrl';
 import { getSocket } from '../../lib/socket';
 import type { Member } from './types';
 
@@ -38,7 +40,7 @@ import type { Member } from './types';
 /** Everything that can occupy the right-hand column. */
 export type Panel =
   | 'none' | 'details' | 'thread' | 'saved' | 'settings' | 'search' | 'scheduled'
-  | 'browse' | 'channel';
+  | 'browse' | 'channel' | 'threads';
 
 const SidePanel: React.FC<{
   width: 'wide' | 'narrow';
@@ -108,12 +110,18 @@ const ChatWorkspace: React.FC = () => {
    * to be something the reader did, not something that happened to them.
    */
   const autoOpened = useRef(false);
+  const replaceNextUrl = useRef(false);
+  const { back } = useChatUrl({ onBrowse: () => setPanel('browse'), replaceNextRef: replaceNextUrl });
   useEffect(() => {
     if (autoOpened.current || conversationsLoading) return;
     autoOpened.current = true;
-    if (activeId || conversations.length === 0) return;
+    // A link that names a conversation wins over "open the first one".
+    if (activeId || conversations.length === 0 || new URLSearchParams(window.location.search).has('c')) return;
     const first = conversations[0];
-    if (first && window.matchMedia('(min-width: 768px)').matches) setActiveId(first.id);
+    if (first && window.matchMedia('(min-width: 768px)').matches) {
+      replaceNextUrl.current = true; // not a navigation the user made; Back should not stop here
+      setActiveId(first.id);
+    }
   }, [activeId, conversationsLoading, conversations, setActiveId]);
 
   /*
@@ -192,6 +200,7 @@ const ChatWorkspace: React.FC = () => {
 
   const paletteActions = useMemo<PaletteAction[]>(() => [
     { id: 'search', label: 'Search messages', hint: 'Ctrl/⌘ F', icon: PALETTE_ICONS.search, run: () => setPanel('search') },
+    { id: 'threads', label: 'Threads', icon: PALETTE_ICONS.saved, run: () => setPanel('threads') },
     { id: 'saved', label: 'Saved items', hint: 'Ctrl/⌘ ⇧ S', icon: PALETTE_ICONS.saved, run: () => setPanel('saved') },
     { id: 'scheduled', label: 'Scheduled messages', icon: PALETTE_ICONS.scheduled, run: () => setPanel('scheduled') },
     { id: 'settings', label: 'Notification settings', icon: PALETTE_ICONS.notifications, run: () => setPanel('settings') },
@@ -214,6 +223,7 @@ const ChatWorkspace: React.FC = () => {
         <div className="w-full min-w-0">
           <ConversationList
             onOpenSaved={() => setPanel('saved')}
+            onOpenThreads={() => setPanel('threads')}
             onOpenSettings={() => setPanel('settings')}
             onOpenSearch={() => setPanel('search')}
             onOpenBrowse={() => setPanel('browse')}
@@ -225,7 +235,7 @@ const ChatWorkspace: React.FC = () => {
       {active ? (
         <MessageThread
           conversation={active}
-          onBack={() => setActiveId(null)}
+          onBack={back}
           onToggleContext={() => setPanel((p) => (p === 'details' ? 'none' : 'details'))}
           contextOpen={panel === 'details'}
           onOpenSearch={() => setPanel('search')}
@@ -262,6 +272,11 @@ const ChatWorkspace: React.FC = () => {
             onClose={closePanel}
             onOpenSettings={() => setPanel('channel')}
           />
+        </SidePanel>
+      )}
+      {panel === 'threads' && (
+        <SidePanel width="wide" onDismiss={closePanel}>
+          <ThreadsInbox onClose={closePanel} />
         </SidePanel>
       )}
       {panel === 'saved' && (

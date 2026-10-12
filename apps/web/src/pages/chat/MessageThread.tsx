@@ -208,8 +208,9 @@ const MessageRow: React.FC<{
   const { user } = useAuth();
   const {
     react, edit, remove, pin, save, openThread, setReplyTarget, jumpTo, highlightedId,
-    editingId, setEditingId,
+    editingId, setEditingId, threadUnread,
   } = useChat();
+  const newReplies = threadUnread[m.id] ?? 0;
   const [picking, setPicking] = useState(false);
   const [forwarding, setForwarding] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -472,9 +473,20 @@ const MessageRow: React.FC<{
             {m.replyCount > 0 && (
               <button
                 onClick={() => openThread(m.id)}
-                className="flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/25"
+                aria-label={`${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}${
+                  newReplies > 0 ? `, ${newReplies} new` : ''}`}
+                className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium transition-colors duration-150 ${
+                  newReplies > 0
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/25'
+                }`}
               >
                 <MessageSquare size={11} /> {m.replyCount} {m.replyCount === 1 ? 'reply' : 'replies'}
+                {newReplies > 0 && (
+                  <span className="ml-0.5 rounded-full bg-white/25 px-1.5 text-[10px] font-semibold tabular-nums">
+                    {newReplies} new
+                  </span>
+                )}
               </button>
             )}
           </div>
@@ -486,13 +498,13 @@ const MessageRow: React.FC<{
           without a mouse, and everything here is keyboard-focusable. */}
       {!editing && !pending && (
         <div
-          className={`absolute -top-3 z-10 flex items-center gap-0.5 rounded-xl border border-border-light bg-white p-0.5 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
+          className={`absolute -top-3 z-10 flex items-center gap-0.5 rounded-xl border border-border-light bg-white p-0.5 opacity-0 pointer-events-none transition-opacity duration-150 focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
             /* Anchored to the side the bubble is actually on. `left-12` for an
                own message put the toolbar at the far left of a full-width row,
                half a screen away from the message it acted on — easy to miss,
                and easy to hit for the wrong message. */
             mine ? 'right-14' : 'left-14'
-          } ${picking || menuOpen ? 'opacity-100' : ''}`}
+          } ${picking || menuOpen ? 'pointer-events-auto opacity-100' : ''}`}
         >
           {/* One tap for the common few, the picker for everything else. Most
               reactions are a thumbs-up; making that a two-step interaction is

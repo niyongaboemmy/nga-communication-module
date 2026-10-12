@@ -13,6 +13,7 @@ import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
 import { GlobalSearch } from '../components/GlobalSearch';
 import { usePresenceReporter } from '../hooks/usePresenceReporter';
+import { useModuleBadges } from '../hooks/useModuleBadges';
 import { toPresence } from './chat/types';
 import type { Presence } from './chat/types';
 
@@ -90,12 +91,12 @@ const RailLink: React.FC<{ entry: NavEntry; badge?: number }> = ({ entry, badge 
   );
 };
 
-const Rail: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modules, admin }) => (
+const Rail: React.FC<{ modules: NavEntry[]; admin: NavEntry[]; badges: Record<string, number> }> = ({ modules, admin, badges }) => (
   <nav
     aria-label="Modules"
     className="relative z-30 hidden w-16 shrink-0 flex-col items-center gap-1.5 border-r border-border-light bg-white py-3 md:flex dark:border-border-dark/30 dark:bg-chrome-dark"
   >
-    {modules.map((entry) => <RailLink key={entry.to} entry={entry} />)}
+    {modules.map((entry) => <RailLink key={entry.to} entry={entry} badge={badges[entry.to]} />)}
 
     {admin.length > 0 && (
       <>
@@ -142,7 +143,7 @@ const TabLink: React.FC<{ entry: NavEntry; badge?: number }> = ({ entry, badge }
  * 44px minimum on a 360px-wide phone, so the overflow goes into a sheet rather
  * than getting squeezed.
  */
-const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modules, admin }) => {
+const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[]; badges: Record<string, number> }> = ({ modules, admin, badges }) => {
   const [sheetOpen, setSheetOpen] = useState(false);
   const location = useLocation();
 
@@ -150,6 +151,8 @@ const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modu
 
   const primary = modules.slice(0, 4);
   const overflow = [...modules.slice(4), ...admin];
+  // Mail lives under "More" on a phone; its count must not vanish with it.
+  const overflowBadge = overflow.reduce((n, e) => n + (badges[e.to] ?? 0), 0);
 
   return (
     <>
@@ -157,15 +160,21 @@ const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modu
         aria-label="Modules"
         className="pb-safe relative z-30 flex shrink-0 items-stretch gap-0.5 border-t border-border-light bg-white/95 px-1.5 pt-1 backdrop-blur-md md:hidden dark:border-border-dark/40 dark:bg-chrome-dark/90"
       >
-        {primary.map((entry) => <TabLink key={entry.to} entry={entry} />)}
+        {primary.map((entry) => <TabLink key={entry.to} entry={entry} badge={badges[entry.to]} />)}
         {overflow.length > 0 && (
           <button
             onClick={() => setSheetOpen(true)}
             aria-haspopup="dialog"
             aria-expanded={sheetOpen}
+            aria-label={overflowBadge > 0 ? `More, ${overflowBadge} unread` : 'More'}
             className="flex flex-1 flex-col items-center gap-0.5 rounded-xl py-1.5 text-[10px] font-medium text-text-secondary-light dark:text-text-secondary-dark/80"
           >
-            <MoreHorizontal size={21} strokeWidth={1.8} />
+            <span className="relative">
+              <MoreHorizontal size={21} strokeWidth={1.8} />
+              {overflowBadge > 0 && (
+                <span className="absolute -right-2 -top-1.5"><UnreadBadge count={overflowBadge} /></span>
+              )}
+            </span>
             More
           </button>
         )}
@@ -183,8 +192,11 @@ const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[] }> = ({ modu
                   to={to}
                   className="flex flex-col items-center gap-2 rounded-2xl px-1 py-3 text-center text-[11px] font-medium text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
                 >
-                  <span className="grid h-11 w-11 place-items-center rounded-2xl bg-surface-light text-text-secondary-light dark:bg-card-dark/50 dark:text-text-secondary-dark">
+                  <span className="relative grid h-11 w-11 place-items-center rounded-2xl bg-surface-light text-text-secondary-light dark:bg-card-dark/50 dark:text-text-secondary-dark">
                     <Icon size={20} />
+                    {(badges[to] ?? 0) > 0 && (
+                      <span className="absolute -right-1.5 -top-1.5"><UnreadBadge count={badges[to]!} /></span>
+                    )}
                   </span>
                   <span className="leading-tight">{label}</span>
                 </NavLink>
@@ -369,6 +381,7 @@ export const AppShell: React.FC = () => {
 
   const modules = MODULES.filter((i) => can(i.perm));
   const admin = ADMIN.filter((i) => can(i.perm));
+  const badges = useModuleBadges();
 
   return (
     <div className="h-app flex flex-col overflow-hidden bg-background-light text-text-primary-light dark:bg-background-dark dark:text-text-primary-dark">
@@ -377,7 +390,7 @@ export const AppShell: React.FC = () => {
       {searchOpen && <GlobalSearch onClose={() => setSearchOpen(false)} />}
 
       <div className="flex min-h-0 flex-1">
-        <Rail modules={modules} admin={admin} />
+        <Rail modules={modules} admin={admin} badges={badges} />
 
         {/* Pages own their own scrolling. Chat sizes itself to `h-full` and
             never overflows this container; the admin pages are ordinary
@@ -387,7 +400,7 @@ export const AppShell: React.FC = () => {
         </main>
       </div>
 
-      <BottomTabs modules={modules} admin={admin} />
+      <BottomTabs modules={modules} admin={admin} badges={badges} />
     </div>
   );
 };

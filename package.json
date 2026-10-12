@@ -36,6 +36,8 @@
     "verify:chat:live": "node scripts/verify-chat-live.mjs",
     "verify:presence": "node scripts/verify-presence.mjs",
     "verify:chat:threads": "node scripts/verify-chat-threads.mjs",
+    "verify:chat:unread": "node scripts/verify-chat-unread.mjs",
+    "verify:chat:links": "node scripts/verify-chat-links.mjs",
     "verify:chat:files": "node scripts/verify-chat-files.mjs",
     "verify:chat:notifications": "node scripts/verify-chat-notifications.mjs",
     "verify:chat:power": "node scripts/verify-chat-power.mjs",

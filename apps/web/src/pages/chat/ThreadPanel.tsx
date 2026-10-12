@@ -74,7 +74,7 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
   const { can } = usePermissions();
   const { user } = useAuth();
   const {
-    threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
+    threadRootId, threadMessages, threadLoading, openThread, sendThreadReply, markThreadRead,
   } = useChat();
 
   const [value, setValue] = useState('');
@@ -87,9 +87,33 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [threadMessages.length]);
 
+  /*
+   * The thread is read once its newest reply is on screen with the tab
+   * visible — the same honest proxy the main view uses. Re-checked when the
+   * tab comes back, so a reply that arrived while away is not cleared unseen.
+   */
+  useEffect(() => {
+    if (!threadRootId || threadLoading || threadMessages.length === 0) return;
+    const newest = threadMessages.reduce(
+      (max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
+    const mark = () => { if (!document.hidden && newest > 0) markThreadRead(threadRootId, newest); };
+    mark();
+    document.addEventListener('visibilitychange', mark);
+    return () => document.removeEventListener('visibilitychange', mark);
+  }, [threadRootId, threadLoading, threadMessages, markThreadRead]);
+
   useEffect(() => {
     if (!threadRootId) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') openThread(null); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // Escape in a half-written reply steps out of the box; it does not throw
+      // the reply away with the panel.
+      if (document.activeElement === inputRef.current && inputRef.current?.value.trim()) {
+        inputRef.current.blur();
+        return;
+      }
+      openThread(null);
+    };
     document.addEventListener('keydown', onKey);
     // A thread opened by clicking "3 replies" is opened in order to reply.
     if (!window.matchMedia('(pointer: coarse)').matches) inputRef.current?.focus();

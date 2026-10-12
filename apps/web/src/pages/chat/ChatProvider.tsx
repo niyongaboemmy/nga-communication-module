@@ -40,6 +40,8 @@ interface ChatValue {
 
   messages: WireMessage[];
   messagesLoading: boolean;
+  /** Which conversation `messages` currently belongs to (null while switching). */
+  messagesConversationId: string | null;
   hasMore: boolean;
   loadingMore: boolean;
   loadOlder: () => Promise<void>;
@@ -105,13 +107,39 @@ interface ChatValue {
   toggleStar: (id: string) => Promise<void>;
   setNotificationLevel: (id: string, level: NotificationLevel) => Promise<void>;
 
+  /** Unread across every conversation the person has not muted. */
   totalUnread: number;
+  /** Unread mentions across every conversation, muted or not. */
+  totalMentions: number;
+  /**
+   * New replies per followed thread, keyed by root message id. Thread replies
+   * never move a conversation's own badge; they are counted here instead.
+   */
+  threadUnread: Record<string, number>;
+  /** Sum of `threadUnread` — the Threads entry's badge. */
+  threadsUnreadTotal: number;
+  /** The reader has seen the open thread up to `seq`. */
+  markThreadRead: (rootId: string, seq: number) => void;
+  /** "Mark as unread": bring a conversation back to the reader's attention. */
+  markUnread: (conversationId: string) => Promise<void>;
+  /** Mark one (not necessarily open) conversation read to its newest message. */
+  markConversationRead: (conversationId: string) => void;
   /** Whether Enter sends, from the user's own preferences (FR-USR-8). */
   enterToSend: boolean;
   refresh: () => Promise<void>;
 }
 
 const ChatContext = createContext<ChatValue | null>(null);
+
+/**
+ * Whether a conversation is muted right now. A timed mute that has run out is
+ * not a mute: treating it as one hides the badge of a conversation the person
+ * expects to hear from again.
+ */
+export function isMuted(c: Pick<ConversationSummary, 'notification' | 'mutedUntil'>): boolean {
+  if (c.notification === 'none') return true;
+  return Boolean(c.mutedUntil && new Date(c.mutedUntil).getTime() > Date.now());
+}
 
 /**
  * The one-line summary the sidebar shows for a message that just arrived.
@@ -149,6 +177,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const [messages, setMessages] = useState<WireMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesConversationId, setMessagesConversationId] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -163,6 +192,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [threadRootId, setThreadRootId] = useState<string | null>(null);
   const [threadMessages, setThreadMessages] = useState<WireMessage[]>([]);
   const [threadLoading, setThreadLoading] = useState(false);
+  const [threadUnread, setThreadUnread] = useState<Record<string, number>>({});
+  const threadRootRef = useRef<string | null>(null);
+  threadRootRef.current = threadRootId;
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [enterToSend, setEnterToSend] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -205,6 +237,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => { if (user) void refresh(); }, [user, refresh]);
 
+  /** Seed the per-thread counters from the Threads inbox. */
+  const refreshThreadUnread = useCallback(async () => {
+    try {
+      const threads = await chatApi.listFollowedThreads();
+      setThreadUnread(Object.fromEntries(threads.filter((t) => t.unread > 0).map((t) => [t.rootId, t.unread])));
+    } catch { /* a missing marker is not worth an error */ }
+  }, []);
+  useEffect(() => { if (user) void refreshThreadUnread(); }, [user, refreshThreadUnread]);
+
   // One preference reaches this far: whether Enter sends. The rest are read by
   // the notification bridge, which is where they are acted on.
   useEffect(() => {
@@ -216,6 +257,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   /** Load the newest page whenever the open conversation changes. */
   useEffect(() => {
+    setMessagesConversationId(null);
     if (!activeId) { setMessages([]); setHasMore(false); return; }
     let cancelled = false;
     setMessagesLoading(true);
@@ -224,6 +266,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (cancelled) return;
         setMessages(page.messages);
         setHasMore(page.hasMore);
+        setMessagesConversationId(activeId);
       })
       .catch(() => { if (!cancelled) { setMessages([]); setHasMore(false); } })
       .finally(() => { if (!cancelled) setMessagesLoading(false); });
@@ -272,12 +315,16 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (id) socket.emit('conversation:subscribe', { conversationIds: [id] });
       // Counters may have moved while we were away.
       void refresh();
+      void refreshThreadUnread();
       // And anything typed while offline goes now, in the order it was typed.
       void flushOutbox();
     };
     const onDisconnect = () => setConnected(false);
 
     const onNew = ({ conversationId, message }: { conversationId: string; message: WireMessage }) => {
+      // Thread replies arrive as `thread:reply`; one reaching here (an older
+      // gateway) still belongs in the thread pane, not the main flow.
+      if (message.threadRootId) { onThreadReply({ conversationId, rootId: message.threadRootId, message }); return; }
       if (conversationId === activeIdRef.current) {
         setMessages((prev) => reconcile(prev, message));
       }
@@ -298,6 +345,27 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
             },
           }
         : c));
+    };
+
+    function onThreadReply(
+      { conversationId, rootId, message }: { conversationId: string; rootId: string; message: WireMessage },
+    ) {
+      if (conversationId === activeIdRef.current && rootId === threadRootRef.current) {
+        setThreadMessages((prev) => reconcile(prev, message));
+      }
+    }
+
+    const onThreadUnread = (
+      { rootId, unread }: { conversationId: string; rootId: string; unread: number },
+    ) => {
+      setThreadUnread((prev) => {
+        // Reading it right now: the panel will mark it read; don't flash a marker.
+        const value = rootId === threadRootRef.current && !document.hidden ? 0 : unread;
+        if ((prev[rootId] ?? 0) === value) return prev;
+        const next = { ...prev };
+        if (value > 0) next[rootId] = value; else delete next[rootId];
+        return next;
+      });
     };
 
     const onUpdated = ({ conversationId, message }: { conversationId: string; message: WireMessage }) => {
@@ -331,7 +399,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
 
     const onUnread = (
-      p: { conversationId: string; unread: number; unreadMentions: number; lastReadSeq: number },
+      p: { conversationId: string; unread: number; unreadMentions: number; lastReadSeq: number; lastSeq?: number },
     ) => {
       setConversations((prev) => {
         // Told about a conversation we have never seen — added to a channel, or
@@ -343,7 +411,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return prev;
         }
         return prev.map((c) => (c.id === p.conversationId
-          ? { ...c, unread: p.unread, unreadMentions: p.unreadMentions, lastReadSeq: p.lastReadSeq }
+          ? {
+              ...c, unread: p.unread, unreadMentions: p.unreadMentions, lastReadSeq: p.lastReadSeq,
+              lastSeq: Math.max(c.lastSeq, p.lastSeq ?? 0),
+            }
           : c));
       });
     };
@@ -398,6 +469,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     socket.on('message:reaction', onReaction);
     socket.on('typing:update', onTyping);
     socket.on('conversation:unread', onUnread);
+    socket.on('thread:reply', onThreadReply);
+    socket.on('thread:unread', onThreadUnread);
     socket.on('conversation:updated', onConversationUpdated);
     socket.on('conversation:prefs', onPrefs);
     socket.on('conversation:draft', onDraft);
@@ -414,13 +487,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       socket.off('message:reaction', onReaction);
       socket.off('typing:update', onTyping);
       socket.off('conversation:unread', onUnread);
+      socket.off('thread:reply', onThreadReply);
+      socket.off('thread:unread', onThreadUnread);
       socket.off('conversation:updated', onConversationUpdated);
       socket.off('conversation:prefs', onPrefs);
       socket.off('conversation:draft', onDraft);
       socket.off('presence:update', onPresence);
       socket.off('conversation:presence', onConvPresence);
     };
-  }, [user, refresh]);
+  }, [user, refresh, refreshThreadUnread]);
 
   /**
    * Send whatever was composed while offline (FR-MSG-24).
@@ -792,10 +867,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const flash = () => {
       setHighlightedId(messageId);
-      requestAnimationFrame(() => {
-        document.getElementById(`msg-${messageId}`)
-          ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      });
+      const centre = (behavior: ScrollBehavior) => document.getElementById(`msg-${messageId}`)
+        ?.scrollIntoView({ behavior, block: 'center' });
+      // After the new window has painted, and once more after anything that
+      // loads on arrival (the older-page sentinel fires at the top of a short
+      // window) has settled — otherwise the target ends up half off-screen.
+      requestAnimationFrame(() => requestAnimationFrame(() => centre('smooth')));
+      setTimeout(() => centre('auto'), 600);
       // Long enough to notice, short enough not to become part of the design.
       setTimeout(() => setHighlightedId((cur) => (cur === messageId ? null : cur)), 2200);
     };
@@ -859,14 +937,53 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     catch { void refresh(); }
   }, [refresh]);
 
+  const markThreadRead = useCallback((rootId: string, seq: number) => {
+    const conversationId = activeIdRef.current;
+    if (!conversationId || !Number.isFinite(seq) || seq <= 0) return;
+    // Optimistic, like the conversation badge: the marker goes the moment the
+    // replies are on screen.
+    setThreadUnread((prev) => {
+      if (!(rootId in prev)) return prev;
+      const next = { ...prev }; delete next[rootId]; return next;
+    });
+    void chatApi.markThreadRead(conversationId, rootId, seq).catch(() => {});
+  }, []);
+
+  const markUnread = useCallback(async (conversationId: string) => {
+    const r = await chatApi.markUnread(conversationId);
+    setConversations((prev) => prev.map((c) => (c.id === conversationId
+      ? { ...c, unread: r.unread, unreadMentions: r.unreadMentions, lastReadSeq: r.lastReadSeq } : c)));
+    // Leaving the conversation open would mark it straight back as read.
+    if (activeIdRef.current === conversationId) setActiveId(null);
+  }, []);
+
+  const markConversationRead = useCallback((conversationId: string) => {
+    setConversations((prev) => prev.map((x) => (x.id === conversationId
+      ? { ...x, unread: 0, unreadMentions: 0, lastReadSeq: Math.max(x.lastReadSeq, x.lastSeq) } : x)));
+    // To the end as the server knows it: this client may never have seen the
+    // newest seq of a conversation it is not looking at.
+    void chatApi.markReadLatest(conversationId).then((r) => {
+      setConversations((prev) => prev.map((x) => (x.id === conversationId
+        ? { ...x, unread: r.unread, unreadMentions: r.unreadMentions, lastReadSeq: r.lastReadSeq } : x)));
+    }).catch(() => {});
+  }, []);
+
   const totalUnread = useMemo(
-    () => conversations.reduce((n, c) => n + (c.notification === 'none' ? 0 : c.unread), 0),
+    () => conversations.reduce((n, c) => n + (isMuted(c) ? 0 : c.unread), 0),
     [conversations],
+  );
+  const totalMentions = useMemo(
+    () => conversations.reduce((n, c) => n + c.unreadMentions, 0),
+    [conversations],
+  );
+  const threadsUnreadTotal = useMemo(
+    () => Object.values(threadUnread).reduce((n, v) => n + v, 0),
+    [threadUnread],
   );
 
   const value: ChatValue = {
     conversations, conversationsLoading, activeId, setActiveId, active,
-    messages, messagesLoading, hasMore, loadingMore, loadOlder,
+    messages, messagesLoading, messagesConversationId, hasMore, loadingMore, loadOlder,
     typing: (activeId && typingByConv[activeId]) || [],
     typingByConversation: typingByConv,
     conversationPresence: convPresence,
@@ -877,7 +994,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
     pin, save, forward, jumpTo, highlightedId,
     draftFor, setDraft, toggleStar, setNotificationLevel,
-    totalUnread, refresh, enterToSend,
+    totalUnread, totalMentions, threadUnread, threadsUnreadTotal,
+    markThreadRead, markUnread, markConversationRead,
+    refresh, enterToSend,
   };
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;

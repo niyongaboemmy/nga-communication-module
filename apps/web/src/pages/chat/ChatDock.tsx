@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ChevronLeft, Maximize2, MessageSquare, X } from 'lucide-react';
@@ -45,7 +45,8 @@ const DockInner: React.FC = () => {
   const navigate = useNavigate();
   const { shouldShowMini } = useMeetCall();
   const {
-    conversations, activeId, setActiveId, active, connected,
+    activeId, setActiveId, active, connected,
+    totalUnread, totalMentions, threadsUnreadTotal,
   } = useChat();
 
   const [open, setOpen] = useState(false);
@@ -54,13 +55,9 @@ const DockInner: React.FC = () => {
   const panelRef = useRef<HTMLDivElement>(null);
   const launcherRef = useRef<HTMLButtonElement>(null);
 
-  const { unread, mentions } = useMemo(() => conversations.reduce(
-    (acc, c) => ({
-      unread: acc.unread + c.unread,
-      mentions: acc.mentions + c.unreadMentions,
-    }),
-    { unread: 0, mentions: 0 },
-  ), [conversations]);
+  // The same numbers as the rail, tab bar and tab title — see useModuleBadges.
+  const unread = totalUnread + threadsUnreadTotal;
+  const mentions = totalMentions;
 
   /*
    * Pulse when the count *rises*, not whenever it is non-zero. A badge that

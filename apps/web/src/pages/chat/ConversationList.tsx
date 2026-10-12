@@ -2,14 +2,14 @@ import type { ActivityKind } from '@tupo/shared';
 import React, { useMemo, useState } from 'react';
 import {
   Search, Plus, Hash, Megaphone, Star, ChevronRight, BellOff, Users, Filter, Lock, AtSign,
-  Bookmark, Bell, Compass,
+  Bookmark, Bell, Compass, CheckCheck, MoreHorizontal, MessagesSquare, Mail, MailOpen,
 } from 'lucide-react';
 import { IconButton, SearchInput, Skeleton, UnreadBadge, EmptyState } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
 import { shortStamp, sectionOf, SECTION_LABEL, SECTION_ORDER, typingLabel } from './data';
 import type { SidebarSection } from './data';
-import { useChat } from './ChatProvider';
+import { useChat, isMuted } from './ChatProvider';
 import { ConversationAvatar } from './ConversationAvatar';
 import type { Conversation } from './types';
 import { NewConversationDialog } from './NewConversationDialog';
@@ -38,14 +38,18 @@ const Row: React.FC<{
 }> = ({ conversation: c, active, typing, typingKind, onSelect, onToggleStar }) => {
   const { user } = useAuth();
   const unread = c.unread > 0;
-  const muted = c.notification === 'none' || Boolean(c.mutedUntil);
+  const muted = isMuted(c);
   const Icon = c.type === 'dm' ? null : KIND_ICON[c.type];
   const mine = c.lastMessage?.senderId && c.lastMessage.senderId === user?.id;
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
     <li className="group/row relative">
       <button
         onClick={() => onSelect(c.id)}
+        // Long-press on a phone, right-click on a desktop: the same actions as
+        // the "…" button, which a touch screen never shows on hover.
+        onContextMenu={(e) => { e.preventDefault(); setMenuOpen(true); }}
         aria-current={active ? 'true' : undefined}
         className={`group flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors duration-150 ${
           active
@@ -76,8 +80,11 @@ const Row: React.FC<{
             {muted && (
               <BellOff size={12} className="shrink-0 text-text-secondary-light/70 dark:text-text-secondary-dark/70" />
             )}
+            {c.isStarred && (
+              <Star size={11} aria-label="Starred" className="shrink-0 fill-amber-400 text-amber-400" />
+            )}
             {c.lastMessage && (
-              <span className="ml-auto shrink-0 text-[11px] tabular-nums text-text-secondary-light dark:text-text-secondary-dark">
+              <span className="ml-auto shrink-0 text-[11px] tabular-nums text-text-secondary-light transition-opacity duration-150 group-hover/row:opacity-0 group-focus-within/row:opacity-0 dark:text-text-secondary-dark">
                 {shortStamp(c.lastMessage.at)}
               </span>
             )}
@@ -118,21 +125,96 @@ const Row: React.FC<{
         </span>
       </button>
 
-      {/* Star sits outside the row button — a button inside a button is invalid
-          HTML and the inner one stops working in Safari. */}
-      <button
-        onClick={(e) => { e.stopPropagation(); onToggleStar(c.id); }}
-        aria-label={c.isStarred ? `Unstar ${c.name}` : `Star ${c.name}`}
-        aria-pressed={c.isStarred}
-        className={`absolute right-1 top-1 grid h-6 w-6 place-items-center rounded-md text-text-secondary-light transition-opacity duration-150 hover:bg-black/5 focus:opacity-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-text-secondary-dark dark:hover:bg-white/10 ${
-          c.isStarred ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100'
-        }`}
-      >
-        <Star size={12} className={c.isStarred ? 'fill-amber-400 text-amber-400' : ''} />
-      </button>
+      {/* The row's actions sit outside the row button — a button inside a
+          button is invalid HTML and the inner one stops working in Safari. On a
+          touch screen there is no hover, so the trigger is always shown there:
+          an invisible control people can still hit is worse than a visible one. */}
+      <RowMenu conversation={c} onToggleStar={onToggleStar} open={menuOpen} setOpen={setMenuOpen} />
     </li>
   );
 };
+
+/**
+ * Per-conversation actions: read state, star, mute. "Mark as unread" is the
+ * gesture for "come back to this", which no other control in the list offers.
+ */
+const RowMenu: React.FC<{
+  conversation: Conversation;
+  onToggleStar: (id: string) => void;
+  open: boolean;
+  setOpen: (v: boolean | ((p: boolean) => boolean)) => void;
+}> = ({ conversation: c, onToggleStar, open, setOpen }) => {
+  const { markUnread, markConversationRead, setNotificationLevel } = useChat();
+  const ref = React.useRef<HTMLDivElement>(null);
+  const muted = isMuted(c);
+  const hasUnread = c.unread > 0 || c.unreadMentions > 0;
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey, true);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey, true);
+    };
+  }, [open, setOpen]);
+
+  const run = (fn: () => unknown) => () => { setOpen(false); void fn(); };
+
+  return (
+    <div ref={ref} className="absolute right-1 top-1">
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        aria-label={`Actions for ${c.name}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={`grid h-6 w-6 place-items-center rounded-md bg-white text-text-secondary-light transition-opacity duration-150 hover:bg-surface-light focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-blue-500 dark:bg-chrome-dark dark:text-text-secondary-dark dark:hover:bg-white/10 ${
+          open ? 'opacity-100' : 'pointer-events-none opacity-0 group-hover/row:pointer-events-auto group-hover/row:opacity-100'
+        }`}
+      >
+        <MoreHorizontal size={14} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label={`Actions for ${c.name}`}
+          className="animate-dock-in absolute right-0 top-7 z-30 w-48 overflow-hidden rounded-xl border border-border-light bg-white py-1 text-sm shadow-lg dark:border-border-dark/50 dark:bg-elevated-dark"
+        >
+          {hasUnread ? (
+            <MenuItem icon={<MailOpen size={14} />} label="Mark as read" onClick={run(() => markConversationRead(c.id))} />
+          ) : (
+            <MenuItem icon={<Mail size={14} />} label="Mark as unread" onClick={run(() => markUnread(c.id).catch(() => {}))} />
+          )}
+          <MenuItem
+            icon={<Star size={14} className={c.isStarred ? 'fill-amber-400 text-amber-400' : ''} />}
+            label={c.isStarred ? 'Unstar' : 'Star'}
+            onClick={run(() => onToggleStar(c.id))}
+          />
+          <MenuItem
+            icon={muted ? <Bell size={14} /> : <BellOff size={14} />}
+            label={muted ? 'Unmute' : 'Mute'}
+            onClick={run(() => setNotificationLevel(c.id, muted ? 'all' : 'none'))}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MenuItem: React.FC<{ icon: React.ReactNode; label: string; onClick: () => void }> = ({ icon, label, onClick }) => (
+  <button
+    role="menuitem"
+    onClick={(e) => { e.stopPropagation(); onClick(); }}
+    className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-text-primary-light hover:bg-surface-light focus-visible:bg-surface-light focus-visible:outline-none dark:text-text-primary-dark dark:hover:bg-white/5 dark:focus-visible:bg-white/5"
+  >
+    <span className="text-text-secondary-light dark:text-text-secondary-dark">{icon}</span>
+    {label}
+  </button>
+);
 
 const Section: React.FC<{
   title: string;
@@ -169,14 +251,15 @@ const RowSkeleton: React.FC = () => (
 
 export const ConversationList: React.FC<{
   onOpenSaved?: () => void;
+  onOpenThreads?: () => void;
   onOpenSettings?: () => void;
   onOpenSearch?: () => void;
   onOpenBrowse?: () => void;
-}> = ({ onOpenSaved, onOpenSettings, onOpenSearch, onOpenBrowse }) => {
+}> = ({ onOpenSaved, onOpenThreads, onOpenSettings, onOpenSearch, onOpenBrowse }) => {
   const { can } = usePermissions();
   const {
     conversations, conversationsLoading, activeId, setActiveId, toggleStar, connected,
-    typingByConversation,
+    typingByConversation, totalUnread, totalMentions, threadsUnreadTotal, markEverythingRead,
   } = useChat();
   const [query, setQuery] = useState('');
   const [unreadOnly, setUnreadOnly] = useState(false);
@@ -222,6 +305,11 @@ export const ConversationList: React.FC<{
             )}
           </h2>
           <div className="flex items-center gap-0.5">
+            {(totalUnread > 0 || totalMentions > 0) && (
+              <IconButton label="Mark all as read" size="sm" onClick={() => void markEverythingRead()}>
+                <CheckCheck size={15} />
+              </IconButton>
+            )}
             <IconButton
               label={unreadOnly ? 'Show all conversations' : 'Show unread only'}
               size="sm"
@@ -269,6 +357,24 @@ export const ConversationList: React.FC<{
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
+        {onOpenThreads && !conversationsLoading && (
+          <div className="px-1.5 pb-1">
+            <button
+              onClick={onOpenThreads}
+              className="flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors duration-150 hover:bg-surface-light dark:hover:bg-surface-dark"
+            >
+              <span className="grid h-[38px] w-[38px] place-items-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">
+                <MessagesSquare size={18} />
+              </span>
+              <span className={`flex-1 text-sm ${threadsUnreadTotal > 0
+                ? 'font-semibold text-text-primary-light dark:text-text-primary-dark'
+                : 'font-medium text-text-primary-light/90 dark:text-text-primary-dark/90'}`}>
+                Threads
+              </span>
+              <UnreadBadge count={threadsUnreadTotal} />
+            </button>
+          </div>
+        )}
         {conversationsLoading ? (
           <ul aria-busy="true" aria-label="Loading conversations">
             {Array.from({ length: 7 }, (_, i) => <RowSkeleton key={i} />)}

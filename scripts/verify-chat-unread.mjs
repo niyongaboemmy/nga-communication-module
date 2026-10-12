@@ -164,10 +164,14 @@ try {
   check("replying in a thread keeps B's unread channel messages unread", after6.unread_count === before6.unread_count && after6.unread_count > 0, `${before6.unread_count} → ${after6.unread_count}`);
 
   console.log('\n── Mark as read / unread, mark all read');
+  // A pointer user hovers the row to reveal its "…" button.
+  await p.locator('li', { hasText: 'Unread Lab' }).first().hover();
   await p.getByRole('button', { name: 'Actions for Unread Lab' }).click(); await sleep(400);
   await p.getByRole('menuitem', { name: 'Mark as read' }).click(); await sleep(1200);
   check('row menu "Mark as read" clears the badge', await rowBadge(p, 'Unread Lab') === '', `badge="${await rowBadge(p, 'Unread Lab')}" db=${JSON.stringify(await dbUnread(grp, B.id))}`);
-  await p.getByRole('button', { name: 'Actions for Unread Lab' }).click(); await sleep(400);
+  // Right-click (long-press on a phone) opens the same menu.
+  await p.locator('li', { hasText: 'Unread Lab' }).first().locator('button').first().click({ button: 'right' }); await sleep(400);
+  check('right-click / long-press opens the row menu', await p.getByRole('menu', { name: 'Actions for Unread Lab' }).isVisible().catch(() => false));
   await p.getByRole('menuitem', { name: 'Mark as unread' }).click(); await sleep(1200);
   check('row menu "Mark as unread" brings back a badge of 1', await rowBadge(p, 'Unread Lab') === '1', `badge="${await rowBadge(p, 'Unread Lab')}"`);
   await call(A, 'POST', `/api/chat/conversations/${dm}/messages`, { body: 'dm again', nonce: nonce() });

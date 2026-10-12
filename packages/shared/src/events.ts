@@ -23,6 +23,12 @@ export interface ServerToClientEvents extends ChatServerToClientEvents, FeedServ
   'system:reconnect_required': (p: { reason: string }) => void;
   /** Raised on the recipient's own user room. See AppNotification. */
   'notification:new': (p: AppNotification) => void;
+  /**
+   * This person's mailbox counters moved — read, moved or deleted on one of
+   * their devices (delivered on `user:<id>`). Carries nothing: every client
+   * refetches its own counts rather than trusting a pushed number.
+   */
+  'mail:counts': (p: { at: string }) => void;
 }
 
 /**

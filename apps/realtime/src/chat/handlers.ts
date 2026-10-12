@@ -166,13 +166,23 @@ export function registerChatHandlers(
         // The socket is the normal send path, so it is the path that has to
         // raise notifications. Fail-soft: a notification that did not fire is a
         // missed buzz, whereas throwing here would lose a delivered message.
-        await chat.notifyNewMessage(result.message, {
-          conversationName: membership.name ?? 'a conversation',
-          conversationType: membership.type,
-          mentionedUserIds: result.mentionedUserIds,
-          broadcast: result.broadcast,
-          senderMayBroadcast: chat.canManage(membership.role),
-        }).catch(() => {});
+        const rootId = result.message.threadRootId;
+        if (rootId) {
+          await chat.notifyThreadReply(result.message, {
+            conversationName: membership.name ?? 'a conversation',
+            rootId,
+            followerIds: await chat.threadFollowers(p.conversationId, rootId),
+            mentionedUserIds: result.mentionedUserIds,
+          }).catch(() => {});
+        } else {
+          await chat.notifyNewMessage(result.message, {
+            conversationName: membership.name ?? 'a conversation',
+            conversationType: membership.type,
+            mentionedUserIds: result.mentionedUserIds,
+            broadcast: result.broadcast,
+            senderMayBroadcast: chat.canManage(membership.role),
+          }).catch(() => {});
+        }
       }
     } catch (err) {
       ack?.({ ok: false, error: err instanceof ChatError ? err.message : 'Message could not be sent.' });
@@ -381,6 +391,19 @@ export function registerChatHandlers(
 export async function fanOutMessage(
   io: ChatServer, conversationId: string, result: chat.SendResult,
 ): Promise<void> {
+  const rootId = result.message.threadRootId;
+  if (rootId) {
+    // A thread reply belongs in the thread pane, not the main flow — and it
+    // moves followers' thread counters, never anyone's conversation badge.
+    io.to(conversationRoom(conversationId)).emit('thread:reply', {
+      conversationId, rootId, message: result.message,
+    });
+    const counts = await chat.threadUnreadFor(conversationId, rootId).catch(() => []);
+    for (const c of counts) {
+      io.to(userRoom(c.userId)).emit('thread:unread', { conversationId, rootId, unread: c.unread });
+    }
+    return;
+  }
   io.to(conversationRoom(conversationId)).emit('message:new', {
     conversationId, message: result.message,
   });
@@ -406,7 +429,7 @@ async function pushUnread(
   for (const [userId, c] of Object.entries(counts)) {
     io.to(userRoom(userId)).emit('conversation:unread', {
       conversationId, unread: c.unread, unreadMentions: c.unreadMentions,
-      lastReadSeq: c.lastReadSeq,
+      lastReadSeq: c.lastReadSeq, lastSeq: c.lastSeq,
     });
   }
 }

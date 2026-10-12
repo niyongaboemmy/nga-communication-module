@@ -487,15 +487,20 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
     // the sidebar with no chance to resolve anything later. "@mention" in a
     // conversation list tells the reader nothing about who was addressed.
     const preview = previewOf(await renderMentionsAsText(body), attachments.length, input.type);
+    // A thread reply takes a sequence number like any message, but it is not
+    // the channel's latest line: the sidebar preview and ordering belong to the
+    // main flow. Otherwise "Ada: thread reply" sits on the row of a channel
+    // whose newest visible message is something else entirely.
+    const inThread = Boolean(input.threadRootId);
     const { rows: seqRows } = await client.query<{ last_seq: string }>(
       `UPDATE conversations
           SET last_seq = last_seq + 1,
-              last_message_at = now(),
-              last_message_preview = $2,
-              last_message_sender = $3
+              last_message_at = CASE WHEN $4 THEN last_message_at ELSE now() END,
+              last_message_preview = CASE WHEN $4 THEN last_message_preview ELSE $2 END,
+              last_message_sender = CASE WHEN $4 THEN last_message_sender ELSE $3 END
         WHERE id = $1 AND deleted_at IS NULL
         RETURNING last_seq`,
-      [input.conversationId, preview, input.senderId],
+      [input.conversationId, preview, input.senderId, inThread],
     );
     if (!seqRows[0]) throw new ChatError('Conversation not found.', 404);
     const seq = Number(seqRows[0].last_seq);
@@ -583,11 +588,14 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
     await client.query(
       `UPDATE conversation_members
           SET unread_count = unread_count + $4,
-              unread_mentions = unread_mentions + CASE WHEN user_id = ANY($3::text[]) THEN 1 ELSE 0 END,
+              -- Thread replies (a $4 of 0) badge nobody's conversation: they
+              -- are tracked per thread instead — see threadUnreadFor().
+              unread_mentions = unread_mentions + CASE WHEN $4 = 1 AND user_id = ANY($3::text[]) THEN 1 ELSE 0 END,
               -- A hidden DM comes back the moment the other person writes.
               is_hidden = false
         WHERE conversation_id = $1 AND user_id <> $2 AND left_at IS NULL`,
-      [input.conversationId, input.senderId, mentioned, messageType === 'system' ? 0 : 1],
+      [input.conversationId, input.senderId, mentioned,
+        messageType === 'system' || input.threadRootId ? 0 : 1],
     );
 
     /*
@@ -599,12 +607,27 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
      * came back to everything marked read instead of to where they left off.
      * A system notice is not something anyone read.
      */
-    if (messageType !== 'system') {
+    if (messageType !== 'system' && !input.threadRootId) {
       await client.query(
         `UPDATE conversation_members
             SET last_read_seq = $3, unread_count = 0, unread_mentions = 0, last_read_at = now()
           WHERE conversation_id = $1 AND user_id = $2`,
         [input.conversationId, input.senderId, seq],
+      );
+    }
+    /*
+     * A thread reply advances the sender's place *in that thread* only. Moving
+     * their channel watermark to the reply's seq would silently mark every
+     * channel message they had not read yet as read.
+     */
+    if (input.threadRootId) {
+      await client.query(
+        `INSERT INTO thread_reads (user_id, conversation_id, root_id, last_read_seq)
+         VALUES ($2, $1, $3, $4)
+         ON CONFLICT (user_id, root_id)
+         DO UPDATE SET last_read_seq = GREATEST(thread_reads.last_read_seq, EXCLUDED.last_read_seq),
+                       updated_at = now()`,
+        [input.conversationId, input.senderId, input.threadRootId, seq],
       );
     }
 
@@ -993,6 +1016,37 @@ export interface ReadResult {
  * from the log rather than decremented, so they self-heal — a counter that only
  * ever drifts one way is a counter that eventually shows 3 on an empty channel.
  */
+/*
+ * The one definition of "unread" for a conversation member, used by every
+ * recount (read, delete, migration). Kept in one place because three slightly
+ * different copies is how a badge ends up disagreeing with itself.
+ *
+ * Counts main-flow messages only. Thread replies are tracked per thread
+ * (thread_reads) and never badge the conversation; a reply that is also sent
+ * to the channel arrives as its own main-flow message and counts as that.
+ * `w` is the SQL expression for the member's read watermark.
+ */
+export function unreadCountSql(w: string): string {
+  return `(SELECT count(*) FROM messages x
+            WHERE x.conversation_id = m.conversation_id
+              AND x.seq > ${w}
+              AND x.sender_id <> m.user_id
+              AND x.deleted_at IS NULL
+              AND x.type <> 'system'
+              AND x.thread_root_id IS NULL)`;
+}
+
+export function unreadMentionsSql(w: string): string {
+  return `(SELECT count(*) FROM message_mentions mm
+            WHERE mm.conversation_id = m.conversation_id
+              AND mm.user_id = m.user_id
+              AND mm.seq > ${w}
+              AND NOT EXISTS (
+                SELECT 1 FROM messages t
+                 WHERE t.conversation_id = mm.conversation_id
+                   AND t.seq = mm.seq AND t.thread_root_id IS NOT NULL))`;
+}
+
 export async function advanceRead(
   userId: string, conversationId: string, seq: number,
 ): Promise<ReadResult> {
@@ -1026,21 +1080,9 @@ export async function advanceRead(
             last_read_at  = now(),
             -- Recomputed from the log, never decremented. A counter that only
             -- drifts one way is a counter that eventually shows 3 unread on an
-            -- empty channel.
-            unread_count = (
-              SELECT count(*) FROM messages x
-               WHERE x.conversation_id = m.conversation_id
-                 AND x.seq > prev.next_seq
-                 AND x.sender_id <> m.user_id
-                 AND x.deleted_at IS NULL
-                 -- Same rule as the send path, or the counter and the
-                 -- recount would disagree and the badge would flicker.
-                 AND x.type <> 'system'),
-            unread_mentions = (
-              SELECT count(*) FROM message_mentions mm
-               WHERE mm.conversation_id = m.conversation_id
-                 AND mm.user_id = m.user_id
-                 AND mm.seq > prev.next_seq)
+            -- empty channel. The rule itself lives in unreadCountSql().
+            unread_count = ${unreadCountSql('prev.next_seq')},
+            unread_mentions = ${unreadMentionsSql('prev.next_seq')}
        FROM prev
       WHERE m.conversation_id = $1 AND m.user_id = $2 AND m.left_at IS NULL
       RETURNING m.last_read_seq, m.unread_count, m.unread_mentions,
@@ -1272,6 +1314,7 @@ export interface UnreadCounts {
   unread: number;
   unreadMentions: number;
   lastReadSeq: number;
+  lastSeq: number;
 }
 
 /**
@@ -1285,18 +1328,28 @@ export async function unreadFor(
 ): Promise<Record<string, UnreadCounts>> {
   if (!userIds.length) return {};
   const { rows } = await getPool().query<{
-    user_id: string; unread_count: number; unread_mentions: number; last_read_seq: string;
+    user_id: string; unread_count: number; unread_mentions: number; last_read_seq: string; last_seq: string;
   }>(
-    `SELECT user_id, unread_count, unread_mentions, last_read_seq
-       FROM conversation_members
-      WHERE conversation_id = $1 AND user_id = ANY($2::text[]) AND left_at IS NULL`,
+    `SELECT m.user_id, m.unread_count, m.unread_mentions, m.last_read_seq, c.last_seq
+       FROM conversation_members m
+       JOIN conversations c ON c.id = m.conversation_id
+      WHERE m.conversation_id = $1 AND m.user_id = ANY($2::text[]) AND m.left_at IS NULL`,
     [conversationId, userIds],
   );
   return Object.fromEntries(rows.map((r) => [r.user_id, {
     unread: r.unread_count,
     unreadMentions: r.unread_mentions,
     lastReadSeq: Number(r.last_read_seq),
+    lastSeq: Number(r.last_seq),
   }]));
+}
+
+/** The conversation's newest seq — what "mark read to the end" reads up to. */
+export async function lastSeqOf(conversationId: string): Promise<number> {
+  const { rows } = await getPool().query<{ last_seq: string }>(
+    'SELECT last_seq FROM conversations WHERE id = $1', [conversationId],
+  );
+  return Number(rows[0]?.last_seq ?? 0);
 }
 
 /** The badge on the Chat icon in the rail: everything, everywhere, for one person. */
@@ -1584,15 +1637,8 @@ export async function deleteMessage(
   await getPool().query('DELETE FROM message_reactions WHERE message_id = $1', [messageId]);
   await getPool().query(
     `UPDATE conversation_members m
-        SET unread_count = (
-              SELECT count(*) FROM messages x
-               WHERE x.conversation_id = m.conversation_id
-                 AND x.seq > m.last_read_seq AND x.sender_id <> m.user_id
-                 AND x.deleted_at IS NULL AND x.type <> 'system'),
-            unread_mentions = (
-              SELECT count(*) FROM message_mentions mm
-               WHERE mm.conversation_id = m.conversation_id
-                 AND mm.user_id = m.user_id AND mm.seq > m.last_read_seq)
+        SET unread_count = ${unreadCountSql('m.last_read_seq')},
+            unread_mentions = ${unreadMentionsSql('m.last_read_seq')}
       WHERE m.conversation_id = $1 AND m.left_at IS NULL`,
     [conversationId],
   );
@@ -1617,6 +1663,7 @@ export async function refreshPreview(conversationId: string): Promise<void> {
                      ELSE '' END AS preview
            FROM messages m
           WHERE m.conversation_id = $1 AND m.deleted_at IS NULL
+            AND m.thread_root_id IS NULL
           ORDER BY m.seq DESC LIMIT 1
        ) latest
       WHERE c.id = $1`,
@@ -1733,6 +1780,197 @@ export async function threadParticipants(
     [conversationId, rootId],
   );
   return rows.map((r) => r.sender_id);
+}
+
+/*
+ * Thread read state.
+ *
+ * A thread reply is new only for the people following that thread: the
+ * root's author, everyone who has replied, and everyone who has opened it
+ * (opening writes a thread_reads row). For them, "unread" is replies by
+ * someone else past their place in the thread. Everyone else sees the reply
+ * count and nothing more — a channel of 400 does not light up because two
+ * people are talking in a side thread.
+ */
+
+/**
+ * Who follows a thread: the root's author, everyone who has replied, and
+ * everyone who has opened it (a thread_reads row).
+ */
+export async function threadFollowers(conversationId: string, rootId: string): Promise<string[]> {
+  const { rows } = await getPool().query<{ user_id: string }>(
+    `SELECT sender_id AS user_id FROM messages
+      WHERE conversation_id = $1 AND (id = $2 OR thread_root_id = $2)
+        AND deleted_at IS NULL AND type <> 'system'
+     UNION
+     SELECT user_id FROM thread_reads WHERE conversation_id = $1 AND root_id = $2`,
+    [conversationId, rootId],
+  );
+  return rows.map((r) => r.user_id);
+}
+
+/** The reader's place in one thread. Never moves backwards. */
+export async function markThreadRead(
+  userId: string, conversationId: string, rootId: string, seq: number,
+): Promise<number> {
+  const { rows } = await getPool().query<{ last_read_seq: string }>(
+    `INSERT INTO thread_reads (user_id, conversation_id, root_id, last_read_seq)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, root_id)
+     DO UPDATE SET last_read_seq = GREATEST(thread_reads.last_read_seq, EXCLUDED.last_read_seq),
+                   updated_at = now()
+     RETURNING last_read_seq`,
+    [userId, conversationId, rootId, seq],
+  );
+  return Number(rows[0]?.last_read_seq ?? seq);
+}
+
+const THREAD_UNREAD_SQL = `
+  SELECT r.id AS root_id, f.user_id,
+         (SELECT count(*) FROM messages x
+           WHERE x.conversation_id = r.conversation_id
+             AND x.thread_root_id = r.id
+             AND x.deleted_at IS NULL
+             AND x.sender_id <> f.user_id
+             AND x.seq > GREATEST(COALESCE(tr.last_read_seq, 0),
+                                  CASE WHEN r.sender_id = f.user_id THEN r.seq ELSE 0 END)
+         )::int AS unread
+    FROM messages r
+    JOIN followers f ON TRUE
+    LEFT JOIN thread_reads tr ON tr.user_id = f.user_id AND tr.root_id = r.id
+   WHERE r.conversation_id = $1 AND r.deleted_at IS NULL AND r.reply_count > 0
+     AND (r.sender_id = f.user_id OR tr.user_id IS NOT NULL)`;
+
+/**
+ * New-reply counts per follower of one thread — pushed to each of them after
+ * a reply so their "N new replies" marker moves live.
+ */
+export async function threadUnreadFor(
+  conversationId: string, rootId: string,
+): Promise<Array<{ userId: string; unread: number }>> {
+  const { rows } = await getPool().query<{ user_id: string; unread: number }>(
+    `WITH followers AS (
+       SELECT sender_id AS user_id FROM messages WHERE conversation_id = $1 AND id = $2
+       UNION SELECT user_id FROM thread_reads WHERE root_id = $2
+     )
+     ${THREAD_UNREAD_SQL} AND r.id = $2`,
+    [conversationId, rootId],
+  );
+  return rows.map((r) => ({ userId: r.user_id, unread: r.unread }));
+}
+
+/** Threads in one conversation that have replies the reader has not seen. */
+export async function threadUnreadIn(
+  userId: string, conversationId: string,
+): Promise<Record<string, number>> {
+  const { rows } = await getPool().query<{ root_id: string; unread: number }>(
+    `WITH followers AS (SELECT $2::text AS user_id)
+     ${THREAD_UNREAD_SQL}`,
+    [conversationId, userId],
+  );
+  return Object.fromEntries(rows.filter((r) => r.unread > 0).map((r) => [r.root_id, r.unread]));
+}
+
+export interface FollowedThread {
+  conversationId: string;
+  conversationName: string | null;
+  conversationType: string;
+  rootId: string;
+  rootPreview: string;
+  rootSenderName: string | null;
+  replyCount: number;
+  lastReplyAt: string | null;
+  unread: number;
+}
+
+/**
+ * The Threads inbox: every thread this person follows, most recently active
+ * first, with what is new in each.
+ */
+export async function followedThreads(userId: string, limit = 50): Promise<FollowedThread[]> {
+  const { rows } = await getPool().query<{
+    conversation_id: string; conversation_name: string | null; conversation_type: string;
+    root_id: string; body: string | null; sender_name: string | null; reply_count: number;
+    last_reply_at: Date | null; unread: number;
+  }>(
+    `WITH mine AS (
+       SELECT r.id, r.conversation_id, r.seq, r.sender_id, r.body, r.reply_count,
+              COALESCE(tr.last_read_seq, 0) AS read_seq
+         FROM messages r
+         JOIN conversation_members cm ON cm.conversation_id = r.conversation_id
+                                     AND cm.user_id = $1 AND cm.left_at IS NULL
+         LEFT JOIN thread_reads tr ON tr.root_id = r.id AND tr.user_id = $1
+        WHERE r.deleted_at IS NULL AND r.reply_count > 0 AND r.thread_root_id IS NULL
+          AND (r.sender_id = $1 OR tr.user_id IS NOT NULL)
+     )
+     SELECT m.conversation_id, c.name AS conversation_name, c.type AS conversation_type,
+            m.id AS root_id, m.body, u.name AS sender_name, m.reply_count,
+            last.created_at AS last_reply_at,
+            (SELECT count(*) FROM messages x
+              WHERE x.conversation_id = m.conversation_id AND x.thread_root_id = m.id
+                AND x.deleted_at IS NULL AND x.sender_id <> $1
+                AND x.seq > GREATEST(m.read_seq, CASE WHEN m.sender_id = $1 THEN m.seq ELSE 0 END)
+            )::int AS unread
+       FROM mine m
+       JOIN conversations c ON c.id = m.conversation_id AND c.deleted_at IS NULL
+       LEFT JOIN users u ON u.id = m.sender_id
+       LEFT JOIN LATERAL (
+         SELECT created_at FROM messages x
+          WHERE x.conversation_id = m.conversation_id AND x.thread_root_id = m.id AND x.deleted_at IS NULL
+          ORDER BY x.seq DESC LIMIT 1
+       ) last ON TRUE
+      ORDER BY last.created_at DESC NULLS LAST
+      LIMIT $2`,
+    [userId, limit],
+  );
+  const previews = await Promise.all(rows.map((r) => renderMentionsAsText(r.body ?? '')));
+  return rows.map((r, i) => ({
+    conversationId: r.conversation_id,
+    conversationName: r.conversation_name,
+    conversationType: r.conversation_type,
+    rootId: r.root_id,
+    rootPreview: (previews[i] ?? '').slice(0, 160) || '📎 Attachment',
+    rootSenderName: r.sender_name,
+    replyCount: r.reply_count,
+    lastReplyAt: r.last_reply_at ? r.last_reply_at.toISOString() : null,
+    unread: r.unread,
+  }));
+}
+
+/**
+ * Mark a conversation unread from its newest main-flow message — the "come
+ * back to this" gesture. Moves the watermark to just before that message and
+ * recounts, so the badge shows exactly one.
+ */
+export async function markConversationUnread(
+  userId: string, conversationId: string,
+): Promise<ReadResult> {
+  const { rows } = await getPool().query<{
+    last_read_seq: string; unread_count: number; unread_mentions: number;
+  }>(
+    `WITH target AS (
+       SELECT COALESCE((
+         SELECT x.seq - 1 FROM messages x
+          WHERE x.conversation_id = $1 AND x.thread_root_id IS NULL
+            AND x.deleted_at IS NULL AND x.type <> 'system' AND x.sender_id <> $2
+          ORDER BY x.seq DESC LIMIT 1), NULL) AS seq
+     )
+     UPDATE conversation_members m
+        SET last_read_seq = LEAST(m.last_read_seq, target.seq),
+            unread_count = ${unreadCountSql('LEAST(m.last_read_seq, target.seq)')},
+            unread_mentions = ${unreadMentionsSql('LEAST(m.last_read_seq, target.seq)')}
+       FROM target
+      WHERE m.conversation_id = $1 AND m.user_id = $2 AND m.left_at IS NULL
+        AND target.seq IS NOT NULL
+      RETURNING m.last_read_seq, m.unread_count, m.unread_mentions`,
+    [conversationId, userId],
+  );
+  const r = rows[0];
+  if (!r) throw new ChatError('There is nothing from anyone else here to mark unread.', 409);
+  return {
+    lastReadSeq: Number(r.last_read_seq), unread: r.unread_count,
+    unreadMentions: r.unread_mentions, changed: true,
+  };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *

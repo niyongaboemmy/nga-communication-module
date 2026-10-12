@@ -72,6 +72,11 @@ export const markRead = (id: string, seq: number) =>
     `/api/chat/conversations/${id}/read`, { seq },
   ).then((r) => r.data!);
 
+export const markReadLatest = (id: string) =>
+  apiPost<{ lastReadSeq: number; unread: number; unreadMentions: number }>(
+    `/api/chat/conversations/${id}/read`, { latest: true },
+  ).then((r) => r.data!);
+
 export const setPrefs = (
   id: string,
   prefs: { isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null },
@@ -132,6 +137,32 @@ export const replyInThread = (
 ) => apiPost<{ message: WireMessage; root: WireMessage | null; duplicate: boolean }>(
   `/api/chat/conversations/${conversationId}/messages/${rootId}/replies`, payload,
 ).then((r) => r.data!);
+
+/** One thread in the Threads inbox. */
+export interface FollowedThread {
+  conversationId: string;
+  conversationName: string | null;
+  conversationType: string;
+  rootId: string;
+  rootPreview: string;
+  rootSenderName: string | null;
+  replyCount: number;
+  lastReplyAt: string | null;
+  unread: number;
+}
+
+export const listFollowedThreads = () =>
+  apiGet<{ threads: FollowedThread[] }>('/api/chat/threads').then((r) => r.data!.threads);
+
+export const markThreadRead = (conversationId: string, rootId: string, seq: number) =>
+  apiPost<{ lastReadSeq: number }>(
+    `/api/chat/conversations/${conversationId}/threads/${rootId}/read`, { seq },
+  ).then((r) => r.data!);
+
+export const markUnread = (id: string) =>
+  apiPost<{ lastReadSeq: number; unread: number; unreadMentions: number }>(
+    `/api/chat/conversations/${id}/unread`, {},
+  ).then((r) => r.data!);
 
 export const listPinned = (conversationId: string) =>
   apiGet<{ messages: WireMessage[] }>(`/api/chat/conversations/${conversationId}/pins`)

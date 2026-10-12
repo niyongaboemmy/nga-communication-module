@@ -41,17 +41,6 @@ function inQuietHours(prefs: ChatPrefs, now = new Date()): boolean {
 
 const CHAT_KINDS = new Set(['chat.dm', 'chat.mention', 'chat.message', 'chat.thread', 'chat.reaction']);
 
-/**
- * The unread count in the tab title.
- *
- * Restored rather than assumed: another tab, or this one before a reload, may
- * already have changed it, and stacking prefixes produces "(3) (1) Tupo".
- */
-function setTitleBadge(count: number): void {
-  const base = document.title.replace(/^\(\d+\+?\)\s*/, '');
-  document.title = count > 0 ? `(${count > 99 ? '99+' : count}) ${base}` : base;
-}
-
 export const ChatNotificationBridge: React.FC = () => {
   const { user } = useAuth();
   const { notify } = useNotify();
@@ -75,27 +64,8 @@ export const ChatNotificationBridge: React.FC = () => {
       .catch(() => { /* defaults are sane; a failed read must not silence chat */ });
   }, [user]);
 
-  /* ── Title badge ─────────────────────────────────────────────────────── */
-
-  useEffect(() => {
-    if (!user) { setTitleBadge(0); return; }
-
-    const refreshBadge = () => {
-      apiGet<{ unread: number; mentions: number }>('/api/chat/unread')
-        .then((r) => setTitleBadge(r.data!.unread))
-        .catch(() => {});
-    };
-    refreshBadge();
-
-    const socket = getSocket();
-    // Recomputed on any counter change rather than incremented locally: a badge
-    // that only ever counts up is a badge that eventually lies.
-    socket?.on('conversation:unread', refreshBadge);
-    return () => {
-      socket?.off('conversation:unread', refreshBadge);
-      setTitleBadge(0);
-    };
-  }, [user]);
+  /* The tab-title count lives in useModuleBadges (AppShell), alongside the
+     rail and tab-bar badges, so every surface shows the same number. */
 
   /* ── Interruptions ───────────────────────────────────────────────────── */
 
