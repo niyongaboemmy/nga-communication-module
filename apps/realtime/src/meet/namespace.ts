@@ -148,7 +148,7 @@ export function registerMeetNamespace(io: Server): Namespace {
    * Poll rows carry a raw vote tally; the wire shape carries per-option counts.
    * Folding happens here so the client never has to know how votes are stored.
    */
-  const toWirePoll = (row: Record<string, unknown>): MeetPoll => {
+  const toWirePoll = (row: Record<string, unknown>, opts: { revealAnswer?: boolean } = {}): MeetPoll => {
     const options = (row.options as string[]) ?? [];
     const tally = (row.tally as number[][] | null) ?? [];
     const counts = options.map(() => 0);
@@ -161,7 +161,10 @@ export function registerMeetNamespace(io: Server): Namespace {
       kind: (row.kind as 'poll' | 'quiz') ?? 'poll',
       question: String(row.question),
       options: options.map((text, index) => ({ index, text, votes: counts[index] ?? 0 })),
-      correctOptionIndex: (row.correct_option_index as number | null) ?? null,
+      // A quiz's answer is revealed when the poll closes, and before that only
+      // to whoever is allowed to know it (the host's own state).
+      correctOptionIndex: row.status === 'closed' || opts.revealAnswer
+        ? (row.correct_option_index as number | null) ?? null : null,
       anonymous: !!row.anonymous,
       multipleChoice: !!row.multiple_choice,
       status: (row.status as 'open' | 'closed') ?? 'open',
@@ -269,7 +272,7 @@ export function registerMeetNamespace(io: Server): Namespace {
         lobby: canHost(participant.role) ? room.lobby() : [],
         settings,
         chat: chat.map(toWireChat),
-        polls: polls.map(toWirePoll),
+        polls: polls.map((row) => toWirePoll(row, { revealAnswer: canHost(participant.role) })),
         questions: questions.map(toWireQuestion),
         breakouts: breakouts.map((b) => ({
           id: String(b.id), meetingId, name: String(b.name),
@@ -834,7 +837,14 @@ export function registerMeetNamespace(io: Server): Namespace {
       try {
         await db.castVote(pollId, participant.id, indexes);
         const row = await db.pollWithTally(pollId, participant.id);
-        if (row) emitToRoom(meetingId, 'meet:poll', { poll: toWirePoll(row) });
+        if (row) {
+          const mine = toWirePoll(row);
+          // The room sees the tallies; whose vote this was stays with the voter
+          // (an anonymous poll is anonymous), who gets it back in the ack.
+          emitToRoom(meetingId, 'meet:poll', { poll: { ...mine, myVote: null } });
+          if (typeof ack === 'function') ack({ ok: true, poll: mine });
+          return;
+        }
         if (typeof ack === 'function') ack({ ok: true });
       } catch {
         if (typeof ack === 'function') ack({ ok: false });
@@ -857,7 +867,7 @@ export function registerMeetNamespace(io: Server): Namespace {
         // nothing.
         poll.correctOptionIndex = (row.correct_option_index as number | null) ?? null;
         poll.status = 'closed';
-        emitToRoom(meetingId, 'meet:poll_closed', { poll });
+        emitToRoom(meetingId, 'meet:poll_closed', { poll: { ...poll, myVote: null } });
       }
       db.logEvent(meetingId, 'poll.closed', 'info', { actorId: user.id });
     });

@@ -540,15 +540,16 @@ export function useMeetRoom(
     });
 
     socket.on('meet:poll', (p: { poll: MeetPoll }) => {
+      // Broadcasts carry no one's vote; keep this participant's own.
       patch((s) => ({
         polls: s.polls.some((x) => x.id === p.poll.id)
-          ? s.polls.map((x) => (x.id === p.poll.id ? p.poll : x))
+          ? s.polls.map((x) => (x.id === p.poll.id ? { ...p.poll, myVote: x.myVote } : x))
           : [...s.polls, p.poll],
       }));
     });
 
     socket.on('meet:poll_closed', (p: { poll: MeetPoll }) => {
-      patch((s) => ({ polls: s.polls.map((x) => (x.id === p.poll.id ? p.poll : x)) }));
+      patch((s) => ({ polls: s.polls.map((x) => (x.id === p.poll.id ? { ...p.poll, myVote: x.myVote } : x)) }));
     });
 
     socket.on('meet:question', (p: { question: MeetQuestion }) => {
@@ -1013,7 +1014,13 @@ export function useMeetRoom(
   }) => { socketRef.current?.emit('meet:poll_create', p); }, []);
 
   const votePoll = useCallback((pollId: string, optionIndexes: number[]) => {
-    socketRef.current?.emit('meet:poll_vote', { pollId, optionIndexes });
+    socketRef.current?.emit('meet:poll_vote', { pollId, optionIndexes }, (r?: { ok: boolean; poll?: MeetPoll }) => {
+      // The ack carries this participant's own view, vote included.
+      if (r?.ok && r.poll) {
+        const mine = r.poll;
+        patch((s) => ({ polls: s.polls.map((x) => (x.id === mine.id ? mine : x)) }));
+      }
+    });
   }, []);
 
   const closePoll = useCallback((pollId: string) => {

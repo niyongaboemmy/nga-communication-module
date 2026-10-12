@@ -36,7 +36,8 @@ export interface FeedServerToClientEvents {
   'feed:post_updated': (p: { postId: string; post: FeedPostView }) => void;
   'feed:post_deleted': (p: { postId: string; byModerator: boolean }) => void;
 
-  'feed:reaction': (p: { postId: string; reactions: FeedReactionSummary }) => void;
+  /** `reactions.mine` is the actor's; other clients keep their own. */
+  'feed:reaction': (p: { postId: string; reactions: FeedReactionSummary; actorId?: string }) => void;
 
   'feed:comment_new': (p: { postId: string; comment: FeedCommentView }) => void;
   'feed:comment_updated': (p: { postId: string; comment: FeedCommentView }) => void;
@@ -48,7 +49,8 @@ export interface FeedServerToClientEvents {
   ) => void;
 
   /** Poll tallies moved — everyone watching sees the bars change. */
-  'feed:poll_updated': (p: { postId: string; poll: NonNullable<FeedPostView['poll']> }) => void;
+  /** `poll.myVotes` is the actor's; other clients keep their own. */
+  'feed:poll_updated': (p: { postId: string; poll: NonNullable<FeedPostView['poll']>; actorId?: string }) => void;
 
   /** Cheap counter bumps (views, shares) without re-sending the whole post. */
   'feed:counter': (

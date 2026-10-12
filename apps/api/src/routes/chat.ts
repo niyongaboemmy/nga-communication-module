@@ -1066,7 +1066,7 @@ router.post('/conversations/:id/polls', authorizePermission('MESSAGE_SEND'),
 
     // The poll is a message, so it fans out as one — and notifies as one.
     emitToConversation(id, 'message:new', { conversationId: id, message });
-    emitToConversation(id, 'poll:updated', { conversationId: id, poll });
+    emitToConversation(id, 'poll:updated', { conversationId: id, poll: { ...poll, myVotes: [] }, actorId: me.id });
     res.status(201).json(ok({ poll, message }));
   }));
 
@@ -1090,7 +1090,9 @@ router.post('/polls/:pollId/vote', wrap(async (req, res) => {
     // Everyone sees the bars move. A poll whose results only update on reload
     // is a poll people vote in twice.
     emitToConversation(rows[0].conversation_id, 'poll:updated', {
-      conversationId: rows[0].conversation_id, poll,
+      // Neutral: the voter has their own votes from the response; broadcasting
+      // them next to actorId would reveal an anonymous vote.
+      conversationId: rows[0].conversation_id, poll: { ...poll, myVotes: [] }, actorId: me.id,
     });
   }
   res.json(ok({ poll }));
@@ -1103,7 +1105,9 @@ router.post('/polls/:pollId/close', wrap(async (req, res) => {
     'SELECT conversation_id FROM polls WHERE id = $1', [req.params.pollId]);
   if (rows[0]) {
     emitToConversation(rows[0].conversation_id, 'poll:updated', {
-      conversationId: rows[0].conversation_id, poll,
+      // Neutral: the voter has their own votes from the response; broadcasting
+      // them next to actorId would reveal an anonymous vote.
+      conversationId: rows[0].conversation_id, poll: { ...poll, myVotes: [] }, actorId: me.id,
     });
   }
   res.json(ok({ poll }));

@@ -241,7 +241,7 @@ try {
   await sleep(600);
   const fr = b1.log.find((e) => e.ev === 'feed:reaction');
   check('B receives live feed:reaction', !!fr, evs(b1));
-  if (fr) check('broadcast does not overwrite B\'s own "mine" with C\'s reaction', !fr.payload?.reactions?.mine, `mine in B's payload = ${JSON.stringify(fr.payload?.reactions?.mine)}`);
+  if (fr) check('broadcast carries no reactor-specific "mine" (neutral payload + actorId)', !fr.payload?.reactions?.mine && !!fr.payload?.actorId, `mine=${JSON.stringify(fr.payload?.reactions?.mine)} actorId=${fr.payload?.actorId ? 'set' : 'missing'}`);
   reset(b1);
   await call(C, 'POST', `/api/feed/posts/${postId}/comments`, { body: 'live comment' });
   await sleep(600);

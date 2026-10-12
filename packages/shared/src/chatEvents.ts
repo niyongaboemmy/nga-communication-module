@@ -202,7 +202,8 @@ export interface ChatServerToClientEvents {
   ) => void;
 
   /** Poll results moved — everyone watching sees the bars change (FR-MSG-21). */
-  'poll:updated': (p: { conversationId: string; poll: unknown }) => void;
+  /** `poll.myVotes` is the actor's; every other client keeps its own. */
+  'poll:updated': (p: { conversationId: string; poll: unknown; actorId?: string }) => void;
 
   /** A reply landed in a thread. Delivered separately from `message:new` so a
    *  client can update the thread pane without the reply appearing in the main

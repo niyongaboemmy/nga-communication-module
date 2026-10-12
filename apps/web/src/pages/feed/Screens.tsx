@@ -40,15 +40,17 @@ export const SavedPosts: React.FC = () => {
 
 export const PostPermalink: React.FC = () => {
   const { id = '' } = useParams();
-  const { getPost, ingest } = useFeed();
+  const { getPost, ingest, watch } = useFeed();
   const [status, setStatus] = useState<'loading' | 'ok' | 'gone'>('loading');
   const post = getPost(id);
   const { pages, left, right } = useFeedRails();
 
   useEffect(() => {
     setStatus('loading');
-    void api.getPost(id).then((p) => { ingest([p]); setStatus('ok'); }).catch(() => setStatus('gone'));
-  }, [id, ingest]);
+    // Subscribed as well as fetched: comments, reactions and edits arrive live
+    // on a post's own page just as they do in the feed.
+    void api.getPost(id).then((p) => { ingest([p]); watch([p.id]); setStatus('ok'); }).catch(() => setStatus('gone'));
+  }, [id, ingest, watch]);
 
   return (
     <>

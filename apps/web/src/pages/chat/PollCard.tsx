@@ -57,13 +57,21 @@ export const PollCard: React.FC<{
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
-    const onUpdate = (p: { conversationId: string; poll: unknown }) => {
+    const onUpdate = (p: { conversationId: string; poll: unknown; actorId?: string }) => {
       const incoming = p.poll as chatApi.WirePoll;
       // Only this poll. One channel can hold several, and every vote in any of
       // them arrives on the same event.
       if (incoming?.messageId === messageId) {
         liveUpdates.current += 1;
-        setPoll(incoming);
+        // `myVotes` is the voter's. Keep this reader's own: from the voter
+        // lists when the poll is not anonymous, otherwise from what we had.
+        setPoll((prev) => {
+          if (p.actorId === user?.id) return incoming;
+          const myVotes = incoming.anonymous
+            ? (prev?.myVotes ?? [])
+            : incoming.options.filter((o) => user && o.voters.includes(user.id)).map((o) => o.id);
+          return { ...incoming, myVotes };
+        });
       }
     };
     socket.on('poll:updated', onUpdate);

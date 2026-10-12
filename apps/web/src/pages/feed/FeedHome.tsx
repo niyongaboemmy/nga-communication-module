@@ -18,7 +18,7 @@ export const FeedHome: React.FC = () => {
   const [params, setParams] = useSearchParams();
   const filter = (params.get('filter') as FeedFilter) || 'all';
   const [sort, setSort] = useState<FeedSort>('recent');
-  const { posts, ingest, currentUserId } = useFeed();
+  const { posts, ingest, watch, currentUserId } = useFeed();
   const [pendingTop, setPendingTop] = useState<FeedPostView[]>([]);
   const { pages, left, right } = useFeedRails();
 
@@ -37,6 +37,7 @@ export const FeedHome: React.FC = () => {
 
   const showPending = () => {
     ingest(pendingTop);
+    watch(pendingTop.map((p) => p.id));   // revealed posts get live updates too
     pendingTop.forEach((p) => list.prepend(p.id));
     setPendingTop([]);
     document.querySelector('[data-app-scroll]')?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -50,7 +51,7 @@ export const FeedHome: React.FC = () => {
         <div className="relative space-y-3 pt-0 sm:pt-0">
           <StoriesBar />
           <HighlightsBar />
-          <Composer pages={pages} onPublished={(post) => { if (post) { list.prepend(post.id); ingest([post]); } }} />
+          <Composer pages={pages} onPublished={(post) => { if (post) { list.prepend(post.id); ingest([post]); watch([post.id]); } }} />
 
           <div className="flex items-center gap-2 px-3 sm:px-0">
             <div className="flex items-center gap-0.5 rounded-full bg-black/[0.06] p-0.5 text-[13px] dark:bg-white/[0.06]">

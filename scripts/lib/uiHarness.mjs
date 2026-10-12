@@ -23,6 +23,13 @@ export function prepareBrowser(browser) {
     await ctx.route('**/api/sso/verify-mis**', (route) => route.fulfill({
       status: 200, contentType: 'application/json', body: '{"success":true,"data":{"valid":true}}',
     }));
+    // LOG_HTTP_ERRORS=1: print every failed request by URL — the console only
+    // says "Failed to load resource", never which one.
+    if (process.env.LOG_HTTP_ERRORS) {
+      ctx.on('response', (r) => {
+        if (r.status() >= 400) console.log(`  [http ${r.status()}] ${r.request().method()} ${r.url()}`);
+      });
+    }
     return ctx;
   };
   return browser;

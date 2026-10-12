@@ -5,6 +5,7 @@ import type {
   FeedCommentView, FeedFilter, FeedPostView, FeedReaction, FeedReactionSummary, FeedSort,
 } from '@tupo/shared';
 import { useAuth } from '../../context/AuthContext';
+import { usePermissions } from '../../hooks/usePermissions';
 import { getSocket, onSocket } from '../../lib/socket';
 import * as api from './api';
 
@@ -51,8 +52,51 @@ export const useFeed = () => {
   return v;
 };
 
+/**
+ * A post that arrived over the socket was built for whoever caused the event
+ * (the author, an editor, a reactor), so its personal fields are theirs.
+ * Keep this reader's own (X-01): edit/moderate/pin rights, bookmark, their
+ * reaction, their votes, their RSVP and their relationship with the page.
+ */
+function keepMine(incoming: FeedPostView, prev: FeedPostView | undefined, me: string): FeedPostView {
+  if (!prev) {
+    // A brand-new post: nothing is known about this reader yet beyond whether
+    // they wrote it. Everything personal starts neutral.
+    // The author can always edit their own post; anything wider (page editor,
+    // moderator) arrives with the next fetch.
+    const mine = incoming.author.id === me;
+    return {
+      ...incoming,
+      canEdit: mine,
+      canPin: false,
+      canModerate: false,
+      bookmarked: false,
+      reactions: { ...incoming.reactions, mine: null },
+      poll: incoming.poll ? { ...incoming.poll, myVotes: [] } : incoming.poll,
+      event: incoming.event ? { ...incoming.event, going: false } : incoming.event,
+    };
+  }
+  return {
+    ...incoming,
+    canEdit: prev.canEdit,
+    canPin: prev.canPin,
+    canModerate: prev.canModerate,
+    canComment: prev.canComment,
+    bookmarked: prev.bookmarked,
+    reactions: { ...incoming.reactions, mine: prev.reactions.mine },
+    poll: incoming.poll ? { ...incoming.poll, myVotes: prev.poll?.myVotes ?? [] } : incoming.poll,
+    event: incoming.event ? { ...incoming.event, going: prev.event?.going ?? false } : incoming.event,
+    page: { ...incoming.page, following: prev.page.following, myRole: prev.page.myRole },
+  };
+}
+
 export const FeedProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user } = useAuth();
+  const { can: canPerm, roleName } = usePermissions();
+  // Whether this reader may moderate comments — their own rights, never the
+  // rights of whoever wrote the comment a broadcast carries.
+  const moderatorRef = useRef(false);
+  moderatorRef.current = canPerm('MODERATION_ACT') || roleName === 'Admin';
   const [posts, setPosts] = useState<PostMap>({});
   const watched = useRef<Set<string>>(new Set());
   const newPostCbs = useRef(new Set<(p: FeedPostView) => void>());
@@ -99,21 +143,38 @@ export const FeedProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /* ── Socket wiring ──────────────────────────────────────────────────── */
   useEffect(() => {
     if (!user) return;
+    const ownComment = (c: FeedCommentView): FeedCommentView => ({
+      ...c,
+      canEdit: c.author.id === user.id,
+      canModerate: moderatorRef.current,
+      myReaction: c.author.id === user.id ? c.myReaction : null,
+    });
     const offs = [
       onSocket('feed:post_new', ({ post }) => {
-        setPosts((p) => ({ ...p, [post.id]: post }));
-        newPostCbs.current.forEach((cb) => cb(post));
+        const view = keepMine(post, undefined, user.id);
+        setPosts((p) => ({ ...p, [post.id]: p[post.id] ? keepMine(post, p[post.id], user.id) : view }));
+        newPostCbs.current.forEach((cb) => cb(view));
       }),
-      onSocket('feed:post_updated', ({ postId, post }) => setPosts((p) => (p[postId] ? { ...p, [postId]: post } : p))),
+      onSocket('feed:post_updated', ({ postId, post }) =>
+        setPosts((p) => (p[postId] ? { ...p, [postId]: keepMine(post, p[postId], user.id) } : p))),
       onSocket('feed:post_deleted', ({ postId }) => remove(postId)),
-      onSocket('feed:reaction', ({ postId, reactions }) => patch(postId, (cur) => ({ ...cur, reactions }))),
-      onSocket('feed:poll_updated', ({ postId, poll }) => patch(postId, (cur) => ({ ...cur, poll }))),
+      onSocket('feed:reaction', ({ postId, reactions, actorId }) => patch(postId, (cur) => ({
+        ...cur,
+        // Someone else's reaction moves the totals, never this reader's own choice.
+        reactions: actorId === user.id ? reactions : { ...reactions, mine: cur.reactions.mine },
+      }))),
+      onSocket('feed:poll_updated', ({ postId, poll, actorId }) => patch(postId, (cur) => ({
+        ...cur,
+        poll: actorId === user.id ? poll : { ...poll, myVotes: cur.poll?.myVotes ?? [] },
+      }))),
       onSocket('feed:counter', ({ postId, ...counts }) => patch(postId, (cur) => ({ ...cur, ...counts }))),
       onSocket('feed:comment_new', (e) => {
         patch(e.postId, (cur) => ({ ...cur, commentCount: cur.commentCount + 1 }));
-        commentCbs.current.forEach((cb) => cb({ type: 'new', ...e }));
+        const comment = ownComment(e.comment);
+        commentCbs.current.forEach((cb) => cb({ type: 'new', ...e, comment }));
       }),
-      onSocket('feed:comment_updated', (e) => commentCbs.current.forEach((cb) => cb({ type: 'updated', ...e }))),
+      onSocket('feed:comment_updated', (e) =>
+        commentCbs.current.forEach((cb) => cb({ type: 'updated', ...e, comment: ownComment(e.comment) }))),
       onSocket('feed:comment_deleted', (e) => {
         patch(e.postId, (cur) => ({ ...cur, commentCount: Math.max(0, cur.commentCount - 1) }));
         commentCbs.current.forEach((cb) => cb({ type: 'deleted', ...e }));

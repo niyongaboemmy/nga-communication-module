@@ -132,6 +132,40 @@ interface ChatValue {
 const ChatContext = createContext<ChatValue | null>(null);
 
 /**
+ * Make a broadcast message this reader's own (X-01).
+ *
+ * A message that arrives over the socket was built for whoever caused the
+ * event — the sender, the editor, the reactor — so its personal fields are
+ * theirs: their saved flag, whether it mentions *them*, which reactions are
+ * *theirs*. Taken as-is, someone else's edit unsaved my bookmark and their
+ * reaction lit up my pill. These are worked out again for this reader, from
+ * the shared fields and from what this client already knew.
+ */
+export function personalise(incoming: WireMessage, me: string, prev?: WireMessage | null): WireMessage {
+  return {
+    ...incoming,
+    saved: prev?.saved ?? false,
+    mentionsMe: Boolean(incoming.mentionNames && me in incoming.mentionNames) || (prev?.mentionsMe ?? false),
+    reactions: personaliseReactions(incoming.reactions, me, prev?.reactions),
+    // Delivery ticks are the sender's view; on someone else's message they mean nothing.
+    delivery: incoming.senderId === me ? incoming.delivery : (prev?.delivery ?? incoming.delivery),
+  };
+}
+
+export function personaliseReactions(
+  incoming: WireMessage['reactions'], me: string, prev?: WireMessage['reactions'],
+): WireMessage['reactions'] {
+  return incoming.map((r) => {
+    // userIds is capped; when the list is complete it is the truth, otherwise
+    // fall back to what this client knew about its own reaction.
+    const complete = r.userIds.length >= r.count;
+    const before = prev?.find((x) => x.emoji === r.emoji)?.mine ?? false;
+    return { ...r, mine: r.userIds.includes(me) || (!complete && before) };
+  });
+}
+
+
+/**
  * Whether a conversation is muted right now. A timed mute that has run out is
  * not a mute: treating it as one hides the badge of a conversation the person
  * expects to hear from again.
@@ -304,6 +338,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     if (!user) return;
+    const meId = user.id;
     const socket = getSocket();
     if (!socket) return;
 
@@ -326,7 +361,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // gateway) still belongs in the thread pane, not the main flow.
       if (message.threadRootId) { onThreadReply({ conversationId, rootId: message.threadRootId, message }); return; }
       if (conversationId === activeIdRef.current) {
-        setMessages((prev) => reconcile(prev, message));
+        setMessages((prev) => reconcile(prev, message.senderId === user.id
+          ? message : personalise(message, user.id)));
       }
       // The sidebar preview moves whether or not the conversation is open.
       setConversations((prev) => prev.map((c) => c.id === conversationId
@@ -351,7 +387,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       { conversationId, rootId, message }: { conversationId: string; rootId: string; message: WireMessage },
     ) {
       if (conversationId === activeIdRef.current && rootId === threadRootRef.current) {
-        setThreadMessages((prev) => reconcile(prev, message));
+        setThreadMessages((prev) => reconcile(prev, message.senderId === meId
+          ? message : personalise(message, meId)));
       }
     }
 
@@ -368,16 +405,23 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
     };
 
+    // Edits, deletions and reactions apply to the open thread too — a reply
+    // edited or removed must not stay stale in the thread pane.
+    const inBoth = (fn: (list: WireMessage[]) => WireMessage[]) => {
+      setMessages(fn);
+      setThreadMessages(fn);
+    };
+
     const onUpdated = ({ conversationId, message }: { conversationId: string; message: WireMessage }) => {
       if (conversationId !== activeIdRef.current) return;
-      setMessages((prev) => prev.map((m) => (m.id === message.id ? message : m)));
+      inBoth((prev) => prev.map((m) => (m.id === message.id ? personalise(message, user.id, m) : m)));
     };
 
     const onDeleted = ({ conversationId, messageId }: { conversationId: string; messageId: string }) => {
       if (conversationId !== activeIdRef.current) return;
       // Tombstoned in place rather than removed: the message keeps its slot in
       // the log, which is what "This message was deleted" is for.
-      setMessages((prev) => prev.map((m) => (m.id === messageId
+      inBoth((prev) => prev.map((m) => (m.id === messageId
         ? { ...m, deletedAt: new Date().toISOString(), body: null, attachments: [], reactions: [] }
         : m)));
     };
@@ -387,7 +431,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       { conversationId: string; messageId: string; reactions: WireMessage['reactions'] },
     ) => {
       if (conversationId !== activeIdRef.current) return;
-      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, reactions } : m)));
+      inBoth((prev) => prev.map((m) => (m.id === messageId
+        ? { ...m, reactions: personaliseReactions(reactions, user.id, m.reactions) } : m)));
     };
 
     const onTyping = ({ conversationId, users }: { conversationId: string; users: TypingUser[] }) => {
