@@ -1,4 +1,6 @@
+import './utils/asyncErrors.js';
 import express from 'express';
+import { installProcessGuards } from './utils/asyncErrors.js';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import { getPool, pingDb, snowflake, closeDb } from '@tupo/db';
@@ -7,6 +9,8 @@ import type { SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
 import { createStorageDriver } from './storage/driver.js';
 import { canReadFile, canDeleteFile, listConversationFiles } from './access.js';
+
+installProcessGuards('files');
 
 const app = express();
 const storage = createStorageDriver();
@@ -289,8 +293,10 @@ app.get('/api/files/:id/content', async (req, res) => {
   if (range && storage.getRange) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
     if (match) {
-      const start = match[1] ? parseInt(match[1], 10) : 0;
-      const end = match[2] ? parseInt(match[2], 10) : total - 1;
+      // `bytes=-N` is a suffix range: the last N bytes, not the first N.
+      const suffix = !match[1] && match[2];
+      const start = suffix ? Math.max(0, total - parseInt(match[2]!, 10)) : match[1] ? parseInt(match[1], 10) : 0;
+      const end = suffix ? total - 1 : match[2] ? parseInt(match[2], 10) : total - 1;
       if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= total) {
         res.setHeader('Content-Range', `bytes */${total}`);
         return res.status(416).end();
@@ -299,13 +305,27 @@ app.get('/api/files/:id/content', async (req, res) => {
       res.status(206);
       res.setHeader('Content-Range', `bytes ${start}-${last}/${total}`);
       res.setHeader('Content-Length', String(last - start + 1));
-      return (await storage.getRange(file.storage_key, start, last)).pipe(res);
+      return pipeSafely(await storage.getRange(file.storage_key, start, last), res);
     }
   }
 
   res.setHeader('Content-Length', String(total));
-  (await storage.get(file.storage_key)).pipe(res);
+  pipeSafely(await storage.get(file.storage_key), res);
 });
+
+/**
+ * Stream a stored file to the response. A read error (the file vanished from
+ * disk, a permissions problem) is an `error` event on the stream; without a
+ * listener Node treats it as uncaught and the whole files service exits.
+ */
+function pipeSafely(stream: NodeJS.ReadableStream, res: express.Response): void {
+  stream.on('error', (err) => {
+    console.error('[files] read failed:', err instanceof Error ? err.message : err);
+    if (!res.headersSent) res.status(404).json(fail('That file is no longer available.'));
+    else res.destroy();
+  });
+  stream.pipe(res);
+}
 
 /**
  * Everything shared in one conversation — the Files tab.
@@ -384,6 +404,25 @@ app.get('/health', async (_req, res) => {
 });
 
 app.use((_req, res) => res.status(404).json(fail('Not found')));
+
+// Every error a route passes on (including rejected async handlers, see
+// utils/asyncErrors) ends here: a clean status, no internals, never a crash.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (res.headersSent) { res.destroy(); return; }
+  const status = (err as { status?: unknown }).status;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    res.status(status).json(fail(err.message));
+    return;
+  }
+  const pgCode = (err as { code?: unknown }).code;
+  if (typeof pgCode === 'string' && /^22/.test(pgCode)) {
+    res.status(400).json(fail('One of the values sent is not valid.'));
+    return;
+  }
+  console.error(`[files] unhandled error on ${req.method} ${req.path}:`, err);
+  res.status(500).json(fail('An unexpected error occurred.'));
+});
 
 const server = app.listen(config.port, () => {
   console.log(`📁 tupo-files listening on http://localhost:${config.port}  (driver: ${storage.name})`);

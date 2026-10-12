@@ -13,6 +13,7 @@ import { ping as pingMeetDb, getPool as getMeetPool } from './meet/db.js';
 import { rooms as meetRooms } from './meet/state.js';
 import * as chat from '@tupo/chat';
 import { registerChatHandlers } from './chat/handlers.js';
+import { hardenSocket, installProcessGuards } from './utils/safeSocket.js';
 import { registerFeedHandlers } from './feed/handlers.js';
 import { createAccessCache, findInactiveUsers, sessionEnded } from './access.js';
 import { stopActivity } from './activity.js';
@@ -295,7 +296,10 @@ function startPresenceHeartbeat(): NodeJS.Timeout {
 
 const presenceHeartbeat = startPresenceHeartbeat();
 
+installProcessGuards('realtime');
+
 io.on('connection', (socket) => {
+  hardenSocket(socket);
   const user = socket.data.user as SessionClaims;
 
   /*

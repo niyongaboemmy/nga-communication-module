@@ -1,4 +1,5 @@
 import type { Namespace, Server, Socket } from 'socket.io';
+import { hardenSocket } from '../utils/safeSocket.js';
 import jwt from 'jsonwebtoken';
 import {
   parseMeetSettings, severityFor, meetRoleAtLeast, MEET_REACTIONS,
@@ -185,7 +186,7 @@ export function registerMeetNamespace(io: Server): Namespace {
   /* ---------------- connection ---------------- */
 
   nsp.on('connection', (raw) => {
-    const socket = raw as MeetSocket;
+    const socket = hardenSocket(raw, 'realtime/meet') as MeetSocket;
     const user = socket.data.user;
 
     /* -------- join -------- */

@@ -111,7 +111,7 @@ try {
   console.log('\n── Crash resilience (destructive to local dev processes)');
   const r1 = process.env.SKIP_API_CRASH ? { status: 'skipped' } : await call(S, 'GET', '/api/meet?limit=x');
   await sleep(1500);
-  const apiUp = await alive(`${API}/api/health`);
+  const apiUp = await alive(`${API}/health`);
   check('GET /api/meet?limit=x does not crash the API', apiUp, `response status ${r1.status}; api alive after = ${apiUp}`);
   if (meet?.id) {
     const j = await call(A, 'POST', `/api/meet/${meet.id}/join`, {});

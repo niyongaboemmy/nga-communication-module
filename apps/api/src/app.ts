@@ -1,3 +1,4 @@
+import './utils/asyncErrors.js';
 import express from 'express';
 import cors from 'cors';
 import { fail } from '@tupo/shared';
@@ -66,11 +67,32 @@ app.use('/api/integration', integrationRoutes);
 app.use((_req, res) => res.status(404).json(fail('Not found')));
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (res.headersSent) return;
   // A body express.json could not parse is the caller's mistake, not ours.
   if ((err as { type?: string }).type === 'entity.parse.failed') {
     return res.status(400).json(fail('The request body is not valid JSON.'));
   }
-  console.error('[api] unhandled error:', err);
+  if ((err as { type?: string }).type === 'entity.too.large') {
+    return res.status(413).json(fail('The request is too large.'));
+  }
+  // Schema validation failures name the field, never the internals.
+  if (err.name === 'ZodError') {
+    const issue = (err as unknown as { issues?: Array<{ path: unknown[]; message: string }> }).issues?.[0];
+    const where = issue?.path?.length ? `${issue.path.join('.')}: ` : '';
+    return res.status(400).json(fail(`Invalid request — ${where}${issue?.message ?? 'check the values sent'}.`));
+  }
+  // Domain errors (ChatError, FeedError, MailError, …) carry their own status.
+  const status = (err as { status?: unknown }).status;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    return res.status(status).json(fail(err.message));
+  }
+  // PostgreSQL rejecting a malformed value (bad number, id, date or enum) is a
+  // bad request, not a server fault — and its text never goes back out.
+  const pgCode = (err as { code?: unknown }).code;
+  if (typeof pgCode === 'string' && /^22/.test(pgCode)) {
+    return res.status(400).json(fail('One of the values sent is not valid.'));
+  }
+  console.error(`[api] unhandled error on ${req.method} ${req.path}:`, err);
   res.status(500).json(fail('An unexpected error occurred.'));
 });

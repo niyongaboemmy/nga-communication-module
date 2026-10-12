@@ -1,8 +1,11 @@
 import { pingDb, closeDb } from '@tupo/db';
 import { config } from './config.js';
 import { app } from './app.js';
+import { installProcessGuards } from './utils/asyncErrors.js';
 import { activity } from './activity/relay.js';
 import activityCatalog from './activity/catalog.json' with { type: 'json' };
+
+installProcessGuards('api');
 
 async function start(): Promise<void> {
   try {

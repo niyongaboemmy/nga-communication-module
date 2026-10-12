@@ -13,6 +13,11 @@ import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
 import { runPartitionMaintenance, partitionsAhead } from './jobs/partitions.js';
 import { reminders, profileMedia } from '@tupo/notify';
 
+// Last-resort guards: a stray rejection is logged, not fatal; an uncaught
+// exception exits so pm2 restarts the worker from a clean state.
+process.on('unhandledRejection', (reason) => console.error('[worker] unhandled rejection (kept running):', reason));
+process.on('uncaughtException', (err) => { console.error('[worker] uncaught exception — exiting:', err); process.exit(1); });
+
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
 // so a `FLUSHDB` while debugging one cannot destroy the other.
