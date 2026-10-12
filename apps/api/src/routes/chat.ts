@@ -482,16 +482,18 @@ router.post('/conversations/:id/messages', authorizePermission('MESSAGE_SEND'),
       return res.status(400).json(fail('A nonce is required so a retry cannot duplicate.'));
     }
 
+    // The client picks the kind of message, never its authority (B-01).
+    const safe = await chat.normaliseClientMessage(me.id, id, type, metadata);
     const result = await chat.sendMessage({
       conversationId: id,
       senderId: me.id,
       body: String(body ?? ''),
       nonce,
-      type,
+      type: safe.type,
       threadRootId: threadRootId ?? null,
       replyToId: replyToId ?? null,
       attachments: Array.isArray(attachments) ? attachments : [],
-      metadata: metadata && typeof metadata === 'object' ? metadata : {},
+      metadata: safe.metadata,
     });
 
     if (result.created) {
@@ -621,7 +623,7 @@ router.get('/conversations/:id/messages/:messageId/reactions', wrap(async (req, 
   const { id, messageId } = req.params as { id: string; messageId: string };
   await chat.requireMembership(me.id, id);
   const emoji = String(req.query.emoji ?? '');
-  res.json(ok({ names: emoji ? await chat.reactorNames(messageId, emoji) : [] }));
+  res.json(ok({ names: emoji ? await chat.reactorNames(id, messageId, emoji) : [] }));
 }));
 
 router.patch('/conversations/:id/messages/:messageId', authorizePermission('MESSAGE_EDIT_OWN'),
@@ -1072,7 +1074,7 @@ router.get('/conversations/:id/messages/:messageId/poll', wrap(async (req, res) 
   const me = actor(req);
   const { id, messageId } = req.params as { id: string; messageId: string };
   await chat.requireMembership(me.id, id);
-  const poll = await chat.getPollByMessage(me.id, messageId);
+  const poll = await chat.getPollByMessage(me.id, id, messageId);
   if (!poll) return res.status(404).json(fail('No poll on that message.'));
   res.json(ok({ poll }));
 }));

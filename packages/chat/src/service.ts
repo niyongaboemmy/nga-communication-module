@@ -421,6 +421,65 @@ interface WriteResult {
   broadcast: 'channel' | 'here' | null;
 }
 
+/** The message kinds a client may send itself. System notices and polls are server-written. */
+export const CLIENT_MESSAGE_TYPES: readonly MessageType[] = [
+  'text', 'rich_text', 'file', 'image', 'video', 'voice_note', 'call_event', 'post_share',
+];
+const MAX_CLIENT_METADATA = 4096;
+
+/**
+ * Normalise what a client asked to send (B-01).
+ *
+ * The client chooses the kind of message, never its authority: a `system`
+ * notice renders as official and cannot be deleted, a `poll` without a poll
+ * row is a broken card, so neither may come from a client. A meeting card's
+ * details are rebuilt from the meeting itself — and only its host, or a member
+ * of the conversation it was started from, may post one — so a card can never
+ * point somewhere else than it says. Anything else carries at most 4 KB of
+ * metadata, without the keys only the server writes.
+ */
+export async function normaliseClientMessage(
+  senderId: string, conversationId: string, type: unknown, metadata: unknown,
+): Promise<{ type?: MessageType; metadata: Record<string, unknown> }> {
+  if (type !== undefined && type !== null && !(CLIENT_MESSAGE_TYPES as readonly unknown[]).includes(type)) {
+    throw new ChatError('That kind of message cannot be sent directly.', 400);
+  }
+  const meta = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? { ...(metadata as Record<string, unknown>) } : {};
+  if (JSON.stringify(meta).length > MAX_CLIENT_METADATA) {
+    throw new ChatError('Message details are too large.', 400);
+  }
+
+  if (type === 'call_event') {
+    const meetingId = (meta.meet as { meetingId?: unknown } | undefined)?.meetingId;
+    if (typeof meetingId !== 'string' || !meetingId) throw new ChatError('A meeting card needs a meeting.', 400);
+    const { rows } = await getPool().query<{
+      id: string; join_code: string; title: string; scheduled_start: string | null; scheduled_end: string | null;
+      host_id: string; conversation_id: string | null;
+    }>(
+      `SELECT id, join_code, title, scheduled_start, scheduled_end, host_id, conversation_id
+         FROM meetings WHERE id = $1`, [meetingId],
+    );
+    const m = rows[0];
+    if (!m || (m.host_id !== senderId && m.conversation_id !== conversationId)) {
+      throw new ChatError('That meeting cannot be shared here.', 403);
+    }
+    return {
+      type: 'call_event',
+      metadata: {
+        meet: {
+          meetingId: m.id, joinCode: m.join_code, title: m.title,
+          scheduledStart: m.scheduled_start, scheduledEnd: m.scheduled_end,
+        },
+      },
+    };
+  }
+
+  // Keys only the server ever writes.
+  delete meta.meet; delete meta.fromThread; delete meta.event; delete meta.system;
+  return { type: (type ?? undefined) as MessageType | undefined, metadata: meta };
+}
+
 /**
  * The transactional half of a send: everything that must be atomic, and
  * nothing that is not.
@@ -1448,13 +1507,14 @@ export async function reactionsFor(messageId: string, viewerId: string): Promise
 }
 
 /** Names behind a reaction pill — "Ada, Bosco and 3 others". */
-export async function reactorNames(messageId: string, emoji: string): Promise<string[]> {
+export async function reactorNames(conversationId: string, messageId: string, emoji: string): Promise<string[]> {
+  // Scoped to the conversation the caller is a member of, not just the id.
   const { rows } = await getPool().query<{ name: string }>(
     `SELECT u.name FROM message_reactions r
        JOIN users u ON u.id = r.user_id
-      WHERE r.message_id = $1 AND r.emoji = $2
+      WHERE r.conversation_id = $1 AND r.message_id = $2 AND r.emoji = $3
       ORDER BY r.created_at LIMIT 50`,
-    [messageId, emoji],
+    [conversationId, messageId, emoji],
   );
   return rows.map((r) => r.name);
 }
@@ -1566,10 +1626,15 @@ export async function editHistory(
   const { rows } = await getPool().query<{
     previous_body: string | null; edited_at: string; name: string;
   }>(
+    // Only for a live message in the conversation the caller is a member of:
+    // the id alone is not proof of access, and a deleted message's earlier
+    // versions are the oversight view's, not anyone else's.
     `SELECT e.previous_body, e.edited_at, u.name
-       FROM message_edits e JOIN users u ON u.id = e.editor_id
-      WHERE e.message_id = $1 ORDER BY e.edited_at DESC`,
-    [messageId],
+       FROM message_edits e
+       JOIN users u ON u.id = e.editor_id
+       JOIN messages m ON m.id = e.message_id AND m.conversation_id = $1 AND m.deleted_at IS NULL
+      WHERE e.message_id = $2 ORDER BY e.edited_at DESC`,
+    [conversationId, messageId],
   );
   return rows.map((r) => ({ body: r.previous_body, at: r.edited_at, editorName: r.name }));
 }
@@ -1608,7 +1673,12 @@ export async function deleteMessage(
   const row = rows[0];
   if (!row) throw new ChatError('Message not found.', 404);
   if (row.deleted_at) throw new ChatError('That message is already deleted.', 409);
-  if (row.type === 'system') throw new ChatError('System messages cannot be deleted.', 400);
+  // A system notice is the server's, but a moderator must still be able to
+  // remove one — including any written before clients were stopped from
+  // sending them.
+  if (row.type === 'system' && !opts.canDeleteAny && opts.memberRole !== 'owner' && opts.memberRole !== 'admin') {
+    throw new ChatError('System messages cannot be deleted.', 400);
+  }
 
   const mine = row.sender_id === userId;
   const asModerator = !mine
@@ -2755,10 +2825,10 @@ export async function getPoll(viewerId: string, pollId: string): Promise<WirePol
 }
 
 export async function getPollByMessage(
-  viewerId: string, messageId: string,
+  viewerId: string, conversationId: string, messageId: string,
 ): Promise<WirePoll | null> {
   const { rows } = await getPool().query<{ id: string }>(
-    'SELECT id FROM polls WHERE message_id = $1', [messageId]);
+    'SELECT id FROM polls WHERE message_id = $1 AND conversation_id = $2', [messageId, conversationId]);
   return rows[0] ? getPoll(viewerId, rows[0].id) : null;
 }
 

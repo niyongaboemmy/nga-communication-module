@@ -131,16 +131,18 @@ export function registerChatHandlers(
       }
       if (!p.nonce) throw new ChatError('A nonce is required.', 400);
 
+      // The client picks the kind of message, never its authority (B-01).
+      const safe = await chat.normaliseClientMessage(user.id, p.conversationId, p.type, p.metadata);
       const result = await chat.sendMessage({
         conversationId: p.conversationId,
         senderId: user.id,
         body: String(p.body ?? ''),
         nonce: p.nonce,
-        type: p.type,
+        type: safe.type,
         threadRootId: p.threadRootId ?? null,
         replyToId: p.replyToId ?? null,
         attachments: p.attachments ?? [],
-        metadata: p.metadata ?? {},
+        metadata: safe.metadata,
       });
 
       // Ack before fan-out. The sender's own bubble settling is the thing they
