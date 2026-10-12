@@ -84,9 +84,11 @@ try {
   const second = (await call(A, 'POST', '/api/chat/conversations', { type: 'group', name: 'Beta Group', memberIds: [B.id, C.id] })).body.data.conversation.id;
   await call(A, 'POST', `/api/chat/conversations/${second}/messages`, { body: 'beta hello', nonce: nonce() });
   let target;
-  for (let i = 0; i < 60; i++) {
-    const r = await call(A, 'POST', `/api/chat/conversations/${second}/messages`, { body: i === 5 ? 'NEEDLE MESSAGE' : `filler ${i}`, nonce: nonce() });
-    if (i === 5) target = r.body.data.message.id;
+  // 48 messages keeps one sender under the 60/min chat limit while still
+  // putting the needle beyond the first 40-message page.
+  for (let i = 0; i < 48; i++) {
+    const r = await call(A, 'POST', `/api/chat/conversations/${second}/messages`, { body: i === 2 ? 'NEEDLE MESSAGE' : `filler ${i}`, nonce: nonce() });
+    if (i === 2) target = r.body.data.message.id;
   }
   // Alpha is newest, so it is what "open the first one" would pick.
   const root = (await call(A, 'POST', `/api/chat/conversations/${first}/messages`, { body: 'alpha root', nonce: nonce() })).body.data.message;

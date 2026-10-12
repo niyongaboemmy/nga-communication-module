@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { fail } from '@tupo/shared';
 import { config } from './config.js';
+import { rateLimit } from './middleware/rateLimit.js';
 import ssoRoutes from './routes/sso.js';
 import healthRoutes from './routes/health.js';
 import rolesPermissionsRoutes from './routes/rolesPermissions.js';
@@ -46,6 +47,8 @@ app.use((_req, res, next) => {
 app.use('/api/activity', activityRoutes);
 
 app.use(express.json({ limit: '1mb' }));
+// Per-person ceilings on the write paths that can be flooded (A-03).
+app.use(rateLimit);
 
 app.use(healthRoutes);
 app.use('/api/sso', ssoRoutes);

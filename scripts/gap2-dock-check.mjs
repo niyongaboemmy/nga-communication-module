@@ -7,17 +7,18 @@ const call=async(u,m,p,b)=>(await fetch('http://localhost:5190'+p,{method:m,head
 const A=await mk('Dock A'),B=await mk('Dock B'); const b=await chromium.launch();
 try{
  const dm=(await call(A,'POST','/api/chat/conversations/direct',{userId:B.id})).data.conversation.id;
- await call(A,'POST',`/api/chat/conversations/${dm}/messages`,{body:'first',nonce:randomBytes(6).toString('hex')});
- for (const vp of [{width:390,height:844},{width:1280,height:860}]) {
-  const ctx=await b.newContext({viewport:vp}); await ctx.addInitScript(kv=>{for(const[k,v]of Object.entries(kv))localStorage.setItem(k,v);sessionStorage.setItem('nga.installDismissedThisSession','1')},{tupo_token:B.token,tupo_user:JSON.stringify(B.user),tupo_permissions:'[]',tupo_role_permissions:JSON.stringify({keys:perms,name:'Staff'}),'nga.appInstalled':'1'});
-  await ctx.route('**/api/sso/verify-mis**',x=>x.fulfill({status:200,contentType:'application/json',body:'{"success":true}'}));
-  const p=await ctx.newPage(); await p.goto('http://localhost:5194/app/feed'); await p.waitForLoadState('networkidle').catch(()=>{}); await sleep(2500);
-  const lab=()=>p.evaluate(()=>[...document.querySelectorAll('button[aria-haspopup="dialog"]')].map(x=>x.getAttribute('aria-label')).join('|'));
-  console.log(vp.width,'on load (1 pre-existing unread):',await lab());
-  await call(A,'POST',`/api/chat/conversations/${dm}/messages`,{body:'live',nonce:randomBytes(6).toString('hex')}); await sleep(4000);
-  console.log(vp.width,'after live message:',await lab());
-  const rail=await p.evaluate(()=>[...document.querySelectorAll('a[href="/app/chat"]')].map(a=>a.innerText.replace(/\s+/g,' ')+'['+(a.querySelector('[aria-label*=unread]')?.textContent??'')+']').join(' | '));
-  console.log(vp.width,'nav chat links:',rail);
-  await p.screenshot({path:process.env.OUT+`/dock-${vp.width}.png`}); await ctx.close();
- }
+ const preExisting = process.env.PRE === '1';
+ if (preExisting) await call(A,'POST',`/api/chat/conversations/${dm}/messages`,{body:'first',nonce:randomBytes(6).toString('hex')});
+ const ctx=await b.newContext({viewport:{width:390,height:844}}); await ctx.addInitScript(kv=>{for(const[k,v]of Object.entries(kv))localStorage.setItem(k,v);sessionStorage.setItem('nga.installDismissedThisSession','1')},{tupo_token:B.token,tupo_user:JSON.stringify(B.user),tupo_permissions:'[]',tupo_role_permissions:JSON.stringify({keys:perms,name:'Staff'}),'nga.appInstalled':'1'});
+ await ctx.route('**/api/sso/verify-mis**',x=>x.fulfill({status:200,contentType:'application/json',body:'{"success":true}'}));
+ const p=await ctx.newPage(); const evs=[]; p.on('console',m=>{ if(m.text().startsWith('EV ')) evs.push(m.text()); });
+ await p.goto('http://localhost:5194/app/feed'); await p.waitForLoadState('networkidle').catch(()=>{}); await sleep(2500);
+ const lab=()=>p.evaluate(()=>[...document.querySelectorAll('button[aria-haspopup="dialog"]')].map(x=>x.getAttribute('aria-label')).join('|'));
+ console.log('pre-existing unread:', preExisting, '| on load:', await lab());
+ await call(A,'POST',`/api/chat/conversations/${dm}/messages`,{body:'live',nonce:randomBytes(6).toString('hex')}); await sleep(4000);
+ console.log('after live message:', await lab());
+ const convs=(await call(B,'GET','/api/chat/conversations')).data.conversations.map(c=>({id:c.id,unread:c.unread,hidden:c.isHidden}));
+ console.log('server says:', JSON.stringify(convs));
+ const tab=await p.evaluate(()=>[...document.querySelectorAll('nav a')].filter(a=>/chat/i.test(a.innerText)).map(a=>a.innerText.replace(/\s+/g,' ')).join('|'));
+ console.log('tab text:', tab);
 } finally { await b.close(); await purgeUsers(pool,ids,{quiet:true}); await pool.end(); }

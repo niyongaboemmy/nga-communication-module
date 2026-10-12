@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     globalSetup: ['./src/__tests__/globalSetup.ts'],
+    // Suites create content in bursts; rateLimit.test.ts switches limits back on.
+    env: { RATE_LIMITS: 'off' },
     // Never run compiled output: dist holds a second copy of every test, and
     // running both in one process makes them fight over the global fetch stub.
     include: ['src/**/*.test.ts'],
