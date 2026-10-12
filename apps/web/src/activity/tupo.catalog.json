@@ -1,6 +1,6 @@
 {
   "app": "tupo",
-  "version": "2026.10.01",
+  "version": "2026.10.12",
   "features": [
     { "key": "tupo.sign_in", "label": "Sign-in page", "module": "Public", "patterns": ["/"], "public": true },
     { "key": "tupo.sso_callback", "label": "Signing in from NGA MIS", "module": "Public", "patterns": ["/sso/callback"], "public": true },
@@ -9,6 +9,7 @@
     { "key": "tupo.launch", "label": "Opening the app", "module": "Home", "patterns": ["/app"] },
 
     { "key": "tupo.chat", "label": "Chat", "module": "Chat", "patterns": ["/app/chat"] },
+    { "key": "tupo.mentorship", "label": "Mentorship (my mentor / my mentees)", "module": "Chat", "patterns": ["/app/mentorship"] },
 
     { "key": "tupo.feed.home", "label": "Home feed", "module": "Feed", "patterns": ["/app/feed"] },
     { "key": "tupo.feed.reels", "label": "Reels", "module": "Feed", "patterns": ["/app/feed/reels/:reelId?"] },

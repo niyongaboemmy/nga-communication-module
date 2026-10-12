@@ -13,6 +13,8 @@ import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
 import { GlobalSearch } from '../components/GlobalSearch';
 import { usePresenceReporter } from '../hooks/usePresenceReporter';
+import { useHasMentorship } from '../hooks/useHasMentorship';
+import { HeartHandshake } from 'lucide-react';
 import { toPresence } from './chat/types';
 import type { Presence } from './chat/types';
 
@@ -342,6 +344,7 @@ const TopBar: React.FC<{ onOpenSearch: () => void; myPresence: Presence }> = ({ 
 
 export const AppShell: React.FC = () => {
   const { can } = usePermissions();
+  const { user } = useAuth();
   const connection = useConnectionStatus();
   const [searchOpen, setSearchOpen] = useState(false);
   // Reports idle/away for this tab, and gives the own-avatar dot something
@@ -367,7 +370,12 @@ export const AppShell: React.FC = () => {
     return () => document.removeEventListener('keydown', onKey);
   }, []);
 
-  const modules = MODULES.filter((i) => can(i.perm));
+  const hasMentorship = useHasMentorship(user?.id);
+  const modules = [
+    ...MODULES.filter((i) => can(i.perm)),
+    // Only for people with a mentor or mentees in NGA MIS.
+    ...(hasMentorship ? [{ to: '/app/mentorship', icon: HeartHandshake, label: 'Mentorship', perm: [] as string[] }] : []),
+  ];
   const admin = ADMIN.filter((i) => can(i.perm));
 
   return (

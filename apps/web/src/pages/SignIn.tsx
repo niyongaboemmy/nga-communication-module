@@ -3,6 +3,7 @@ import { Navigate } from 'react-router-dom';
 import { ShieldCheck, ArrowRight } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { Logo } from '../components/Logo';
+import { peekReturnTo } from '../lib/returnTo';
 
 /**
  * The entire sign-in surface of Tupo.
@@ -15,7 +16,9 @@ export const SignIn: React.FC = () => {
   const { signIn, isAuthenticated, loading } = useAuth();
 
   if (loading) return null;
-  if (isAuthenticated) return <Navigate to="/app" replace />;
+  // Already signed in (e.g. a session restored in the background): go where the
+  // deep link was headed. The callback is what forgets it, on a fresh sign-in.
+  if (isAuthenticated) return <Navigate to={peekReturnTo()} replace />;
 
   return (
     <div className="grid min-h-full place-items-center bg-slate-50 px-4 dark:bg-chrome-dark">
