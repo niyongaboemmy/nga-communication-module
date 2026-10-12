@@ -209,7 +209,7 @@ async function searchMailSection(req: Request, q: string, limit: number): Promis
       WHERE (
               EXISTS (SELECT 1 FROM mail_recipients r
                        WHERE r.thread_id = t.id AND r.user_id = $1
-                         AND NOT r.is_hidden AND r.folder <> 'trash')
+                         AND NOT r.is_hidden AND NOT r.pending AND r.folder <> 'trash')
            OR EXISTS (SELECT 1 FROM mail_messages sm
                        WHERE sm.thread_id = t.id AND sm.from_user_id = $1)
             )

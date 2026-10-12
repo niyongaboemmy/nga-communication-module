@@ -120,7 +120,7 @@ export async function canReadFile(userId: string, fileId: string): Promise<Acces
       WHERE a.file_id = $1
         AND (m.from_user_id = $2
              OR EXISTS (SELECT 1 FROM mail_recipients r
-                         WHERE r.message_id = m.id AND r.user_id = $2 AND NOT r.is_hidden))
+                         WHERE r.message_id = m.id AND r.user_id = $2 AND NOT r.is_hidden AND NOT r.pending))
       LIMIT 1`,
     [fileId, userId],
   );

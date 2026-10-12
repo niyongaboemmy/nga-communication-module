@@ -177,7 +177,7 @@ export async function listLabels(userId: string): Promise<MailLabel[]> {
             COALESCE((
               SELECT count(*) FROM mail_recipients r
                WHERE r.user_id = $1 AND NOT r.is_read AND r.folder = 'inbox' AND NOT r.is_hidden
-                 AND r.labels ? l.id
+                 AND NOT r.pending AND r.labels ? l.id
             ), 0)::text AS unread
        FROM mail_labels l
       WHERE l.owner_id IS NULL OR l.owner_id = $1
@@ -227,9 +227,9 @@ export async function mailboxCounts(userId: string): Promise<MailboxCounts> {
   }>(
     `SELECT
        (SELECT count(*) FROM mail_recipients r
-         WHERE r.user_id = $1 AND NOT r.is_read AND r.folder = 'inbox' AND NOT r.is_hidden)::text AS inbox,
+         WHERE r.user_id = $1 AND NOT r.is_read AND r.folder = 'inbox' AND NOT r.is_hidden AND NOT r.pending)::text AS inbox,
        (SELECT count(*) FROM mail_recipients r
-         WHERE r.user_id = $1 AND r.is_starred AND NOT r.is_hidden)::text AS starred,
+         WHERE r.user_id = $1 AND r.is_starred AND NOT r.is_hidden AND NOT r.pending)::text AS starred,
        (SELECT count(*) FROM mail_messages m
          WHERE m.from_user_id = $1 AND m.is_draft)::text AS drafts,
        (SELECT count(*) FROM mail_messages m
@@ -293,7 +293,7 @@ export async function listThreads(userId: string, opts: ListOpts): Promise<{
       `SELECT DISTINCT ON (r.thread_id) r.thread_id, t.last_message_at AS sort_at
          FROM mail_recipients r
          JOIN mail_threads t ON t.id = r.thread_id
-        WHERE r.user_id = $1 AND NOT r.is_hidden AND ${folderCond}
+        WHERE r.user_id = $1 AND NOT r.is_hidden AND NOT r.pending AND ${folderCond}
           AND ($2::text IS NULL OR $2 = ANY(SELECT jsonb_array_elements_text(r.labels)))
           AND ($3::text IS NULL OR t.subject ILIKE $3 OR t.last_snippet ILIKE $3)
           AND ($4::timestamptz IS NULL OR t.last_message_at < $4::timestamptz)
@@ -336,7 +336,7 @@ async function threadSummary(
          UNION ALL
          SELECT r.user_id, r.name, r.address, m.created_at
            FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id
-          WHERE r.thread_id = $1 AND r.kind <> 'bcc'
+          WHERE r.thread_id = $1 AND r.kind <> 'bcc' AND NOT r.pending
        ) x
        LEFT JOIN users u ON u.id = x.user_id
       ORDER BY COALESCE(x.user_id, x.address), x.created_at DESC`,
@@ -382,7 +382,7 @@ async function threadSummary(
     `SELECT bool_or(NOT is_read) AS unread, bool_or(is_starred) AS starred,
             (array_agg(folder ORDER BY created_at DESC))[1] AS folder,
             COALESCE((array_agg(labels ORDER BY created_at DESC))[1], '[]'::jsonb) AS labels
-       FROM mail_recipients WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden`,
+       FROM mail_recipients WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden AND NOT pending`,
     [threadId, userId],
   );
   const rr = rRows[0];
@@ -403,7 +403,7 @@ async function threadSummary(
 async function participates(db: PoolClient | ReturnType<typeof getPool>, userId: string, threadId: string): Promise<boolean> {
   const { rows } = await db.query(
     `SELECT 1 WHERE EXISTS (SELECT 1 FROM mail_messages WHERE thread_id = $1 AND from_user_id = $2)
-                OR EXISTS (SELECT 1 FROM mail_recipients WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden)`,
+                OR EXISTS (SELECT 1 FROM mail_recipients WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden AND NOT pending)`,
     [threadId, userId],
   );
   return rows.length > 0;
@@ -427,7 +427,8 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
     `SELECT m.*, u.avatar_url AS from_avatar
        FROM mail_messages m LEFT JOIN users u ON u.id = m.from_user_id
       WHERE m.thread_id = $1
-        AND (NOT m.is_draft OR m.from_user_id = $2)
+        -- Drafts and not-yet-sent scheduled messages are the sender's alone.
+        AND (m.from_user_id = $2 OR (NOT m.is_draft AND m.sent_at IS NOT NULL))
       ORDER BY m.created_at`,
     [threadId, userId],
   );
@@ -521,13 +522,13 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
   // Opening a thread marks the viewer's unread copies read (FR-MAIL-1).
   await db.query(
     `UPDATE mail_recipients SET is_read = true, read_at = now()
-      WHERE thread_id = $1 AND user_id = $2 AND NOT is_read`,
+      WHERE thread_id = $1 AND user_id = $2 AND NOT is_read AND NOT pending`,
     [threadId, userId],
   );
 
   const { rows: lbl } = await db.query<{ labels: string[] }>(
     `SELECT COALESCE((array_agg(labels ORDER BY created_at DESC))[1], '[]'::jsonb) AS labels
-       FROM mail_recipients WHERE thread_id = $1 AND user_id = $2`,
+       FROM mail_recipients WHERE thread_id = $1 AND user_id = $2 AND NOT pending`,
     [threadId, userId],
   );
 
@@ -559,7 +560,7 @@ export async function threadPlainText(
             (SELECT string_agg(r.name, ', ') FROM mail_recipients r
               WHERE r.message_id = m.id AND r.kind <> 'bcc') AS to_names
        FROM mail_messages m
-      WHERE m.thread_id = $1 AND NOT m.is_draft
+      WHERE m.thread_id = $1 AND NOT m.is_draft AND m.sent_at IS NOT NULL
       ORDER BY m.created_at`,
     [threadId],
   );
@@ -703,31 +704,19 @@ export async function compose(userId: string, payload: MailComposePayload): Prom
       const recipientId = snowflake();
       await client.query(
         `INSERT INTO mail_recipients
-           (id, message_id, thread_id, kind, user_id, address, name, merge_vars, channel, delivery_status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'{}'::jsonb,$8,$9)`,
-        [recipientId, messageId, threadId, r.kind, r.userId, r.address, r.name, r.channel, status],
+           (id, message_id, thread_id, kind, user_id, address, name, merge_vars, channel, delivery_status, pending)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'{}'::jsonb,$8,$9,$10)`,
+        // Drafts and scheduled mail stay invisible to recipients until sent.
+        [recipientId, messageId, threadId, r.kind, r.userId, r.address, r.name, r.channel, status,
+         isDraft || Boolean(scheduledAt)],
       );
       if (!isDraft) await recordEvent(client, recipientId, messageId, 'queued', { channel: r.channel });
     }
 
-    // ── thread rollup ─────────────────────────────────────────────────────
-    if (!isDraft) {
-      const willSendNow = !scheduledAt;
-      await client.query(
-        `UPDATE mail_messages SET sent_at = CASE WHEN $2 THEN now() ELSE sent_at END WHERE id = $1`,
-        [messageId, willSendNow],
-      );
-      await client.query(
-        `UPDATE mail_threads t SET
-           last_message_at = now(), last_sender_id = $2, last_sender_name = $3,
-           last_snippet = $4, subject = $5,
-           message_count = (SELECT count(*) FROM mail_messages WHERE thread_id = $1 AND NOT is_draft),
-           has_attachments = has_attachments OR $6
-         WHERE t.id = $1`,
-        [threadId, userId, fromName, snippetOf(bodyHtml, bodyText), subject,
-         (payload.attachments?.length ?? 0) > 0],
-      );
-    }
+    // ── release ───────────────────────────────────────────────────────────
+    // Sent now: recipients see it and the thread summary moves. Scheduled
+    // mail is released by the sweep at its time; drafts never are.
+    if (!isDraft && !scheduledAt) await releaseMessage(client, messageId);
 
     await client.query('COMMIT');
 
@@ -761,7 +750,37 @@ export async function cancelScheduled(userId: string, messageId: string): Promis
     [messageId, userId],
   );
   if (!rowCount) throw new MailError('No pending scheduled message to cancel.', 404);
-  await getPool().query(`DELETE FROM mail_recipients WHERE message_id = $1`, [messageId]);
+  // The recipients stay (still pending): the message is back as a draft with
+  // everyone it was addressed to, not an empty one.
+}
+
+/**
+ * Release a message to its recipients: stamp it sent, make its recipient rows
+ * visible, and move the thread's summary. The single point where mail becomes
+ * something other people can see — used by compose (send now) and by the
+ * scheduled-send sweep.
+ */
+export async function releaseMessage(db: PoolClient | ReturnType<typeof getPool>, messageId: string): Promise<void> {
+  const { rows } = await db.query<{
+    thread_id: string; from_user_id: string; from_name: string; snippet: string; subject: string; has_attachments: boolean;
+  }>(
+    `UPDATE mail_messages SET sent_at = COALESCE(sent_at, now()), updated_at = now()
+      WHERE id = $1 AND NOT is_draft
+      RETURNING thread_id, from_user_id, from_name, snippet, subject, has_attachments`,
+    [messageId],
+  );
+  const m = rows[0];
+  if (!m) return;
+  await db.query('UPDATE mail_recipients SET pending = false WHERE message_id = $1 AND pending', [messageId]);
+  await db.query(
+    `UPDATE mail_threads t SET
+       last_message_at = now(), last_sender_id = $2, last_sender_name = $3,
+       last_snippet = $4, subject = $5,
+       message_count = (SELECT count(*) FROM mail_messages WHERE thread_id = $1 AND NOT is_draft AND sent_at IS NOT NULL),
+       has_attachments = has_attachments OR $6
+     WHERE t.id = $1`,
+    [m.thread_id, m.from_user_id, m.from_name, m.snippet, m.subject, m.has_attachments],
+  );
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -773,7 +792,7 @@ const MOVABLE: MailFolder[] = ['inbox', 'archive', 'trash', 'spam'];
 export async function moveThread(userId: string, threadId: string, folder: MailFolder): Promise<void> {
   if (!MOVABLE.includes(folder)) throw new MailError('Cannot move mail there.');
   const { rowCount } = await getPool().query(
-    `UPDATE mail_recipients SET folder = $3 WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden`,
+    `UPDATE mail_recipients SET folder = $3 WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden AND NOT pending`,
     [threadId, userId, folder],
   );
   if (!rowCount) throw new MailError('Thread not found in your mailbox.', 404);
@@ -781,7 +800,7 @@ export async function moveThread(userId: string, threadId: string, folder: MailF
 
 export async function starThread(userId: string, threadId: string, starred: boolean): Promise<void> {
   await getPool().query(
-    `UPDATE mail_recipients SET is_starred = $3 WHERE thread_id = $1 AND user_id = $2`,
+    `UPDATE mail_recipients SET is_starred = $3 WHERE thread_id = $1 AND user_id = $2 AND NOT pending`,
     [threadId, userId, starred],
   );
 }
@@ -789,7 +808,7 @@ export async function starThread(userId: string, threadId: string, starred: bool
 export async function markThread(userId: string, threadId: string, read: boolean): Promise<void> {
   await getPool().query(
     `UPDATE mail_recipients SET is_read = $3, read_at = CASE WHEN $3 THEN now() ELSE NULL END
-      WHERE thread_id = $1 AND user_id = $2`,
+      WHERE thread_id = $1 AND user_id = $2 AND NOT pending`,
     [threadId, userId, read],
   );
 }
@@ -802,7 +821,7 @@ export async function setThreadLabels(userId: string, threadId: string, labelIds
   );
   const valid = rows.map((r) => r.id);
   const { rowCount } = await db.query(
-    `UPDATE mail_recipients SET labels = $3::jsonb WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden`,
+    `UPDATE mail_recipients SET labels = $3::jsonb WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden AND NOT pending`,
     [threadId, userId, JSON.stringify(valid)],
   );
   if (!rowCount) throw new MailError('Thread not found in your mailbox.', 404);
@@ -859,7 +878,7 @@ export async function canReadMailAttachment(userId: string, fileId: string): Pro
       WHERE a.file_id = $1
         AND (m.from_user_id = $2
              OR EXISTS (SELECT 1 FROM mail_recipients r
-                         WHERE r.message_id = m.id AND r.user_id = $2 AND NOT r.is_hidden))
+                         WHERE r.message_id = m.id AND r.user_id = $2 AND NOT r.is_hidden AND NOT r.pending))
       LIMIT 1`,
     [fileId, userId],
   );

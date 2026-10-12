@@ -295,7 +295,15 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
               onToggle={() => setExpanded((s) => { const n = new Set(s); n.has(m.id) ? n.delete(m.id) : n.add(m.id); return n; })}
               onReply={(k) => doReply(m.id, k)}
               onDelivery={() => setDelivery(m.id)}
-              onEditDraft={() => onCompose({ draftId: m.id, subject: m.subject, bodyHtml: m.bodyHtml, threadId: m.threadId })}
+              // Everything the draft holds: recipients, attachments and what it
+              // replies to. Seeding only subject and body made the first
+              // autosave wipe the rest.
+              onEditDraft={() => onCompose({
+                draftId: m.id, subject: m.subject, bodyHtml: m.bodyHtml, threadId: m.threadId,
+                to: m.to.map(recip), cc: m.cc.map(recip), bcc: m.bcc.map(recip),
+                attachments: m.attachments.map((a) => ({ fileId: a.fileId, name: a.name, mime: a.mime, size: a.size })),
+                parentId: m.parentId ?? undefined, kind: m.kind,
+              })}
               onChanged={() => { load(); onChanged(); }}
             />
             {replyTo?.id === m.id && (

@@ -21,6 +21,7 @@ export interface ComposerSeed {
   kind?: MailMessageKind;
   draftId?: string;
   scheduledAt?: string | null;
+  attachments?: Array<{ fileId: string; name: string; mime: string; size: number }>;
 }
 
 interface Props {
@@ -42,7 +43,7 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
   const [subject, setSubject] = useState(seed?.subject ?? '');
   const initialBody = seed?.bodyHtml ?? (signatureHtml ? `<p></p><p></p>${signatureHtml}` : '');
   const [body, setBody] = useState(initialBody);
-  const [attachments, setAttachments] = useState<Att[]>([]);
+  const [attachments, setAttachments] = useState<Att[]>(seed?.attachments ?? []);
   const [uploading, setUploading] = useState(false);
   const [busy, setBusy] = useState<null | 'send' | 'draft' | 'schedule'>(null);
   const [error, setError] = useState<string | null>(null);

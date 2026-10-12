@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
-import { sanitizeMailHtml } from '@tupo/mail';
+import { sanitizeMailHtml, sendDueScheduled } from '@tupo/mail';
 import { app } from '../app.js';
 import { config } from '../config.js';
 
@@ -84,5 +84,56 @@ describe('mail HTML policy', () => {
     const { rows } = await getPool().query('SELECT body_html FROM mail_messages WHERE id = $1', [sent.body.data.messageId]);
     expect(rows[0].body_html).toContain('<p>hello</p>');
     expect(rows[0].body_html).not.toMatch(/onerror|<script/i);
+  });
+});
+
+describe('unsent mail is invisible to its recipients', () => {
+  const inbox = async (t: string) => JSON.stringify((await as(t).get('/api/mail/threads?folder=inbox')).body);
+  const unread = async (t: string) => (await as(t).get('/api/mail/counts')).body.data.counts.inbox as number;
+
+  it('a draft never reaches the recipient — not the list, not the count', async () => {
+    const before = await unread(ben.token);
+    const d = await as(ada.token).post('/api/mail/compose', { to: [ben.email], subject: 'HALF-WRITTEN', bodyHtml: '<p>wip</p>', draft: true });
+    expect(d.status).toBeLessThan(300);
+    expect(await inbox(ben.token)).not.toContain('HALF-WRITTEN');
+    expect(await unread(ben.token)).toBe(before);
+    expect((await as(ben.token).get(`/api/mail/threads/${d.body.data.threadId}`)).status).toBe(404);
+  });
+
+  it('a student’s draft cannot put anything in a staff inbox', async () => {
+    await as(stu.token).post('/api/mail/compose', { to: [ada.email], subject: 'STUDENT DRAFT', bodyHtml: '<p>x</p>', draft: true });
+    expect(await inbox(ada.token)).not.toContain('STUDENT DRAFT');
+  });
+
+  it('scheduled mail appears only when it is sent, and then normally', async () => {
+    const at = new Date(Date.now() + 3 * 864e5).toISOString();
+    const r = await as(ada.token).post('/api/mail/compose', { to: [ben.email], subject: 'EMBARGOED', bodyHtml: '<p>later</p>', scheduledAt: at });
+    expect(r.body.data.scheduled).toBe(true);
+    expect(await inbox(ben.token)).not.toContain('EMBARGOED');
+
+    // Its time comes.
+    await getPool().query(`UPDATE mail_messages SET scheduled_at = now() - interval '1 minute' WHERE id = $1`, [r.body.data.messageId]);
+    await sendDueScheduled();
+    expect(await inbox(ben.token)).toContain('EMBARGOED');
+  });
+
+  it('cancelling a scheduled send keeps everyone it was addressed to', async () => {
+    const at = new Date(Date.now() + 864e5).toISOString();
+    const r = await as(ada.token).post('/api/mail/compose', { to: [ben.email], subject: 'CANCEL ME', bodyHtml: '<p>x</p>', scheduledAt: at });
+    expect((await as(ada.token).post(`/api/mail/messages/${r.body.data.messageId}/cancel`)).status).toBe(200);
+    const { rows } = await getPool().query('SELECT count(*)::int AS n FROM mail_recipients WHERE message_id = $1', [r.body.data.messageId]);
+    expect(rows[0].n).toBeGreaterThan(0);
+    expect(await inbox(ben.token)).not.toContain('CANCEL ME');
+  });
+
+  it('a reply draft in an existing thread does not change what the recipient sees', async () => {
+    const first = await as(ada.token).post('/api/mail/compose', { to: [ben.email], subject: 'Visible thread', bodyHtml: '<p>first line</p>' });
+    const tid = first.body.data.threadId;
+    await as(ada.token).post('/api/mail/compose', {
+      to: [ben.email], subject: 'Re: Visible thread', bodyHtml: '<p>SECRET DRAFT LINE</p>', threadId: tid, draft: true,
+    });
+    expect(await inbox(ben.token)).not.toContain('SECRET DRAFT LINE');
+    const view = await as(ben.token).get(`/api/mail/threads/${tid}`);
+    expect(JSON.stringify(view.body)).not.toContain('SECRET DRAFT LINE');
   });
 });
