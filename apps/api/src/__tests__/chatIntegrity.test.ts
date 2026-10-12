@@ -128,3 +128,23 @@ describe('reads are scoped to the caller’s own conversation', () => {
     }
   });
 });
+
+describe('one rule for posting into a conversation', () => {
+  it('an announcement channel is read-only for a student on every path', async () => {
+    const ann = (await as(owner.token).post('/api/chat/conversations', {
+      type: 'announcement', name: `ann-${nonce()}`, memberIds: [member.id], visibility: 'private',
+    })).body.data.conversation.id;
+    convs.push(ann);
+    const root = (await as(owner.token).post(`/api/chat/conversations/${ann}/messages`, { body: 'Announcement', nonce: nonce() })).body.data.message;
+    const S = as(member.token);
+    expect((await S.post(`/api/chat/conversations/${ann}/messages`, { body: 'x', nonce: nonce() })).status).toBe(403);
+    expect((await S.post(`/api/chat/conversations/${ann}/messages/${root.id}/replies`, { body: 'via thread', nonce: nonce() })).status).toBe(403);
+    expect((await S.post(`/api/chat/conversations/${ann}/messages/${root.id}/replies`, { body: 'to channel', alsoSendToChannel: true, nonce: nonce() })).status).toBe(403);
+    expect((await S.post(`/api/chat/conversations/${ann}/polls`, { question: 'Q?', options: ['a', 'b'] })).status).toBe(403);
+    // Forwarding a message from a group into the announcement channel is posting there.
+    const g = (await S.post(`/api/chat/conversations/${group}/messages`, { body: 'forward me', nonce: nonce() })).body.data.message;
+    expect((await S.post(`/api/chat/conversations/${group}/messages/${g.id}/forward`, { conversationIds: [ann] })).status).toBe(403);
+    // The announcer still can.
+    expect((await as(owner.token).post(`/api/chat/conversations/${ann}/messages/${root.id}/replies`, { body: 'ok', nonce: nonce() })).status).toBe(201);
+  });
+});

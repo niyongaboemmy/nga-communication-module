@@ -58,6 +58,40 @@ export interface Membership {
  * a former member must not keep reading. Every read and every write goes
  * through here.
  */
+/**
+ * May this person post in this conversation? The one rule (B-03).
+ *
+ * A member, of a conversation that is not archived, and — in an announcement
+ * channel — an announcer (platform CHANNEL_ANNOUNCE or a channel owner/admin).
+ * Every path that puts words into a conversation calls this: sending (REST and
+ * socket), thread replies (including "also send to the channel"), forwarding
+ * into it, polls, scheduling a message and the scheduler posting it later.
+ * Before this each path carried its own copy, and three of them had none.
+ */
+export async function assertCanPost(
+  userId: string, conversationId: string, opts: { mayAnnounce: boolean },
+): Promise<Membership> {
+  const membership = await requireMembership(userId, conversationId);
+  if (membership.isArchived) throw new ChatError('This conversation is archived.', 409);
+  if (membership.type === 'announcement' && !opts.mayAnnounce && !canManage(membership.role)) {
+    throw new ChatError('Only announcers can post in this channel.', 403);
+  }
+  return membership;
+}
+
+/** Whether a user's role grants a platform permission (for jobs with no request). */
+export async function userHasPermission(userId: string, key: string): Promise<boolean> {
+  const { rows } = await getPool().query(
+    `SELECT 1 FROM users u
+       JOIN role_permissions rp ON rp.role_id = u.role_id
+       JOIN permissions p ON p.id = rp.permission_id
+      WHERE u.id = $1 AND u.status = 'active' AND p.key = $2
+      LIMIT 1`,
+    [userId, key],
+  );
+  return rows.length > 0;
+}
+
 export async function requireMembership(
   userId: string, conversationId: string, client?: PoolClient,
 ): Promise<Membership> {

@@ -465,17 +465,8 @@ router.post('/conversations/:id/messages', authorizePermission('MESSAGE_SEND'),
   wrap(async (req, res) => {
     const me = actor(req);
     const id = req.params.id!;
-    const membership = await chat.requireMembership(me.id, id);
-
-    if (membership.isArchived) {
-      return res.status(409).json(fail('This conversation is archived.'));
-    }
-    // Announcement channels are read-only unless you are one of the announcers.
-    if (membership.type === 'announcement'
-        && !hasPermission(req, 'CHANNEL_ANNOUNCE')
-        && !chat.canManage(membership.role)) {
-      return res.status(403).json(fail('Only announcers can post in this channel.'));
-    }
+    // Member, not archived, and an announcer in an announcement channel (B-03).
+    const membership = await chat.assertCanPost(me.id, id, { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
 
     const { body, nonce, type, threadRootId, replyToId, attachments, metadata } = req.body ?? {};
     if (!nonce || typeof nonce !== 'string') {
@@ -706,8 +697,9 @@ router.post('/conversations/:id/messages/:messageId/replies',
   authorizePermission('MESSAGE_SEND'), wrap(async (req, res) => {
     const me = actor(req);
     const { id, messageId } = req.params as { id: string; messageId: string };
-    const membership = await chat.requireMembership(me.id, id);
-    if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
+    // A thread reply is still posting into this conversation — and "also send
+    // to the channel" posts into the main flow — so the same rule applies.
+    const membership = await chat.assertCanPost(me.id, id, { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
 
     const { body, nonce, attachments, alsoSendToChannel } = req.body ?? {};
     if (!nonce) return res.status(400).json(fail('A nonce is required.'));
@@ -877,6 +869,10 @@ router.post('/conversations/:id/messages/:messageId/forward',
     const { id, messageId } = req.params as { id: string; messageId: string };
     const targets = Array.isArray(req.body?.conversationIds) ? req.body.conversationIds : [];
     if (!targets.length) return res.status(400).json(fail('Choose where to forward it.'));
+    // Forwarding into a conversation is posting there.
+    for (const target of targets) {
+      await chat.assertCanPost(me.id, String(target), { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
+    }
 
     const results = await chat.forwardMessage(
       me.id, id, messageId, targets, typeof req.body?.comment === 'string' ? req.body.comment : undefined,
@@ -1023,8 +1019,7 @@ router.post('/conversations/:id/scheduled', authorizePermission('MESSAGE_SCHEDUL
   wrap(async (req, res) => {
     const me = actor(req);
     const id = req.params.id!;
-    const membership = await chat.requireMembership(me.id, id);
-    if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
+    await chat.assertCanPost(me.id, id, { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
 
     const at = new Date(String(req.body?.sendAt ?? ''));
     const scheduled = await chat.scheduleMessage(
@@ -1048,13 +1043,7 @@ router.post('/conversations/:id/polls', authorizePermission('MESSAGE_SEND'),
   wrap(async (req, res) => {
     const me = actor(req);
     const id = req.params.id!;
-    const membership = await chat.requireMembership(me.id, id);
-    if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
-    if (membership.type === 'announcement'
-        && !hasPermission(req, 'CHANNEL_ANNOUNCE')
-        && !chat.canManage(membership.role)) {
-      return res.status(403).json(fail('Only announcers can post in this channel.'));
-    }
+    const membership = await chat.assertCanPost(me.id, id, { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
 
     const { poll, message } = await chat.createPoll(me.id, id, {
       question: String(req.body?.question ?? ''),

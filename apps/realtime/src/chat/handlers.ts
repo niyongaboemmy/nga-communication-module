@@ -129,13 +129,9 @@ export function registerChatHandlers(
       // platform permission first, then membership, archive and announcers.
       const perms = await permissions();
       if (perms && !perms.has('MESSAGE_SEND')) throw deny();
-      const membership = await chat.requireMembership(user.id, p.conversationId);
-      if (membership.isArchived) throw new ChatError('This conversation is archived.', 409);
-      if (membership.type === 'announcement'
-          && !perms?.has('CHANNEL_ANNOUNCE')
-          && !chat.canManage(membership.role)) {
-        throw new ChatError('Only announcers can post in this channel.', 403);
-      }
+      const membership = await chat.assertCanPost(user.id, p.conversationId, {
+        mayAnnounce: Boolean(perms?.has('CHANNEL_ANNOUNCE')),
+      });
       if (!p.nonce) throw new ChatError('A nonce is required.', 400);
 
       // The client picks the kind of message, never its authority (B-01).

@@ -142,7 +142,11 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
     }
   };
 
-  const canReply = can('MESSAGE_SEND') && !conversation.isArchived;
+  // The same rule as the server's assertCanPost: an announcement channel's
+  // threads are for announcers too.
+  const canReply = can('MESSAGE_SEND') && !conversation.isArchived
+    && (conversation.type !== 'announcement' || can('CHANNEL_ANNOUNCE')
+        || conversation.myRole === 'owner' || conversation.myRole === 'admin');
 
   return (
     <aside
