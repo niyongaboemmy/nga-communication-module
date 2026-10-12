@@ -211,6 +211,60 @@ async function resolveMeetRole(req: Request, m: meet.MeetingRow): Promise<MeetRo
   return rows[0]?.role ?? 'attendee';
 }
 
+/**
+ * How much of *this* meeting the caller may see (E-01).
+ *
+ *   insider — host and co-hosts, invitees, members of the conversation it
+ *             was started from, anyone who actually attended, and a platform
+ *             administrator taking over: details, attendance, transcript,
+ *             AI notes, recordings.
+ *   viewer  — someone the admission policy would let in (to knock or join):
+ *             the meeting's details and calendar file, nothing it produced.
+ *   none    — everyone else, who gets the same 404 as a meeting that does
+ *             not exist, so ids and codes cannot be probed.
+ *
+ * A guest ticket is a viewer of its own meeting and of nothing else.
+ */
+type MeetAccess = 'none' | 'viewer' | 'insider';
+async function meetingAccess(req: Request, m: meet.MeetingRow): Promise<MeetAccess> {
+  const guest = (req as MeetRequest).guest;
+  if (guest) return guest.meetingId === m.id ? 'viewer' : 'none';
+  const user = actor(req);
+  if (m.host_id === user.id) return 'insider';
+  const { rows } = await getPool().query<{
+    role: MeetRole | null; attended: boolean; invited: boolean; member: boolean;
+  }>(
+    `SELECT
+       (SELECT role FROM meeting_participants WHERE meeting_id = $1 AND user_id = $2
+         ORDER BY created_at DESC LIMIT 1) AS role,
+       EXISTS (SELECT 1 FROM meeting_participants WHERE meeting_id = $1 AND user_id = $2
+                AND state IN ('active', 'left')) AS attended,
+       EXISTS (SELECT 1 FROM meeting_invites WHERE meeting_id = $1 AND user_id = $2) AS invited,
+       ($3::text IS NOT NULL AND EXISTS (
+          SELECT 1 FROM conversation_members WHERE conversation_id = $3 AND user_id = $2 AND left_at IS NULL)) AS member`,
+    [m.id, user.id, m.conversation_id],
+  );
+  const r = rows[0]!;
+  if (r.attended || r.invited || r.member || (r.role && meetRoleAtLeast(r.role, 'cohost'))) return 'insider';
+  if (user.permissions.has('MEET_HOST_CONTROLS') && user.roleLevel === 'ADMIN') return 'insider';
+  const policy = parseMeetSettings(m.settings).admissionPolicy;
+  if (policy === 'authenticated' || policy === 'public') return 'viewer';
+  if (policy === 'permission' && can(req, 'MEET_JOIN')) return 'viewer';
+  return 'none';
+}
+
+/** 404 unless the caller has at least `level` on this meeting. */
+async function requireMeetingAccess(
+  req: Request, res: Response, m: meet.MeetingRow, level: 'viewer' | 'insider',
+): Promise<MeetAccess | null> {
+  const access = await meetingAccess(req, m);
+  if (access === 'none' || (level === 'insider' && access !== 'insider')) {
+    res.status(404).json(fail('Meeting not found.'));
+    return null;
+  }
+  return access;
+}
+
 async function requireHost(req: Request, res: Response, m: meet.MeetingRow): Promise<boolean> {
   const role = await resolveMeetRole(req, m);
   if (!meetRoleAtLeast(role, 'cohost')) {
@@ -530,8 +584,11 @@ router.get('/:idOrCode', async (req: Request, res: Response) => {
 
   const m = await meet.findMeeting(key);
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  const access = await requireMeetingAccess(req, res, m, 'viewer');
+  if (!access) return;
 
-  const { rows: participants } = await getPool().query(
+  // Who was there is for insiders; someone about to knock sees the meeting only.
+  const { rows: participants } = access !== 'insider' ? { rows: [] } : await getPool().query(
     `SELECT p.id, p.display_name, p.role, p.state, p.joined_at, p.left_at,
             p.duration_seconds, u.avatar_url
        FROM meeting_participants p LEFT JOIN users u ON u.id = p.user_id
@@ -1080,6 +1137,7 @@ router.get('/:id/sfu/session', async (req: Request, res: Response) => {
 router.get('/:id/attendance', authorizePermission('MEET_ATTENDANCE_VIEW'), async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
 
   const { rows } = await getPool().query(
     `SELECT p.id, p.display_name, p.is_guest, p.role, p.state,
@@ -1151,6 +1209,7 @@ router.get('/:id/events', async (req: Request, res: Response) => {
 router.get('/:id/transcript', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
 
   // Anyone who was in the meeting may read its transcript; nobody else may.
   const { rows: seen } = await getPool().query(
@@ -1198,6 +1257,8 @@ async function aiPreflight(req: Request, res: Response): Promise<
 > {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) { res.status(404).json(fail('Meeting not found.')); return null; }
+  // Generating notes reads the whole transcript: insiders only.
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return null;
 
   // Order matters. A meeting that never switched AI on, or that has no
   // transcript, is something the caller can fix — say so. "AI is not
@@ -1228,6 +1289,7 @@ const AI_PERM = 'MEET_AI_USE';
 router.get('/:id/ai', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
   res.json(ok(await ai.listArtifacts(m.id)));
 });
 
@@ -1383,6 +1445,7 @@ router.post('/:id/ai/engagement', authorizePermission('MEET_ATTENDANCE_VIEW'), a
 router.post('/:id/ai/agenda', authorizePermission(AI_PERM), async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
   if (!isAnyProviderConfigured()) return res.status(503).json(fail('AI is not configured on this server.'));
 
   const minutes = Number(req.body?.durationMinutes) ||
@@ -1403,6 +1466,10 @@ router.post('/:id/ai/agenda', authorizePermission(AI_PERM), async (req: Request,
 
 /** Live caption translation. Kept small and fast — it is on the caption path. */
 router.post('/:id/ai/translate', authorizePermission('MEET_JOIN'), async (req: Request, res: Response) => {
+  const tm = await meet.findMeeting(param(req, 'id'));
+  if (!tm) return res.status(404).json(fail('Meeting not found.'));
+  // In-call translation is for people in (or allowed into) this meeting.
+  if (!(await requireMeetingAccess(req, res, tm, 'viewer'))) return;
   const { text, targetLang } = req.body ?? {};
   if (typeof text !== 'string' || !text.trim() || typeof targetLang !== 'string') {
     return res.status(400).json(fail('text and targetLang are required.'));
@@ -1428,14 +1495,17 @@ async function participantFor(req: Request, meetingId: string): Promise<{
   const request = req as MeetRequest;
   if (request.guest) {
     const { rows } = await getPool().query<{ id: string; display_name: string }>(
-      'SELECT id, display_name FROM meeting_participants WHERE id = $1 AND meeting_id = $2',
+      `SELECT id, display_name FROM meeting_participants
+        WHERE id = $1 AND meeting_id = $2 AND state IN ('active', 'left')`,
       [request.guest.participantId, meetingId],
     );
     return rows[0] ? { id: rows[0].id, displayName: rows[0].display_name } : null;
   }
   const { rows } = await getPool().query<{ id: string; display_name: string }>(
+    // Knocking, denied or removed is not "in the meeting".
     `SELECT id, display_name FROM meeting_participants
-      WHERE meeting_id = $1 AND user_id = $2 ORDER BY created_at DESC LIMIT 1`,
+      WHERE meeting_id = $1 AND user_id = $2 AND state IN ('active', 'left')
+      ORDER BY created_at DESC LIMIT 1`,
     [meetingId, actor(req).id],
   );
   return rows[0] ? { id: rows[0].id, displayName: rows[0].display_name } : null;
@@ -1720,6 +1790,7 @@ router.post('/:id/recordings/:recordingId/fail', denyGuests,
 router.get('/:id/recordings', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
   const { rows } = await getPool().query(
     `SELECT r.id, r.meeting_id, r.file_id, r.mode, r.status, r.duration_seconds,
             r.size_bytes, r.folder, r.started_at, r.ended_at,
@@ -1773,6 +1844,7 @@ router.put('/:id/invites/me', async (req: Request, res: Response) => {
 router.get('/:id/ics', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'viewer'))) return;
 
   const stamp = (d: Date) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const start = m.scheduled_start ?? m.started_at ?? m.created_at;

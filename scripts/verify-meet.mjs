@@ -350,8 +350,9 @@ try {
   const pupilTranscript = await api(`/api/meet/${meeting.id}/transcript`, pupilUser.token);
   check('a participant may read the transcript', pupilTranscript.status === 200);
   const stranger = await makeUser('Verify Stranger', 'Staff');
+  // Refused as not found: to someone with no part in it the meeting does not exist.
   check('someone who was never there may not',
-    (await api(`/api/meet/${meeting.id}/transcript`, stranger.token)).status === 403);
+    [403, 404].includes((await api(`/api/meet/${meeting.id}/transcript`, stranger.token)).status));
 
   /* ---- M12: the AI chain ----------------------------------------------- */
   console.log('\nAI — the four-provider fallback chain');
