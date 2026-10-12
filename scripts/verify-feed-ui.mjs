@@ -10,6 +10,7 @@
  *   npm run verify:feed:ui        (needs `npm run dev` running)
  */
 import { chromium } from 'playwright';
+import { prepareBrowser } from './lib/uiHarness.mjs';
 import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
@@ -61,6 +62,8 @@ try {
   const pageId = pageRes.data.page.id;
 
   browser = await chromium.launch();
+
+  prepareBrowser(browser);
   const ctx = await browser.newContext({ viewport: { width: 1360, height: 900 } });
   await ctx.addInitScript((kv) => { for (const [k, v] of Object.entries(kv)) localStorage.setItem(k, v); }, seed(ada));
   const page = await ctx.newPage();

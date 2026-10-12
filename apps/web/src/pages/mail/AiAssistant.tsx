@@ -1,3 +1,4 @@
+import { SafeHtml } from '../../components/SafeHtml';
 import React, { useState } from 'react';
 import { Sparkles, Wand2, X, Loader2, Check, Undo2, ArrowUpRight } from 'lucide-react';
 import { Button } from '../../components/ui';
@@ -122,8 +123,8 @@ export const AiAssistant: React.FC<Props> = ({ getCurrentHtml, subject, recipien
       {result && (
         <div>
           <p className="mb-1 text-xs text-text-secondary-light dark:text-text-secondary-dark">{result.note} · via {result.provider}</p>
-          <div className="tupo-prose max-h-52 overflow-y-auto rounded-lg border border-border-light bg-surface-light/50 p-2.5 text-sm dark:border-border-dark/60 dark:bg-surface-dark/40"
-            dangerouslySetInnerHTML={{ __html: result.html }} />
+          <SafeHtml className="tupo-prose max-h-52 overflow-y-auto rounded-lg border border-border-light bg-surface-light/50 p-2.5 text-sm dark:border-border-dark/60 dark:bg-surface-dark/40"
+            html={result.html} />
           <div className="mt-2 flex items-center gap-2">
             <Button size="sm" onClick={() => { onApply(result.html, result.note); onClose(); }}>
               <Check size={13} /> Use this

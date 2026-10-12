@@ -1,3 +1,4 @@
+import { SafeHtml } from '../../components/SafeHtml';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -176,7 +177,7 @@ const PreviewModal: React.FC<{ campaignId: string; onClose: () => void; onSubmit
                 <div key={i} className="rounded-lg border border-border-light p-3 dark:border-border-dark/50">
                   <p className="text-xs text-text-secondary-light">To: {s.to}</p>
                   <p className="mb-1 text-sm font-semibold">{s.subject}</p>
-                  <div className="tupo-prose max-w-none text-sm" dangerouslySetInnerHTML={{ __html: s.bodyHtml }} />
+                  <SafeHtml className="tupo-prose max-w-none text-sm" html={s.bodyHtml} />
                 </div>
               ))}
               {preview.samples.length === 0 && <p className="text-sm text-text-secondary-light">No deliverable recipients.</p>}

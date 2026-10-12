@@ -14,6 +14,7 @@
 import type { PoolClient } from 'pg';
 import { getPool, snowflake } from '@tupo/db';
 import {
+  MAIL_FOLDERS,
   MAIL_MAX_BODY_HTML, MAIL_MAX_RECIPIENTS, MAIL_MAX_SUBJECT, MAIL_MAX_PAGE_SIZE, MAIL_PAGE_SIZE,
   normalizeSubject,
 } from '@tupo/shared';
@@ -22,6 +23,7 @@ import type {
   MailThreadView, MailLabel, MailboxCounts, MailRecipientDelivery, MailAttachment,
 } from '@tupo/shared';
 import { MailError } from './errors.js';
+import { sanitizeMailHtml } from './sanitize.js';
 import { internalEmailDelivery } from './config.js';
 import { htmlToText, snippetOf, isEmailAddress } from './render.js';
 import { deliverInApp, isSuppressed, recordEvent } from './delivery.js';
@@ -158,7 +160,7 @@ export async function updatePrefs(userId: string, patch: Partial<MailPrefs>): Pr
        signature_enabled = EXCLUDED.signature_enabled,
        email_copies = EXCLUDED.email_copies,
        updated_at = now()`,
-    [userId, next.displayName, next.signatureHtml.slice(0, 20_000), next.signatureEnabled, next.emailCopies],
+    [userId, next.displayName, sanitizeMailHtml(next.signatureHtml.slice(0, 20_000)), next.signatureEnabled, next.emailCopies],
   );
   return next;
 }
@@ -256,7 +258,10 @@ interface ListOpts {
 export async function listThreads(userId: string, opts: ListOpts): Promise<{
   threads: MailThreadSummary[]; nextCursor: string | null;
 }> {
-  const limit = Math.min(Math.max(opts.limit ?? MAIL_PAGE_SIZE, 1), MAIL_MAX_PAGE_SIZE);
+  if (!(MAIL_FOLDERS as readonly string[]).includes(opts.folder)) {
+    throw new MailError('Unknown mail folder.', 400);
+  }
+  const limit = Math.min(Math.max(Number(opts.limit) || MAIL_PAGE_SIZE, 1), MAIL_MAX_PAGE_SIZE);
   const db = getPool();
   const senderFolders: MailFolder[] = ['sent', 'drafts', 'scheduled'];
   const like = opts.q ? `%${opts.q.replace(/[%_]/g, '\\$&')}%` : null;
@@ -280,9 +285,10 @@ export async function listThreads(userId: string, opts: ListOpts): Promise<{
     );
     threadIds = rows.sort((a, b) => (a.sort_at < b.sort_at ? 1 : -1)).slice(0, limit + 1);
   } else {
+    // The folder is always a bound parameter, never part of the SQL text.
     const folderCond =
       opts.folder === 'starred' ? `r.is_starred AND r.folder <> 'trash'`
-      : `r.folder = '${opts.folder}'`;
+      : `r.folder = $5`;
     const { rows } = await db.query<{ thread_id: string; sort_at: string }>(
       `SELECT DISTINCT ON (r.thread_id) r.thread_id, t.last_message_at AS sort_at
          FROM mail_recipients r
@@ -292,7 +298,9 @@ export async function listThreads(userId: string, opts: ListOpts): Promise<{
           AND ($3::text IS NULL OR t.subject ILIKE $3 OR t.last_snippet ILIKE $3)
           AND ($4::timestamptz IS NULL OR t.last_message_at < $4::timestamptz)
         ORDER BY r.thread_id, t.last_message_at DESC`,
-      [userId, opts.labelId ?? null, like, opts.cursor ?? null],
+      opts.folder === 'starred'
+        ? [userId, opts.labelId ?? null, like, opts.cursor ?? null]
+        : [userId, opts.labelId ?? null, like, opts.cursor ?? null, opts.folder],
     );
     threadIds = rows.sort((a, b) => (a.sort_at < b.sort_at ? 1 : -1)).slice(0, limit + 1);
   }
@@ -585,7 +593,8 @@ export interface ComposeResult {
  */
 export async function compose(userId: string, payload: MailComposePayload): Promise<ComposeResult> {
   const subject = (payload.subject ?? '').trim().slice(0, MAIL_MAX_SUBJECT) || '(no subject)';
-  const bodyHtml = (payload.bodyHtml ?? '').slice(0, MAIL_MAX_BODY_HTML);
+  // Sanitised on write: what is stored is safe for every reader and client.
+  const bodyHtml = sanitizeMailHtml((payload.bodyHtml ?? '').slice(0, MAIL_MAX_BODY_HTML));
   const bodyText = (payload.bodyText?.trim() || htmlToText(bodyHtml)).slice(0, MAIL_MAX_BODY_HTML);
   const isDraft = payload.draft === true;
   const scheduledAt = payload.scheduledAt ? new Date(payload.scheduledAt) : null;

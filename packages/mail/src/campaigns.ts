@@ -10,6 +10,7 @@
  * sees the rest of the list. `campaign_id` ties them back together and the
  * sender's mailbox shows one campaign, not five hundred messages.
  */
+import { sanitizeMailHtml } from './sanitize.js';
 import type { PoolClient } from 'pg';
 import { getPool, snowflake } from '@tupo/db';
 import { notify, push } from '@tupo/notify';
@@ -70,7 +71,7 @@ export async function createCampaign(userId: string, payload: MailCampaignPayloa
   if (!payload.subject?.trim()) throw new MailError('A campaign needs a subject.');
   const from = await personFor(userId);
   const id = snowflake();
-  const bodyHtml = payload.bodyHtml ?? '';
+  const bodyHtml = sanitizeMailHtml(payload.bodyHtml ?? '');
   await getPool().query(
     `INSERT INTO mail_campaigns
        (id, name, subject, body_html, body_text, template_id, from_user_id, from_name, from_address,
@@ -95,7 +96,7 @@ export async function updateCampaign(
   if (!['draft', 'pending_approval'].includes(cur.status)) {
     throw new MailError('Only a draft campaign can be edited.', 409);
   }
-  const bodyHtml = payload.bodyHtml ?? cur.bodyHtml;
+  const bodyHtml = sanitizeMailHtml(payload.bodyHtml ?? cur.bodyHtml);
   await getPool().query(
     `UPDATE mail_campaigns SET name = $2, subject = $3, body_html = $4, body_text = $5,
            template_id = $6, list_ids = $7::jsonb, extra_recipients = $8::jsonb, scheduled_at = $9,
@@ -197,7 +198,7 @@ export async function previewCampaign(userId: string, id: string): Promise<Campa
     return {
       to: r.address,
       subject: renderMerge(campaign.subject, vars),
-      bodyHtml: renderMerge(campaign.bodyHtml, vars, { escape: false }),
+      bodyHtml: renderMerge(campaign.bodyHtml, vars, { escape: true }),
     };
   });
 
@@ -375,7 +376,7 @@ async function materialiseCampaignMessage(
 ): Promise<string> {
   const vars = mergeVarsFor(r);
   const subject = renderMerge(campaign.subject, vars).slice(0, 300) || '(no subject)';
-  const bodyHtml = renderMerge(campaign.bodyHtml, vars, { escape: false });
+  const bodyHtml = renderMerge(campaign.bodyHtml, vars, { escape: true });
   const bodyText = renderMerge(campaign.bodyText || htmlToText(campaign.bodyHtml), vars);
 
   const threadId = snowflake();

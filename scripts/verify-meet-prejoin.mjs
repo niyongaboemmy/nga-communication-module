@@ -10,6 +10,7 @@
  *   npm run verify:meet:prejoin      (needs `npm run dev` running)
  */
 import { chromium } from 'playwright';
+import { prepareBrowser } from './lib/uiHarness.mjs';
 import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
@@ -44,6 +45,8 @@ const m=(await api('/api/meet',{method:'POST',body:JSON.stringify({title:'Device
   scheduledStart:new Date(Date.now()+3600e3).toISOString()})})).data;
 
 browser = await chromium.launch({ args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream'] });
+
+prepareBrowser(browser);
 const ctx = await browser.newContext({ viewport:{width:1280,height:900}, deviceScaleFactor:2, permissions:['camera','microphone'] });
 await ctx.addInitScript(kv=>{for(const [k,v] of Object.entries(kv)) localStorage.setItem(k,v);}, seed);
 const page = await ctx.newPage();

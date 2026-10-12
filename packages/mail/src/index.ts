@@ -8,6 +8,7 @@
 export * from './errors.js';
 export * from './config.js';
 export * from './render.js';
+export * from './sanitize.js';
 export * from './smtp.js';
 export * from './delivery.js';
 export * from './service.js';

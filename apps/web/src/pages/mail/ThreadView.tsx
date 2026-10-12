@@ -1,3 +1,4 @@
+import { SafeHtml, sanitizeHtml, escapeText } from '../../components/SafeHtml';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ArrowLeft, Reply, ReplyAll, Forward, Archive, Trash2, Star, Tag, MoreVertical,
@@ -41,7 +42,7 @@ const AttachmentChip: React.FC<{ a: MailMessageView['attachments'][number] }> = 
 const InlineReply: React.FC<{
   message: MailMessageView; kind: MailMessageKind; initialBody?: string; onDone: () => void; onCancel: () => void;
 }> = ({ message, kind, initialBody, onDone, onCancel }) => {
-  const [body, setBody] = useState(initialBody ? `<p>${initialBody}</p>` : '');
+  const [body, setBody] = useState(initialBody ? `<p>${escapeText(initialBody)}</p>` : '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -105,9 +106,10 @@ const MessageCard: React.FC<{
 
       {expanded && (
         <div className="px-3 pb-3">
-          <div
+          <SafeHtml
             className="tupo-prose max-w-none border-t border-border-light pt-3 dark:border-border-dark/40"
-            dangerouslySetInnerHTML={{ __html: message.bodyHtml || '<p class="text-text-secondary-light">(no content)</p>' }}
+            html={message.bodyHtml}
+            fallback='<p class="text-text-secondary-light">(no content)</p>'
           />
 
           {message.attachments.length > 0 && (
@@ -203,7 +205,7 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
     if (kind === 'forward') {
       onCompose({
         subject: forwardSubject(m.subject),
-        bodyHtml: `<p></p><p></p><blockquote>---------- Forwarded message ----------<br>From: ${m.from.name} &lt;${m.from.address}&gt;<br>Subject: ${m.subject}</blockquote>${m.bodyHtml}`,
+        bodyHtml: `<p></p><p></p><blockquote>---------- Forwarded message ----------<br>From: ${escapeText(m.from.name)} &lt;${escapeText(m.from.address)}&gt;<br>Subject: ${escapeText(m.subject)}</blockquote>${sanitizeHtml(m.bodyHtml)}`,
         kind: 'forward',
       });
       return;

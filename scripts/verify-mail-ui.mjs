@@ -9,6 +9,7 @@
  *   npm run verify:mail:ui        (needs `npm run dev` running)
  */
 import { chromium } from 'playwright';
+import { prepareBrowser } from './lib/uiHarness.mjs';
 import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
@@ -55,6 +56,8 @@ try {
   const ben = await makeUser('UI Ben');
 
   browser = await chromium.launch();
+
+  prepareBrowser(browser);
 
   // ── desktop: compose + send ────────────────────────────────────────────
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });

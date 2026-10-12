@@ -10,6 +10,7 @@
  *   node scripts/verify-chat-ui.mjs        (needs `npm run dev` running)
  */
 import { readFileSync, mkdirSync } from 'node:fs';
+import { prepareBrowser } from './lib/uiHarness.mjs';
 let chromium;
 try {
   ({ chromium } = await import('playwright'));
@@ -113,6 +114,7 @@ const sendReady = (page) =>
 const BASE = 'http://localhost:5194';
 const API = 'http://localhost:5190';
 const browser = await chromium.launch();
+prepareBrowser(browser);
 const alice = await makeUser('Ada Umutoni');
 const bob = await makeUser('Bosco Rugema');
 /** Extra accounts made mid-run, so the cleanup can remove them too. */

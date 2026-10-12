@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { getPool } from '@tupo/db';
-import { ok, fail } from '@tupo/shared';
+import { ok, fail, MAIL_FOLDERS } from '@tupo/shared';
+import type { MailFolder } from '@tupo/shared';
 import * as mail from '@tupo/mail';
 import { MailError } from '@tupo/mail';
 import * as mailAi from '../services/mailAiService.js';
@@ -64,8 +65,11 @@ router.delete('/labels/:id', authorizePermission('MAIL_READ'), wrap(async (req, 
 
 router.get('/threads', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   const folder = str(req.query.folder) || 'inbox';
+  if (!(MAIL_FOLDERS as readonly string[]).includes(folder)) {
+    return res.status(400).json(fail('Unknown mail folder.'));
+  }
   const result = await mail.listThreads(actor(req).id, {
-    folder: folder as never,
+    folder: folder as MailFolder,
     labelId: str(req.query.label) || undefined,
     q: str(req.query.q, 200) || undefined,
     cursor: str(req.query.cursor) || undefined,

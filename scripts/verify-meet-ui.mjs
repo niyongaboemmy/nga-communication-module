@@ -5,6 +5,7 @@
  * meeting: one hosts, one knocks and is admitted. Screenshots at each step.
  */
 import { readFileSync } from 'node:fs';
+import { prepareBrowser } from './lib/uiHarness.mjs';
 let chromium;
 try {
   ({ chromium } = await import('playwright'));
@@ -75,6 +76,7 @@ const browser = await chromium.launch({
     '--disable-features=CalculateNativeWinOcclusion',
   ],
 });
+prepareBrowser(browser);
 
 const errors = [];
 async function newPage(user) {
