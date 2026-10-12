@@ -13,9 +13,11 @@ import type {
   FeedReactionSummary,
 } from '@tupo/shared';
 import { FEED_AUDIENCES, FEED_LIMITS, FEED_REACTIONS } from '@tupo/shared';
+import { loadVisiblePost } from './visibility.js';
 import { FeedError } from './errors.js';
 import {
   type FeedActor, assertVisible, can, canTargetAudience, rankScore, visibleAudiences,
+  effectiveAudience,
 } from './common.js';
 import { toPageSummary, type PageRow } from './pages.js';
 
@@ -155,10 +157,22 @@ export async function assertCanPostAs(actor: FeedActor, pageId: string, audience
 
 export interface CreateResult { postId: string; status: FeedPostView['status']; }
 
+const POST_STATUSES = ['published', 'draft', 'scheduled'] as const;
+const COMMENT_POLICIES = ['open', 'followers', 'closed'] as const;
+
 export async function createPost(actor: FeedActor, payload: ComposePostPayload): Promise<CreateResult> {
-  const audience: FeedAudience =
-    payload.audience && (FEED_AUDIENCES as readonly string[]).includes(payload.audience) ? payload.audience : 'everyone';
-  await assertCanPostAs(actor, payload.pageId, audience);
+  const requested: FeedAudience | null =
+    payload.audience && (FEED_AUDIENCES as readonly string[]).includes(payload.audience) ? payload.audience : null;
+  const page = await assertCanPostAs(actor, payload.pageId, requested ?? 'everyone');
+  // The page caps the post: nothing on a staff-only page is ever wider than
+  // staff, whatever the composer sent — and no choice means the page's own.
+  const audience = effectiveAudience(requested ?? page.audience as FeedAudience, page.audience as FeedAudience);
+  if (payload.status !== undefined && !(POST_STATUSES as readonly string[]).includes(payload.status)) {
+    throw new FeedError('Unknown post status.', 400);
+  }
+  if (payload.commentPolicy !== undefined && !(COMMENT_POLICIES as readonly string[]).includes(payload.commentPolicy)) {
+    throw new FeedError('Unknown comment setting.', 400);
+  }
 
   const body = (payload.body ?? '').slice(0, FEED_LIMITS.POST_BODY_MAX);
   const poll = validatePoll(payload.poll);
@@ -193,8 +207,9 @@ export async function createPost(actor: FeedActor, payload: ComposePostPayload):
         id, payload.pageId, actor.id, body, payload.format === 'rich' ? 'rich' : 'plain',
         JSON.stringify(media), payload.linkPreview ? JSON.stringify(payload.linkPreview) : null,
         type, poll ? JSON.stringify(poll) : null, event ? JSON.stringify(event) : null,
+        // Pinning is its own action with its own cap (setPinned), not a create flag.
         audience, status, status === 'scheduled' ? payload.scheduledAt : null, publishedAt,
-        Boolean(payload.pinned), payload.commentPolicy ?? 'open',
+        false, payload.commentPolicy ?? 'open',
       ],
     );
 
@@ -326,10 +341,17 @@ export async function editPost(actor: FeedActor, postId: string, patch: EditPost
     if (patch.linkPreview !== undefined) { params.push(patch.linkPreview ? JSON.stringify(patch.linkPreview) : null); sets.push(`link_preview = $${params.length}`); }
     if (patch.audience !== undefined && (FEED_AUDIENCES as readonly string[]).includes(patch.audience)) {
       if (!canTargetAudience(actor.roleLevel, patch.audience)) throw new FeedError('You cannot post to that audience.', 403);
-      params.push(patch.audience); sets.push(`audience = $${params.length}`);
+      const { rows: pg } = await client.query<{ audience: FeedAudience }>(
+        'SELECT audience FROM feed_pages WHERE id = $1', [post.page_id],
+      );
+      params.push(effectiveAudience(patch.audience, pg[0]?.audience ?? 'everyone'));
+      sets.push(`audience = $${params.length}`);
     }
-    if (patch.commentPolicy !== undefined) { params.push(patch.commentPolicy); sets.push(`comment_policy = $${params.length}`); }
-    if (patch.pinned !== undefined) { params.push(Boolean(patch.pinned)); sets.push(`pinned = $${params.length}`); }
+    if (patch.commentPolicy !== undefined) {
+      if (!(COMMENT_POLICIES as readonly string[]).includes(patch.commentPolicy)) throw new FeedError('Unknown comment setting.', 400);
+      params.push(patch.commentPolicy); sets.push(`comment_policy = $${params.length}`);
+    }
+    // Pinning goes through setPinned (cap, editor-only); an edit cannot pin.
     params.push(postId);
     await client.query(`UPDATE feed_posts SET ${sets.join(', ')} WHERE id = $${params.length}`, params);
     await client.query('COMMIT');
@@ -591,6 +613,9 @@ export async function getPostView(actor: FeedActor, postId: string): Promise<Fee
   if (!view) throw new FeedError('Post not found.', 404);
   if (view.status !== 'published' && !view.canEdit) throw new FeedError('Post not found.', 404);
   if (view.status === 'published') assertVisible(actor, view.audience);
+  // The same rule as every engagement path: page audience and page deletion
+  // count too, so a direct link cannot show what the feed would not.
+  if (!view.canEdit) await loadVisiblePost(actor, postId);
   return view;
 }
 

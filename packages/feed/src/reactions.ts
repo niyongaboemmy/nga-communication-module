@@ -5,6 +5,7 @@
 import { getPool } from '@tupo/db';
 import type { FeedReaction, FeedReactionSummary } from '@tupo/shared';
 import { FEED_REACTIONS } from '@tupo/shared';
+import { loadVisiblePost, loadVisibleComment } from './visibility.js';
 import { FeedError } from './errors.js';
 import { type FeedActor, can, normalizeReaction } from './common.js';
 
@@ -23,11 +24,8 @@ export async function reactToPost(
   actor: FeedActor, postId: string, emoji: string | null,
 ): Promise<PostReactionResult> {
   await assertReactable(actor);
-  const { rows: postRows } = await getPool().query<{ author_id: string; page_id: string; status: string }>(
-    `SELECT author_id, page_id, status FROM feed_posts WHERE id = $1 AND deleted_at IS NULL`, [postId],
-  );
-  const post = postRows[0];
-  if (!post || post.status !== 'published') throw new FeedError('Post not found.', 404);
+  const post = await loadVisiblePost(actor, postId);
+  if (post.status !== 'published') throw new FeedError('Post not found.', 404);
 
   const client = await getPool().connect();
   let added: FeedReaction | null = null;
@@ -95,11 +93,8 @@ export async function reactToComment(
   actor: FeedActor, commentId: string, emoji: string | null,
 ): Promise<CommentReactionResult> {
   await assertReactable(actor);
-  const { rows: cRows } = await getPool().query<{ post_id: string; author_id: string }>(
-    'SELECT post_id, author_id FROM feed_comments WHERE id = $1 AND deleted_at IS NULL', [commentId],
-  );
-  const comment = cRows[0];
-  if (!comment) throw new FeedError('Comment not found.', 404);
+  const { comment, post: parentPost } = await loadVisibleComment(actor, commentId);
+  if (parentPost.status !== 'published') throw new FeedError('Comment not found.', 404);
 
   const client = await getPool().connect();
   try {

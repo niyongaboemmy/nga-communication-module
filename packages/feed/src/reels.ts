@@ -6,6 +6,7 @@
  * (unnested) comments — see the migration header (0025) for why this isn't
  * bolted onto the page-centric post model instead.
  */
+import { loadVisibleReel } from './visibility.js';
 import type { PoolClient } from 'pg';
 import { getPool, snowflake } from '@tupo/db';
 import type {
@@ -80,11 +81,7 @@ export async function deleteReel(actor: FeedActor, reelId: string): Promise<void
 export interface ReelLikeResult { liked: boolean; likeCount: number; authorId: string; }
 
 export async function toggleLike(actor: FeedActor, reelId: string): Promise<ReelLikeResult> {
-  const { rows } = await getPool().query<{ author_id: string }>(
-    `SELECT author_id FROM feed_reels WHERE id = $1 AND deleted_at IS NULL`, [reelId],
-  );
-  const reel = rows[0];
-  if (!reel) throw new FeedError('Reel not found.', 404);
+  const reel = await loadVisibleReel(actor, reelId);
   if (!can(actor, 'FEED_COMMENT')) throw new FeedError('You cannot react.', 403);
 
   const client = await getPool().connect();
@@ -119,10 +116,8 @@ export async function addComment(actor: FeedActor, reelId: string, body: string)
   if (!can(actor, 'FEED_COMMENT')) throw new FeedError('You cannot comment.', 403);
   const text = (body ?? '').trim().slice(0, FEED_LIMITS.REEL_COMMENT_BODY_MAX);
   if (!text) throw new FeedError('A comment needs some text.', 400);
-  const { rows } = await getPool().query<{ author_id: string }>(
-    'SELECT author_id FROM feed_reels WHERE id = $1 AND deleted_at IS NULL', [reelId],
-  );
-  if (!rows[0]) throw new FeedError('Reel not found.', 404);
+  const visibleReel = await loadVisibleReel(actor, reelId);
+  const rows = [{ author_id: visibleReel.author_id }];
 
   const client = await getPool().connect();
   const id = snowflake();
@@ -154,6 +149,7 @@ export async function addComment(actor: FeedActor, reelId: string, body: string)
 }
 
 export async function listComments(actor: FeedActor, reelId: string): Promise<FeedReelCommentView[]> {
+  await loadVisibleReel(actor, reelId);
   const { rows } = await getPool().query<{
     id: string; reel_id: string; author_id: string; body: string; created_at: string;
     author_name: string; author_avatar: string | null;
@@ -200,18 +196,21 @@ export async function deleteComment(actor: FeedActor, commentId: string): Promis
 export async function recordView(
   actor: FeedActor, reelId: string,
 ): Promise<{ viewCount: number; uniqueReach: number } | null> {
+  const visible = await loadVisibleReel(actor, reelId).catch(() => null);
+  if (!visible) return null;
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
-    const { rows: exists } = await client.query(
-      'SELECT 1 FROM feed_reels WHERE id = $1 AND deleted_at IS NULL', [reelId],
-    );
-    if (!exists[0]) { await client.query('ROLLBACK'); return null; }
-    await client.query(
+    // One impression per person per half hour, as for posts.
+    const { rows: counted } = await client.query(
       `INSERT INTO feed_reel_views (reel_id, user_id) VALUES ($1,$2)
-       ON CONFLICT (reel_id, user_id) DO UPDATE SET views = feed_reel_views.views + 1, last_at = now()`,
+       ON CONFLICT (reel_id, user_id) DO UPDATE
+         SET views = feed_reel_views.views + 1, last_at = now()
+         WHERE feed_reel_views.last_at < now() - interval '30 minutes'
+       RETURNING 1`,
       [reelId, actor.id],
     );
+    if (!counted[0]) { await client.query('ROLLBACK'); return null; }
     const { rows } = await client.query<{ views: string; reach: string }>(
       `SELECT COALESCE(sum(views),0)::text AS views, count(*)::text AS reach FROM feed_reel_views WHERE reel_id = $1`,
       [reelId],

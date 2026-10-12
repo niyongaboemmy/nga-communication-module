@@ -8,6 +8,7 @@
 import { getPool, snowflake } from '@tupo/db';
 import type { AddCommentPayload, FeedCommentView, FeedMediaItem, FeedPerson, FeedReaction } from '@tupo/shared';
 import { FEED_LIMITS, FEED_REACTIONS } from '@tupo/shared';
+import { loadVisiblePost, loadVisibleComment } from './visibility.js';
 import { FeedError } from './errors.js';
 import { type FeedActor, can, clampLimit, decodeCursor, encodeCursor } from './common.js';
 import { resolveMedia } from './posts.js';
@@ -48,18 +49,9 @@ interface PostGuardRow {
   editor_role: string | null; following: boolean; status: string;
 }
 
+/** Visible to this person (audience, page, status) — see visibility.ts. */
 async function loadPostGuard(actor: FeedActor, postId: string): Promise<PostGuardRow> {
-  const { rows } = await getPool().query<PostGuardRow>(
-    `SELECT fp.id, fp.author_id, fp.comment_policy, fp.page_id, fp.status,
-            e.role AS editor_role, (f.user_id IS NOT NULL) AS following
-       FROM feed_posts fp
-       LEFT JOIN feed_page_editors e ON e.page_id = fp.page_id AND e.user_id = $2
-       LEFT JOIN feed_page_followers f ON f.page_id = fp.page_id AND f.user_id = $2
-      WHERE fp.id = $1 AND fp.deleted_at IS NULL`,
-    [postId, actor.id],
-  );
-  if (!rows[0]) throw new FeedError('Post not found.', 404);
-  return rows[0];
+  return loadVisiblePost(actor, postId);
 }
 
 function assertCanComment(actor: FeedActor, guard: PostGuardRow): void {
@@ -169,7 +161,8 @@ export interface CommentPage { items: FeedCommentView[]; nextCursor: string | nu
 export async function listComments(
   actor: FeedActor, postId: string, opts: { cursor?: string | null; limit?: number } = {},
 ): Promise<CommentPage> {
-  await loadPostGuard(actor, postId); // 404s if the post is gone
+  const guard = await loadPostGuard(actor, postId); // 404s if gone or not for this person
+  if (guard.status !== 'published' && guard.editor_role === null) throw new FeedError('Post not found.', 404);
   const limit = clampLimit(opts.limit, 12);
   const before = decodeCursor(opts.cursor);
   const params: unknown[] = [actor.id, postId];
@@ -212,6 +205,7 @@ export async function listComments(
 export async function listReplies(
   actor: FeedActor, commentId: string, opts: { cursor?: string | null; limit?: number } = {},
 ): Promise<CommentPage> {
+  await loadVisibleComment(actor, commentId); // replies inherit their post's audience
   const limit = clampLimit(opts.limit, 10);
   const before = decodeCursor(opts.cursor);
   const params: unknown[] = [actor.id, commentId];

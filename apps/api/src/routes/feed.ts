@@ -2,6 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { ok, fail } from '@tupo/shared';
 import { feedAudienceRoom, feedPostRoom, feedReelRoom } from '@tupo/shared';
 import type { FeedActor } from '@tupo/feed';
+import type { FeedAudience } from '@tupo/shared';
 import * as feed from '@tupo/feed';
 import { FeedError } from '@tupo/feed';
 import { notifyAndPush } from '@tupo/notify';
@@ -541,12 +542,26 @@ async function notifyFollowersOfPost(
   postId: string, authorId: string, pageName: string, type: string,
 ): Promise<{ emitIds: string[] }> {
   const { getPool } = await import('@tupo/db');
+  // Only followers who may see the post: its own audience and its page's both
+  // have to include the follower's role. A staff-only post never reaches a
+  // student who happens to follow the page — not live, not as a notification.
+  const { rows: meta } = await getPool().query<{ audience: FeedAudience; page_audience: FeedAudience }>(
+    `SELECT p.audience, pg.audience AS page_audience
+       FROM feed_posts p JOIN feed_pages pg ON pg.id = p.page_id WHERE p.id = $1`, [postId],
+  );
+  if (!meta[0]) return { emitIds: [] };
+  const levels = feed.levelsThatSee(feed.effectiveAudience(meta[0].audience, meta[0].page_audience));
+  const named = levels.filter((l): l is NonNullable<typeof l> => l !== null);
+  const includeUnassigned = levels.includes(null);
   const { rows } = await getPool().query<{ user_id: string; notify: boolean }>(
     `SELECT f.user_id, f.notify
        FROM feed_page_followers f
        JOIN feed_posts p ON p.page_id = f.page_id
-      WHERE p.id = $1`,
-    [postId],
+       JOIN users u ON u.id = f.user_id
+       LEFT JOIN roles r ON r.id = u.role_id
+      WHERE p.id = $1
+        AND (r.level = ANY($2::text[]) OR ($3 AND r.level IS NULL))`,
+    [postId, named, includeUnassigned],
   );
   const emitIds = rows.map((r) => r.user_id).filter((id) => id !== authorId);
   const notifyIds = rows.filter((r) => r.notify && r.user_id !== authorId).map((r) => r.user_id);

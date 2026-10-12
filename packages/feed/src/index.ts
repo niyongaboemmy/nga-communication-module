@@ -7,6 +7,8 @@
  * enforce different rules.
  */
 export { FeedError } from './errors.js';
+export { levelsThatSee, effectiveAudience } from './common.js';
+export { loadVisiblePost, loadVisibleReel } from './visibility.js';
 export {
   type FeedActor, type RoleLevel, visibleAudiences, canTargetAudience,
 } from './common.js';
