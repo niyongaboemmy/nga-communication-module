@@ -59,6 +59,13 @@ export function registerChatHandlers(
   const deny = () => new ChatError('Forbidden. You do not have permission to perform this action.', 403);
   /** What this socket has been *authorised* for — never what it claims. */
   const subscribed = new Set<string>();
+  /**
+   * Still in the conversation's room — not merely subscribed once. An eviction
+   * (removed from the conversation) takes the socket out of the room, and from
+   * then on it may neither read nor signal into it.
+   */
+  const inRoom = (conversationId: string): boolean =>
+    subscribed.has(conversationId) && socket.rooms.has(conversationRoom(conversationId));
 
   /* ── Subscribe ────────────────────────────────────────────────────────── */
 
@@ -109,7 +116,7 @@ export function registerChatHandlers(
    * this it would start grey and stay grey until somebody happened to connect.
    */
   socket.on('conversation:presence:query', async ({ conversationId }, ack) => {
-    if (!subscribed.has(conversationId)) { ack?.({ online: [], viewing: [] }); return; }
+    if (!inRoom(conversationId)) { ack?.({ online: [], viewing: [] }); return; }
     await emitConversationPresence(io, redis, conversationId);
     ack?.({ online: [], viewing: [] });
   });
@@ -311,7 +318,7 @@ export function registerChatHandlers(
   const ACTIVITY_KINDS = new Set<ActivityKind>(['typing', 'recording', 'uploading']);
 
   socket.on('typing:start', async ({ conversationId, kind }) => {
-    if (!subscribed.has(conversationId) || !redis) return;
+    if (!inRoom(conversationId) || !redis) return;
     try {
       const key = typingKey(conversationId);
       await redis.hset(key, user.id, JSON.stringify({
@@ -358,7 +365,7 @@ export function registerChatHandlers(
   });
 
   socket.on('receipt:delivered', async ({ conversationId, messageIds }) => {
-    if (!subscribed.has(conversationId) || !messageIds?.length) return;
+    if (!inRoom(conversationId) || !messageIds?.length) return;
     try {
       await chat.markDelivered(user.id, conversationId, messageIds.slice(0, 200));
       // The sender's ticks are the only thing that changes; the room is the

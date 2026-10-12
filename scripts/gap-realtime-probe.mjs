@@ -231,6 +231,14 @@ try {
   const cReactF = await call(C, 'POST', `/api/feed/posts/${staffPostId}/reactions`, { emoji: 'like' });
   check('student cannot react to staff-only post', cReactF.status >= 400, `status ${cReactF.status}`);
 
+  // A student cannot listen in on a staff-only post's room by knowing its id.
+  reset(c1);
+  c1.emit('feed:subscribe', { postIds: [staffPostId] });
+  await sleep(400);
+  await call(ADM, 'POST', `/api/feed/posts/${staffPostId}/comments`, { body: 'STAFF-ONLY COMMENT' });
+  await sleep(800);
+  check('student socket subscribed to a staff-only post receives none of its events', !c1.log.some((e) => JSON.stringify(e.payload ?? '').includes('STAFF-ONLY COMMENT')), evs(c1) || 'none');
+
   const pub = await call(ADM, 'POST', `/api/feed/pages/${pageId}/posts`, { body: 'public probe', audience: 'everyone' });
   const postId = pub.body?.data?.postId;
   for (const s of [b1, c1, a1]) s.emit('feed:subscribe', { postIds: [postId] });

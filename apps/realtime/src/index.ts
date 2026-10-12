@@ -98,9 +98,16 @@ async function connectRedis(): Promise<void> {
     await chatSub.subscribe(CHAT_CHANNEL);
     chatSub.on('message', (_channel, payload) => {
       try {
-        const { rooms, event, payload: data, exceptSocketId } = JSON.parse(payload) as {
+        const parsed = JSON.parse(payload) as {
           rooms: string[]; event: string; payload: unknown; exceptSocketId?: string;
+          leave?: { userIds: string[]; rooms: string[] };
         };
+        // Eviction: these people's sockets leave these rooms, everywhere.
+        if (parsed.leave && Array.isArray(parsed.leave.userIds) && Array.isArray(parsed.leave.rooms)) {
+          io.in(parsed.leave.userIds.map((id) => `user:${id}`)).socketsLeave(parsed.leave.rooms);
+          return;
+        }
+        const { rooms, event, payload: data, exceptSocketId } = parsed;
         if (!Array.isArray(rooms) || !event) return;
         const target = exceptSocketId ? io.except(exceptSocketId) : io;
         // Rooms are named by the publisher, which is our own API — the payload

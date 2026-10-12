@@ -219,6 +219,9 @@ export interface ChatServerToClientEvents {
     p: { conversationId: string; rootId: string; message: WireMessage },
   ) => void;
 
+  /** This user is no longer a member (removed or left), on every device. */
+  'conversation:removed': (p: { conversationId: string; reason: 'removed' | 'left' }) => void;
+
   /** A draft saved on another device (FR-MSG-17). */
   'conversation:draft': (
     p: { conversationId: string; draft: string | null; at: string },

@@ -90,6 +90,20 @@ export function emitToRooms(rooms: string[], event: string, payload: unknown, ex
   relay({ rooms, event, payload, exceptSocketId });
 }
 
+/**
+ * Take these people's sockets out of these rooms, on every gateway node (X-02).
+ *
+ * Membership is checked when a socket joins a room, so a person removed from a
+ * conversation kept receiving it — messages, typing, reactions — until they
+ * happened to reconnect. This closes that window at the moment of removal.
+ */
+export function evictFromRooms(userIds: string[], rooms: string[]): void {
+  if (!userIds.length || !rooms.length) return;
+  const client = getPublisher();
+  if (!client) return;
+  void client.publish(CHAT_CHANNEL, JSON.stringify({ leave: { userIds, rooms } })).catch(() => {});
+}
+
 export async function closeChatRealtime(): Promise<void> {
   await publisher?.quit().catch(() => {});
   publisher = null;

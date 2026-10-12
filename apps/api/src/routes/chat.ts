@@ -10,7 +10,7 @@ import { authorizePermission } from '../middleware/authorize.js';
 import { config } from '../config.js';
 import * as chat from '@tupo/chat';
 import { ChatError } from '@tupo/chat';
-import { emitToConversation, emitToUsers } from '../services/chatRealtime.js';
+import { evictFromRooms, emitToConversation, emitToUsers } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
 import { hasPermission } from '../access/gate.js';
 import { contactDenied } from '../access/contactGate.js';
@@ -1204,6 +1204,9 @@ router.delete('/conversations/:id/members/:userId', wrap(async (req, res) => {
   emitToConversation(id, 'conversation:member_changed', {
     conversationId: id, userId, action: leaving ? 'left' : 'removed', memberCount,
   });
+  // Out of the room on every device now, not at their next reconnect.
+  evictFromRooms([userId], [`conv:${id}`]);
+  emitToUsers([userId], 'conversation:removed', { conversationId: id, reason: leaving ? 'left' : 'removed' });
 
   if (!leaving) {
     await audit({

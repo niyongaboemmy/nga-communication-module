@@ -464,6 +464,19 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
     };
 
+    // Removed from (or left) a conversation on any device: it goes from the
+    // list everywhere, and closes if it is the one open.
+    const onRemoved = ({ conversationId }: { conversationId: string; reason: 'removed' | 'left' }) => {
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+      if (activeIdRef.current === conversationId) {
+        activeIdRef.current = null;
+        setActiveIdRaw(null);
+        setMessages([]);
+        setThreadRootId(null);
+        setThreadMessages([]);
+      }
+    };
+
     const onConversationUpdated = ({ conversation }: { conversation: ConversationSummary }) => {
       setConversations((prev) => {
         const i = prev.findIndex((c) => c.id === conversation.id);
@@ -517,6 +530,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     socket.on('thread:reply', onThreadReply);
     socket.on('thread:unread', onThreadUnread);
     socket.on('conversation:updated', onConversationUpdated);
+    socket.on('conversation:removed', onRemoved);
     socket.on('conversation:prefs', onPrefs);
     socket.on('conversation:draft', onDraft);
     socket.on('presence:update', onPresence);
@@ -535,6 +549,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       socket.off('thread:reply', onThreadReply);
       socket.off('thread:unread', onThreadUnread);
       socket.off('conversation:updated', onConversationUpdated);
+      socket.off('conversation:removed', onRemoved);
       socket.off('conversation:prefs', onPrefs);
       socket.off('conversation:draft', onDraft);
       socket.off('presence:update', onPresence);
