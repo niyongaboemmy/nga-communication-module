@@ -141,6 +141,52 @@ async function mailTo(userId: string, senderId: string) {
      VALUES ($1, $2, $3, $4, 'me@amashuri.com', 'to', 'inbox', false)`, [snowflake(), messageId, threadId, userId]);
 }
 
+const pageIds: string[] = [];
+
+/** A feed page plus an announcement on it; who it reaches is up to the caller. */
+async function announcement(authorId: string, body: string, o: {
+  audience?: string; timelineFor?: string[]; mandatoryFollowers?: string[]; viewedBy?: string[];
+  type?: string; status?: string; daysAgo?: number; deleted?: boolean;
+} = {}) {
+  const pool = getPool();
+  const pageId = snowflake();
+  pageIds.push(pageId);
+  const mandatory = (o.mandatoryFollowers ?? []).length > 0;
+  await pool.query(
+    `INSERT INTO feed_pages (id, slug, name, kind, mandatory, created_by) VALUES ($1, $1, 'School Office', 'official', $2, $3)`,
+    [pageId, mandatory, authorId]);
+  const postId = snowflake();
+  await pool.query(
+    `INSERT INTO feed_posts (id, page_id, author_id, body, type, audience, status, published_at, deleted_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now() - make_interval(days => $8), $9)`,
+    [postId, pageId, authorId, body, o.type ?? 'announcement', o.audience ?? 'everyone', o.status ?? 'published',
+     o.daysAgo ?? 0, o.deleted ? new Date() : null]);
+  for (const u of o.timelineFor ?? []) {
+    await pool.query(
+      `INSERT INTO feed_timeline (user_id, post_id, page_id, reason) VALUES ($1, $2, $3, 'follow')`, [u, postId, pageId]);
+  }
+  for (const u of o.mandatoryFollowers ?? []) {
+    await pool.query(
+      `INSERT INTO feed_page_followers (page_id, user_id, source) VALUES ($1, $2, 'mandatory')`, [pageId, u]);
+  }
+  for (const u of o.viewedBy ?? []) {
+    await pool.query(`INSERT INTO feed_post_views (post_id, user_id) VALUES ($1, $2)`, [postId, u]);
+  }
+  return postId;
+}
+
+async function scheduledMessage(senderId: string, convId: string, state: string, o: { daysAgo?: number } = {}) {
+  await getPool().query(
+    `INSERT INTO scheduled_messages (id, conversation_id, sender_id, body, send_at, state)
+     VALUES ($1, $2, $3, 'Reminder', now() - make_interval(days => $5), $4)`,
+    [snowflake(), convId, senderId, state, o.daysAgo ?? 0]);
+}
+
+async function invite(meetingId: string, userId: string, response: string) {
+  await getPool().query(
+    `INSERT INTO meeting_invites (meeting_id, user_id, response) VALUES ($1, $2, $3)`, [meetingId, userId, response]);
+}
+
 // ── contract ────────────────────────────────────────────────────────────────
 const TIERS = ['blocking', 'slipping', 'tidy'];
 const DEPTHS = ['summary', 'detail', 'write'];
@@ -243,6 +289,7 @@ const item = (res: request.Response, kind: string): Item | undefined =>
 async function cleanup() {
   const pool = getPool();
   await pool.query('DELETE FROM notifications');
+  if (pageIds.length) await pool.query('DELETE FROM feed_pages WHERE id = ANY($1::text[])', [pageIds.splice(0)]);
   await pool.query('DELETE FROM feed_reports');
   await pool.query('DELETE FROM mail_campaigns');
   await pool.query('DELETE FROM mail_recipients');
@@ -484,6 +531,178 @@ describe('approval and moderation queues', () => {
     expect(item(res, 'P-07')).toMatchObject({ count: 1, depth: 'summary', entities: [] });
     // Enforce swaps in the v2 set: MODERATION_QUEUE_VIEW is not held there.
     expect(item(res, 'O-05')).toBeUndefined();
+  });
+});
+
+describe('quick reminders', () => {
+  it('M-03: unread inbox mail is a tidy item linking to mail, with no subjects (no extra query)', async () => {
+    const me = await makeUser('Staff');
+    const peer = await makeUser('Staff');
+    await mailTo(me.id, peer.id);
+    await mailTo(me.id, peer.id);
+    const res = await summary(me.misToken);
+    expect(item(res, 'M-03')).toMatchObject({
+      tier: 'tidy', count: 2, lens: 'SELF', depth: 'detail', entities: [],
+      cta: { href: `${config.appPublicUrl}/app/mail` },
+    });
+    expect(res.body.data.comms.mail_unread).toBe(2);
+  });
+
+  it('M-03: read mail and other people\'s mail do not count', async () => {
+    const me = await makeUser('Staff');
+    const other = await makeUser('Staff');
+    await mailTo(other.id, me.id);
+    await mailTo(me.id, other.id);
+    await getPool().query(`UPDATE mail_recipients SET is_read = true WHERE user_id = $1`, [me.id]);
+    expect(item(await summary(me.misToken), 'M-03')).toBeUndefined();
+  });
+
+  it('M-04: pending invitations to upcoming meetings; slipping within 24 h, single meeting deep-links', async () => {
+    const me = await makeUser('Staff');
+    const host = await makeUser('Staff');
+    const later = await meeting(host.id, 'Termly review', { status: 'scheduled', startsInMin: 3 * 24 * 60, invite: [me.id] });
+    let res = await summary(me.misToken);
+    let m04 = item(res, 'M-04')! as Item & { due_at: string };
+    expect(m04).toMatchObject({ tier: 'tidy', count: 1, lens: 'SELF', depth: 'detail', entities: ['Termly review'] });
+    expect(m04.cta.href).toBe(`${config.appPublicUrl}/app/meet/${later.code}`);
+
+    await meeting(host.id, 'Dept sync', { status: 'scheduled', startsInMin: 120, invite: [me.id] });
+    res = await summary(me.misToken);
+    m04 = item(res, 'M-04')! as Item & { due_at: string };
+    expect(m04).toMatchObject({ tier: 'slipping', count: 2, entities: ['Dept sync', 'Termly review'] });
+    expect(m04.cta.href).toBe(`${config.appPublicUrl}/app/meet`);
+    expect(Date.parse(m04.due_at) - Date.now()).toBeGreaterThan(110 * 60_000);
+    expect(Date.parse(m04.due_at) - Date.now()).toBeLessThan(121 * 60_000);
+  });
+
+  it('M-04: answered, past, live, cancelled, hosted and other people\'s invitations are not shown', async () => {
+    const me = await makeUser('Staff');
+    const host = await makeUser('Staff');
+    const other = await makeUser('Staff');
+    const declined = await meeting(host.id, 'Declined', { status: 'scheduled', startsInMin: 60 });
+    await invite(declined.id, me.id, 'declined');
+    const accepted = await meeting(host.id, 'Accepted', { status: 'scheduled', startsInMin: 60 });
+    await invite(accepted.id, me.id, 'accepted');
+    const tentative = await meeting(host.id, 'Tentative', { status: 'scheduled', startsInMin: 60 });
+    await invite(tentative.id, me.id, 'tentative');
+    await meeting(host.id, 'Already started', { status: 'scheduled', startsInMin: -30, invite: [me.id] });
+    await meeting(host.id, 'Live', { status: 'live', invite: [me.id] });
+    const cancelled = await meeting(host.id, 'Cancelled', { status: 'scheduled', startsInMin: 60, invite: [me.id] });
+    await getPool().query(`UPDATE meetings SET status = 'cancelled' WHERE id = $1`, [cancelled.id]);
+    await meeting(me.id, 'Mine', { status: 'scheduled', startsInMin: 60, invite: [me.id] });
+    await meeting(host.id, 'Not for me', { status: 'scheduled', startsInMin: 60, invite: [other.id] });
+    expect(item(await summary(me.misToken), 'M-04')).toBeUndefined();
+  });
+
+  it('M-06: failed scheduled messages of the last week, labelled by conversation', async () => {
+    const me = await makeUser('Staff');
+    const peer = await makeUser('Staff', 'Grace Peer');
+    const dm = await conversation('dm', null, [{ userId: me.id }, { userId: peer.id }]);
+    const group = await conversation('group', 'S3 Maths', [{ userId: me.id }, { userId: peer.id }]);
+    await scheduledMessage(me.id, dm, 'failed');
+    await scheduledMessage(me.id, group, 'failed', { daysAgo: 2 });
+    const m06 = item(await summary(me.misToken), 'M-06')!;
+    expect(m06).toMatchObject({
+      tier: 'slipping', count: 2, lens: 'SELF', depth: 'detail',
+      cta: { href: `${config.appPublicUrl}/app/chat` },
+    });
+    expect(m06.entities).toEqual(['Grace Peer', 'S3 Maths']);
+  });
+
+  it('M-06: pending, sent, cancelled, old and other people\'s scheduled messages are not shown', async () => {
+    const me = await makeUser('Staff');
+    const peer = await makeUser('Staff');
+    const conv = await conversation('group', 'G', [{ userId: me.id }, { userId: peer.id }]);
+    await scheduledMessage(me.id, conv, 'pending');
+    await scheduledMessage(me.id, conv, 'sent');
+    await scheduledMessage(me.id, conv, 'cancelled');
+    await scheduledMessage(me.id, conv, 'failed', { daysAgo: 10 });
+    await scheduledMessage(peer.id, conv, 'failed');
+    expect(item(await summary(me.misToken), 'M-06')).toBeUndefined();
+  });
+
+  it('F-01: unseen announcements from the timeline and from mandatory pages, newest first', async () => {
+    const me = await makeUser('Staff');
+    const office = await makeUser('Staff');
+    await announcement(office.id, '<p>Sports day moved to <b>Friday</b> &amp; uniforms</p><p>Details inside</p>',
+      { timelineFor: [me.id], daysAgo: 2 });
+    await announcement(office.id, 'Term dates\nfor 2027', { mandatoryFollowers: [me.id], daysAgo: 1 });
+    const res = await summary(me.misToken);
+    const f01 = item(res, 'F-01')! as Item & { waiting_since: string };
+    expect(f01).toMatchObject({
+      tier: 'slipping', count: 2, lens: 'SELF', depth: 'detail',
+      entities: ['Term dates', 'Sports day moved to Friday & uniforms'],
+      cta: { href: `${config.appPublicUrl}/app/feed` },
+    });
+    expect(Date.now() - Date.parse(f01.waiting_since)).toBeGreaterThan(47 * 3_600_000);
+  });
+
+  it('F-01: one unseen announcement links straight to the post; a long first line is trimmed', async () => {
+    const me = await makeUser('Staff');
+    const office = await makeUser('Staff');
+    const postId = await announcement(office.id, 'x'.repeat(200), { timelineFor: [me.id] });
+    const f01 = item(await summary(me.misToken), 'F-01')!;
+    expect(f01.count).toBe(1);
+    expect(f01.cta.href).toBe(`${config.appPublicUrl}/app/feed/post/${postId}`);
+    expect(f01.entities[0]!.length).toBeLessThanOrEqual(80);
+  });
+
+  it('F-01: viewed, old, deleted, draft, ordinary, own, unaddressed and out-of-audience posts are not shown', async () => {
+    const me = await makeUser('Student');
+    const office = await makeUser('Staff');
+    const other = await makeUser('Staff');
+    await announcement(office.id, 'Already read', { timelineFor: [me.id], viewedBy: [me.id] });
+    await announcement(office.id, 'Old news', { timelineFor: [me.id], daysAgo: 20 });
+    await announcement(office.id, 'Deleted', { timelineFor: [me.id], deleted: true });
+    await announcement(office.id, 'Draft', { timelineFor: [me.id], status: 'draft' });
+    await announcement(office.id, 'Just a post', { timelineFor: [me.id], type: 'standard' });
+    await announcement(me.id, 'My own', { timelineFor: [me.id] });
+    await announcement(office.id, 'For someone else', { timelineFor: [other.id] });
+    await announcement(office.id, 'Staff only', { timelineFor: [me.id], audience: 'staff' });
+    await announcement(office.id, 'Parents only', { mandatoryFollowers: [me.id], audience: 'parents' });
+    const res = await summary(me.misToken);
+    expect(item(res, 'F-01')).toBeUndefined();
+    // Staff see every band, so the same staff-only post does reach a staff member.
+    await announcement(office.id, 'Staff only', { timelineFor: [other.id], audience: 'staff' });
+    expect(item(await summary(other.misToken), 'F-01')).toMatchObject({ count: 2 });
+  });
+
+  it('P-08: my rejected drafts and failed sends, never anyone else\'s', async () => {
+    const me = await makeUser('Moderator');
+    const other = await makeUser('Moderator');
+    await campaign(me.id, 'Fees reminder', 'draft');
+    await getPool().query(`UPDATE mail_campaigns SET rejected_reason = 'Wrong amount' WHERE subject = 'Fees reminder'`);
+    await campaign(me.id, 'Trip letter', 'failed');
+    await campaign(me.id, 'Plain draft', 'draft');
+    await campaign(me.id, 'Delivered', 'sent');
+    await campaign(me.id, 'Old failure', 'failed');
+    await getPool().query(`UPDATE mail_campaigns SET updated_at = now() - interval '30 days' WHERE subject = 'Old failure'`);
+    await campaign(other.id, 'Theirs', 'failed');
+    const p08 = item(await summary(me.misToken), 'P-08')! as Item & { title: string };
+    expect(p08).toMatchObject({
+      tier: 'slipping', count: 2, lens: 'SELF', depth: 'detail',
+      cta: { href: `${config.appPublicUrl}/app/mail/campaigns` },
+    });
+    expect(p08.entities.sort()).toEqual(['Fees reminder', 'Trip letter']);
+    expect(p08.title).toBe('1 bulk mail send sent back by an approver and 1 bulk mail send failed');
+  });
+
+  it('P-08 is hidden from someone who cannot open the campaigns screen', async () => {
+    const staff = await makeUser('Staff');
+    await campaign(staff.id, 'Somehow mine', 'failed');
+    expect(item(await summary(staff.misToken), 'P-08')).toBeUndefined();
+  });
+
+  it('a busy account orders the new reminders by tier: blocking, then slipping, then tidy', async () => {
+    const me = await makeUser('Moderator');
+    const host = await makeUser('Staff');
+    const peer = await makeUser('Staff');
+    await meeting(host.id, 'Live now', { status: 'live', invite: [me.id] });
+    await meeting(host.id, 'Next week', { status: 'scheduled', startsInMin: 7 * 24 * 60, invite: [me.id] });
+    await mailTo(me.id, peer.id);
+    await announcement(peer.id, 'Notice', { timelineFor: [me.id] });
+    const kinds = ((await summary(me.misToken)).body.data.items as Item[]).map((i) => `${i.kind}:${i.tier}`);
+    expect(kinds).toEqual(['M-02:blocking', 'F-01:slipping', 'M-04:tidy', 'M-03:tidy']);
   });
 });
 
@@ -862,6 +1081,32 @@ describe('hardening: performance', () => {
       `INSERT INTO feed_reports (id, target_type, target_id, reporter_id, reason)
        SELECT 'perf-r-' || g, 'post', 'perf-t-' || g, $1, 'spam' FROM generate_series(1, 200) g`, [peer.id]);
 
+    await pool.query(
+      `INSERT INTO meetings (id, host_id, title, room_name, join_code, status, scheduled_start)
+       SELECT 'perf-i-' || g, $1, 'Invite ' || g, 'perf-iroom-' || g, 'perf-icode-' || g, 'scheduled',
+              now() + make_interval(days => 2, mins => g)
+         FROM generate_series(1, 200) g`, [peer.id]);
+    await pool.query(
+      `INSERT INTO meeting_invites (meeting_id, user_id) SELECT 'perf-i-' || g, $1 FROM generate_series(1, 200) g`,
+      [busy.id]);
+    await pool.query(
+      `INSERT INTO mail_campaigns (id, subject, from_user_id, created_by, status, rejected_reason)
+       SELECT 'perf-own-' || g, 'Mine ' || g, $1, $1, 'draft', 'No' FROM generate_series(1, 200) g`, [busy.id]);
+    const perfConv = await conversation('group', 'Perf', [{ userId: busy.id }, { userId: peer.id }]);
+    await pool.query(
+      `INSERT INTO scheduled_messages (id, conversation_id, sender_id, body, send_at, state)
+       SELECT 'perf-s-' || g, $1, $2, 'B', now() - make_interval(mins => g), 'failed' FROM generate_series(1, 200) g`,
+      [perfConv, busy.id]);
+    const perfPage = snowflake();
+    pageIds.push(perfPage);
+    await pool.query(`INSERT INTO feed_pages (id, slug, name, mandatory) VALUES ($1, $1, 'Perf', true)`, [perfPage]);
+    await pool.query(`INSERT INTO feed_page_followers (page_id, user_id) VALUES ($1, $2)`, [perfPage, busy.id]);
+    await pool.query(
+      `INSERT INTO feed_posts (id, page_id, author_id, body, type, published_at)
+       SELECT 'perf-p-' || g, $1, $2, 'Notice ' || g, 'announcement', now() - make_interval(mins => g)
+         FROM generate_series(1, 200) g`, [perfPage, peer.id]);
+    for (let i = 0; i < 3; i++) await mailTo(busy.id, peer.id);
+
     const loaded = await countQueries(busy.misToken);
     expect(loaded.n).toBe(baseline.n);
     expect(loaded.n).toBeLessThanOrEqual(15);
@@ -871,6 +1116,11 @@ describe('hardening: performance', () => {
     expect(item(loaded.res, 'M-02')!.count).toBe(200);
     expect(item(loaded.res, 'P-07')!.count).toBe(200);
     expect(item(loaded.res, 'O-05')!.count).toBe(200);
+    expect(item(loaded.res, 'M-03')!.count).toBe(3);
+    expect(item(loaded.res, 'M-04')!.count).toBe(200);
+    expect(item(loaded.res, 'M-06')!.count).toBe(200);
+    expect(item(loaded.res, 'F-01')!.count).toBe(200);
+    expect(item(loaded.res, 'P-08')!.count).toBe(200);
     expect(d.updates).toHaveLength(10);
     expect(d.comms.meetings.length).toBeLessThanOrEqual(10);
   });

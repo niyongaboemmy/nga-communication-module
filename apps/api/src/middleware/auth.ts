@@ -38,8 +38,10 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
 
   const pool = getPool();
-  const { rows } = await pool.query<{ role: Role; status: string; mis_user_id: string; revoked_at: Date | null }>(
-    `SELECT u.role, u.status, u.mis_user_id, r.revoked_at
+  const { rows } = await pool.query<{
+    role: Role; status: string; mis_user_id: string; avatar_url: string | null; revoked_at: Date | null;
+  }>(
+    `SELECT u.role, u.status, u.mis_user_id, u.avatar_url, r.revoked_at
        FROM users u LEFT JOIN session_revocations r ON r.user_id = u.id
       WHERE u.id = $1`,
     [decoded.id]
@@ -67,6 +69,8 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     ...decoded,
     // The stored MIS id, not the claim: it keys the v2 snapshot cache.
     misUserId: user.mis_user_id ?? decoded.misUserId,
+    // Stored, not the claim: the NGA picture can change mid-session (verify-mis).
+    avatarUrl: user.avatar_url ?? undefined,
     role: user.role,
     roleId: resolved?.roleId ?? null,
     roleName: resolved?.roleName ?? null,

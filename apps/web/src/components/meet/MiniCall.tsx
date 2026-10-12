@@ -28,6 +28,10 @@ import { useMeetCall } from '../../context/MeetCallContext';
  */
 
 const MARGIN = 16;
+/* Below md the shell shows a bottom tab bar (~64px incl. padding); a window
+   docked to the bottom sits above it rather than over the tabs. */
+const TAB_BAR_INSET = 72;
+const bottomInset = () => (typeof window !== 'undefined' && window.innerWidth < 768 ? TAB_BAR_INSET : 0);
 /* Fixed at 264 the window overhung a 320px phone once the 16px margins were
    counted. Measured against the viewport instead, so it is always the smaller
    of "the size we want" and "the size that fits". */
@@ -181,7 +185,7 @@ export const MiniCall: React.FC = () => {
       : window.innerWidth - rect.right - MARGIN);
     const dy = Math.max(0, vertical === 'top'
       ? rect.top - MARGIN
-      : window.innerHeight - rect.bottom - MARGIN);
+      : window.innerHeight - rect.bottom - MARGIN - bottomInset());
 
     const next: Corner = { horizontal, vertical, dx, dy };
     setCorner(next);
@@ -195,7 +199,7 @@ export const MiniCall: React.FC = () => {
     width,
     height,
     [corner.horizontal]: MARGIN + corner.dx,
-    [corner.vertical]: MARGIN + corner.dy,
+    [corner.vertical]: MARGIN + corner.dy + (corner.vertical === 'bottom' ? bottomInset() : 0),
   };
 
   return createPortal(

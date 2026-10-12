@@ -88,7 +88,7 @@ const Editor: React.FC<{
   };
 
   return (
-    <div className="mx-auto max-w-3xl p-6">
+    <div className="mx-auto max-w-3xl px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
       <button onClick={onCancel} className="mb-4 inline-flex items-center gap-1 text-sm text-blue-600"><ArrowLeft size={15} /> Back</button>
       <h1 className="mb-4 text-xl font-semibold">{campaign ? 'Edit campaign' : 'New bulk announcement'}</h1>
       <div className="space-y-3">
@@ -235,7 +235,7 @@ export const MailCampaigns: React.FC = () => {
   if (typeof mode === 'object') return <Editor campaign={mode.edit} lists={lists} templates={templates} onDone={() => { setMode('list'); load(); }} onCancel={() => setMode('list')} />;
 
   return (
-    <div className="mx-auto max-w-4xl p-6">
+    <div className="mx-auto max-w-4xl px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
       <button onClick={() => navigate('/app/mail')} className="mb-3 inline-flex items-center gap-1 text-sm text-blue-600"><ArrowLeft size={15} /> Back to mail</button>
       <PageHeader
         title="Bulk announcements"

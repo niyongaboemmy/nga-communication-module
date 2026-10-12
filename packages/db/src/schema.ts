@@ -16,6 +16,8 @@ export const users = pgTable('users', {
   name: text('name').notNull(),
   email: text('email').notNull().default(''),
   avatarUrl: text('avatar_url'),
+  /** The wide profile cover from NGA MIS (null = none). */
+  coverUrl: text('cover_url'),
   /** Effective Tupo role. Admin-assigned values are sticky across logins. */
   role: text('role').notNull().default('unassigned'),
   /** True once an administrator has set the role by hand, so a later MIS

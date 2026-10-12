@@ -117,7 +117,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       last = Date.now();
       try {
         const res = await fetch('/api/sso/verify-mis', { headers: { Authorization: `Bearer ${token}` } });
-        if (res.status === 401) signOut();
+        if (res.status === 401) {
+          signOut();
+          return;
+        }
+        // The poll carries the central NGA profile picture: a change made in MIS
+        // (or another NGA app) reaches the shell, feed and chat within a minute.
+        const body = (await res.json().catch(() => null)) as { data?: { avatarUrl?: string | null } } | null;
+        const polled = body?.data?.avatarUrl;
+        if (polled !== undefined) {
+          setUser((prev) => {
+            if (!prev || (prev.avatarUrl ?? null) === polled) return prev;
+            const next = { ...prev, avatarUrl: polled ?? undefined };
+            localStorage.setItem(USER_KEY, JSON.stringify(next));
+            return next;
+          });
+        }
       } catch {
         // A network blip is not a logout; the next poll settles it.
       }

@@ -156,14 +156,14 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
     : kind === 'forward' ? 'Forward' : 'New message';
 
   const shellClass = expanded
-    ? 'inset-4 md:inset-10'
-    : 'inset-x-2 bottom-0 top-16 sm:left-auto sm:right-6 sm:top-auto sm:h-[min(90vh,44rem)] sm:w-[min(42rem,calc(100vw-3rem))]';
+    ? 'inset-0 sm:inset-4 md:inset-10'
+    : 'inset-0 sm:inset-auto sm:bottom-0 sm:right-6 sm:h-[min(90vh,44rem)] sm:w-[min(42rem,calc(100vw-3rem))]';
 
   if (minimized) {
     return (
       <button
         onClick={() => setMinimized(false)}
-        className="fixed bottom-0 right-6 z-40 flex w-72 items-center justify-between rounded-t-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-lg"
+        className="fixed left-3 right-[4.75rem] bottom-[calc(4.25rem+env(safe-area-inset-bottom))] z-40 flex items-center justify-between gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-lg sm:left-auto sm:right-6 sm:w-72 md:bottom-0 md:rounded-b-none md:rounded-t-xl"
       >
         <span className="truncate">{subject || title}</span>
         <Maximize2 size={14} />
@@ -172,8 +172,10 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
   }
 
   return (
-    <div className={`fixed z-40 ${shellClass}`}>
-      <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border-light bg-white shadow-2xl dark:border-border-dark dark:bg-elevated-dark">
+    // z-95: above the app's top bar (z-50) and the chat launcher (z-90), so on
+    // a phone the full-screen composer's own header — and its Close — show.
+    <div className={`fixed z-95 ${shellClass}`}>
+      <div className="pt-safe flex h-full flex-col overflow-hidden border-border-light bg-white shadow-2xl sm:rounded-xl sm:border dark:border-border-dark dark:bg-elevated-dark">
         <div className="flex items-center justify-between bg-blue-600 px-4 py-2 text-white">
           <span className="text-sm font-semibold">{title}</span>
           <div className="flex items-center gap-1">
@@ -224,7 +226,7 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
               </button>
             )}
             {subjectIdeas && subjectIdeas.length > 0 && (
-              <div className="absolute right-0 top-full z-10 mt-1 w-72 rounded-xl border border-border-light bg-white p-1 shadow-lg dark:border-border-dark dark:bg-elevated-dark">
+              <div className="absolute right-0 top-full z-10 mt-1 w-[min(18rem,calc(100vw-2rem))] rounded-xl border border-border-light bg-white p-1 shadow-lg dark:border-border-dark dark:bg-elevated-dark">
                 {subjectIdeas.map((s) => (
                   <button key={s} onClick={() => { setSubject(s); setSubjectIdeas(null); }}
                     className="block w-full rounded-lg px-2.5 py-1.5 text-left text-sm hover:bg-surface-light dark:hover:bg-surface-dark">{s}</button>
@@ -255,7 +257,7 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
           {error && <p className="mb-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300">{error}</p>}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-border-light px-4 py-2.5 dark:border-border-dark/60">
+        <div className="pb-safe flex flex-wrap items-center gap-2 border-t border-border-light px-4 py-2.5 dark:border-border-dark/60">
           <div className="relative flex items-center">
             <Button size="sm" data-track="tupo.mail.send_click" onClick={() => doSend('send')} disabled={busy !== null}>
               {busy === 'send' ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}

@@ -173,6 +173,49 @@ table td, table th, .tabular-nums { font-variant-numeric: tabular-nums; }
 .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
 .pt-safe { padding-top: env(safe-area-inset-top, 0px); }
 
+/* ============================================================
+   Stacked tables. Below 768px a `.table-stack` table drops its header and
+   each row becomes a card: one cell per line, labelled from the cell's
+   `data-label`. A cell marked `data-primary` leads the card with no label,
+   `data-actions` sits at the card's foot. Wide admin tables then read on a
+   phone without sideways scrolling.
+   ============================================================ */
+@media (max-width: 767.98px) {
+  .table-stack thead { display: none; }
+  .table-stack, .table-stack tbody { display: block; }
+  .table-stack tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.375rem;
+    padding: 0.875rem 1rem;
+  }
+  .table-stack td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-width: 0;
+    padding: 0 !important;
+    text-align: left !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+  }
+  .table-stack td[data-label]::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-secondary-light);
+  }
+  .dark .table-stack td[data-label]::before { color: var(--color-text-secondary-dark); }
+  .table-stack td[data-label] > * { text-align: right; }
+  .table-stack td[data-primary] { display: block; margin-bottom: 0.125rem; }
+  .table-stack td[data-actions] { justify-content: flex-end; margin-top: 0.25rem; }
+  .table-stack td[data-empty] { display: none; }
+}
+
 /* Message bubbles use the 16px radius from §15.2, with the corner nearest the
    author squared off so a run of messages reads as one block. */
 .bubble-in  { border-radius: 16px 16px 16px 4px; }

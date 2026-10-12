@@ -337,6 +337,7 @@ export interface UserProfile {
   id: string;
   name: string;
   avatarUrl: string | null;
+  coverUrl: string | null;
   role: string;
   title: string | null;
   pronouns: string | null;

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ShieldCheck, Search, Lock, Hash, Users as UsersIcon, MessageSquare, Megaphone,
   AlertTriangle, ChevronDown, ChevronUp, Archive, RefreshCw, X, Download, FileText, Play,
-  ImageOff, Trash2, Eye, EyeOff, CornerUpLeft, Forward,
+  ImageOff, Trash2, Eye, EyeOff, CornerUpLeft, Forward, ArrowLeft,
 } from 'lucide-react';
 import type { WireAttachment } from '@tupo/shared';
 import { apiGet, apiPost, ApiError } from '../../lib/api';
@@ -238,7 +238,11 @@ export const Oversight: React.FC = () => {
   );
 
   return (
-    <div className="flex h-full flex-col p-4 sm:p-6">
+    // Below lg the page scrolls as a whole and the panes are master/detail:
+    // the list is the screen until a conversation is opened, then the viewer
+    // replaces it with a way back — two half-height cards on a phone left
+    // room for one row each.
+    <div className="flex h-full flex-col overflow-y-auto p-4 sm:p-6 lg:overflow-hidden">
       <PageHeader
         title="Communication oversight"
         subtitle="Read any group, channel or direct message for academic-conduct review, and remove content that breaks the rules. Every conversation opened and every removal is written to the audit log."
@@ -246,9 +250,9 @@ export const Oversight: React.FC = () => {
 
       <StatsRow stats={stats} onRefresh={refreshStats} />
 
-      <div className="mt-4 grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
+      <div className="mt-4 grid flex-1 grid-cols-1 gap-4 lg:min-h-0 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
         {/* ── Conversation list ─────────────────────────────────────────── */}
-        <Card className="flex min-h-0 flex-col overflow-hidden">
+        <Card className={`min-h-[70dvh] flex-col overflow-hidden lg:min-h-0 ${selected ? 'hidden lg:flex' : 'flex'}`}>
           <div className="space-y-2.5 border-b border-border-light p-3 dark:border-border-dark/50">
             <SearchInput
               icon={<Search size={15} />}
@@ -314,7 +318,15 @@ export const Oversight: React.FC = () => {
         </Card>
 
         {/* ── Message viewer ────────────────────────────────────────────── */}
-        <Card className="flex min-h-0 flex-col overflow-hidden">
+        <Card className={`h-[80dvh] flex-col overflow-hidden lg:h-auto lg:min-h-0 ${selected ? 'flex' : 'hidden lg:flex'}`}>
+          {selected && (
+            <button
+              onClick={() => setSelectedId(null)}
+              className="flex shrink-0 items-center gap-1.5 border-b border-border-light px-3 py-2 text-xs font-medium text-blue-600 lg:hidden dark:border-border-dark/50 dark:text-blue-400"
+            >
+              <ArrowLeft size={14} /> All conversations
+            </button>
+          )}
           {selected ? (
             <ConversationViewer
               key={selected.id}

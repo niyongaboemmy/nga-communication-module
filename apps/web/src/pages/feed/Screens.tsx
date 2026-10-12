@@ -18,7 +18,7 @@ export const SavedPosts: React.FC = () => {
   return (
     <>
       <FeedFrame left={left} right={right}>
-        <div className="mx-auto max-w-2xl">
+        <div className="mx-auto max-w-2xl px-3 pt-3 sm:px-0 sm:pt-0">
           {/* The rail hides under 980px, so this is the only way back on a phone. */}
           <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light lg:hidden dark:text-text-secondary-dark">
             <ArrowLeft size={15} /> Back to feed
@@ -53,7 +53,7 @@ export const PostPermalink: React.FC = () => {
   return (
     <>
       <FeedFrame left={left} right={right}>
-        <div className="mx-auto max-w-2xl">
+        <div className="mx-auto max-w-2xl px-3 pt-3 sm:px-0 sm:pt-0">
           <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light dark:text-text-secondary-dark">
             <ArrowLeft size={15} /> Back to feed
           </Link>
@@ -86,7 +86,7 @@ export const ModerationQueue: React.FC = () => {
 
   return (
     <FeedFrame left={left} right={right}>
-      <div className="mx-auto max-w-2xl">
+      <div className="mx-auto max-w-2xl px-3 pt-3 sm:px-0 sm:pt-0">
         <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light lg:hidden dark:text-text-secondary-dark">
           <ArrowLeft size={15} /> Back to feed
         </Link>

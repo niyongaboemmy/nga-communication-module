@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { X, MessageSquare, Clock, Briefcase } from 'lucide-react';
 import { Avatar, IconButton, Spinner } from '../../components/ui';
+import { avatarPreviewOpen } from '../../components/AvatarPreview';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useNotify } from '../../context/NotificationContext';
 import { useChat } from './ChatProvider';
@@ -43,6 +44,7 @@ export const ProfileCard: React.FC<{
   const [profile, setProfile] = useState<chatApi.UserProfile | null>(null);
   const [failed, setFailed] = useState(false);
   const [opening, setOpening] = useState(false);
+  const [coverFailed, setCoverFailed] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -54,8 +56,12 @@ export const ProfileCard: React.FC<{
   }, [userId]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    // While the photo preview is open, Esc and clicks belong to it.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !avatarPreviewOpen()) { e.stopPropagation(); onClose(); }
+    };
     const onDown = (e: MouseEvent) => {
+      if (avatarPreviewOpen()) return;
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
     document.addEventListener('keydown', onKey, true);
@@ -118,14 +124,28 @@ export const ProfileCard: React.FC<{
         <div className="grid h-32 place-items-center"><Spinner /></div>
       ) : (
         <>
-          <div className="flex items-start gap-3 p-3.5">
+          {/* Cover from NGA MIS, or the plain system blue. */}
+          <div className="relative h-16 overflow-hidden bg-blue-600" data-testid="profile-cover">
+            {profile.coverUrl && !coverFailed && (
+              <img
+                src={profile.coverUrl}
+                alt=""
+                onError={() => setCoverFailed(true)}
+                className="absolute inset-0 h-full w-full object-cover"
+              />
+            )}
+          </div>
+          <div className="-mt-7 flex items-start gap-3 px-3.5 pb-3.5">
             <Avatar
               name={profile.name}
               src={profile.avatarUrl ?? undefined}
-              size={48}
+              size={56}
               presence={toPresence(profile.presence)}
+              preview
+              previewCaption={profile.title || profile.role}
+              className="rounded-full ring-4 ring-white dark:ring-elevated-dark"
             />
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 pt-8">
               <p className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
                 {profile.name}
                 {profile.pronouns && (

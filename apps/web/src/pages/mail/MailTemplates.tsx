@@ -39,7 +39,7 @@ export const MailTemplates: React.FC = () => {
 
   if (editing) {
     return (
-      <div className="mx-auto max-w-3xl p-6">
+      <div className="mx-auto max-w-3xl px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
         <button onClick={() => setEditing(null)} className="mb-4 inline-flex items-center gap-1 text-sm text-blue-600"><ArrowLeft size={15} /> Back to templates</button>
         <h1 className="mb-4 text-xl font-semibold">{editing.id ? 'Edit template' : 'New template'}</h1>
         <div className="space-y-3">
@@ -66,7 +66,7 @@ export const MailTemplates: React.FC = () => {
   }
 
   return (
-    <div className="mx-auto max-w-4xl p-6">
+    <div className="mx-auto max-w-4xl px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
       <button onClick={() => navigate('/app/mail')} className="mb-3 inline-flex items-center gap-1 text-sm text-blue-600"><ArrowLeft size={15} /> Back to mail</button>
       <PageHeader
         title="Mail templates"
@@ -78,14 +78,14 @@ export const MailTemplates: React.FC = () => {
       ) : (
         <ul className="divide-y divide-border-light rounded-xl border border-border-light dark:divide-border-dark/40 dark:border-border-dark/50">
           {items.map((t) => (
-            <li key={t.id} className="flex items-center gap-3 p-4">
-              <span className="rounded bg-surface-light px-2 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary-light dark:bg-surface-dark">{t.category}</span>
+            <li key={t.id} className="flex items-center gap-3 px-3 py-3 sm:p-4">
+              <span className="hidden shrink-0 rounded bg-surface-light px-2 py-0.5 text-[10px] uppercase sm:inline tracking-wide text-text-secondary-light dark:bg-surface-dark">{t.category}</span>
               <button onClick={() => setEditing(t)} className="min-w-0 flex-1 text-left">
                 <span className="block truncate font-medium">{t.name}</span>
                 <span className="block truncate text-xs text-text-secondary-light dark:text-text-secondary-dark">{t.subject}</span>
               </button>
               {t.variables.length > 0 && (
-                <span className="hidden text-xs text-text-secondary-light sm:block">{t.variables.map((v) => `{{${v}}}`).join(' ')}</span>
+                <span title={t.variables.map((v) => `{{${v}}}`).join(' ')} className="hidden max-w-[40%] shrink truncate font-mono text-[11px] text-text-secondary-light lg:block dark:text-text-secondary-dark">{t.variables.map((v) => `{{${v}}}`).join(' ')}</span>
               )}
               <IconButton label="Delete" size="sm" onClick={() => api.deleteTemplate(t.id).then(load)}><Trash2 size={15} /></IconButton>
             </li>

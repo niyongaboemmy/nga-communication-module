@@ -163,3 +163,131 @@ describe('protected routes', () => {
     expect(res.body.data.user.misToken).toBeUndefined();
   });
 });
+
+describe('central NGA profile picture', () => {
+  const PIC = 'https://api.amashuri.com/avatars/991/1790000000/md.webp?s=abc';
+  const PIC2 = 'https://api.amashuri.com/avatars/991/1790000500/md.webp?s=def';
+  const avatarSet = (md: string) => ({ version: 1, sm: md.replace('md.webp', 'sm.webp'), md, lg: md.replace('md.webp', 'lg.webp') });
+
+  const meWith = (avatar: unknown) => ({
+    success: true,
+    data: {
+      user: { user_id: 991, avatar_url: (avatar as any)?.md ?? null },
+      avatar,
+      profile: { name: 'Aline Uwase', email: 'aline@amashuri.com' },
+      permissions: ['MARK_ATTENDANCE'],
+    },
+  });
+
+  /** MIS whose /auth/verify reports `verifyAvatar` (omitted when undefined). */
+  const stubVerify = (verifyAvatar: unknown) => {
+    const base = (globalThis.fetch as any);
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/auth/verify')) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: { userId: 991, access_version: 1, ...(verifyAvatar === undefined ? {} : { avatar: verifyAvatar }) },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return base(input, init);
+    }));
+  };
+
+  const storedAvatar = async () =>
+    (await getPool().query("SELECT avatar_url FROM users WHERE mis_user_id = '991'")).rows[0]?.avatar_url ?? null;
+
+  it('signs in with the MIS picture', async () => {
+    mockMis({ meBody: meWith(avatarSet(PIC)) });
+    const res = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(res.body.data.user.avatarUrl).toBe(PIC);
+    expect(await storedAvatar()).toBe(PIC);
+  });
+
+  it('clears the picture when MIS says there is none, but keeps it when MIS is silent', async () => {
+    mockMis({ meBody: meWith(avatarSet(PIC)) });
+    await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+
+    // An older MIS that knows nothing about pictures: keep ours.
+    mockMis();
+    let res = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(res.body.data.user.avatarUrl).toBe(PIC);
+
+    mockMis({ meBody: meWith(null) });
+    res = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(res.body.data.user.avatarUrl).toBeUndefined();
+    expect(await storedAvatar()).toBeNull();
+  });
+
+  it('the verify-mis poll stores a picture changed in MIS and hands it to the browser', async () => {
+    mockMis({ meBody: meWith(avatarSet(PIC)) });
+    const login = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    const auth = `Bearer ${login.body.data.token}`;
+
+    stubVerify(avatarSet(PIC2));
+    const poll = await request(app).get('/api/sso/verify-mis').set('Authorization', auth);
+    expect(poll.status).toBe(200);
+    expect(poll.body.data).toMatchObject({ valid: true, avatarUrl: PIC2 });
+    expect(await storedAvatar()).toBe(PIC2);
+
+    // The same session token now reads the new picture (stored, not the stale claim).
+    const me = await request(app).get('/api/sso/me').set('Authorization', auth);
+    expect(me.body.data.user.avatarUrl).toBe(PIC2);
+
+    stubVerify(null);
+    const removed = await request(app).get('/api/sso/verify-mis').set('Authorization', auth);
+    expect(removed.body.data.avatarUrl).toBeNull();
+    expect(await storedAvatar()).toBeNull();
+  });
+
+  it('the poll leaves the picture alone when MIS does not report one', async () => {
+    mockMis({ meBody: meWith(avatarSet(PIC)) });
+    const login = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    stubVerify(undefined);
+    const poll = await request(app).get('/api/sso/verify-mis').set('Authorization', `Bearer ${login.body.data.token}`);
+    expect(poll.body.data).toEqual({ valid: true, degraded: false });
+    expect(await storedAvatar()).toBe(PIC);
+  });
+
+  it('ignores a picture link that is not http(s)', async () => {
+    mockMis({ meBody: meWith({ version: 1, sm: 'x', md: 'javascript:alert(1)', lg: 'x' }) });
+    const res = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(res.body.data.user.avatarUrl).toBeUndefined();
+  });
+});
+
+describe('central NGA profile cover', () => {
+  const COVER = { version: 1, md: 'https://api.amashuri.com/covers/991/1/md.webp?s=c', lg: 'https://api.amashuri.com/covers/991/1/lg.webp?s=c' };
+  const meWithCover = (cover: unknown) => ({
+    success: true,
+    data: { user: { user_id: 991 }, cover, profile: { name: 'Aline Uwase', email: 'aline@amashuri.com' }, permissions: [] },
+  });
+  const storedCover = async () =>
+    (await getPool().query("SELECT cover_url FROM users WHERE mis_user_id = '991'")).rows[0]?.cover_url ?? null;
+
+  it('stores the MIS cover at sign-in, and the profile card reads it', async () => {
+    mockMis({ meBody: meWithCover(COVER) });
+    const res = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(res.status).toBe(200);
+    expect(await storedCover()).toBe(COVER.lg);
+    const chat = await import('@tupo/chat');
+    const profile = await chat.getProfile(res.body.data.user.id, res.body.data.user.id);
+    expect(profile.coverUrl).toBe(COVER.lg);
+  });
+
+  it('the verify-mis poll follows a cover changed or removed in MIS', async () => {
+    mockMis({ meBody: meWithCover(null) });
+    const login = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    expect(await storedCover()).toBeNull();
+    const base = globalThis.fetch as any;
+    const verifyWith = (cover: unknown) => vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) =>
+      String(input).endsWith('/auth/verify')
+        ? new Response(JSON.stringify({ success: true, data: { userId: 991, cover } }), { status: 200 })
+        : base(input, init)));
+    verifyWith(COVER);
+    await request(app).get('/api/sso/verify-mis').set('Authorization', `Bearer ${login.body.data.token}`);
+    expect(await storedCover()).toBe(COVER.lg);
+    verifyWith(null);
+    await request(app).get('/api/sso/verify-mis').set('Authorization', `Bearer ${login.body.data.token}`);
+    expect(await storedCover()).toBeNull();
+  });
+});

@@ -208,6 +208,7 @@ export const ContextPanel: React.FC<{
                 size={72}
                 radius="rounded-2xl"
                 className="mx-auto"
+                preview
                 fallback={<span className="text-2xl font-bold">#</span>}
               />
               <p className="mt-3 text-base font-semibold text-text-primary-light dark:text-text-primary-dark">{c.name}</p>

@@ -128,7 +128,7 @@ export const RolesPermissions: React.FC = () => {
   if (loading) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
   return (
-    <div className="p-6">
+    <div className="px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
       <PageHeader
         title="Roles & permissions"
         subtitle="A role carries a permission set; every user holds one role. Changes take effect on the user's next request — no re-login needed."
