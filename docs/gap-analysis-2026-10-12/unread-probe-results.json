@@ -1,0 +1,107 @@
+[
+  {
+    "n": "sidebar row shows \"3\" for 3 new messages in a background conversation",
+    "ok": true,
+    "d": "badge=\"3\" db={\"unread_count\":3,\"unread_mentions\":0,\"last_read_seq\":\"2\"}"
+  },
+  {
+    "n": "app rail / nav Chat icon shows a total unread badge",
+    "ok": false,
+    "d": "rail badge=\"\""
+  },
+  {
+    "n": "browser tab title carries the unread count",
+    "ok": true,
+    "d": "title=\"(3) Tupo — NGA Communication\""
+  },
+  {
+    "n": "badge clears after opening and seeing the messages",
+    "ok": true,
+    "d": "badge=\"\" db={\"unread_count\":0,\"unread_mentions\":0,\"last_read_seq\":\"5\"}"
+  },
+  {
+    "n": "quote-reply counts as 1 unread in the sidebar",
+    "ok": true,
+    "d": "badge=\"1\""
+  },
+  {
+    "n": "quote-reply badge clears on open",
+    "ok": true,
+    "d": "badge=\"\""
+  },
+  {
+    "n": "thread reply updates the sidebar badge live",
+    "ok": false,
+    "d": "reply 201; live badge=\"\"; db unread 0 → 1"
+  },
+  {
+    "n": "live badge and badge-after-reload agree (no phantom counts)",
+    "ok": false,
+    "d": "live=\"\" after reload=\"1\""
+  },
+  {
+    "n": "opening the conversation clears a thread-reply unread",
+    "ok": false,
+    "d": "badge=\"1\" db={\"unread_count\":1,\"unread_mentions\":0,\"last_read_seq\":\"6\"}"
+  },
+  {
+    "n": "the \"N replies\" link is clickable (not covered by the invisible hover toolbar)",
+    "ok": false,
+    "d": ""
+  },
+  {
+    "n": "opening the thread panel clears it",
+    "ok": false,
+    "d": "badge=\"1\" db={\"unread_count\":1,\"unread_mentions\":0,\"last_read_seq\":\"6\"}"
+  },
+  {
+    "n": "after reading everything and reloading, the conversation is not \"new\" again",
+    "ok": false,
+    "d": "badge after reload=\"1\" api unread=1"
+  },
+  {
+    "n": "one reply also sent to channel counts as 1 unread, not 2",
+    "ok": false,
+    "d": "db unread 1 → 0; badge=\"\""
+  },
+  {
+    "n": "scrolled-up reader sees a \"new messages / jump to latest\" cue",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "message not marked read while scrolled up",
+    "ok": true,
+    "d": "db={\"unread_count\":1,\"unread_mentions\":0,\"last_read_seq\":\"34\"}"
+  },
+  {
+    "n": "mark-all-read clears every sidebar badge live",
+    "ok": true,
+    "d": "read-all 200; group=\"\" dm=\"\""
+  },
+  {
+    "n": "a visible \"Mark all as read\" control exists in the chat UI",
+    "ok": false,
+    "d": ""
+  },
+  {
+    "n": "muted conversation still signals unread quietly (bold/dot, no number)",
+    "ok": true,
+    "d": "badge=\"\" nameWeight=600"
+  },
+  {
+    "n": "reading in tab 2 clears the badge in tab 1",
+    "ok": true,
+    "d": "before: tab1=\"1\" tab2=\"1\"; after: tab1=\"\""
+  },
+  {
+    "n": "mobile bottom tab \"Chat\" shows unread count while on Feed",
+    "ok": false,
+    "d": "tab badge=\",\""
+  },
+  {
+    "n": "floating chat launcher (dock) shows unread count",
+    "ok": false,
+    "d": "dock=\"\""
+  }
+]

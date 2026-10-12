@@ -1,0 +1,112 @@
+[
+  {
+    "n": "chat page loads for B (not bounced to sign-in)",
+    "ok": true,
+    "d": "http://localhost:5194/app/chat"
+  },
+  {
+    "n": "new DM from A appears in B's sidebar without reload",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "sidebar preview shows the new message text live",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "B opens the DM and sees the message",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "a new message renders in the open thread live",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "a reaction from A renders live on B's screen",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "an edit renders live",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "a delete removes the text live",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "typing indicator appears for B while A types",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "message typed in A's browser reaches B live",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "B sees an offline/reconnecting indicator",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "after reconnect, a message sent while B was offline appears in the open thread (gap fill)",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "message composed offline is delivered after reconnect (outbox)",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "nav shows an unread mail badge while on another module",
+    "ok": false,
+    "d": "mail nav text: \"Mail\""
+  },
+  {
+    "n": "mail inbox shows the mail",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "new mail appears in the open inbox without reload",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "mail HTML with onerror payload does NOT execute in recipient browser",
+    "ok": false,
+    "d": "executed=true dialogs=[\"xss-mail\",\"xss-mail\"]"
+  },
+  {
+    "n": "a reply arriving in the currently open thread renders live",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "a notification bell / centre exists in the shell",
+    "ok": true,
+    "d": ""
+  },
+  {
+    "n": "feed comment by another user appears live on the permalink",
+    "ok": false,
+    "d": ""
+  },
+  {
+    "n": "B's own reaction button is not switched to A's reaction",
+    "ok": true,
+    "d": "buttons: Like"
+  },
+  {
+    "n": "after an admin edit, a plain follower is NOT shown Edit/Delete actions",
+    "ok": true,
+    "d": "before: none; after: none"
+  }
+]

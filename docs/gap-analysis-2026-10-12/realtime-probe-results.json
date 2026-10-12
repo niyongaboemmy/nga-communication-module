@@ -1,0 +1,297 @@
+[
+  {
+    "n": "A can open a DM with B",
+    "ok": true,
+    "d": "status 200"
+  },
+  {
+    "n": "B (device 1) learns of the new DM live",
+    "ok": true,
+    "d": "connection:ready, presence:update, conversation:updated"
+  },
+  {
+    "n": "B (device 2) learns of the new DM live",
+    "ok": true,
+    "d": "connection:ready, presence:update, conversation:updated"
+  },
+  {
+    "n": "A sends via REST",
+    "ok": true,
+    "d": "status 201"
+  },
+  {
+    "n": "B device 1 receives message:new",
+    "ok": true,
+    "d": "message:new, notification:new, conversation:unread"
+  },
+  {
+    "n": "B device 2 receives message:new",
+    "ok": true,
+    "d": "message:new, notification:new, conversation:unread"
+  },
+  {
+    "n": "A's own socket gets echo (multi-device sync for sender)",
+    "ok": true,
+    "d": "message:new"
+  },
+  {
+    "n": "socket message:send acks ok",
+    "ok": true,
+    "d": "{\"ok\":true,\"message\":{\"id\":\"235437989679857664\",\"conversationId\":\"235437981098311680\",\"seq\":2,\"type\":\"text\",\"body\":\"via "
+  },
+  {
+    "n": "B receives socket-sent message",
+    "ok": true,
+    "d": "typing:update, message:new, conversation:unread, notification:new"
+  },
+  {
+    "n": "B receives typing start",
+    "ok": true,
+    "d": "typing:update"
+  },
+  {
+    "n": "typing auto-expires server-side when stop never sent (9s)",
+    "ok": false,
+    "d": "no expiry event"
+  },
+  {
+    "n": "B reacts",
+    "ok": true,
+    "d": "status 200"
+  },
+  {
+    "n": "A receives message:reaction live",
+    "ok": true,
+    "d": "message:reaction, notification:new"
+  },
+  {
+    "n": "B other device receives reaction",
+    "ok": true,
+    "d": "message:reaction"
+  },
+  {
+    "n": "arbitrary non-emoji reaction string rejected",
+    "ok": false,
+    "d": "status 200"
+  },
+  {
+    "n": "500-char reaction rejected",
+    "ok": true,
+    "d": "status 400"
+  },
+  {
+    "n": "B cannot edit A's message",
+    "ok": true,
+    "d": "status 403"
+  },
+  {
+    "n": "A edits",
+    "ok": true,
+    "d": "status 200"
+  },
+  {
+    "n": "B receives message:updated",
+    "ok": true,
+    "d": "message:updated"
+  },
+  {
+    "n": "B marks read",
+    "ok": true,
+    "d": "status 200"
+  },
+  {
+    "n": "B other device told the conversation is read (unread sync)",
+    "ok": true,
+    "d": "conversation:unread, read:update"
+  },
+  {
+    "n": "A receives read receipt",
+    "ok": true,
+    "d": "read:update"
+  },
+  {
+    "n": "unread endpoint drops after read",
+    "ok": true,
+    "d": "{\"unread\":2,\"mentions\":0} → {\"unread\":0,\"mentions\":0}"
+  },
+  {
+    "n": "non-member cannot read DM messages",
+    "ok": true,
+    "d": "status 404"
+  },
+  {
+    "n": "non-member cannot react",
+    "ok": true,
+    "d": "status 404"
+  },
+  {
+    "n": "non-member socket cannot subscribe and eavesdrop",
+    "ok": true,
+    "d": "none"
+  },
+  {
+    "n": "student→staff DM policy decision recorded",
+    "ok": true,
+    "d": "status 403 (allowed)"
+  },
+  {
+    "n": "B has notifications listing",
+    "ok": true,
+    "d": "count=1"
+  },
+  {
+    "n": "B socket received notification:new for DM",
+    "ok": true,
+    "d": "conversation:unread, read:update, message:new, notification:new"
+  },
+  {
+    "n": "A sends mail",
+    "ok": true,
+    "d": "status 201 {\"success\":true,\"data\":{\"messageId\":\"235438043249508352\",\"threadId\":\"235438043236925440\",\"draft\":false,\"scheduled\":false"
+  },
+  {
+    "n": "B gets a live socket event for new mail",
+    "ok": true,
+    "d": "notification:new"
+  },
+  {
+    "n": "B mail counts increase",
+    "ok": true,
+    "d": "{\"counts\":{\"inbox\":0,\"starred\":0,\"drafts\":0,\"scheduled\":0}} → {\"counts\":{\"inbox\":2,\"starred\":0,\"drafts\":0,\"scheduled\":0}}"
+  },
+  {
+    "n": "mail body sanitized server-side (no onerror / javascript:)",
+    "ok": true,
+    "d": "clean"
+  },
+  {
+    "n": "mail read on device 1 syncs to device 2 live",
+    "ok": false,
+    "d": "no events"
+  },
+  {
+    "n": "non-recipient cannot open mail thread",
+    "ok": true,
+    "d": "status 404"
+  },
+  {
+    "n": "folder param is not injectable (student sees no foreign threads)",
+    "ok": false,
+    "d": "status 200, 1 foreign threads returned to a student"
+  },
+  {
+    "n": "no time-based SQL injection via folder",
+    "ok": true,
+    "d": "took 11 ms"
+  },
+  {
+    "n": "a draft does NOT appear in the recipient inbox",
+    "ok": false,
+    "d": "draft status 201; leak=true; counts {\"inbox\":0,\"starred\":0,\"drafts\":0,\"scheduled\":0} → {\"inbox\":2,\"starred\":0,\"drafts\":0,\"scheduled\":0}"
+  },
+  {
+    "n": "student (no MAIL_SEND) cannot place a subject in staff inbox via draft",
+    "ok": false,
+    "d": "draft status 201"
+  },
+  {
+    "n": "scheduled mail is NOT visible before its send time",
+    "ok": false,
+    "d": "schedule status 201 {\"messageId\":\"235438073599492096\",\"threadId\":\"235438073595297792\",\"draft\":false,\"scheduled\":true}"
+  },
+  {
+    "n": "student cannot export distribution-list member addresses",
+    "ok": false,
+    "d": "status 200, list \"All Parents\", 0 members"
+  },
+  {
+    "n": "admin creates feed page",
+    "ok": true,
+    "d": "status 201"
+  },
+  {
+    "n": "student follows page",
+    "ok": true,
+    "d": "status 200"
+  },
+  {
+    "n": "admin publishes staff-only post",
+    "ok": true,
+    "d": "status 201"
+  },
+  {
+    "n": "student does NOT receive staff-only post body over socket",
+    "ok": false,
+    "d": "LEAK: feed:post_new delivered to student"
+  },
+  {
+    "n": "student does NOT get notification for staff-only post",
+    "ok": false,
+    "d": "{\"id\":\"235438080150994944\",\"kind\":\"feed.published\",\"title\":\"Probe page f6ace7\",\"body\":\"shared a new post\",\"link\":\"/app/f"
+  },
+  {
+    "n": "student cannot comment on staff-only post",
+    "ok": false,
+    "d": "status 201"
+  },
+  {
+    "n": "student cannot list comments of staff-only post",
+    "ok": false,
+    "d": "status 200"
+  },
+  {
+    "n": "student cannot react to staff-only post",
+    "ok": false,
+    "d": "status 200"
+  },
+  {
+    "n": "B receives live feed:reaction",
+    "ok": true,
+    "d": "feed:reaction"
+  },
+  {
+    "n": "broadcast does not overwrite B's own \"mine\" with C's reaction",
+    "ok": false,
+    "d": "mine in B's payload = \"like\""
+  },
+  {
+    "n": "B receives live feed:comment_new",
+    "ok": true,
+    "d": "feed:comment_new"
+  },
+  {
+    "n": "comment broadcast does not carry author canEdit=true to others",
+    "ok": false,
+    "d": "\"canEdit\":true"
+  },
+  {
+    "n": "repeated views by one user are deduplicated",
+    "ok": false,
+    "d": "viewCount=3 keys=id|page|author|body|format|media|linkPreview|type|poll|event|audience|status|scheduledAt|publishedAt|pinned|commentPolicy|editedAt|reactions|commentCount|shareCount|viewCount|uniqueReach|bookmarked|ca"
+  },
+  {
+    "n": "B stays online while one device remains",
+    "ok": true,
+    "d": "typing:update, conversation:presence"
+  },
+  {
+    "n": "A sees B go offline after last device leaves",
+    "ok": true,
+    "d": "{\"userId\":\"gapp-fe34087c90\",\"status\":\"offline\",\"at\":\"2026-10-12T16:26:56.738Z\",\"lastSeenAt\":\"2026-10-12T16:26:56.635Z\"}"
+  },
+  {
+    "n": "on reconnect, gateway replays/announces missed messages (connection:ready carries sync info)",
+    "ok": false,
+    "d": "connection:ready, presence:update :: {\"userId\":\"gapp-fe34087c90\",\"socketId\":\"UDCwnC0Efp-SjGoJAANp\",\"serverTime\":\"2026-10-12T16:26:59.163Z\"}"
+  },
+  {
+    "n": "60 messages in a burst are throttled",
+    "ok": false,
+    "d": "{\"201\":60}"
+  },
+  {
+    "n": "40 feed comments in a burst are throttled",
+    "ok": false,
+    "d": "{\"201\":40}"
+  }
+]
