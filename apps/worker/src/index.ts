@@ -10,6 +10,7 @@ import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
 import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './jobs/mail.js';
 import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
+import { runPartitionMaintenance, partitionsAhead } from './jobs/partitions.js';
 import { reminders, profileMedia } from '@tupo/notify';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
@@ -128,6 +129,13 @@ const worker = new Worker(
         processed++;
         lastJobAt = new Date().toISOString();
         return runReminderSync();
+      }
+
+      // Monthly partitions for messages and meeting_events (SRS §7.3).
+      case 'partitions:ensure': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runPartitionMaintenance();
       }
 
       default:
@@ -251,6 +259,23 @@ if (reminderCfg.clientId && reminderCfg.clientSecret && process.env.NODE_ENV !==
   }).catch((err) => console.error('[worker] could not queue the boot avatars sync:', err.message));
 }
 
+/**
+ * Partition maintenance, every six hours plus once shortly after boot. Daily
+ * would do; six-hourly means a missed run or a long outage is caught the same
+ * day, and the work is a no-op when the months already exist.
+ */
+queue.add('partitions:ensure', {}, {
+  jobId: 'partitions-ensure',
+  repeat: { every: 6 * 60 * 60_000 },
+  removeOnComplete: 10,
+  removeOnFail: 10,
+}).catch((err) => console.error('[worker] could not register partition maintenance:', err.message));
+queue.add('partitions:ensure', { boot: true }, {
+  delay: 10_000,
+  removeOnComplete: true,
+  removeOnFail: 10,
+}).catch((err) => console.error('[worker] could not queue boot partition maintenance:', err.message));
+
 worker.on('ready', () => console.log('[worker] connected to redis, waiting for jobs'));
 
 const app = express();
@@ -267,6 +292,12 @@ app.get('/health', async (_req, res) => {
 
   try { checks.queueDepth = String(await queue.getWaitingCount()); }
   catch { checks.queueDepth = 'unknown'; }
+
+  // Months of partitions in hand. Under 2 means partitions:ensure has stopped
+  // running, and writes will start landing in the default partitions.
+  const ahead = await partitionsAhead();
+  checks.partitionsAheadMonths = ahead === null ? 'unknown' : String(ahead);
+  if (ahead !== null && ahead < 2) healthy = false;
 
   res.status(healthy ? 200 : 503).json({
     service: 'tupo-worker',
