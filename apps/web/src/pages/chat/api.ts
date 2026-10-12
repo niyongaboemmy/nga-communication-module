@@ -352,6 +352,33 @@ export interface UserProfile {
 export const getProfile = (userId: string) =>
   apiGet<{ profile: UserProfile }>(`/api/chat/profile/${userId}`).then((r) => r.data!.profile);
 
+/** A mentor or mentee, as NGA MIS assigns them (see GET /api/chat/mentorship). */
+export interface MentorshipPerson {
+  misUserId: number;
+  /** Null only when MIS gave no email to create their Tupo account with. */
+  tupoUserId: string | null;
+  name: string;
+  userType: string | null;
+  avatarUrl: string | null;
+  coverUrl: string | null;
+  academicYearName: string | null;
+  assignedAt: string | null;
+  classGroupName: string | null;
+  registrationNumber: string | null;
+  /** Only on your mentor. */
+  email: string | null;
+  phone: string | null;
+  profile: (UserProfile & { lastSeenAt?: string | null }) | null;
+}
+
+export interface Mentorship {
+  mentor: MentorshipPerson | null;
+  mentees: MentorshipPerson[];
+}
+
+export const getMentorship = () =>
+  apiGet<Mentorship>('/api/chat/mentorship').then((r) => r.data!);
+
 export const setStatus = (status: { emoji?: string | null; text?: string | null; expiresAt?: string | null }) =>
   apiPut<{ profile: UserProfile }>('/api/chat/status', status).then((r) => r.data!.profile);
 

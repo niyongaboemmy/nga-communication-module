@@ -5,6 +5,7 @@ import { Logo } from '../components/Logo';
 import { useAuth } from '../context/AuthContext';
 import type { SsoExchangeResult } from '@tupo/shared';
 import { consumeSsoState } from '../lib/ssoState';
+import { takeReturnTo } from '../lib/returnTo';
 
 /** Where the MIS sends the user back to. Exchanges the code for a Tupo session. */
 export const SsoCallback: React.FC = () => {
@@ -49,7 +50,7 @@ export const SsoCallback: React.FC = () => {
         if (res.ok && body.success) {
           const { token, user, permissions, rolePermissions, roleName } = body.data as SsoExchangeResult;
           setSession(token, user, permissions, rolePermissions ?? [], roleName ?? null);
-          navigate('/app', { replace: true });
+          navigate(takeReturnTo(), { replace: true });
         } else {
           setError(body.message ?? 'Sign-in failed. The code may have expired or already been used.');
         }

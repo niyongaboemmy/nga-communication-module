@@ -14,6 +14,10 @@ import { emitToConversation, emitToUsers } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
 import { hasPermission } from '../access/gate.js';
 import { contactDenied } from '../access/contactGate.js';
+import {
+  relationshipsFor, ensureTupoUsers, isMentorshipPeer, blockedBetween, MentorshipUnavailable,
+  type MisRelationshipPerson,
+} from '../services/mentorshipService.js';
 import { enqueueUnfurl } from '../services/queue.js';
 import { activity } from '../activity/relay.js';
 import {
@@ -343,10 +347,18 @@ router.post('/conversations/direct', wrap(async (req, res) => {
   if (!peerId) return res.status(400).json(fail('A user id is required.'));
 
   const existing = await chat.findDirect(me.id, peerId);
-  if (!existing && !hasPermission(req, 'DM_START')) {
+  // A student and the mentor MIS assigned them may always open a chat with each
+  // other — students hold no DM_START, and the contact policy would otherwise
+  // keep a student from the one adult appointed to listen. A block still wins.
+  const mentorship = !existing && peerId !== me.id && await isMentorshipPeer(me, peerId);
+  if (mentorship) {
+    if (await blockedBetween(me.id, peerId)) {
+      return res.status(403).json(fail('You are not permitted to message this person.'));
+    }
+  } else if (!existing && !hasPermission(req, 'DM_START')) {
     return res.status(403).json(fail('You do not have permission to start a direct message.'));
   }
-  if (!existing) {
+  if (!existing && !mentorship) {
     const allowed = await chat.contactAllowed(me.id, peerId);
     if (!allowed) {
       return res.status(403).json(fail('You are not permitted to message this person.'));
@@ -1294,6 +1306,58 @@ router.get('/profile/:userId', authorizePermission('DIRECTORY_VIEW'), wrap(async
   const online = await presenceFor([profile.id]);
   const seen = await lastSeenFor([profile.id]);
   res.json(ok({ profile: withPresence(profile, profile.id, online, seen) }));
+}));
+
+/**
+ * Mentorship (from NGA MIS): the student's mentor, or the mentor's mentees,
+ * each with their Tupo profile, presence and — for the mentor — every contact
+ * detail MIS holds. Anyone signed in may ask about themselves; nobody can ask
+ * about anyone else.
+ */
+router.get('/mentorship', wrap(async (req, res) => {
+  const me = actor(req);
+  let rel;
+  try {
+    rel = await relationshipsFor(me.misUserId);
+  } catch (err) {
+    if (err instanceof MentorshipUnavailable) {
+      return res.status(503).json(fail('Mentorship information is unavailable right now. Please try again shortly.'));
+    }
+    throw err;
+  }
+  const people = [...(rel.mentor ? [rel.mentor] : []), ...rel.mentees];
+  const tupoIds = await ensureTupoUsers(people);
+  const ids = [...tupoIds.values()];
+  const [online, seen] = await Promise.all([presenceFor(ids), lastSeenFor(ids)]);
+
+  const view = async (p: MisRelationshipPerson, withContact: boolean) => {
+    const tupoId = tupoIds.get(p.user_id) ?? null;
+    const profile = tupoId
+      ? await chat.getProfile(me.id, tupoId).catch(() => null)
+      : null;
+    return {
+      misUserId: p.user_id,
+      tupoUserId: tupoId,
+      name: profile?.name ?? p.name ?? p.email ?? 'Unknown',
+      userType: p.user_type,
+      avatarUrl: profile?.avatarUrl ?? p.avatar?.md ?? null,
+      coverUrl: profile?.coverUrl ?? p.cover?.lg ?? null,
+      academicYearName: p.academic_year_name,
+      assignedAt: p.assigned_at,
+      classGroupName: p.class_group_name ?? null,
+      registrationNumber: p.registration_number ?? null,
+      // A student sees how to reach their mentor; a mentor already has their
+      // mentees' details in MIS and does not need them echoed here.
+      email: withContact ? p.email : null,
+      phone: withContact ? p.phone ?? null : null,
+      profile: profile && tupoId ? withPresence(profile, tupoId, online, seen) : null,
+    };
+  };
+
+  res.json(ok({
+    mentor: rel.mentor ? await view(rel.mentor, true) : null,
+    mentees: await Promise.all(rel.mentees.map((m) => view(m, false))),
+  }));
 }));
 
 router.put('/status', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, res) => {

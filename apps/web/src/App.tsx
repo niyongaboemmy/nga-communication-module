@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { ActivityRouterTracker } from './vendor/nga-activity/react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { MeetCallProvider } from './context/MeetCallContext';
@@ -38,6 +38,8 @@ import { FeedHome } from './pages/feed/FeedHome';
 import { Reels } from './pages/feed/Reels';
 import { PageProfile, PageDirectory, PageInsights } from './pages/feed/PageScreens';
 import { SavedPosts, PostPermalink, ModerationQueue } from './pages/feed/Screens';
+import { MentorshipPage } from './pages/mentorship/MentorshipPage';
+import { rememberReturnTo, forgetReturnTo } from './lib/returnTo';
 
 const FeedProviderLayout: React.FC = () => (
   <FeedProvider><Outlet /></FeedProvider>
@@ -47,8 +49,13 @@ const FeedProviderLayout: React.FC = () => (
 const Protected: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated, loading } = useAuth();
   const { hasRole } = usePermissions();
+  const location = useLocation();
+  React.useEffect(() => { if (isAuthenticated) forgetReturnTo(); }, [isAuthenticated]);
   if (loading) return null;
-  if (!isAuthenticated) return <Navigate to="/" replace />;
+  if (!isAuthenticated) {
+    rememberReturnTo(`${location.pathname}${location.search}`);
+    return <Navigate to="/" replace />;
+  }
   // Authenticated but no role assigned — no permissions, so no app.
   if (!hasRole) return <PendingAccess />;
   return <>{children}</>;
@@ -117,6 +124,8 @@ export const App: React.FC = () => (
               <Route path="moderation" element={
                 <RequirePermission anyOf={['MODERATION_QUEUE_VIEW']}><ModerationQueue /></RequirePermission>} />
             </Route>
+            {/* Mentor and mentees from NGA MIS; open to everyone (the API scopes it to you). */}
+            <Route path="mentorship" element={<MentorshipPage />} />
             <Route path="files" element={<ComingSoon module="Files" phase="Phase 2" />} />
           {/* Meet. The room is its own full-height screen inside the shell;
               `new` is declared before `:idOrCode` so it is not read as a code. */}
