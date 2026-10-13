@@ -2,6 +2,7 @@ import { pingDb, closeDb } from '@tupo/db';
 import { config } from './config.js';
 import { app } from './app.js';
 import { installProcessGuards } from './utils/asyncErrors.js';
+import { startMeetSweep } from './services/meetLifecycle.js';
 import { activity } from './activity/relay.js';
 import activityCatalog from './activity/catalog.json' with { type: 'json' };
 
@@ -22,6 +23,8 @@ async function start(): Promise<void> {
     // Publish the feature catalog (route patterns → named features) so the MIS
     // usage console can label Tupo's pages. Non-fatal: it only logs.
     if (activity().enabled) void activity().pushCatalog(activityCatalog);
+    // Abandoned meetings close themselves (MEET-RT2).
+    if (process.env.MEET_SWEEP !== 'off') startMeetSweep();
   });
 
   server.on('error', (err: NodeJS.ErrnoException) => {

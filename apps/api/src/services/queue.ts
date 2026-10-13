@@ -72,6 +72,8 @@ export async function enqueueMeetWrapUp(meetingId: string, host: SessionClaims):
       actorId: host.id,
       token: serviceToken(host),
     }, {
+      // At most one wrap-up per meeting in the queue at a time.
+      jobId: `meet-wrapup-${meetingId}`,
       // The models are the slow, flaky part; retry with backoff rather than
       // losing the minutes to one rate-limited call.
       attempts: 3,

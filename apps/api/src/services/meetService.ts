@@ -628,7 +628,8 @@ export async function endMeeting(meetingId: string, actorId: string): Promise<vo
   // NULL left_at that the attendance export would have to guess about.
   await closeAttendanceLegs(pool, { meetingId });
   await pool.query(
-    `UPDATE meetings SET status = 'ended', ended_at = now(), updated_at = now() WHERE id = $1`,
+    `UPDATE meetings SET status = 'ended', ended_at = COALESCE(ended_at, now()), updated_at = now()
+      WHERE id = $1 AND status <> 'ended'`,
     [meetingId],
   );
   await logMeetEvent(meetingId, 'meeting.ended', { actorId });

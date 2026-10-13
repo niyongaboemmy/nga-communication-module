@@ -10,7 +10,7 @@ import type { ClientToServerEvents, ServerToClientEvents, SessionClaims } from '
 import { config } from './config.js';
 import { registerMeetNamespace } from './meet/namespace.js';
 import { ping as pingMeetDb, getPool as getMeetPool } from './meet/db.js';
-import { rooms as meetRooms } from './meet/state.js';
+import { rooms as meetRooms, roomKey as meetRoomKey } from './meet/state.js';
 import * as chat from '@tupo/chat';
 import { registerChatHandlers } from './chat/handlers.js';
 import { hardenSocket, installProcessGuards } from './utils/safeSocket.js';
@@ -107,6 +107,17 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
           rooms: string[]; event: string; payload: unknown; exceptSocketId?: string;
           leave?: { userIds: string[]; rooms: string[] };
         };
+        // A meeting ended outside the room: tell whoever is still in it here,
+        // and drop this node's in-memory state for it (E-04).
+        const ended = (parsed as { meetEnded?: { meetingId?: string; by?: string | null } }).meetEnded;
+        if (ended?.meetingId) {
+          meetNsp.local.to(meetRoomKey(ended.meetingId)).emit('meet:ended' as never, {
+            by: ended.by ?? null, at: new Date().toISOString(),
+            summaryUrl: `/app/meet/${ended.meetingId}/summary`,
+          } as never);
+          meetRooms.delete(ended.meetingId);
+          return;
+        }
         // Eviction: these people's sockets leave these rooms, everywhere.
         if (parsed.leave && Array.isArray(parsed.leave.userIds) && Array.isArray(parsed.leave.rooms)) {
           io.local.in(parsed.leave.userIds.map((id) => `user:${id}`)).socketsLeave(parsed.leave.rooms);

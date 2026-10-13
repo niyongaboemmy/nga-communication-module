@@ -2,7 +2,8 @@
 /**
  * Meet reconnect (E-03 / MEET-RT1): a dropped connection returns an admitted
  * participant to the call — not to a lobby the host never sees — on a new
- * attendance leg, and media tokens keep working.
+ * attendance leg, and media tokens keep working. Ending over REST reaches
+ * whoever is still in the room (E-04).
  *
  *   npm run verify:meet:reconnect      (needs `npm run dev`)
  */
@@ -76,6 +77,14 @@ try {
   check('media tokens work after the reconnect', tok.status === 200, String(tok.status));
   const legs = (await pool.query('SELECT count(*)::int AS n FROM meeting_attendance_segments WHERE participant_id = $1', [pid])).rows[0].n;
   check('the first leg was banked as its own segment', legs === 1, `${legs}`);
+
+  // E-04: ending from outside the room (pre-join page, REST) reaches the room.
+  const endedEvt = new Promise((res) => { again.s.once('meet:ended', res); setTimeout(() => res(null), 4000); });
+  const end = await call(host, 'POST', `/api/meet/${meetingId}/end`, {});
+  check('ending over REST succeeds', end.status === 200, String(end.status));
+  check('people still in the room are told it ended', Boolean(await endedEvt));
+  const st = (await pool.query('SELECT status, wrapup_queued_at FROM meetings WHERE id = $1', [meetingId])).rows[0];
+  check('the meeting is ended and its wrap-up claimed once', st.status === 'ended' && st.wrapup_queued_at !== null, JSON.stringify(st));
 } catch (err) {
   check('suite ran to completion', false, err?.stack ?? String(err));
 } finally {

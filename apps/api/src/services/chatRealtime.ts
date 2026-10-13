@@ -126,6 +126,16 @@ export function evictFromRooms(userIds: string[], rooms: string[]): void {
   void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ leave: { userIds, rooms } })).catch(() => {});
 }
 
+/**
+ * A meeting ended outside the room (REST, auto-close): every gateway node
+ * tells the people still in it and drops its in-memory room (E-04).
+ */
+export function publishMeetEnded(meetingId: string, by: string | null): void {
+  const client = getPublisher();
+  if (!client) return;
+  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ meetEnded: { meetingId, by } })).catch(() => {});
+}
+
 export async function closeChatRealtime(): Promise<void> {
   await publisher?.quit().catch(() => {});
   publisher = null;

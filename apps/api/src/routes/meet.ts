@@ -28,7 +28,7 @@ import { reminders } from '@tupo/notify';
 import * as ai from '../services/meetAiService.js';
 import * as notes from '../services/meetNotesService.js';
 import { getProviderStatus, isAnyProviderConfigured } from '../services/aiProviders/index.js';
-import { enqueueMeetWrapUp } from '../services/queue.js';
+import { endMeetingEverywhere } from '../services/meetLifecycle.js';
 import { audit } from '../services/userService.js';
 import { activity } from '../activity/relay.js';
 
@@ -953,21 +953,11 @@ router.post('/:id/end', authorizePermission('MEET_HOST_CONTROLS'), async (req: R
   if (!m) return res.status(404).json(fail('Meeting not found.'));
   if (!(await requireHost(req, res, m))) return;
 
-  await meet.endMeeting(m.id, actor(req).id);
-  // A meeting that has ended must stop inviting people into it.
-  void notifications.revokeSubject('meeting', m.id).catch(() => {});
-  // Ended before its scheduled start (the host ran it early): withdraw the
-  // reminders that would otherwise still fire.
-  reminders.queueMeetingReminderCancel(m.id);
-
-  // Minutes, chapters and action items are generated off the request, so
-  // ending a meeting stays instant and a Redis outage costs the minutes rather
-  // than the ability to end the call.
-  // Only the session claims travel to the worker — not the resolved RBAC
-  // fields the middleware attached, which the worker re-resolves anyway.
-  const { id, misUserId, name, email, role, avatarUrl } = actor(req);
-  const queued = await enqueueMeetWrapUp(m.id, { id, misUserId, name, email, role, avatarUrl });
-  res.json(ok({ ended: true, wrapUpQueued: queued }));
+  // One path for every way a meeting ends: legs closed, everyone in the room
+  // told and dropped, invitations and reminders withdrawn, and the wrap-up
+  // (minutes, chapters, action items) queued exactly once, off the request.
+  const { wrapUpQueued } = await endMeetingEverywhere(m.id, actor(req).id);
+  res.json(ok({ ended: true, wrapUpQueued }));
 });
 
 router.put('/:id/settings', authorizePermission('MEET_HOST_CONTROLS'), async (req: Request, res: Response) => {
