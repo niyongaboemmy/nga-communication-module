@@ -65,6 +65,7 @@
     "verify:navigation": "node scripts/verify-navigation.mjs",
     "verify:errors": "node scripts/verify-load-errors.mjs",
     "verify:access:ui": "node scripts/verify-access-ux.mjs",
+    "verify:admin:ui": "node scripts/verify-admin-ui.mjs",
     "verify:sessions": "node scripts/verify-sessions.mjs"
   },
   "devDependencies": {

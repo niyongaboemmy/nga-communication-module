@@ -3,7 +3,7 @@ import { getPool } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
-import { beyond, permissionKeysOfRole } from '../access/roleSafety.js';
+import { GOVERNANCE_KEYS, beyond, permissionKeysOfRole } from '../access/roleSafety.js';
 import { emitToUsers, publishSessionEnd } from '../services/chatRealtime.js';
 import { removeAllSubscriptions } from '@tupo/notify';
 import {
@@ -57,23 +57,149 @@ router.patch('/me/theme', async (req: Request, res: Response) => {
   return res.json(ok({ theme, misSynced }));
 });
 
-/** The roster, with each user's current role. */
-router.get('/', authorizePermission('USERS_VIEW', 'USERS_MANAGE'), async (req: Request, res: Response) => {
-  const search = String(req.query.q ?? '').trim();
-  const limit = Math.min(Number(req.query.limit ?? 50), 200);
+/* ── The roster (F-11) ────────────────────────────────────────────────────
+ * Filtered, sorted and paged on the server, with a real total: the screen
+ * used to ask for 50 rows and show them as if they were everyone.
+ */
 
-  const { rows } = await getPool().query(
-    `SELECT u.id, u.mis_user_id, u.name, u.email, u.avatar_url, u.role, u.status,
+const SORTS: Record<string, string> = {
+  name: 'u.name',
+  last_login: 'u.last_login_at',
+  role: 'r.name',
+  status: 'u.status',
+};
+
+interface RosterFilters { q: string; role: string; status: string; sort: string; dir: 'asc' | 'desc' }
+
+function rosterFilters(req: Request): RosterFilters {
+  const sort = String(req.query.sort ?? 'name');
+  return {
+    q: String(req.query.q ?? '').trim().slice(0, 100),
+    // A role id, "none" for unassigned, or empty for any.
+    role: String(req.query.role ?? '').trim(),
+    status: ['active', 'suspended'].includes(String(req.query.status)) ? String(req.query.status) : '',
+    sort: SORTS[sort] ? sort : 'name',
+    dir: req.query.dir === 'desc' ? 'desc' : 'asc',
+  };
+}
+
+/** WHERE clause and parameters for a set of filters; `$1…` are used in order. */
+function rosterWhere(f: RosterFilters, skip: Array<keyof RosterFilters> = []): { sql: string; params: unknown[] } {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (f.q && !skip.includes('q')) {
+    params.push(f.q);
+    where.push(`(u.name ILIKE '%' || $${params.length} || '%' OR u.email ILIKE '%' || $${params.length} || '%')`);
+  }
+  if (f.role && !skip.includes('role')) {
+    if (f.role === 'none') where.push('u.role_id IS NULL');
+    else if (/^\d+$/.test(f.role)) { params.push(Number(f.role)); where.push(`u.role_id = $${params.length}`); }
+  }
+  if (f.status && !skip.includes('status')) { params.push(f.status); where.push(`u.status = $${params.length}`); }
+  return { sql: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
+}
+
+const ROSTER_COLUMNS = `u.id, u.mis_user_id, u.name, u.email, u.avatar_url, u.role, u.status,
             u.role_assigned_by_admin, u.last_login_at,
-            r.id AS role_id, r.name AS role_name, r.level AS role_level
-       FROM users u
-       LEFT JOIN roles r ON r.id = u.role_id
-      WHERE ($1 = '' OR u.name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%')
-      ORDER BY (u.role_id IS NULL) DESC, u.name
-      LIMIT $2`,
-    [search, limit]
+            r.id AS role_id, r.name AS role_name, r.level AS role_level`;
+
+function rosterOrder(f: RosterFilters): string {
+  // Nulls last either way (never signed in, no role), then name as a tiebreak
+  // so paging is stable.
+  return `ORDER BY ${SORTS[f.sort]} ${f.dir.toUpperCase()} NULLS LAST, u.name ASC, u.id ASC`;
+}
+
+router.get('/', authorizePermission('USERS_VIEW', 'USERS_MANAGE'), async (req: Request, res: Response) => {
+  const f = rosterFilters(req);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const pool = getPool();
+  const { sql, params } = rosterWhere(f);
+
+  const { rows } = await pool.query(
+    `SELECT ${ROSTER_COLUMNS}
+       FROM users u LEFT JOIN roles r ON r.id = u.role_id
+       ${sql} ${rosterOrder(f)}
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, limit, offset],
   );
-  return res.json(ok(rows, { total: rows.length }));
+  const { rows: totalRows } = await pool.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM users u ${sql}`, params,
+  );
+  // Counts for the filter chips: everything but the status filter applies, so
+  // each chip says how many it would show.
+  const facetWhere = rosterWhere(f, ['status']);
+  const { rows: facets } = await pool.query<{ active: number; suspended: number; unassigned: number; all: number }>(
+    `SELECT count(*)::int AS all,
+            count(*) FILTER (WHERE u.status = 'active')::int AS active,
+            count(*) FILTER (WHERE u.status = 'suspended')::int AS suspended,
+            count(*) FILTER (WHERE u.role_id IS NULL)::int AS unassigned
+       FROM users u ${facetWhere.sql}`,
+    facetWhere.params,
+  );
+  return res.json({ ...ok(rows, { total: totalRows[0]?.n ?? 0 }), limit, offset, facets: facets[0] });
+});
+
+/**
+ * The roles this administrator may hand out (F-11). Read under USERS_MANAGE
+ * rather than borrowing the roles editor's permission: without it the
+ * dropdown came up empty, and one stray change unassigned the person.
+ */
+router.get('/assignable-roles', authorizePermission('USERS_MANAGE'), async (req: Request, res: Response) => {
+  const actor = (req as AuthenticatedRequest).user!;
+  const { rows } = await getPool().query<{ id: number; name: string; level: string; keys: string[] | null; members: number }>(
+    `SELECT r.id, r.name, r.level,
+            array_remove(array_agg(DISTINCT p.key), NULL) AS keys,
+            (SELECT count(*)::int FROM users u WHERE u.role_id = r.id) AS members
+       FROM roles r
+       LEFT JOIN role_permissions rp ON rp.role_id = r.id
+       LEFT JOIN permissions p ON p.id = rp.permission_id
+      GROUP BY r.id
+      ORDER BY array_position(ARRAY['STUDENT','PARENT','STAFF','ADMIN'], r.level), r.name`,
+  );
+  return res.json(ok(rows.map((r) => {
+    const keys = r.keys ?? [];
+    return {
+      id: r.id, name: r.name, level: r.level, members: r.members,
+      permissionCount: keys.length,
+      assignable: beyond(actor.permissions, keys).length === 0,
+      grantsGovernance: GOVERNANCE_KEYS.some((k) => keys.includes(k)),
+    };
+  })));
+});
+
+/** A spreadsheet cell that cannot be read as a formula (CSV injection). */
+function csvCell(value: unknown): string {
+  let text = value === null || value === undefined ? '' : String(value);
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** The filtered roster as CSV (F-11). Personal data leaving Tupo, so audited. */
+router.get('/export.csv', authorizePermission('USERS_VIEW', 'USERS_MANAGE'), async (req: Request, res: Response) => {
+  const actor = (req as AuthenticatedRequest).user!;
+  const f = rosterFilters(req);
+  const { sql, params } = rosterWhere(f);
+  const { rows } = await getPool().query(
+    `SELECT ${ROSTER_COLUMNS} FROM users u LEFT JOIN roles r ON r.id = u.role_id ${sql} ${rosterOrder(f)} LIMIT 20000`,
+    params,
+  );
+  const header = ['Name', 'Email', 'MIS id', 'Role', 'Status', 'Role set by admin', 'Last sign-in'];
+  const lines = [header.join(',')].concat(rows.map((u) => [
+    u.name, u.email, u.mis_user_id, u.role_name ?? 'Unassigned', u.status,
+    u.role_assigned_by_admin ? 'yes' : 'no',
+    u.last_login_at ? new Date(u.last_login_at).toISOString() : '',
+  ].map(csvCell).join(',')));
+  await audit({
+    actorId: actor.id, action: 'users.export', targetType: 'users',
+    metadata: { rows: rows.length, filters: { q: f.q || undefined, role: f.role || undefined, status: f.status || undefined } },
+    ipAddress: req.ip, userAgent: req.headers['user-agent'],
+  });
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="tupo-users-${stamp}.csv"`);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.send(`\uFEFF${lines.join('\r\n')}\r\n`);
 });
 
 /**
@@ -95,6 +221,13 @@ router.put('/:id/role', authorizePermission('USERS_MANAGE'), async (req: Request
     [req.params.id]
   );
   if (userRows.length === 0) return res.status(404).json(fail('User not found.'));
+
+  // Someone else changed it since this administrator's screen loaded (F-11):
+  // say so rather than silently overwriting their decision.
+  const expected = (req.body ?? {}).expectedRoleId;
+  if (expected !== undefined && (expected ?? null) !== (userRows[0]!.role_id ?? null)) {
+    return res.status(409).json({ ...fail('Someone else changed this person\'s role a moment ago. Reload to see it.'), code: 'ROLE_CHANGED' });
+  }
 
   // An administrator removing their own last administrative role would lock
   // everyone out of role management, so refuse it.
@@ -154,10 +287,17 @@ router.put('/:id/role', authorizePermission('USERS_MANAGE'), async (req: Request
     [req.params.id, roleId ?? null, roleId !== null && roleId !== undefined, newRole, newAcademicLevel]
   );
 
+  const names = await pool.query<{ id: number; name: string }>(
+    'SELECT id, name FROM roles WHERE id = ANY($1::int[])',
+    [[target.role_id, roleId].filter((x): x is number => typeof x === 'number')],
+  );
+  const nameOf = (id: number | null | undefined) => names.rows.find((r) => r.id === id)?.name ?? null;
   await audit({
     actorId: actor.id, action: 'user.role.assign', targetType: 'user', targetId: req.params.id,
     metadata: {
       from: target.role_id, to: roleId ?? null,
+      // Names as they were at the time, so the log still reads after a rename (F-13).
+      roleNameFrom: nameOf(target.role_id), roleNameTo: nameOf(roleId),
       roleFrom: target.role, roleTo: newRole,
       academicLevelFrom: target.academic_level, academicLevelTo: newAcademicLevel,
     },

@@ -201,8 +201,11 @@ try {
     if (await sel.count()) {
       await sel.selectOption({ label: 'Admin' });
       await sleep(1500);
+      // The confirmation is an in-app dialog (F-11), not window.confirm.
+      const inApp = await p.getByRole('alertdialog').isVisible().catch(() => false);
+      if (inApp) { await p.keyboard.press('Escape'); await sleep(300); }
       const now = (await pool.query('SELECT r.name FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=$1', [STU.id])).rows[0]?.name;
-      check('promoting a student to Admin asks for confirmation first', dialogs.length > 0 || now !== 'Admin', `dialogs=${dialogs.length} roleNow=${now}`);
+      check('promoting a student to Admin asks for confirmation first', (dialogs.length > 0 || inApp) && now !== 'Admin', `dialogs=${dialogs.length} inApp=${inApp} roleNow=${now}`);
       await pool.query(`UPDATE users SET role_id=(SELECT id FROM roles WHERE name='Student'), role='student', role_assigned_by_admin=false, academic_level=NULL WHERE id=$1`, [STU.id]);
     }
     // Search miss wording
