@@ -14,7 +14,7 @@ import type {
 } from '@tupo/shared';
 import { FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
 import { FeedError } from './errors.js';
-import { type FeedActor, assertVisible, can, canTargetAudience, clampLimit, decodeCursor, encodeCursor, visibleAudiences } from './common.js';
+import { type FeedActor, assertVisible, can, canTargetAudience, clampLimit, decodeCursor, encodeCursor, visibleAudiences, lockRow } from './common.js';
 import { assertOwnImage, resolveMedia } from './posts.js';
 
 interface ReelRow {
@@ -100,6 +100,7 @@ export async function toggleLike(actor: FeedActor, reelId: string): Promise<Reel
   let liked = false;
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_reels', reelId);
     const { rowCount } = await client.query(
       'DELETE FROM feed_reel_likes WHERE reel_id = $1 AND user_id = $2', [reelId, actor.id],
     );
@@ -135,6 +136,7 @@ export async function addComment(actor: FeedActor, reelId: string, body: string)
   const id = snowflake();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_reels', reelId);
     await client.query(
       'INSERT INTO feed_reel_comments (id, reel_id, author_id, body) VALUES ($1,$2,$3,$4)',
       [id, reelId, actor.id, text],

@@ -25,6 +25,10 @@ export async function votePoll(actor: FeedActor, postId: string, choices: number
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    // One vote change per person per poll at a time: delete-then-insert from
+    // two quick clicks could otherwise leave two answers on a single-choice
+    // poll (FEED-B4).
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))`, [postId, actor.id]);
     await client.query('DELETE FROM feed_poll_votes WHERE post_id = $1 AND user_id = $2', [postId, actor.id]);
     for (const i of picks) {
       await client.query(

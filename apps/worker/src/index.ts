@@ -9,6 +9,7 @@ import { runChatSweeps } from './jobs/chatSweeps.js';
 import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
 import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './jobs/mail.js';
 import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
+import { announcePost } from '@tupo/feed';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
 import { runPartitionMaintenance, partitionsAhead } from './jobs/partitions.js';
 import { reminders, profileMedia } from '@tupo/notify';
@@ -116,6 +117,12 @@ const worker = new Worker(
         return runMailSweeps();
       }
 
+      // Feed — notify followers and update open feeds for a published post.
+      case 'feed:announce': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return announcePost((job.data as { postId: string }).postId);
+      }
       // Feed — publish scheduled posts whose time has come (FR-FEED-4).
       case 'feed:sweep': {
         processed++;

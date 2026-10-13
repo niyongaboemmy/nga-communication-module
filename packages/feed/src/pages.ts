@@ -15,7 +15,7 @@ import { FEED_LIMITS, FEED_PAGE_KINDS, FEED_AUDIENCES, FEED_ACCENT_RE } from '@t
 import { assertOwnImage } from './posts.js';
 import { FeedError } from './errors.js';
 import {
-  type FeedActor, type RoleLevel, can, canTargetAudience, slugify, visibleAudiences,
+  type FeedActor, type RoleLevel, can, canTargetAudience, slugify, visibleAudiences, lockRow,
 } from './common.js';
 
 /** A page accent goes straight into inline styles: hex colours only (FEED-V4). */
@@ -352,6 +352,7 @@ export async function follow(actor: FeedActor, pageId: string, notify = true): P
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_pages', row.id);
     const { rowCount } = await client.query(
       `INSERT INTO feed_page_followers (page_id, user_id, notify, source)
        VALUES ($1,$2,$3,'manual') ON CONFLICT (page_id, user_id) DO UPDATE SET notify = EXCLUDED.notify`,

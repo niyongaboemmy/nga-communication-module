@@ -10,7 +10,7 @@ import type { AddCommentPayload, FeedCommentView, FeedMediaItem, FeedPerson, Fee
 import { FEED_LIMITS, FEED_REACTIONS } from '@tupo/shared';
 import { loadVisiblePost, loadVisibleComment } from './visibility.js';
 import { FeedError } from './errors.js';
-import { type FeedActor, can, clampLimit, decodeCursor, encodeCursor } from './common.js';
+import { type FeedActor, can, clampLimit, decodeCursor, encodeCursor, lockRow } from './common.js';
 import { resolveMedia } from './posts.js';
 
 /** Comments carry far less media than a post — Facebook allows one attachment;
@@ -119,6 +119,7 @@ export async function addComment(
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_posts', postId);
     // Never trust client-supplied media straight into a table the `feed`
     // file-access grant treats as world-readable — resolve it the same way a
     // post's media is resolved, so a fileId must actually belong to this
@@ -264,6 +265,7 @@ export async function deleteComment(actor: FeedActor, commentId: string, byModer
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_posts', c.post_id);
     await client.query('UPDATE feed_comments SET deleted_at = now() WHERE id = $1', [commentId]);
     // Replies to a deleted top-level comment go with it.
     if (!c.parent_id) await client.query('UPDATE feed_comments SET deleted_at = now() WHERE parent_id = $1', [commentId]);

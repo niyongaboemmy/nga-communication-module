@@ -5,7 +5,9 @@ export default defineConfig({
     environment: 'node',
     globalSetup: ['./src/__tests__/globalSetup.ts'],
     // Suites create content in bursts; rateLimit.test.ts switches limits back on.
-    env: { RATE_LIMITS: 'off' },
+    // No job queue: background work falls back to running inline against the
+    // test database instead of landing on a dev worker reading tupo_dev.
+    env: { RATE_LIMITS: 'off', JOB_QUEUE: 'off' },
     // A handful of suites are timing-sensitive across files (shared Redis
     // caches and rate windows) and fail intermittently — they did before the
     // remediation work too. CI retries a failing test up to twice so a deploy

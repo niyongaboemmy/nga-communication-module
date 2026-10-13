@@ -7,7 +7,7 @@ import type { FeedReaction, FeedReactionSummary } from '@tupo/shared';
 import { FEED_REACTIONS } from '@tupo/shared';
 import { loadVisiblePost, loadVisibleComment } from './visibility.js';
 import { FeedError } from './errors.js';
-import { type FeedActor, can, normalizeReaction } from './common.js';
+import { type FeedActor, can, normalizeReaction, lockRow } from './common.js';
 
 async function assertReactable(actor: FeedActor): Promise<void> {
   if (!can(actor, 'FEED_COMMENT')) throw new FeedError('You cannot react.', 403);
@@ -39,6 +39,7 @@ export async function reactToPost(
   let added: FeedReaction | null = null;
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_posts', postId);
     const { rows: existing } = await client.query<{ emoji: string }>(
       'SELECT emoji FROM feed_reactions WHERE post_id = $1 AND user_id = $2', [postId, actor.id],
     );
@@ -108,6 +109,7 @@ export async function reactToComment(
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_comments', commentId);
     const { rows: existing } = await client.query<{ emoji: string }>(
       'SELECT emoji FROM feed_comment_reactions WHERE comment_id = $1 AND user_id = $2', [commentId, actor.id],
     );

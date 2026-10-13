@@ -272,6 +272,22 @@ export async function notifyAndPush(
  * Meeting reminders via the NGA MIS Reminder Hub. Namespaced, because
  * `syncMeeting` means nothing next to `notify` without it.
  */
+/**
+ * Deliver a socket event to rooms through the gateway's relay channel — the
+ * same `{rooms,event,payload}` message the API's chat relay publishes, for
+ * code that runs outside the API (the worker announcing a scheduled post).
+ */
+export async function relay(rooms: string[], event: string, payload: unknown): Promise<void> {
+  if (!rooms.length) return;
+  const client = getPublisher();
+  if (!client) return;
+  try {
+    await publishWhenReady(client, 'tupo:chat', JSON.stringify({ rooms, event, payload }));
+  } catch {
+    // Live delivery is best effort; the feed is read from the database anyway.
+  }
+}
+
 export * as reminders from './reminders.js';
 
 /** Everyone's NGA profile photo + cover, refreshed from MIS by the worker. */

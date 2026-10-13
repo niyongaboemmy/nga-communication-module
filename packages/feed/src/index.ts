@@ -26,6 +26,8 @@ export * as stories from './stories.js';
 
 export { getFeed } from './feed.js';
 export { publishDueScheduledPosts, hydratePosts, getPostView } from './posts.js';
+export { announcePost, neutralPost } from './announce.js';
+import { announcePost } from './announce.js';
 export { ensureMandatoryFollows } from './pages.js';
 
 import { publishDueScheduledPosts } from './posts.js';
@@ -34,6 +36,10 @@ import { sweepExpiredStories } from './stories.js';
 /** Worker sweep entry point — publish scheduled posts whose time has come. */
 export async function runFeedSweep(): Promise<{ published: number }> {
   const { published } = await publishDueScheduledPosts();
+  // A scheduled post announces itself exactly like a hand-published one.
+  for (const id of published) {
+    await announcePost(id).catch((e) => console.error(`[feed] announcing ${id} failed:`, e));
+  }
   return { published: published.length };
 }
 

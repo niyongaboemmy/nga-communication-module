@@ -153,3 +153,18 @@ export function rankScore(input: {
 }
 
 export { FEED_LIMITS };
+
+/**
+ * Lock a parent row (post, comment, reel, page) for the rest of the
+ * transaction, *before* inserting or deleting its children. Counters here are
+ * recounted (`SET n = (SELECT count(*) …)`), and under READ COMMITTED a
+ * concurrent transaction blocked on the UPDATE would otherwise recount from a
+ * snapshot that misses the other's row — a stale total (FEED-B10). Taken
+ * first, the lock makes every later statement see the other's committed rows.
+ */
+export async function lockRow(
+  client: { query: (sql: string, params: unknown[]) => Promise<unknown> },
+  table: 'feed_posts' | 'feed_comments' | 'feed_reels' | 'feed_pages', id: string,
+): Promise<void> {
+  await client.query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [id]);
+}

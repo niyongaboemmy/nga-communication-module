@@ -274,12 +274,7 @@ export async function onPublished(client: PoolClient, postId: string): Promise<P
   const post = rows[0];
   if (!post) throw new FeedError('Post not found.', 404);
 
-  await client.query(
-    `UPDATE feed_pages SET post_count = (
-        SELECT count(*) FROM feed_posts WHERE page_id = $1 AND status = 'published' AND deleted_at IS NULL
-     ) WHERE id = $1`,
-    [post.page_id],
-  );
+  await recountPagePosts(client, post.page_id);
 
   // Hybrid fan-out: only for pages at or below the threshold. Big and mandatory
   // pages are merged at read time instead.
@@ -327,16 +322,30 @@ export async function unpublishPost(actor: FeedActor, postId: string): Promise<v
   await loadForWrite(actor, postId);
   await getPool().query(`UPDATE feed_posts SET status = 'unpublished', updated_at = now() WHERE id = $1`, [postId]);
   await getPool().query('DELETE FROM feed_timeline WHERE post_id = $1', [postId]);
+  await recountPagePosts(getPool(), null, postId);
+}
+
+/**
+ * A page's post count is its published, live posts — recounted rather than
+ * decremented, so deleting a draft or an unpublished post cannot drag it
+ * down (FEED-B12). Addressed by page, or by one of its posts.
+ */
+async function recountPagePosts(
+  db: PoolClient | ReturnType<typeof getPool>, pageId: string | null, viaPostId?: string,
+): Promise<void> {
+  await db.query(
+    `UPDATE feed_pages pg SET post_count = (
+        SELECT count(*) FROM feed_posts p WHERE p.page_id = pg.id AND p.status = 'published' AND p.deleted_at IS NULL)
+      WHERE pg.id = COALESCE($1, (SELECT page_id FROM feed_posts WHERE id = $2))`,
+    [pageId, viaPostId ?? null],
+  );
 }
 
 export async function deletePost(actor: FeedActor, postId: string, byModerator = false): Promise<void> {
   await loadForWrite(actor, postId, byModerator);
   await getPool().query('UPDATE feed_posts SET deleted_at = now(), updated_at = now() WHERE id = $1', [postId]);
   await getPool().query('DELETE FROM feed_timeline WHERE post_id = $1', [postId]);
-  await getPool().query(
-    `UPDATE feed_pages SET post_count = GREATEST(0, post_count - 1) WHERE id = (SELECT page_id FROM feed_posts WHERE id = $1)`,
-    [postId],
-  );
+  await recountPagePosts(getPool(), null, postId);
 }
 
 export async function editPost(actor: FeedActor, postId: string, patch: EditPostPayload): Promise<void> {
@@ -662,6 +671,12 @@ export async function publishDueScheduledPosts(): Promise<{ published: string[] 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // Re-checked under a row lock: a post unscheduled or deleted since the
+      // SELECT above, or claimed by an overlapping sweep, is skipped.
+      const { rows: due } = await client.query(
+        `SELECT 1 FROM feed_posts WHERE id = $1 AND status = 'scheduled' AND deleted_at IS NULL
+            AND scheduled_at <= now() FOR UPDATE SKIP LOCKED`, [r.id]);
+      if (!due.length) { await client.query('ROLLBACK'); continue; }
       await onPublished(client, r.id);
       await client.query('COMMIT');
       published.push(r.id);

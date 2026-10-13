@@ -2,14 +2,15 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { ok, fail } from '@tupo/shared';
 import { feedAudienceRoom, feedPostRoom, feedReelRoom } from '@tupo/shared';
 import type { FeedActor } from '@tupo/feed';
-import type { FeedAudience, FeedPostView } from '@tupo/shared';
+import type { FeedPostView } from '@tupo/shared';
 import * as feed from '@tupo/feed';
 import { FeedError } from '@tupo/feed';
 import { notifyAndPush } from '@tupo/notify';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
-import { emitToRooms, emitToUsers } from '../services/chatRealtime.js';
+import { emitToRooms } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
+import { enqueueFeedAnnounce } from '../services/queue.js';
 import { activity } from '../activity/relay.js';
 
 /**
@@ -42,16 +43,7 @@ const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
  * moderation rights, bookmarks, reactions, votes, RSVPs and page relationship
  * are each reader's own; clients keep what they already know about those.
  */
-function neutralPost(post: FeedPostView): FeedPostView {
-  return {
-    ...post,
-    canEdit: false, canPin: false, canModerate: false, bookmarked: false,
-    reactions: { ...post.reactions, mine: null },
-    poll: post.poll ? { ...post.poll, myVotes: [] } : post.poll,
-    event: post.event ? { ...post.event, going: false } : post.event,
-    page: { ...post.page, following: false, myRole: null },
-  };
-}
+const neutralPost = (post: FeedPostView): FeedPostView => feed.neutralPost(post);
 
 /** Push a post's current view to everyone watching it. */
 async function broadcastPost(actor: FeedActor, postId: string): Promise<void> {
@@ -202,16 +194,8 @@ router.post('/pages/:id/posts', authorizePermission('FEED_POST'), wrap(async (re
     activity().trackFor(req, 'tupo.feed.post', { post_id: result.postId, page_id: req.params.id!, status: result.status });
   }
 
-  if (result.status === 'published') {
-    const post = await feed.getPostView(actor, result.postId);
-    // The author's timeline row exists; tell everyone whose timeline it hit.
-    const followers = await notifyFollowersOfPost(result.postId, actor.id, post.page.name, post.type);
-    emitToUsers([actor.id, ...followers.emitIds], 'feed:post_new', { post: neutralPost(post) });
-    // The home feed now shows every audience-visible post, not just followed
-    // pages (FR-FEED-7) — broadcast to the audience band so it appears live
-    // for everyone who can see it, not only this page's followers.
-    emitToRooms([feedAudienceRoom(post.audience)], 'feed:post_new', { post: neutralPost(post) });
-  }
+  // Followers notified and open feeds updated by the worker (FEED-P4).
+  if (result.status === 'published') await announceSoon(result.postId);
   res.status(201).json(ok(result));
 }));
 
@@ -237,9 +221,7 @@ router.post('/posts/:id/publish', authorizePermission('FEED_POST'), wrap(async (
   await feed.posts.publishPost(actor, req.params.id!);
   const post = await feed.getPostView(actor, req.params.id!);
   activity().trackFor(req, 'tupo.feed.post', { post_id: req.params.id!, page_id: post.page.id, status: 'published' });
-  const followers = await notifyFollowersOfPost(req.params.id!, actor.id, post.page.name, post.type);
-  emitToUsers([actor.id, ...followers.emitIds], 'feed:post_new', { post: neutralPost(post) });
-  emitToRooms([feedAudienceRoom(post.audience)], 'feed:post_new', { post: neutralPost(post) });
+  await announceSoon(req.params.id!);
   res.json(ok({ post }));
 }));
 
@@ -550,51 +532,20 @@ function nameOf(req: Request): string {
   return (req as AuthenticatedRequest).user?.name ?? 'Someone';
 }
 
-/**
- * Notify the followers of a page who asked for it, and hand back the ids to
- * emit `feed:post_new` to (their timelines already have the row).
- */
 /** A comment as broadcast to a room: no one's personal rights or reaction in it. */
 function neutralComment<C extends { canEdit: boolean; canModerate: boolean; myReaction: unknown }>(c: C): C {
   return { ...c, canEdit: false, canModerate: false, myReaction: null };
 }
 
-async function notifyFollowersOfPost(
-  postId: string, authorId: string, pageName: string, type: string,
-): Promise<{ emitIds: string[] }> {
-  const { getPool } = await import('@tupo/db');
-  // Only followers who may see the post: its own audience and its page's both
-  // have to include the follower's role. A staff-only post never reaches a
-  // student who happens to follow the page — not live, not as a notification.
-  const { rows: meta } = await getPool().query<{ audience: FeedAudience; page_audience: FeedAudience }>(
-    `SELECT p.audience, pg.audience AS page_audience
-       FROM feed_posts p JOIN feed_pages pg ON pg.id = p.page_id WHERE p.id = $1`, [postId],
-  );
-  if (!meta[0]) return { emitIds: [] };
-  const levels = feed.levelsThatSee(feed.effectiveAudience(meta[0].audience, meta[0].page_audience));
-  const named = levels.filter((l): l is NonNullable<typeof l> => l !== null);
-  const includeUnassigned = levels.includes(null);
-  const { rows } = await getPool().query<{ user_id: string; notify: boolean }>(
-    `SELECT f.user_id, f.notify
-       FROM feed_page_followers f
-       JOIN feed_posts p ON p.page_id = f.page_id
-       JOIN users u ON u.id = f.user_id
-       LEFT JOIN roles r ON r.id = u.role_id
-      WHERE p.id = $1
-        AND (r.level = ANY($2::text[]) OR ($3 AND r.level IS NULL))`,
-    [postId, named, includeUnassigned],
-  );
-  const emitIds = rows.map((r) => r.user_id).filter((id) => id !== authorId);
-  const notifyIds = rows.filter((r) => r.notify && r.user_id !== authorId).map((r) => r.user_id);
-  if (notifyIds.length) {
-    await notifyAndPush(notifyIds, {
-      kind: type === 'announcement' ? 'feed.announcement' : 'feed.published',
-      title: type === 'announcement' ? `📣 ${pageName}` : pageName,
-      body: type === 'announcement' ? 'posted an announcement' : 'shared a new post',
-      link: `/app/feed/post/${postId}`, subjectType: 'feed_post', subjectId: postId,
-    }).catch(() => {});
-  }
-  return { emitIds };
+/**
+ * Announce a just-published post: followers allowed to see it are notified
+ * and every open feed gets it live. Done by the worker, because for a
+ * mandatory page that is the whole school (FEED-P4); if the queue is down it
+ * runs here in the background instead, never in the request's critical path.
+ */
+async function announceSoon(postId: string): Promise<void> {
+  if (await enqueueFeedAnnounce(postId)) return;
+  void feed.announcePost(postId).catch((e) => console.error('[feed] announce failed:', e));
 }
 
 export default router;
