@@ -11,7 +11,7 @@
 import { Redis } from 'ioredis';
 import { getPool } from '@tupo/db';
 import { presenceKey } from '@tupo/shared';
-import { sendSmtp, smtpConfigFromEnv, type SmtpConfig } from '@tupo/mail';
+import { sendSmtp, smtpConfigFromEnv, type SmtpConfig } from './smtp.js';
 
 const DIGEST_KINDS = ['chat.dm', 'chat.mention', 'feed.mention', 'meet.invited'];
 const MAX_PEOPLE = 200;

@@ -8,7 +8,7 @@ import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
 import { notify, sendWebPush } from '@tupo/notify';
 import { app } from '../app.js';
 import { config } from '../config.js';
-import { runEmailDigest } from '../../../worker/src/jobs/digest.js';
+import { runEmailDigest } from '@tupo/mail';
 
 /** F-04: push subscriptions, who gets a push, and the email digest. */
 

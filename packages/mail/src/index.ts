@@ -15,6 +15,7 @@ export * from './service.js';
 export * from './lists.js';
 export * from './templates.js';
 export * from './campaigns.js';
+export * from './digest.js';
 
 import { deliverSmtp, MAX_SMTP_ATTEMPTS } from './delivery.js';
 import { getPool } from '@tupo/db';

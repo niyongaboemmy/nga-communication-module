@@ -12,7 +12,7 @@ import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
 import { announcePost } from '@tupo/feed';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
 import { runPartitionMaintenance, partitionsAhead } from './jobs/partitions.js';
-import { runEmailDigest } from './jobs/digest.js';
+import { runEmailDigest } from '@tupo/mail';
 import { reminders, profileMedia } from '@tupo/notify';
 import * as mailDelivery from '@tupo/mail';
 

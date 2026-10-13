@@ -6,6 +6,7 @@ import {
 } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
+import { emitToUsers } from '../services/chatRealtime.js';
 import { beyond, GOVERNANCE_KEYS } from '../access/roleSafety.js';
 import { audit } from '../services/userService.js';
 
@@ -198,7 +199,14 @@ router.put('/roles/:id',
         WHERE id = $1`,
       [id, name ?? null, description ?? null]
     );
-    if (keysProvided) await replacePermissions(id, permissionKeys!);
+    if (keysProvided) {
+      await replacePermissions(id, permissionKeys!);
+      // Everyone holding this role re-reads permissions now (F-07).
+      const { rows: holders } = await pool.query<{ id: string }>('SELECT id FROM users WHERE role_id = $1', [id]);
+      for (let i = 0; i < holders.length; i += 500) {
+        emitToUsers(holders.slice(i, i + 500).map((h) => h.id), 'access:changed', { reason: 'permissions' });
+      }
+    }
 
     await audit({
       actorId: actor.id, action: 'role.update', targetType: 'role', targetId: String(id),

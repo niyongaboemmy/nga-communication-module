@@ -4,7 +4,7 @@ import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
 import { beyond, permissionKeysOfRole } from '../access/roleSafety.js';
-import { publishSessionEnd } from '../services/chatRealtime.js';
+import { emitToUsers, publishSessionEnd } from '../services/chatRealtime.js';
 import { removeAllSubscriptions } from '@tupo/notify';
 import {
   audit, getUserTheme, setUserTheme, roleLabelForLevel, academicLevelFromPlacement,
@@ -163,6 +163,8 @@ router.put('/:id/role', authorizePermission('USERS_MANAGE'), async (req: Request
     },
     ipAddress: req.ip, userAgent: req.headers['user-agent'],
   });
+  // Their open tabs re-read permissions now, not at the next sign-in (F-07).
+  emitToUsers([String(req.params.id)], 'access:changed', { reason: 'role' });
   return res.json(ok({ userId: req.params.id, roleId: roleId ?? null }));
 });
 
@@ -196,6 +198,7 @@ router.put('/:id/status', authorizePermission('USERS_MANAGE'), async (req: Reque
     await removeAllSubscriptions(String(req.params.id)).catch(() => {});
   }
 
+  if (status === 'active') emitToUsers([String(req.params.id)], 'access:changed', { reason: 'status' });
   await audit({
     actorId: actor.id, action: `user.${status}`, targetType: 'user', targetId: req.params.id,
     ipAddress: req.ip, userAgent: req.headers['user-agent'],

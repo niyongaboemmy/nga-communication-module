@@ -35,6 +35,8 @@ export interface ServerToClientEvents extends ChatServerToClientEvents, FeedServ
    * unread total so every bell agrees without refetching.
    */
   'notification:read': (p: { ids: string[] | 'all'; unread: number }) => void;
+  /** This person's role, or what it allows, just changed: re-read permissions (F-07). */
+  'access:changed': (p: { reason: 'role' | 'permissions' | 'status' }) => void;
   /**
    * This person's mailbox counters moved — read, moved or deleted on one of
    * their devices (delivered on `user:<id>`). Carries nothing: every client

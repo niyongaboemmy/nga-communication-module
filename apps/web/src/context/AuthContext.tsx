@@ -218,6 +218,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (token) void refreshPermissions();
   }, [token, refreshPermissions]);
 
+  /*
+   * And while signed in (F-07): when an administrator changes this person's
+   * role or what their role allows, the server says so over the socket; as a
+   * backstop, the set is re-read when the tab comes back into view (at most
+   * every 30 s). Menus, routes and buttons update without a reload.
+   */
+  useEffect(() => {
+    if (!token) return;
+    let last = Date.now();
+    const maybe = () => {
+      if (document.hidden || Date.now() - last < 30_000) return;
+      last = Date.now();
+      void refreshPermissions();
+    };
+    document.addEventListener('visibilitychange', maybe);
+    window.addEventListener('focus', maybe);
+    let off: (() => void) | undefined;
+    void import('../lib/socket').then(({ onSocket }) => {
+      off = onSocket('access:changed', () => { last = Date.now(); void refreshPermissions(); });
+    });
+    return () => {
+      document.removeEventListener('visibilitychange', maybe);
+      window.removeEventListener('focus', maybe);
+      off?.();
+    };
+  }, [token, refreshPermissions]);
+
   /**
    * A theme the user picked here. Saved locally first so the UI is instant and
    * survives a reload even when offline, then pushed to the MIS

@@ -16,6 +16,8 @@ import { SsoCallback } from './pages/SsoCallback';
 import { PendingAccess } from './pages/PendingAccess';
 import { Suspended } from './pages/Suspended';
 import { NotFound } from './pages/NotFound';
+import { AccessDenied } from './pages/AccessDenied';
+import { MODULES, ADMIN } from './components/shell/navigation';
 import { AppShell, ComingSoon } from './pages/AppShell';
 import { ChatLayout } from './pages/chat/ChatLayout';
 import { ChatPermalink, ChatInvite } from './pages/chat/ChatLinks';
@@ -36,7 +38,6 @@ import { MailTemplates } from './pages/mail/MailTemplates';
 import { MailLists } from './pages/mail/MailLists';
 import { MailCampaigns } from './pages/mail/MailCampaigns';
 import { MailSettings } from './pages/mail/MailSettings';
-import { EmptyState } from './components/ui';
 import { FeedProvider } from './pages/feed/FeedProvider';
 import { FeedHome } from './pages/feed/FeedHome';
 import { Reels } from './pages/feed/Reels';
@@ -69,17 +70,20 @@ const Protected: React.FC<{ children: React.ReactNode }> = ({ children }) => {
  * Route-level permission gate. Purely cosmetic: the API independently
  * authorises every request, so this only spares the user a page of 403s.
  */
-const RequirePermission: React.FC<{ anyOf: string[]; children: React.ReactNode }> = ({ anyOf, children }) => {
+const RequirePermission: React.FC<{ anyOf: string[]; children: React.ReactNode; area?: string }> = ({ anyOf, children, area }) => {
   const { can } = usePermissions();
-  if (!can(anyOf)) {
-    return (
-      <EmptyState
-        title="You do not have access to this area"
-        hint={`Requires one of: ${anyOf.join(', ')}. Ask an administrator if you need it.`}
-      />
-    );
-  }
+  if (!can(anyOf)) return <AccessDenied area={area} />;
   return <>{children}</>;
+};
+
+/**
+ * `/app` lands on the first module this person can actually open (F-07) —
+ * not always the feed, which a role without FEED_VIEW could only be refused.
+ */
+const FirstModule: React.FC = () => {
+  const { can } = usePermissions();
+  const first = [...MODULES.filter((m) => m.to !== '/app/files'), ...ADMIN].find((m) => can(m.perm));
+  return first ? <Navigate to={first.to} replace /> : <AccessDenied />;
 };
 
 /** The last line of defence: a failure above every screen still leaves a way back (F-06). */
@@ -128,7 +132,7 @@ export const App: React.FC = () => (
           {/* The one route a person with no NGA account can reach. */}
           <Route path="/meet/:idOrCode" element={<GuestMeeting />} />
           <Route path="/app" element={<Protected><AppShell /></Protected>}>
-            <Route index element={<Navigate to="/app/feed" replace />} />
+            <Route index element={<FirstModule />} />
             <Route path="chat" element={<ChatLayout />} />
             {/* Links produced by notifications, "copy link" and invites. */}
             <Route path="chat/invite/:code" element={<ChatInvite />} />
