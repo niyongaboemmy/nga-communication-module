@@ -181,10 +181,12 @@ export async function listComments(
 
   // First two replies per top-level comment, oldest first.
   if (top.length) {
+    // Two per parent, chosen in SQL (D-11): every reply used to be loaded.
     const { rows: replies } = await getPool().query<CommentRow>(
       `SELECT * FROM (
-         ${COMMENT_SELECT} AND c.parent_id = ANY($2)
-       ) c ORDER BY c.created_at ASC`,
+         SELECT x.*, row_number() OVER (PARTITION BY x.parent_id ORDER BY x.created_at ASC, x.id ASC) AS rn
+           FROM (${COMMENT_SELECT} AND c.parent_id = ANY($2)) x
+       ) c WHERE c.rn <= 2 ORDER BY c.created_at ASC`,
       [actor.id, top.map((t) => t.id)],
     );
     const byParent = new Map<string, FeedCommentView[]>();

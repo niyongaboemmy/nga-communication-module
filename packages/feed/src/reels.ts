@@ -171,9 +171,11 @@ export async function listComments(actor: FeedActor, reelId: string): Promise<Fe
     `SELECT c.id, c.reel_id, c.author_id, c.body, c.created_at, u.name AS author_name, u.avatar_url AS author_avatar
        FROM feed_reel_comments c JOIN users u ON u.id = c.author_id
       WHERE c.reel_id = $1 AND c.deleted_at IS NULL
-      ORDER BY c.created_at ASC`,
+      -- The latest 200, shown oldest first (D-11: was every comment).
+      ORDER BY c.created_at DESC LIMIT 200`,
     [reelId],
   );
+  rows.reverse();
   return rows.map((r) => ({
     id: r.id,
     reelId: r.reel_id,

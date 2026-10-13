@@ -113,6 +113,10 @@ async function candidateIds(
              ) AS is_followed
         FROM feed_posts fp
        WHERE fp.deleted_at IS NULL AND fp.status = 'published'
+         -- Bounded (D-11 / FEED-P1): the open feed ranks the last half year,
+         -- not every post ever made, on each request. Following, a page's own
+         -- posts and saved posts reach further back.
+         AND fp.published_at > now() - interval '180 days'
          AND fp.audience = ANY(${audP}) ${annFilter} ${pageOk}`;
   }
 

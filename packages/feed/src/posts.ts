@@ -565,21 +565,24 @@ export async function hydratePosts(actor: FeedActor, postIds: string[]): Promise
   const pollPosts = posts.filter((p) => p.poll);
   const voteByPost = new Map<string, Map<number, number>>();
   const myVotesByPost = new Map<string, number[]>();
-  const votersByPost = new Map<string, Set<string>>();
+  const voterCountByPost = new Map<string, number>();
   if (pollPosts.length) {
-    const { rows: voteRows } = await pool.query<{ post_id: string; option_index: number; user_id: string }>(
-      `SELECT post_id, option_index, user_id FROM feed_poll_votes WHERE post_id = ANY($1)`,
-      [pollPosts.map((p) => p.id)],
-    );
-    for (const v of voteRows) {
-      if (!voteByPost.has(v.post_id)) { voteByPost.set(v.post_id, new Map()); votersByPost.set(v.post_id, new Set()); }
-      const m = voteByPost.get(v.post_id)!;
-      m.set(v.option_index, (m.get(v.option_index) ?? 0) + 1);
-      votersByPost.get(v.post_id)!.add(v.user_id);
-      if (v.user_id === actor.id) {
-        myVotesByPost.set(v.post_id, [...(myVotesByPost.get(v.post_id) ?? []), v.option_index]);
-      }
+    // Counted in SQL (D-11 / FEED-P2): a school-wide poll has thousands of
+    // votes, and every one of them used to be loaded to be counted here.
+    const ids = pollPosts.map((p) => p.id);
+    const { rows: counts } = await pool.query<{ post_id: string; option_index: number; n: number }>(
+      `SELECT post_id, option_index, count(*)::int AS n FROM feed_poll_votes
+        WHERE post_id = ANY($1) GROUP BY post_id, option_index`, [ids]);
+    const { rows: voters } = await pool.query<{ post_id: string; n: number }>(
+      `SELECT post_id, count(DISTINCT user_id)::int AS n FROM feed_poll_votes WHERE post_id = ANY($1) GROUP BY post_id`, [ids]);
+    const { rows: mine } = await pool.query<{ post_id: string; option_index: number }>(
+      `SELECT post_id, option_index FROM feed_poll_votes WHERE post_id = ANY($1) AND user_id = $2`, [ids, actor.id]);
+    for (const c of counts) {
+      if (!voteByPost.has(c.post_id)) voteByPost.set(c.post_id, new Map());
+      voteByPost.get(c.post_id)!.set(c.option_index, c.n);
     }
+    for (const v of voters) voterCountByPost.set(v.post_id, v.n);
+    for (const m of mine) myVotesByPost.set(m.post_id, [...(myVotesByPost.get(m.post_id) ?? []), m.option_index]);
   }
 
   // Event RSVPs.
@@ -624,7 +627,7 @@ export async function hydratePosts(actor: FeedActor, postIds: string[]): Promise
         multi: p.poll.multi,
         closesAt: p.poll.closesAt,
         closed,
-        totalVoters: (votersByPost.get(p.id)?.size) ?? 0,
+        totalVoters: voterCountByPost.get(p.id) ?? 0,
         myVotes: myVotesByPost.get(p.id) ?? [],
       };
     }

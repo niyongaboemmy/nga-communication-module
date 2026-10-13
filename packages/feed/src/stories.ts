@@ -144,7 +144,7 @@ export async function getViewers(actor: FeedActor, storyId: string): Promise<Fee
   const { rows: viewers } = await getPool().query<{ id: string; name: string; avatar_url: string | null; viewed_at: string }>(
     `SELECT u.id, u.name, u.avatar_url, v.viewed_at FROM feed_story_views v
        JOIN users u ON u.id = v.user_id
-      WHERE v.story_id = $1 ORDER BY v.viewed_at DESC`,
+      WHERE v.story_id = $1 ORDER BY v.viewed_at DESC LIMIT 500`,
     [storyId],
   );
   return viewers.map((v) => ({ id: v.id, name: v.name, avatarUrl: v.avatar_url, viewedAt: v.viewed_at }));

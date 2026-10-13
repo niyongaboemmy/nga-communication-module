@@ -482,18 +482,26 @@ export async function removeEditor(actor: FeedActor, pageId: string, userId: str
  */
 export async function ensureMandatoryFollows(userId: string, roleLevel: RoleLevel): Promise<void> {
   const audiences = visibleAudiences(roleLevel);
-  await getPool().query(
+  // Writes only when someone is missing a follow, and recounts only those
+  // pages (D-11 / FEED-B14): this ran an UPDATE over every mandatory page on
+  // every feed load, contending on the hottest rows in the feed.
+  const { rows: added } = await getPool().query<{ page_id: string }>(
     `INSERT INTO feed_page_followers (page_id, user_id, notify, source)
        SELECT p.id, $1, true, 'mandatory'
          FROM feed_pages p
         WHERE p.deleted_at IS NULL AND p.mandatory AND p.audience = ANY($2)
-     ON CONFLICT (page_id, user_id) DO NOTHING`,
+          AND NOT EXISTS (SELECT 1 FROM feed_page_followers f WHERE f.page_id = p.id AND f.user_id = $1)
+     ON CONFLICT (page_id, user_id) DO NOTHING
+     RETURNING page_id`,
     [userId, audiences],
   );
-  await getPool().query(
-    `UPDATE feed_pages p SET follower_count = (SELECT count(*) FROM feed_page_followers f WHERE f.page_id = p.id)
-      WHERE p.mandatory AND p.deleted_at IS NULL`,
-  );
+  if (added.length) {
+    await getPool().query(
+      `UPDATE feed_pages p SET follower_count = (SELECT count(*) FROM feed_page_followers f WHERE f.page_id = p.id)
+        WHERE p.id = ANY($1::text[])`,
+      [added.map((a) => a.page_id)],
+    );
+  }
 }
 
 export async function followedPageIds(userId: string): Promise<string[]> {
