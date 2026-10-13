@@ -29,7 +29,7 @@
     { "key": "tupo.meet.room", "label": "In a meeting", "module": "Meet", "patterns": ["/app/meet/:idOrCode"] },
 
     { "key": "tupo.mail.mailbox", "label": "Mailbox", "module": "Mail", "patterns": ["/app/mail", "/app/mail/t/:threadId"] },
-    { "key": "tupo.mail.campaigns", "label": "Bulk mail campaigns", "module": "Mail", "patterns": ["/app/mail/campaigns"] },
+    { "key": "tupo.mail.campaigns", "label": "Bulk mail campaigns", "module": "Mail", "patterns": ["/app/mail/campaigns", "/app/mail/campaigns/:campaignId?"] },
     { "key": "tupo.mail.lists", "label": "Distribution lists", "module": "Mail", "patterns": ["/app/mail/lists"] },
     { "key": "tupo.mail.templates", "label": "Mail templates", "module": "Mail", "patterns": ["/app/mail/templates"] },
     { "key": "tupo.mail.settings", "label": "Mail settings", "module": "Mail", "patterns": ["/app/mail/settings"] },
