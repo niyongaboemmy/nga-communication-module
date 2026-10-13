@@ -19,6 +19,13 @@ export interface ServerToClientEvents extends ChatServerToClientEvents, FeedServ
   'presence:update': (p: {
     userId: string; status: PresenceStatus; at: string; lastSeenAt?: string | null;
   }) => void;
+  /**
+   * This person's own status, on their own devices only (F-10): what they
+   * chose and what everyone else therefore sees. Separate from
+   * `presence:update` because "appear offline" shows others a grey dot while
+   * the status picker still has to show the choice.
+   */
+  'presence:self': (p: { choice: PresenceChoice; status: PresenceStatus }) => void;
   'pong': (p: { at: string }) => void;
   'system:reconnect_required': (p: { reason: string }) => void;
   /**
@@ -68,7 +75,16 @@ export interface AppNotification {
 
 export interface ClientToServerEvents extends ChatClientToServerEvents, FeedClientToServerEvents {
   'ping': (ack: (p: { at: string }) => void) => void;
+  /** This tab's activity: `online` while used, `away` once idle or hidden. */
   'presence:set': (p: { status: PresenceStatus }, ack: (p: { ok: boolean }) => void) => void;
+  /**
+   * A status the person picked (F-10). It holds across every tab and device
+   * until changed; `auto` hands control back to activity.
+   */
+  'presence:choose': (
+    p: { choice: PresenceChoice },
+    ack?: (p: { ok: boolean; choice: PresenceChoice; status: PresenceStatus }) => void,
+  ) => void;
 
   /**
    * Keep this person's presence key alive.
@@ -101,6 +117,10 @@ export interface PresenceSnapshot {
 }
 
 export type PresenceStatus = 'online' | 'away' | 'busy' | 'in-a-meeting' | 'dnd' | 'offline';
+
+/** What a person can pick for themselves; `auto` follows activity and meetings. */
+export type PresenceChoice = 'auto' | 'busy' | 'dnd' | 'invisible';
+export const PRESENCE_CHOICES: readonly PresenceChoice[] = ['auto', 'busy', 'dnd', 'invisible'];
 
 export const PRESENCE_TTL_SECONDS = 90;
 export const PRESENCE_HEARTBEAT_SECONDS = 45;
@@ -138,3 +158,14 @@ export const presenceKey = (userId: string) => `presence:${userId}`;
  * cache in front of it, so the common case never touches the database.
  */
 export const lastSeenKey = (userId: string) => `lastseen:${userId}`;
+
+/**
+ * Redis key saying a person has Tupo open, whatever anyone else is shown (F-10).
+ * Never read for presence: only the push sender uses it, so someone who
+ * appears offline, or hides their presence, is not also pushed to their phone
+ * while they sit at an open tab. TTL'd like the presence key.
+ */
+export const connectedKey = (userId: string) => `connected:${userId}`;
+
+/** Redis key holding the status a person picked. No TTL: it holds until changed. */
+export const presenceChoiceKey = (userId: string) => `presence:choice:${userId}`;

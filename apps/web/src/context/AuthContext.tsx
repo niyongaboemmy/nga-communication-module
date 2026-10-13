@@ -3,7 +3,10 @@ import type { SessionUser } from '@tupo/shared';
 import {
   SESSION_KEY, USER_KEY, PERMISSIONS_KEY, ROLE_PERMISSIONS_KEY, clearSession, apiGet, apiPatch,
 } from '../lib/api';
-import { THEME_KEY, readStoredTheme, storeTheme, patchCachedUserTheme } from '../lib/theme';
+import {
+  THEME_KEY, hasStoredMode, onSystemThemeChange, patchCachedUserTheme, readStoredMode, resolveTheme,
+  storeMode, systemTheme, type ThemeMode,
+} from '../lib/theme';
 import { beginSsoState } from '../lib/ssoState';
 import { endActivity } from '../activity';
 
@@ -31,10 +34,15 @@ interface AuthContextValue {
    *  administrator's change lands on the next page view. */
   refreshPermissions: () => Promise<void>;
   signOut: () => void;
+  /** The colour on screen. */
   theme: Theme;
+  /** What the person picked: light, dark, or follow the device (F-10). */
+  themeMode: ThemeMode;
   /** Set the appearance and persist it — locally at once, then up to the MIS
    *  so every NGA app follows. */
   setTheme: (theme: Theme) => void;
+  /** Light, dark or system. "System" stays on this device: the MIS has no word for it. */
+  setThemeMode: (mode: ThemeMode) => void;
   toggleTheme: () => void;
 }
 
@@ -50,7 +58,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Initialised straight from storage rather than in an effect: starting at
   // 'light' and correcting later would write 'light' over the user's saved
   // choice on every reload, which is exactly why the theme never stuck.
-  const [theme, setThemeState] = useState<Theme>(readStoredTheme);
+  const [themeMode, setModeState] = useState<ThemeMode>(readStoredMode);
+  const [deviceTheme, setDeviceTheme] = useState<Theme>(systemTheme);
+  const theme: Theme = themeMode === 'system' ? deviceTheme : themeMode;
+  // Read inside callbacks registered once.
+  const modeRef = useRef(themeMode);
+  modeRef.current = themeMode;
+  /** A fixed theme from elsewhere (the MIS, the desktop app) — never over "system". */
+  const adoptRemote = useCallback((remote: Theme) => {
+    if (modeRef.current === 'system') return;
+    setModeState(remote);
+    patchCachedUserTheme(USER_KEY, remote);
+  }, []);
   /** When the MIS was last consulted about the theme. Also bumped on a local
    *  change, so a pull cannot race an in-flight save and undo it. */
   const lastPull = useRef(0);
@@ -70,8 +89,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // Nothing to restore for the theme: it was read from storage before
         // the first render. Only adopt the session's copy when this browser
         // has no saved choice of its own.
-        if (!localStorage.getItem(THEME_KEY) && parsed.preferredTheme) {
-          setThemeState(parsed.preferredTheme);
+        if (!hasStoredMode() && parsed.preferredTheme) {
+          setModeState(parsed.preferredTheme);
         }
       } catch {
         // Corrupt storage is not a recoverable session — start clean.
@@ -85,8 +104,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // The `.dark` class is what drives Tailwind's dark: variant here, matching
     // the MIS's `darkMode: "class"` so the two apps theme identically.
     document.documentElement.classList.toggle('dark', theme === 'dark');
-    storeTheme(theme);
   }, [theme]);
+  useEffect(() => { storeMode(themeMode); }, [themeMode]);
+  // "System" follows the device as it changes (sunset, a manual switch).
+  useEffect(() => onSystemThemeChange(setDeviceTheme), []);
+  // A pick made in another tab applies here too.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === THEME_KEY && e.newValue) setModeState(readStoredMode());
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   const signOut = useCallback(() => {
     // Tell usage analytics this tab's session is over while the token that
@@ -188,11 +217,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // The MIS is the source of truth for appearance, so a fresh sign-in adopts
     // whatever it says — that is how a change made in the MIS or a sibling app
     // reaches this browser.
-    if (newUser.preferredTheme) {
-      setThemeState(newUser.preferredTheme);
-      storeTheme(newUser.preferredTheme);
-    }
-  }, []);
+    if (newUser.preferredTheme) adoptRemote(newUser.preferredTheme);
+  }, [adoptRemote]);
 
   const refreshPermissions = useCallback(async () => {
     try {
@@ -284,8 +310,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
    */
   const setTheme = useCallback((next: Theme) => {
     lastPull.current = Date.now();
-    setThemeState(next);
-    storeTheme(next);
+    setModeState(next);
     patchCachedUserTheme(USER_KEY, next);
     setUser((u) => (u ? { ...u, preferredTheme: next } : u));
 
@@ -307,8 +332,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (next !== 'light' && next !== 'dark') return;
       e.preventDefault();
       lastPull.current = Date.now();
-      setThemeState(next);
-      storeTheme(next);
+      // The desktop app sets a theme explicitly, so it replaces "system" too.
+      setModeState(next);
       patchCachedUserTheme(USER_KEY, next);
       setUser((u) => (u ? { ...u, preferredTheme: next } : u));
     };
@@ -317,8 +342,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const toggleTheme = useCallback(() => {
-    setTheme(theme === 'light' ? 'dark' : 'light');
-  }, [theme, setTheme]);
+    setTheme(resolveTheme(modeRef.current) === 'light' ? 'dark' : 'light');
+  }, [setTheme]);
+
+  const setThemeMode = useCallback((mode: ThemeMode) => {
+    if (mode === 'system') { lastPull.current = Date.now(); setModeState('system'); return; }
+    setTheme(mode);
+  }, [setTheme]);
 
   /**
    * Pull the MIS's copy back down, so a theme changed in the MIS or a sibling
@@ -335,11 +365,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       try {
         const body = await apiGet<{ theme: Theme }>('/api/users/me/theme');
         const remote = body.data?.theme;
-        if (remote === 'light' || remote === 'dark') {
-          setThemeState(remote);
-          storeTheme(remote);
-          patchCachedUserTheme(USER_KEY, remote);
-        }
+        if (remote === 'light' || remote === 'dark') adoptRemote(remote);
       } catch {
         // Keep whatever is on screen; the MIS is the source of truth but not
         // a reason to break the UI when it is unreachable.
@@ -355,7 +381,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   return (
     <AuthContext.Provider value={{
       isAuthenticated: !!token, user, token, permissions, rolePermissions, roleName, loading,
-      signIn, setSession, signOut, refreshPermissions, theme, setTheme, toggleTheme,
+      signIn, setSession, signOut, refreshPermissions, theme, themeMode, setTheme, setThemeMode, toggleTheme,
     }}>
       {children}
     </AuthContext.Provider>

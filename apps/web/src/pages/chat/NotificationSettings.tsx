@@ -71,7 +71,11 @@ const Toggle: React.FC<{
   </label>
 );
 
-export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+/**
+ * `embedded`: drawn inside the Settings page (F-10) rather than as chat's side
+ * panel — no close button, no Escape, no side border.
+ */
+export const NotificationSettings: React.FC<{ onClose?: () => void; embedded?: boolean }> = ({ onClose, embedded = false }) => {
   const { notify, requestSystemPermission, systemPermission } = useNotify();
   const [prefs, setPrefs] = useState<Prefs | null>(null);
   const [saving, setSaving] = useState(false);
@@ -83,10 +87,11 @@ export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClos
   }, [notify]);
 
   useEffect(() => {
+    if (embedded || !onClose) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, embedded]);
 
   const update = async (patch: Partial<Prefs>) => {
     if (!prefs) return;
@@ -113,22 +118,26 @@ export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClos
   return (
     <aside
       aria-label="Notification settings"
-      className="flex h-full min-h-0 w-full flex-col border-l border-border-light bg-white dark:border-border-dark/30 dark:bg-chrome-dark"
+      className={embedded
+        ? 'flex w-full flex-col'
+        : 'flex h-full min-h-0 w-full flex-col border-l border-border-light bg-white dark:border-border-dark/30 dark:bg-chrome-dark'}
     >
       <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border-light px-3 dark:border-border-dark/30">
         <h2 className="flex items-center gap-2 text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
           <Bell size={15} /> Notifications
           {saving && <Spinner className="h-3 w-3" />}
         </h2>
-        <IconButton label="Close notification settings" onClick={onClose}>
-          <X size={18} />
-        </IconButton>
+        {!embedded && onClose && (
+          <IconButton label="Close notification settings" onClick={onClose}>
+            <X size={18} />
+          </IconButton>
+        )}
       </header>
 
       {!prefs ? (
         <div className="grid flex-1 place-items-center"><Spinner /></div>
       ) : (
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
+        <div className={embedded ? 'space-y-4 p-3' : 'min-h-0 flex-1 space-y-4 overflow-y-auto p-3'}>
           <section>
             <h3 className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wider text-text-secondary-light/80 dark:text-text-secondary-dark/70">
               Notify me about

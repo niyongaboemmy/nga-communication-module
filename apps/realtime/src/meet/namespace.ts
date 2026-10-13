@@ -1,4 +1,5 @@
 import type { Namespace, Server, Socket } from 'socket.io';
+import { meetUserRoom } from '../presence.js';
 import { hardenSocket } from '../utils/safeSocket.js';
 import jwt from 'jsonwebtoken';
 import {
@@ -53,7 +54,10 @@ const SPEAKING_FLUSH_MS = 30_000;
 /** Interim captions are dropped above this rate per participant. */
 const CAPTION_MIN_INTERVAL_MS = 250;
 
-export function registerMeetNamespace(io: Server): Namespace {
+export function registerMeetNamespace(
+  io: Server,
+  hooks: { onMeetingPresence?: (userId: string) => void } = {},
+): Namespace {
   const nsp = io.of('/meet');
 
   /* ---------------- handshake ---------------- */
@@ -254,6 +258,11 @@ export function registerMeetNamespace(io: Server): Namespace {
       socket.data.role = record.role as MeetRole;
       socket.data.breakoutRoomId = null;
       await socket.join(roomKey(meetingId));
+      // "In a meeting" for everyone who can see this person's status (F-10).
+      if (!socket.data.guest && socket.data.user?.id) {
+        await socket.join(meetUserRoom(socket.data.user.id));
+        hooks.onMeetingPresence?.(socket.data.user.id);
+      }
 
       // A second tab is another socket for the same participant, not a second
       // participant — otherwise a reload shows the room a phantom attendee.
@@ -1254,6 +1263,11 @@ export function registerMeetNamespace(io: Server): Namespace {
   }
 
   async function departure(socket: MeetSocket, reason: string): Promise<void> {
+    const userId = socket.data.guest ? undefined : socket.data.user?.id;
+    if (userId) {
+      await socket.leave(meetUserRoom(userId));
+      hooks.onMeetingPresence?.(userId);
+    }
     const { meetingId, participantId } = socket.data;
     if (!meetingId || !participantId) return;
     const room = rooms.get(meetingId);

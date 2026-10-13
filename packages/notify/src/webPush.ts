@@ -13,7 +13,7 @@
 import webpush from 'web-push';
 import type { Redis } from 'ioredis';
 import { getPool, snowflake } from '@tupo/db';
-import { presenceKey } from '@tupo/shared';
+import { connectedKey, presenceKey } from '@tupo/shared';
 
 export interface PushConfig { publicKey: string; privateKey: string; subject: string }
 
@@ -87,8 +87,9 @@ export async function sendWebPush(
   let online = new Set<string>();
   if (presence) {
     try {
-      const vals = await presence.mget(userIds.map(presenceKey));
-      online = new Set(userIds.filter((_, i) => vals[i]));
+      // Either key: someone who appears offline still has the app open.
+      const vals = await presence.mget([...userIds.map(presenceKey), ...userIds.map(connectedKey)]);
+      online = new Set(userIds.filter((_, i) => vals[i] || vals[i + userIds.length]));
     } catch { /* treat as offline */ }
   }
   const offline = userIds.filter((id) => !online.has(id));

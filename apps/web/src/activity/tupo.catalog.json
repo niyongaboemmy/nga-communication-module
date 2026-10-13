@@ -40,6 +40,7 @@
     { "key": "tupo.admin.audit", "label": "Audit log", "module": "Administration", "patterns": ["/app/admin/audit"] },
     { "key": "tupo.admin.oversight", "label": "Conversation oversight", "module": "Administration", "patterns": ["/app/admin/oversight"] },
     { "key": "tupo.admin.system", "label": "System status", "module": "Administration", "patterns": ["/app/system"] },
+    { "key": "tupo.settings", "label": "Profile & settings", "module": "Account", "patterns": ["/app/settings"] },
 
     { "key": "tupo.chat.send", "label": "Chat message sent", "module": "Chat", "event": true, "key_event": true },
     { "key": "tupo.mail.send", "label": "Mail sent", "module": "Mail", "event": true, "key_event": true },

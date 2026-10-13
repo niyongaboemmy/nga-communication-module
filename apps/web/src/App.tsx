@@ -17,6 +17,7 @@ import { PendingAccess } from './pages/PendingAccess';
 import { Suspended } from './pages/Suspended';
 import { NotFound } from './pages/NotFound';
 import { AccessDenied } from './pages/AccessDenied';
+import { Settings } from './pages/Settings';
 import { MODULES, ADMIN } from './components/shell/navigation';
 import { AppShell, ComingSoon } from './pages/AppShell';
 import { ChatLayout } from './pages/chat/ChatLayout';
@@ -189,6 +190,8 @@ export const App: React.FC = () => (
               <RequirePermission anyOf={['OVERSIGHT_VIEW_ALL', 'OVERSIGHT_MESSAGE_DELETE']}><Oversight /></RequirePermission>} />
             <Route path="admin/dashboard" element={
               <RequirePermission anyOf={['DASHBOARD_VIEW']}><Dashboard /></RequirePermission>} />
+            {/* Everyone's own profile and settings (F-10): no permission needed. */}
+            <Route path="settings" element={<Settings />} />
             <Route path="system" element={
               <RequirePermission anyOf={['SYSTEM_HEALTH_VIEW']}><SystemStatus /></RequirePermission>} />
             {/* Anything else under /app: a real "not found", inside the shell. */}

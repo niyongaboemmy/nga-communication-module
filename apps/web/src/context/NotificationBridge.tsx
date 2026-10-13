@@ -4,6 +4,7 @@ import { useAuth } from './AuthContext';
 import { useNotify } from './NotificationContext';
 import { useNotificationCenter } from './NotificationCenterContext';
 import { getSocket } from '../lib/socket';
+import { isDoNotDisturb } from '../lib/myStatus';
 import { apiGet } from '../lib/api';
 import type { SoundName } from '../lib/sounds';
 import type { AppNotification } from '@tupo/shared';
@@ -24,6 +25,7 @@ import type { AppNotification } from '@tupo/shared';
  *   - the notification panel is open (it is right there in the list);
  *   - the person is already looking at the thing (that conversation or mail
  *     thread is open in a visible tab);
+ *   - the person picked "Do not disturb" (F-10): nothing pops up or chimes;
  *   - quiet hours, or the sound / desktop preferences, say so.
  * The record is never suppressed: it waits behind the bell either way.
  */
@@ -103,7 +105,7 @@ export const NotificationBridge: React.FC = () => {
 
     const onNotification = (n: AppNotification) => {
       const { prefs: p, location: loc, panelOpen } = live.current;
-      if (panelOpen) return;
+      if (panelOpen || isDoNotDisturb()) return;
       if (alreadyLooking(n, loc.pathname, new URLSearchParams(loc.search))) return;
 
       const rule = RULES[n.kind] ?? QUIET;

@@ -5,7 +5,7 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import { Redis } from 'ioredis';
 import type { AppNotification } from '@tupo/shared';
 import jwt from 'jsonwebtoken';
-import { PRESENCE_TTL_SECONDS, PRESENCE_HEARTBEAT_SECONDS } from '@tupo/shared';
+import { PRESENCE_TTL_SECONDS, PRESENCE_HEARTBEAT_SECONDS, connectedKey, presenceKey } from '@tupo/shared';
 import type { ClientToServerEvents, ServerToClientEvents, SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
 import { registerMeetNamespace } from './meet/namespace.js';
@@ -19,7 +19,7 @@ import { createAccessCache, findInactiveUsers, revocationsFor, sessionEnded } fr
 import { issuedBeforeRevocation } from './utils/ssoLogout.js';
 import { stopActivity } from './activity.js';
 import {
-  broadcastPresence, markOffline, markOnline, readPresence, toStatus,
+  broadcastPresence, markOffline, readPresence, recomputePresence, toChoice, toStatus, writeChoice,
 } from './presence.js';
 
 const app = express();
@@ -255,7 +255,10 @@ io.use((socket, next) => {
  * SDP — and keeping it separate means none of it is broadcast to sockets that
  * only asked for chat presence.
  */
-const meetNsp = registerMeetNamespace(io);
+const meetNsp = registerMeetNamespace(io, {
+  // Joining or leaving a call moves "in a meeting" (F-10).
+  onMeetingPresence: (userId) => { void recomputePresence(io, redisReady ? presence : null, userId).catch(() => {}); },
+});
 
 // Runs after the namespace's own JWT middleware has set `socket.data.user`.
 // Guests hold a meeting ticket, not an account, so they have no row to check.
@@ -347,7 +350,10 @@ function startPresenceHeartbeat(): NodeJS.Timeout {
         // key has already gone, EXPIRE is a no-op and the next connect or
         // presence:set puts it back.
         const pipeline = presence.pipeline();
-        for (const id of ids) pipeline.expire(`presence:${id}`, PRESENCE_TTL_SECONDS);
+        for (const id of ids) {
+          pipeline.expire(`presence:${id}`, PRESENCE_TTL_SECONDS);
+          pipeline.set(connectedKey(id), '1', 'EX', PRESENCE_TTL_SECONDS);
+        }
         await pipeline.exec();
       } catch {
         // Presence is decoration; a failed refresh costs a grey dot, not a
@@ -419,11 +425,11 @@ io.on('connection', (socket) => {
     await socket.join(`user:${user.id}`);
     const visible = await chat.showsPresence(user.id).catch(() => true);
     socket.data.presenceVisible = visible;
-    if (!visible || socket.disconnected) return;
-    await markOnline(redisReady ? presence : null, user.id, 'online');
+    if (socket.disconnected) return;
     // Coming online is worth telling the people who can see it — otherwise the
-    // green dot only ever appears on a reload.
-    void broadcastPresence(io, user.id, 'online');
+    // green dot only ever appears on a reload. A status picked on another
+    // device (busy, do not disturb) holds; this tab only adds its activity.
+    await recomputePresence(io, redisReady ? presence : null, user.id).catch(() => {});
   })();
 
   socket.emit('connection:ready', {
@@ -453,8 +459,12 @@ io.on('connection', (socket) => {
   let lastSeenWrittenAt = Date.now();
   socket.on('presence:heartbeat', async (ack) => {
     if (socket.data.presenceVisible) {
-      const status = toStatus(socket.data.presenceStatus);
-      await markOnline(redisReady ? presence : null, user.id, status);
+      // Keep the key alive as it is; only when it has gone (a Redis restart)
+      // is the status worked out again and rewritten.
+      const alive = redisReady
+        ? await presence.expire(presenceKey(user.id), PRESENCE_TTL_SECONDS).catch(() => 1)
+        : 1;
+      if (!alive) await recomputePresence(io, presence, user.id).catch(() => {});
       if (Date.now() - lastSeenWrittenAt > chat.LAST_SEEN_WRITE_INTERVAL_MS) {
         lastSeenWrittenAt = Date.now();
         void chat.touchLastSeen(user.id).catch(() => {});
@@ -485,23 +495,27 @@ io.on('connection', (socket) => {
     ack({ presence: await readPresence(redisReady ? presence : null, wanted) });
   });
 
+  /*
+   * This tab's activity. Older clients also sent picks through here, so those
+   * are honoured as picks rather than read as activity.
+   */
   socket.on('presence:set', async ({ status }, ack) => {
     const next = toStatus(status);
-    socket.data.presenceStatus = next;
-
-    if (socket.data.presenceVisible) {
-      if (next === 'offline') {
-        // Appearing offline on purpose. The key goes, exactly as it would on a
-        // disconnect, so every reader agrees without needing to know this was
-        // a choice rather than a closed laptop.
-        await markOffline(redisReady ? presence : null, user.id);
-        void broadcastPresence(io, user.id, 'offline', new Date().toISOString());
-      } else {
-        await markOnline(redisReady ? presence : null, user.id, next);
-        void broadcastPresence(io, user.id, next);
-      }
+    if (next === 'online' || next === 'away') {
+      socket.data.presenceStatus = next;
+    } else if (next === 'busy' || next === 'dnd' || next === 'offline') {
+      await writeChoice(redisReady ? presence : null, user.id, next === 'offline' ? 'invisible' : next);
     }
+    await recomputePresence(io, redisReady ? presence : null, user.id).catch(() => {});
     if (typeof ack === 'function') ack({ ok: true });
+  });
+
+  /** A status the person picked, for all their devices (F-10). */
+  socket.on('presence:choose', async ({ choice }, ack) => {
+    await writeChoice(redisReady ? presence : null, user.id, toChoice(choice));
+    const outcome = await recomputePresence(io, redisReady ? presence : null, user.id)
+      .catch(() => ({ choice: toChoice(choice), status: 'online' as const }));
+    if (typeof ack === 'function') ack({ ok: true, ...outcome });
   });
 
   socket.on('disconnect', async () => {
@@ -510,6 +524,7 @@ io.on('connection', (socket) => {
     const remaining = await io.in(`user:${user.id}`).fetchSockets();
     if (remaining.length === 0) {
       const at = new Date();
+      if (redisReady) await presence.del(connectedKey(user.id)).catch(() => 0);
       await markOffline(redisReady ? presence : null, user.id);
       // The last-seen goes out with the status change: the moment a dot turns
       // grey is exactly when the UI needs the line that replaces it.
@@ -517,6 +532,9 @@ io.on('connection', (socket) => {
         io, user.id, 'offline',
         socket.data.presenceVisible ? at.toISOString() : null,
       );
+    } else {
+      // The tab in use closed beside an idle one: the person may now be away.
+      await recomputePresence(io, redisReady ? presence : null, user.id).catch(() => {});
     }
   });
 });

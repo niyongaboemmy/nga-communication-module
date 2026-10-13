@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
-  LogOut, Sun, Moon, Search, MoreHorizontal, Command,
+  LogOut, Sun, Moon, Search, MoreHorizontal, Command, Settings as SettingsIcon,
 } from 'lucide-react';
 import { Logo } from '../components/Logo';
 import { useAuth } from '../context/AuthContext';
@@ -18,6 +18,7 @@ import { GlobalSearch } from '../components/GlobalSearch';
 import { usePresenceReporter } from '../hooks/usePresenceReporter';
 import { useModuleBadges } from '../hooks/useModuleBadges';
 import { toPresence } from './chat/types';
+import { StatusPicker } from './Settings';
 import type { Presence } from './chat/types';
 
 /**
@@ -286,6 +287,19 @@ const UserMenu: React.FC<{ presence: Presence }> = ({ presence }) => {
             </div>
           </div>
           <div className="my-1 h-px bg-border-light dark:bg-card-dark/50" />
+          <p className="px-2.5 pb-0.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-text-secondary-light/80 dark:text-text-secondary-dark/70">
+            Status
+          </p>
+          <StatusPicker compact onPicked={() => setOpen(false)} />
+          <div className="my-1 h-px bg-border-light dark:bg-card-dark/50" />
+          <NavLink
+            role="menuitem"
+            to="/app/settings"
+            onClick={() => setOpen(false)}
+            className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-sm font-medium text-text-primary-light transition-colors duration-150 hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
+          >
+            <SettingsIcon size={15} /> Settings
+          </NavLink>
           <button
             role="menuitem"
             onClick={signOut}

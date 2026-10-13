@@ -2,10 +2,10 @@ import type { Server } from 'socket.io';
 import type { Redis } from 'ioredis';
 import * as chat from '@tupo/chat';
 import {
-  PRESENCE_TTL_SECONDS, conversationRoom, lastSeenKey, presenceKey, userRoom,
+  PRESENCE_CHOICES, PRESENCE_TTL_SECONDS, connectedKey, conversationRoom, lastSeenKey, presenceChoiceKey, presenceKey, userRoom,
 } from '@tupo/shared';
 import type {
-  ClientToServerEvents, PresenceSnapshot, PresenceStatus, ServerToClientEvents,
+  ClientToServerEvents, PresenceChoice, PresenceSnapshot, PresenceStatus, ServerToClientEvents,
 } from '@tupo/shared';
 
 /**
@@ -184,4 +184,95 @@ export async function emitConversationPresence(
       conversationId, online, viewing, at: new Date().toISOString(),
     });
   } catch { /* ignore */ }
+}
+
+/* ── One status per person (F-10) ──────────────────────────────────────────
+ * Presence used to be whatever the last socket said: an idle tab reported
+ * "away" while the tab in use never re-reported, there was no way to pick
+ * busy or do-not-disturb, and "in a meeting" was in the vocabulary but never
+ * set. Now each tab reports only its own activity, the person's pick is held
+ * once for all their devices, and the status everyone sees is worked out from
+ * all of it in one place.
+ */
+
+/** Meet sockets of signed-in people join this room, so "in a meeting" can be read. */
+export const meetUserRoom = (userId: string) => `meetuser:${userId}`;
+
+export function toChoice(raw: unknown): PresenceChoice {
+  return PRESENCE_CHOICES.includes(raw as PresenceChoice) ? raw as PresenceChoice : 'auto';
+}
+
+/**
+ * The status other people see. A pick of do-not-disturb or appear-offline
+ * wins over everything; a meeting wins over busy (it is the more useful thing
+ * to know); otherwise any tab in use means online, and only when every tab is
+ * idle or hidden is the person away.
+ */
+export function resolveStatus(
+  input: { choice: PresenceChoice; inMeeting: boolean; activities: PresenceStatus[] },
+): PresenceStatus {
+  if (!input.activities.length) return 'offline';
+  if (input.choice === 'invisible') return 'offline';
+  if (input.choice === 'dnd') return 'dnd';
+  if (input.inMeeting) return 'in-a-meeting';
+  if (input.choice === 'busy') return 'busy';
+  return input.activities.some((a) => a === 'online') ? 'online' : 'away';
+}
+
+/** Picks, for a gateway running without Redis (single instance, development). */
+const localChoices = new Map<string, PresenceChoice>();
+
+export async function readChoice(redis: Redis | null, userId: string): Promise<PresenceChoice> {
+  if (redis) {
+    try { return toChoice(await redis.get(presenceChoiceKey(userId))); } catch { /* fall through */ }
+  }
+  return localChoices.get(userId) ?? 'auto';
+}
+
+export async function writeChoice(redis: Redis | null, userId: string, choice: PresenceChoice): Promise<void> {
+  if (choice === 'auto') localChoices.delete(userId); else localChoices.set(userId, choice);
+  if (!redis) return;
+  try {
+    if (choice === 'auto') await redis.del(presenceChoiceKey(userId));
+    else await redis.set(presenceChoiceKey(userId), choice);
+  } catch { /* the local copy still holds for this instance */ }
+}
+
+interface PresenceSocketData { presenceStatus?: PresenceStatus; presenceVisible?: boolean }
+
+/**
+ * Work out this person's status from every tab and meeting they have open,
+ * store it, and tell whoever needs to know — only when it actually changed,
+ * so a second tab going idle beside an active one costs nothing.
+ */
+export async function recomputePresence(
+  io: PresenceServer, redis: Redis | null, userId: string,
+): Promise<{ choice: PresenceChoice; status: PresenceStatus }> {
+  const sockets = await io.in(userRoom(userId)).fetchSockets();
+  const meetSockets = await io.of('/meet').in(meetUserRoom(userId)).fetchSockets().catch(() => []);
+  const choice = await readChoice(redis, userId);
+  const activities = sockets.map((s) => toStatus((s.data as PresenceSocketData).presenceStatus));
+  const status = resolveStatus({ choice, inMeeting: meetSockets.length > 0, activities });
+  // Opted out of presence: nothing is ever written or broadcast for them.
+  const visible = sockets.some((s) => (s.data as PresenceSocketData).presenceVisible !== false);
+  if (redis && sockets.length) {
+    try { await redis.set(connectedKey(userId), '1', 'EX', PRESENCE_TTL_SECONDS); } catch { /* push may double up */ }
+  }
+
+  if (visible && sockets.length) {
+    let previous: string | null = null;
+    if (redis) { try { previous = await redis.get(presenceKey(userId)); } catch { /* treat as changed */ } }
+    if (status === 'offline') {
+      if (previous !== null || !redis) {
+        await markOffline(redis, userId);
+        void broadcastPresence(io, userId, 'offline', new Date().toISOString());
+      }
+    } else {
+      await markOnline(redis, userId, status);
+      if (previous !== status) void broadcastPresence(io, userId, status);
+    }
+  }
+  // Their own devices always learn the outcome, hidden or not.
+  io.to(userRoom(userId)).emit('presence:self', { choice, status });
+  return { choice, status };
 }

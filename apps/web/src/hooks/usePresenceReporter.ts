@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { PRESENCE_HEARTBEAT_SECONDS } from '@tupo/shared';
 import type { PresenceStatus } from '@tupo/shared';
-import { getSocket } from '../lib/socket';
+import { getSocket, onSocket } from '../lib/socket';
+import { setMyStatus, useMyStatus } from '../lib/myStatus';
 
 /**
  * Tell the server whether this person is actually at their desk.
@@ -21,13 +22,18 @@ import { getSocket } from '../lib/socket';
  * Nothing is emitted unless the status actually changes, so a busy person
  * sends one packet on going idle and one on coming back, not one per event.
  * A status the person chose for themselves is never overwritten by this.
+ *
+ * This only reports this tab's activity (F-10). The status everyone sees is
+ * worked out by the gateway from all of the person's tabs, their meetings and
+ * their pick, and comes back as `presence:self` — which is what this returns.
  */
 
 const IDLE_AFTER_MS = 5 * 60_000;
 const HIDDEN_AFTER_MS = 60_000;
 
 export function usePresenceReporter(): PresenceStatus {
-  const [status, setStatus] = useState<PresenceStatus>('online');
+  const mine = useMyStatus();
+  useEffect(() => onSocket('presence:self', (p) => setMyStatus(p)), []);
   const sent = useRef<PresenceStatus>('online');
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hiddenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -36,7 +42,6 @@ export function usePresenceReporter(): PresenceStatus {
     const report = (next: PresenceStatus) => {
       if (sent.current === next) return;
       sent.current = next;
-      setStatus(next);
       // Fire and forget, in line with every other presence signal: it is never
       // persisted and is safe to drop.
       getSocket()?.emit('presence:set', { status: next }, () => {});
@@ -86,5 +91,5 @@ export function usePresenceReporter(): PresenceStatus {
     };
   }, []);
 
-  return status;
+  return mine.status;
 }

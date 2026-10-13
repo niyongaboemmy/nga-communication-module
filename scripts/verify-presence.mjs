@@ -96,7 +96,9 @@ async function main() {
   await ask(sa, 'presence:heartbeat');
   check('heartbeat does not clobber "busy"', (await redis.get(key)) === 'busy',
     `stored: ${await redis.get(key)}`);
-  await ask(sa, 'presence:set', { status: 'online' });
+  // A pick is cleared by handing back to automatic (F-10); `presence:set`
+  // only carries this tab's activity now.
+  await ask(sa, 'presence:choose', { choice: 'auto' });
 
   console.log('\n  • presence:query');
   const q = await ask(sa, 'presence:query', { userIds: [alice.id, bob.id] });
