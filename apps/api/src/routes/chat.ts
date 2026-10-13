@@ -216,6 +216,8 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
   const me = actor(req);
   const q = String(req.query.q ?? '').trim();
   const limit = Math.min(Math.max(Number(req.query.limit ?? 20), 1), 50);
+  // Paged (B-12): a school-wide directory is longer than one screen.
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
 
   const { rows } = await getPool().query<{
     id: string; name: string; avatar_url: string | null; role: string; email: string;
@@ -239,9 +241,11 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
       -- Name, then email: same-named people get a stable, predictable order
       -- rather than whatever the planner felt like.
       ORDER BY name ASC, email ASC
-      LIMIT $3`,
-    [me.id, q, limit],
+      LIMIT $3 OFFSET $4`,
+    [me.id, q, limit + 1, offset],
   );
+  const hasMore = rows.length > limit;
+  rows.splice(limit);
 
   // Contact policy: the picker lists only people the viewer may contact.
   const hidden = await contactDenied(me, rows.map((r) => r.id), 'directory');
@@ -254,6 +258,8 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
       id: r.id, name: r.name, avatarUrl: r.avatar_url, role: r.role,
       email: r.email,
     }, r.id, online, seen)),
+    hasMore,
+    nextOffset: hasMore ? offset + limit : null,
   }));
 }));
 
@@ -372,7 +378,7 @@ router.patch('/conversations/:id/prefs', wrap(async (req, res) => {
   const id = req.params.id!;
   await chat.requireMembership(me.id, id);
 
-  const { isStarred, notification, mutedUntil } = req.body ?? {};
+  const { isStarred, notification, mutedUntil, hidden } = req.body ?? {};
   if (notification !== undefined && !NOTIFICATION_LEVELS.includes(notification)) {
     return res.status(400).json(fail('That is not a notification level.'));
   }
@@ -381,14 +387,18 @@ router.patch('/conversations/:id/prefs', wrap(async (req, res) => {
     isStarred: typeof isStarred === 'boolean' ? isStarred : undefined,
     notification: notification as NotificationLevel | undefined,
     mutedUntil: mutedUntil === undefined ? undefined : mutedUntil,
+    hidden: typeof hidden === 'boolean' ? hidden : undefined,
   });
 
   // Preferences are per-person, so this goes to the user's own room — every
   // device they have open, and nobody else's.
   emitToUsers([me.id], 'conversation:prefs', {
     conversationId: id, isStarred, notification, mutedUntil,
+    ...(typeof hidden === 'boolean' ? { hidden } : {}),
   });
 
+  // A hidden DM is out of this person's list, so there is nothing to read back.
+  if (hidden === true) return res.json(ok({ hidden: true }));
   res.json(ok({ conversation: await chat.getConversation(me.id, id) }));
 }));
 
@@ -402,6 +412,14 @@ router.put('/conversations/:id/draft', wrap(async (req, res) => {
     conversationId: id, draft, at: new Date().toISOString(),
   });
   res.json(ok({ saved: true }));
+}));
+
+/** Links shared here, newest first (B-12). */
+router.get('/conversations/:id/links', wrap(async (req, res) => {
+  const me = actor(req);
+  res.json(ok(await chat.listConversationLinks(me.id, req.params.id!, {
+    before: typeof req.query.before === 'string' ? req.query.before : undefined,
+  })));
 }));
 
 router.get('/conversations/:id/members', wrap(async (req, res) => {
@@ -810,7 +828,8 @@ router.post('/conversations/:id/unread', wrap(async (req, res) => {
   const me = actor(req);
   const { id } = req.params as { id: string };
   await chat.requireMembership(me.id, id);
-  const result = await chat.markConversationUnread(me.id, id);
+  const result = await chat.markConversationUnread(me.id, id,
+    req.body?.seq === undefined ? undefined : Number(req.body.seq));
   emitToUsers([me.id], 'conversation:unread', {
     conversationId: id, unread: result.unread, unreadMentions: result.unreadMentions,
     lastReadSeq: result.lastReadSeq,
@@ -1342,6 +1361,10 @@ router.post('/conversations/:id/invites', authorizePermission('CHANNEL_MEMBERS_M
     });
     res.status(201).json(ok({ invite }));
   }));
+
+router.get('/conversations/:id/invites', authorizePermission('CHANNEL_MEMBERS_MANAGE'), wrap(async (req, res) => {
+  res.json(ok({ invites: await chat.listInvites(actor(req).id, req.params.id!) }));
+}));
 
 router.post('/invites/:code/redeem', authorizePermission('CHANNEL_JOIN'), wrap(async (req, res) => {
   const me = actor(req);

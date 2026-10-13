@@ -39,9 +39,11 @@ function toLocalInput(d: Date): string {
 export const SchedulePopover: React.FC<{
   conversationId: string;
   body: string;
+  /** Uploaded files that go with it (B-09: scheduling used to drop them). */
+  attachments?: string[];
   onDone: () => void;
   onClose: () => void;
-}> = ({ conversationId, body, onDone, onClose }) => {
+}> = ({ conversationId, body, attachments = [], onDone, onClose }) => {
   const { notify } = useNotify();
   const [custom, setCustom] = useState(() => toLocalInput(nextAt(8, 0)));
   const [busy, setBusy] = useState(false);
@@ -66,7 +68,7 @@ export const SchedulePopover: React.FC<{
     if (busy) return;
     setBusy(true);
     try {
-      await chatApi.scheduleMessage(conversationId, body, at.toISOString());
+      await chatApi.scheduleMessage(conversationId, body, at.toISOString(), attachments);
       notify({
         title: `Scheduled for ${at.toLocaleString(undefined, {
           weekday: 'short', hour: '2-digit', minute: '2-digit',

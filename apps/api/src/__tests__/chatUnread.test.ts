@@ -143,7 +143,8 @@ describe('mark as unread', () => {
 
     const lonely = await api(ada.token).post('/api/chat/conversations', { type: 'group', name: `empty-${nonce()}`, memberIds: [ben.id] });
     const empty = lonely.body.data.conversation.id;
-    expect((await api(ada.token).post(`/api/chat/conversations/${empty}/unread`)).status).toBe(409);
+    const emptyRes = await api(ada.token).post(`/api/chat/conversations/${empty}/unread`);
+    expect(emptyRes.status, JSON.stringify({ body: emptyRes.body, lonely: lonely.status, lb: lonely.body })).toBe(409);
     await getPool().query('DELETE FROM messages WHERE conversation_id = $1', [empty]);
     await getPool().query('DELETE FROM conversation_members WHERE conversation_id = $1', [empty]);
     await getPool().query('DELETE FROM conversations WHERE id = $1', [empty]);

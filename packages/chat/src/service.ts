@@ -1433,10 +1433,17 @@ export async function memberIdsOf(conversationId: string): Promise<string[]> {
 
 export async function setMemberPrefs(
   userId: string, conversationId: string,
-  prefs: { isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null },
+  prefs: { isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null; hidden?: boolean },
 ): Promise<void> {
   const sets: string[] = [];
   const params: unknown[] = [conversationId, userId];
+  // Hiding is for direct messages (B-13): a group or channel is left, not
+  // hidden. It comes back by itself when the other person writes.
+  if (prefs.hidden !== undefined) {
+    const { rows } = await getPool().query<{ type: string }>('SELECT type FROM conversations WHERE id = $1', [conversationId]);
+    if (rows[0]?.type !== 'dm') throw new ChatError('Only a direct message can be hidden — leave a group instead.', 400);
+    params.push(prefs.hidden); sets.push(`is_hidden = $${params.length}`);
+  }
   if (prefs.isStarred !== undefined) { params.push(prefs.isStarred); sets.push(`is_starred = $${params.length}`); }
   if (prefs.notification !== undefined) { params.push(prefs.notification); sets.push(`notification = $${params.length}`); }
   if (prefs.mutedUntil !== undefined) { params.push(parseClientDate(prefs.mutedUntil, 'mutedUntil')); sets.push(`muted_until = $${params.length}`); }
@@ -2187,13 +2194,17 @@ export async function followedThreads(userId: string, limit = 50): Promise<Follo
  * recounts, so the badge shows exactly one.
  */
 export async function markConversationUnread(
-  userId: string, conversationId: string,
+  userId: string, conversationId: string, fromSeq?: number,
 ): Promise<ReadResult> {
+  // `fromSeq`: "mark unread from here" on a message (B-10) — everything from
+  // that message on becomes new again. Without it, the newest one from
+  // someone else.
+  const from = Number.isFinite(fromSeq) && (fromSeq as number) > 0 ? Math.floor(fromSeq as number) : null;
   const { rows } = await getPool().query<{
     last_read_seq: string; unread_count: number; unread_mentions: number;
   }>(
     `WITH target AS (
-       SELECT COALESCE((
+       SELECT COALESCE($3::bigint - 1, (
          SELECT x.seq - 1 FROM messages x
           WHERE x.conversation_id = $1 AND x.thread_root_id IS NULL
             AND x.deleted_at IS NULL AND x.type <> 'system' AND x.sender_id <> $2
@@ -2207,7 +2218,7 @@ export async function markConversationUnread(
       WHERE m.conversation_id = $1 AND m.user_id = $2 AND m.left_at IS NULL
         AND target.seq IS NOT NULL
       RETURNING m.last_read_seq, m.unread_count, m.unread_mentions`,
-    [conversationId, userId],
+    [conversationId, userId, from],
   );
   const r = rows[0];
   if (!r) throw new ChatError('There is nothing from anyone else here to mark unread.', 409);
@@ -2449,6 +2460,46 @@ export async function forwardMessage(
 
   if (!out.length) throw new ChatError('Nowhere to forward that to.', 400);
   return out;
+}
+
+export interface ConversationLink {
+  url: string; title: string | null; siteName: string | null; imageUrl: string | null;
+  messageId: string; senderName: string | null; at: string;
+}
+
+/**
+ * Links shared in a conversation, newest first (B-12) — the Links tab. Read
+ * from the previews already stored for each message; deleted messages take
+ * their links with them.
+ */
+export async function listConversationLinks(
+  viewerId: string, conversationId: string, opts: { before?: string; limit?: number } = {},
+): Promise<{ links: ConversationLink[]; nextBefore: string | null }> {
+  await requireMembership(viewerId, conversationId);
+  const limit = Math.min(Math.max(opts.limit ?? 40, 1), 100);
+  const { rows } = await getPool().query<{
+    url: string; title: string | null; site_name: string | null; image_url: string | null;
+    message_id: string; sender_name: string | null; created_at: string;
+  }>(
+    `SELECT lp.url, lp.title, lp.site_name, lp.image_url, ml.message_id, u.name AS sender_name, m.created_at
+       FROM message_links ml
+       JOIN link_previews lp ON lp.url_hash = ml.url_hash
+       JOIN messages m ON m.conversation_id = ml.conversation_id AND m.id = ml.message_id AND m.deleted_at IS NULL
+       LEFT JOIN users u ON u.id = m.sender_id
+      WHERE ml.conversation_id = $1
+        AND ($2::timestamptz IS NULL OR m.created_at < $2::timestamptz)
+      ORDER BY m.created_at DESC, ml.ordinal
+      LIMIT $3`,
+    [conversationId, opts.before ? parseClientDate(opts.before, 'before') : null, limit + 1],
+  );
+  const page = rows.slice(0, limit);
+  return {
+    links: page.map((r) => ({
+      url: r.url, title: r.title, siteName: r.site_name, imageUrl: r.image_url,
+      messageId: r.message_id, senderName: r.sender_name, at: new Date(r.created_at).toISOString(),
+    })),
+    nextBefore: rows.length > limit ? new Date(page[page.length - 1]!.created_at).toISOString() : null,
+  };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -3643,6 +3694,36 @@ export async function redeemInvite(
   }
 
   return getConversation(userId, invite.conversation_id);
+}
+
+/**
+ * The invite links still working for a conversation (B-12): who made each,
+ * how often it has been used and when it stops — so a link sent to the wrong
+ * group can be found and revoked rather than left open for its whole life.
+ */
+export async function listInvites(
+  actorId: string, conversationId: string,
+): Promise<Array<InviteLink & { createdByName: string | null; createdAt: string }>> {
+  const membership = await requireMembership(actorId, conversationId);
+  if (!canManage(membership.role)) throw new ChatError('You cannot see this conversation\'s invites.', 403);
+  const { rows } = await getPool().query<{
+    code: string; expires_at: string | null; max_uses: number | null; uses: number;
+    created_at: string; creator: string | null;
+  }>(
+    `SELECT i.code, i.expires_at, i.max_uses, i.uses, i.created_at, u.name AS creator
+       FROM conversation_invites i LEFT JOIN users u ON u.id = i.created_by
+      WHERE i.conversation_id = $1 AND i.revoked_at IS NULL
+        AND (i.expires_at IS NULL OR i.expires_at > now())
+        AND (i.max_uses IS NULL OR i.uses < i.max_uses)
+      ORDER BY i.created_at DESC`,
+    [conversationId],
+  );
+  return rows.map((r) => ({
+    code: r.code, conversationId, conversationName: membership.name ?? 'Conversation',
+    expiresAt: r.expires_at ? new Date(r.expires_at).toISOString() : null,
+    maxUses: r.max_uses, uses: r.uses, createdByName: r.creator,
+    createdAt: new Date(r.created_at).toISOString(),
+  }));
 }
 
 export async function revokeInvite(actorId: string, code: string): Promise<boolean> {

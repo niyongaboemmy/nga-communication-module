@@ -111,17 +111,28 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
 
   // Debounced directory search — a request per keystroke would be a request per
   // keystroke.
+  // Paged (B-12): "Show more people" continues from where the page ended.
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     setSearching(true);
     const t = setTimeout(() => {
-      apiGet<{ people: Person[] }>(`/api/chat/directory?q=${encodeURIComponent(query)}`)
-        .then((r) => { if (!cancelled) setPeople(r.data!.people); })
-        .catch(() => { if (!cancelled) setPeople([]); })
+      apiGet<{ people: Person[]; nextOffset?: number | null }>(`/api/chat/directory?q=${encodeURIComponent(query)}`)
+        .then((r) => { if (!cancelled) { setPeople(r.data!.people); setNextOffset(r.data!.nextOffset ?? null); } })
+        .catch(() => { if (!cancelled) { setPeople([]); setNextOffset(null); } })
         .finally(() => { if (!cancelled) setSearching(false); });
     }, 220);
     return () => { cancelled = true; clearTimeout(t); };
   }, [query, mode]);
+  const loadMorePeople = () => {
+    if (nextOffset === null) return;
+    apiGet<{ people: Person[]; nextOffset?: number | null }>(`/api/chat/directory?q=${encodeURIComponent(query)}&offset=${nextOffset}`)
+      .then((r) => {
+        setPeople((cur) => [...cur, ...r.data!.people.filter((p) => !cur.some((c) => c.id === p.id))]);
+        setNextOffset(r.data!.nextOffset ?? null);
+      })
+      .catch(() => { /* the button stays for another try */ });
+  };
 
   useEffect(() => { setCursor(0); }, [query, mode]);
 
@@ -331,7 +342,7 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
               {query ? `Nobody matches “${query}” — try an email address.` : 'No one to show.'}
             </p>
           ) : (
-            <ul ref={listRef} id="directory-results" role="listbox" aria-label="People" className="space-y-0.5">
+            <><ul ref={listRef} id="directory-results" role="listbox" aria-label="People" className="space-y-0.5">
               {people.map((p, i) => {
                 const on = selected.some((s) => s.id === p.id);
                 const active = i === cursor;
@@ -385,6 +396,13 @@ export const NewConversationDialog: React.FC<{ onClose: () => void }> = ({ onClo
                 );
               })}
             </ul>
+            {nextOffset !== null && (
+              <button onClick={loadMorePeople}
+                className="mt-1 w-full rounded-lg py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/20">
+                Show more people
+              </button>
+            )}
+            </>
           )}
         </div>
 

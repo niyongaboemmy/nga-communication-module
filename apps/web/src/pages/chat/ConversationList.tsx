@@ -1,8 +1,9 @@
 import type { ActivityKind } from '@tupo/shared';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Search, Plus, Hash, Megaphone, Star, ChevronRight, BellOff, Users, Filter, Lock, AtSign,
   Bookmark, Bell, Compass, CheckCheck, MoreHorizontal, MessagesSquare, Mail, MailOpen,
+  EyeOff,
 } from 'lucide-react';
 import { IconButton, SearchInput, Skeleton, UnreadBadge, EmptyState } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -151,7 +152,9 @@ const RowMenu: React.FC<{
   open: boolean;
   setOpen: (v: boolean | ((p: boolean) => boolean)) => void;
 }> = ({ conversation: c, onToggleStar, open, setOpen }) => {
-  const { markUnread, markConversationRead, setNotificationLevel } = useChat();
+  const { markUnread, markConversationRead, muteUntil, hideConversation } = useChat();
+  const [muteOpen, setMuteOpen] = useState(false);
+  useEffect(() => { if (!open) setMuteOpen(false); }, [open]);
   const ref = React.useRef<HTMLDivElement>(null);
   const muted = isMuted(c);
   const hasUnread = c.unread > 0 || c.unreadMentions > 0;
@@ -201,18 +204,51 @@ const RowMenu: React.FC<{
             label={c.isStarred ? 'Unstar' : 'Star'}
             onClick={run(() => onToggleStar(c.id))}
           />
-          <MenuItem
-            icon={muted ? <Bell size={14} /> : <BellOff size={14} />}
-            label={muted ? 'Unmute' : 'Mute'}
-            onClick={run(() => setNotificationLevel(c.id, muted ? 'all' : 'none'))}
-          />
+          {muted ? (
+            <>
+              <MenuItem icon={<Bell size={14} />} label="Unmute" onClick={run(() => muteUntil(c.id, null))} />
+              {c.mutedUntil && new Date(c.mutedUntil).getTime() > Date.now() && c.notification !== 'none' && (
+                <p className="px-3 pb-1.5 text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
+                  Muted until {mutedUntilLabel(c.mutedUntil)}
+                </p>
+              )}
+            </>
+          ) : muteOpen ? (
+            // Timed mute (B-13): most mutes are "for the rest of this lesson".
+            <div role="group" aria-label="Mute for">
+              <MenuItem icon={<BellOff size={14} />} label="For 1 hour" onClick={run(() => muteUntil(c.id, inMinutes(60)))} />
+              <MenuItem icon={<BellOff size={14} />} label="For 8 hours" onClick={run(() => muteUntil(c.id, inMinutes(8 * 60)))} />
+              <MenuItem icon={<BellOff size={14} />} label="Until tomorrow morning" onClick={run(() => muteUntil(c.id, tomorrowAt(7)))} />
+              <MenuItem icon={<BellOff size={14} />} label="Until I turn it back on" onClick={run(() => muteUntil(c.id, 'forever'))} />
+            </div>
+          ) : (
+            <MenuItem icon={<BellOff size={14} />} label="Mute…" onClick={() => setMuteOpen(true)} keepOpen />
+          )}
+          {c.type === 'dm' && (
+            <MenuItem icon={<EyeOff size={14} />} label="Hide conversation" onClick={run(() => hideConversation(c.id))} />
+          )}
         </div>
       )}
     </div>
   );
 };
 
-const MenuItem: React.FC<{ icon: React.ReactNode; label: string; onClick: () => void }> = ({ icon, label, onClick }) => (
+const inMinutes = (m: number) => new Date(Date.now() + m * 60_000).toISOString();
+const tomorrowAt = (hour: number) => {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(hour, 0, 0, 0);
+  return d.toISOString();
+};
+const mutedUntilLabel = (iso: string) => {
+  const d = new Date(iso);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay
+    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+};
+
+const MenuItem: React.FC<{ icon: React.ReactNode; label: string; onClick: () => void; keepOpen?: boolean }> = ({ icon, label, onClick }) => (
   <button
     role="menuitem"
     onClick={(e) => { e.stopPropagation(); onClick(); }}

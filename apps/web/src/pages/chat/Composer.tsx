@@ -670,7 +670,7 @@ export const Composer: React.FC<{
 
         {/* Schedule sits beside send rather than inside a menu: "send this
             later" is a decision made at the moment of sending. */}
-        {can('MESSAGE_SCHEDULE') && value.trim() && (
+        {can('MESSAGE_SCHEDULE') && (value.trim() || tray.readyIds.length > 0) && !tray.busy && (
           <div className="relative">
             <IconButton label="Schedule this message" tooltipSide="top" onClick={() => setScheduling(true)}>
               <Clock size={18} />
@@ -678,8 +678,9 @@ export const Composer: React.FC<{
             {scheduling && (
               <SchedulePopover
                 conversationId={conversation.id}
-                body={value.trim()}
-                onDone={() => { setScheduling(false); setDraft(conversation.id, ''); }}
+                body={toWire(value.trim(), [...picked.current, ...members.map((m) => ({ id: m.userId, name: m.name }))])}
+                attachments={tray.readyIds}
+                onDone={() => { setScheduling(false); setDraft(conversation.id, ''); tray.clear(); }}
                 onClose={() => setScheduling(false)}
               />
             )}

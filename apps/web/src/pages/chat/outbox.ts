@@ -36,6 +36,9 @@ export interface OutboxEntry {
   replyToId: string | null;
   threadRootId: string | null;
   attachments: string[];
+  /** Kept so a poll, a call card or a /me survives the queue as what it was (CHAT-M12). */
+  type?: string;
+  metadata?: Record<string, unknown>;
   createdAt: number;
   /** Bumped on each failed flush, so a poisonous entry cannot loop forever. */
   attempts: number;

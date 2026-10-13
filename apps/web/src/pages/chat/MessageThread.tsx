@@ -4,8 +4,9 @@ import {
   Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
   RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
-  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag, Timer,
+  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag, Timer, Copy, Mail,
 } from 'lucide-react';
+import { useNotify } from '../../context/NotificationContext';
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
@@ -187,7 +188,7 @@ const ThreadHeader: React.FC<{
           </>
         )}
         {c.type !== 'dm' && (c.myRole === 'owner' || c.myRole === 'admin') && (
-          <IconButton label="Channel settings" onClick={onOpenChannelSettings}>
+          <IconButton label={c.type === 'group' ? 'Group settings' : 'Channel settings'} onClick={onOpenChannelSettings}>
             <Settings size={17} />
           </IconButton>
         )}
@@ -224,8 +225,18 @@ const MessageRow: React.FC<{
   const { user } = useAuth();
   const {
     react, edit, remove, pin, save, openThread, setReplyTarget, jumpTo, highlightedId,
-    editingId, setEditingId, threadUnread, discard, blockedIds,
+    editingId, setEditingId, threadUnread, discard, blockedIds, active, markUnread,
   } = useChat();
+  const { notify, confirm: confirmed } = useNotify();
+  /** Every action says so when it fails (B-10) — they used to fail silently. */
+  const attempt = (what: () => Promise<unknown>, failed: string, done?: string) => {
+    void what().then(() => { if (done) confirmed(done); })
+      .catch((err) => notify({ title: failed, body: err instanceof Error ? err.message : undefined, tone: 'error' }));
+  };
+  const copy = (text: string, done: string) => attempt(async () => {
+    if (!navigator.clipboard) throw new Error('This browser does not allow copying here.');
+    await navigator.clipboard.writeText(text);
+  }, 'Could not copy', done);
   const newReplies = threadUnread[m.id] ?? 0;
   const [reporting, setReporting] = useState(false);
   // The card behind every avatar: who this is, message them, block, report.
@@ -307,7 +318,11 @@ const MessageRow: React.FC<{
   // not landed yet — there is nothing on the server to edit.
   const withinEditWindow = Date.now() - new Date(m.createdAt).getTime() < EDIT_WINDOW_MS;
   const canEdit = mine && !pending && !failed && withinEditWindow && can('MESSAGE_EDIT_OWN');
-  const canDelete = (mine && can('MESSAGE_DELETE_OWN')) || can('MESSAGE_DELETE_ANY');
+  // A channel's own owner, admins and moderators may remove what is posted
+  // there (B-13) — the server always allowed it; the menu never offered it.
+  const runsThisRoom = active?.type !== 'dm'
+    && (active?.myRole === 'owner' || active?.myRole === 'admin' || active?.myRole === 'moderator');
+  const canDelete = (mine && can('MESSAGE_DELETE_OWN')) || can('MESSAGE_DELETE_ANY') || (!mine && runsThisRoom);
 
   const submitEdit = async () => {
     const next = draft.trim();
@@ -618,7 +633,7 @@ const MessageRow: React.FC<{
               label={m.pinnedAt ? 'Unpin message' : 'Pin message'}
               size="sm"
               active={Boolean(m.pinnedAt)}
-              onClick={() => void pin(m.id, !m.pinnedAt)}
+              onClick={() => attempt(() => pin(m.id, !m.pinnedAt), m.pinnedAt ? 'Could not unpin that message' : 'Could not pin that message')}
             >
               {m.pinnedAt ? <PinOff size={15} /> : <Pin size={15} />}
             </IconButton>
@@ -680,19 +695,36 @@ const MessageRow: React.FC<{
                 className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-xl border border-border-light bg-white py-1 shadow-xl dark:border-border-dark/50 dark:bg-elevated-dark"
                 onMouseLeave={() => setMenuOpen(false)}
               >
+                {m.body && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); copy(m.body ?? '', 'Text copied'); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
+                  >
+                    <Copy size={13} /> Copy text
+                  </button>
+                )}
                 <button
                   role="menuitem"
                   onClick={() => {
                     setMenuOpen(false);
                     // A permalink is a route in this app, never an absolute URL
                     // built from whatever origin the tab happens to be on.
-                    const url = `${window.location.origin}/app/chat/${m.conversationId}/${m.id}`;
-                    void navigator.clipboard?.writeText(url).catch(() => {});
+                    copy(`${window.location.origin}/app/chat/${m.conversationId}/${m.id}`, 'Link copied');
                   }}
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
                 >
                   <Link2 size={13} /> Copy link to message
                 </button>
+                {!mine && !pending && !failed && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); attempt(() => markUnread(m.conversationId, m.seq), 'Could not mark that unread'); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
+                  >
+                    <Mail size={13} /> Mark unread from here
+                  </button>
+                )}
                 {!mine && (
                   <button
                     role="menuitem"

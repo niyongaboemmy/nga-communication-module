@@ -110,6 +110,10 @@ interface ChatValue {
 
   toggleStar: (id: string) => Promise<void>;
   setNotificationLevel: (id: string, level: NotificationLevel) => Promise<void>;
+  /** Mute until a time (B-13); null unmutes. `forever` is the old "Mute". */
+  muteUntil: (id: string, until: string | null | 'forever') => Promise<void>;
+  /** Hide a direct message until the other person writes again (B-13). */
+  hideConversation: (id: string) => Promise<void>;
 
   /** Unread across every conversation the person has not muted. */
   totalUnread: number;
@@ -125,7 +129,7 @@ interface ChatValue {
   /** The reader has seen the open thread up to `seq`. */
   markThreadRead: (rootId: string, seq: number) => void;
   /** "Mark as unread": bring a conversation back to the reader's attention. */
-  markUnread: (conversationId: string) => Promise<void>;
+  markUnread: (conversationId: string, fromSeq?: number) => Promise<void>;
   /** Mark one (not necessarily open) conversation read to its newest message. */
   markConversationRead: (conversationId: string) => void;
   /** Whether Enter sends, from the user's own preferences (FR-USR-8). */
@@ -328,16 +332,34 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       .catch(() => {});
   }, [user]);
 
+  /** An outbox entry, drawn as the pending message it will become. */
+  const queuedAsMessage = (e: outbox.OutboxEntry): WireMessage => ({
+    id: `queued-${e.nonce}`, conversationId: e.conversationId, seq: Number.MAX_SAFE_INTEGER,
+    type: (e.type as MessageType) ?? 'text', body: e.body || null,
+    senderId: user?.id ?? '', senderName: user?.name ?? '', senderAvatarUrl: user?.avatarUrl ?? null, senderRole: null,
+    createdAt: new Date(e.createdAt).toISOString(), editedAt: null, deletedAt: null, deletedBy: null, nonce: e.nonce,
+    reactions: [], attachments: [], threadRootId: e.threadRootId, replyCount: 0, threadLastAt: null, replyTo: null,
+    pinnedAt: null, pinnedBy: null, saved: false, editedCount: 0, forwardedFrom: null, mentionsMe: false,
+    mentionNames: {}, linkPreviews: [],
+    delivery: e.attempts >= outbox.MAX_ATTEMPTS ? 'failed' : 'pending', readCount: 0, metadata: e.metadata ?? {},
+  });
+
   /** Load the newest page whenever the open conversation changes. */
   useEffect(() => {
     setMessagesConversationId(null);
     if (!activeId) { setMessages([]); setHasMore(false); return; }
     let cancelled = false;
     setMessagesLoading(true);
-    chatApi.listMessages(activeId, { limit: 40 })
-      .then((page) => {
+    Promise.all([chatApi.listMessages(activeId, { limit: 40 }), outbox.pending().catch(() => [])])
+      .then(([page, queuedHere]) => {
         if (cancelled) return;
-        setMessages(page.messages);
+        // What is still waiting in the outbox shows as pending after a reload
+        // (CHAT-M12), instead of seeming lost until it is flushed.
+        const known = new Set(page.messages.map((m) => m.nonce).filter(Boolean));
+        const waiting = queuedHere
+          .filter((e) => e.conversationId === activeId && !e.threadRootId && !known.has(e.nonce))
+          .map((e) => queuedAsMessage(e));
+        setMessages([...page.messages, ...waiting]);
         setHasMore(page.hasMore);
         setMessagesConversationId(activeId);
       })
@@ -601,13 +623,16 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
 
     const onPrefs = (
-      p: { conversationId: string; isStarred?: boolean; notification?: NotificationLevel },
+      p: { conversationId: string; isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null; hidden?: boolean },
     ) => {
+      // Hidden on another device: gone from this list too.
+      if (p.hidden) { setConversations((prev) => prev.filter((c) => c.id !== p.conversationId)); return; }
       setConversations((prev) => prev.map((c) => (c.id === p.conversationId
         ? {
             ...c,
             isStarred: p.isStarred ?? c.isStarred,
             notification: p.notification ?? c.notification,
+            mutedUntil: p.mutedUntil !== undefined ? p.mutedUntil : c.mutedUntil,
           }
         : c)));
     };
@@ -692,6 +717,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
             body: entry.body, nonce: entry.nonce,
             threadRootId: entry.threadRootId, replyToId: entry.replyToId,
             attachments: entry.attachments,
+            ...(entry.type ? { type: entry.type as MessageType } : {}),
+            ...(entry.metadata ? { metadata: entry.metadata } : {}),
           });
           if (entry.conversationId === activeIdRef.current) {
             setMessages((prev) => reconcile(prev, r.message, entry.nonce));
@@ -851,6 +878,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       replyToId,
       threadRootId: input.threadRootId ?? null,
       attachments: input.attachments ?? [],
+      type: input.type, metadata: input.metadata,
     });
     void outbox.pending().then((q) => setQueued(q.length));
 
@@ -898,7 +926,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const conversationId = failedMsg.conversationId;
     // The original payload — attachments, type and metadata included — not a
     // text-only rebuild that would post a voice note as an empty message.
-    const original = pendingPayloads.current.get(nonce);
+    // After a reload the payload lives only in the outbox: take it from there.
+    const queued = pendingPayloads.current.has(nonce)
+      ? null : (await outbox.pending().catch(() => [])).find((e) => e.nonce === nonce) ?? null;
+    const original = pendingPayloads.current.get(nonce) ?? (queued ? {
+      body: queued.body, nonce, threadRootId: queued.threadRootId, replyToId: queued.replyToId,
+      attachments: queued.attachments,
+      ...(queued.type ? { type: queued.type as MessageType } : {}),
+      ...(queued.metadata ? { metadata: queued.metadata } : {}),
+    } : undefined);
     try {
       // Same nonce: if the original in fact landed, this resolves to it rather
       // than posting a second copy.
@@ -1140,6 +1176,22 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     catch { void refresh(); }
   }, [refresh]);
 
+  const muteUntil = useCallback(async (id: string, until: string | null | 'forever') => {
+    const patch = until === 'forever'
+      ? { notification: 'none' as NotificationLevel, mutedUntil: null }
+      : until === null
+        ? { notification: 'all' as NotificationLevel, mutedUntil: null }
+        : { mutedUntil: until };
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+    try { await chatApi.setPrefs(id, patch); } catch { void refresh(); }
+  }, [refresh]);
+
+  const hideConversation = useCallback(async (id: string) => {
+    setConversations((prev) => prev.filter((c) => c.id !== id));
+    if (activeIdRef.current === id) setActiveId(null);
+    try { await chatApi.setPrefs(id, { hidden: true }); } catch { void refresh(); }
+  }, [refresh, setActiveId]);
+
   const markThreadRead = useCallback((rootId: string, seq: number) => {
     const conversationId = activeIdRef.current;
     if (!conversationId || !Number.isFinite(seq) || seq <= 0) return;
@@ -1152,8 +1204,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     void chatApi.markThreadRead(conversationId, rootId, seq).catch(() => {});
   }, []);
 
-  const markUnread = useCallback(async (conversationId: string) => {
-    const r = await chatApi.markUnread(conversationId);
+  const markUnread = useCallback(async (conversationId: string, fromSeq?: number) => {
+    const r = await chatApi.markUnread(conversationId, fromSeq);
     setConversations((prev) => prev.map((c) => (c.id === conversationId
       ? { ...c, unread: r.unread, unreadMentions: r.unreadMentions, lastReadSeq: r.lastReadSeq } : c)));
     // Leaving the conversation open would mark it straight back as read.
@@ -1225,7 +1277,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     replyTarget, setReplyTarget,
     threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
     pin, save, forward, jumpTo, highlightedId,
-    draftFor, setDraft, toggleStar, setNotificationLevel,
+    draftFor, setDraft, toggleStar, setNotificationLevel, muteUntil, hideConversation,
     totalUnread, totalMentions, threadUnread, threadsUnreadTotal,
     markThreadRead, markUnread, markConversationRead,
     refresh, enterToSend, blockedIds, setBlocked,

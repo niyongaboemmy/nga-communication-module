@@ -67,7 +67,7 @@ try {
 
   console.log('\nThe profile card');
   await page.goto(`${BASE}/app/chat?c=${group}`);
-  await page.getByText('REPORT ME PLEASE').waitFor({ timeout: 15000 });
+  await page.getByRole('log', { name: 'Messages' }).getByText('REPORT ME PLEASE').waitFor({ timeout: 15000 });
   await page.getByRole('button', { name: /Bob Sender, profile/ }).first().click();
   const card = page.getByRole('dialog', { name: /Bob Sender, profile/ });
   await card.waitFor({ timeout: 8000 });
@@ -98,9 +98,9 @@ try {
 
   console.log('\nReporting a message');
   await page.goto(`${BASE}/app/chat?c=${group}`);
-  const msg = page.getByText('REPORT ME PLEASE');
+  const msg = page.getByRole('log', { name: 'Messages' }).getByText('REPORT ME PLEASE');
   await msg.waitFor({ timeout: 15000 });
-  const row = page.locator('[data-message-row]', { has: msg });
+  const row = page.locator('[data-message-row]', { has: page.getByText('REPORT ME PLEASE') });
   await row.hover();
   await row.getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menuitem', { name: 'Report message' }).click();

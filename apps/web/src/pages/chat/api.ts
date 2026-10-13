@@ -79,7 +79,7 @@ export const markReadLatest = (id: string) =>
 
 export const setPrefs = (
   id: string,
-  prefs: { isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null },
+  prefs: { isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null; hidden?: boolean },
 ) => apiPatch<{ conversation: ConversationSummary }>(
   `/api/chat/conversations/${id}/prefs`, prefs,
 ).then((r) => r.data!.conversation);
@@ -159,9 +159,9 @@ export const markThreadRead = (conversationId: string, rootId: string, seq: numb
     `/api/chat/conversations/${conversationId}/threads/${rootId}/read`, { seq },
   ).then((r) => r.data!);
 
-export const markUnread = (id: string) =>
+export const markUnread = (id: string, fromSeq?: number) =>
   apiPost<{ lastReadSeq: number; unread: number; unreadMentions: number }>(
-    `/api/chat/conversations/${id}/unread`, {},
+    `/api/chat/conversations/${id}/unread`, fromSeq ? { seq: fromSeq } : {},
   ).then((r) => r.data!);
 
 export const listPinned = (conversationId: string) =>
@@ -243,9 +243,9 @@ export interface ScheduledMessage {
 export const listScheduled = () =>
   apiGet<{ scheduled: ScheduledMessage[] }>('/api/chat/scheduled').then((r) => r.data!.scheduled);
 
-export const scheduleMessage = (conversationId: string, body: string, sendAt: string) =>
+export const scheduleMessage = (conversationId: string, body: string, sendAt: string, attachments: string[] = []) =>
   apiPost<{ scheduled: ScheduledMessage }>(
-    `/api/chat/conversations/${conversationId}/scheduled`, { body, sendAt },
+    `/api/chat/conversations/${conversationId}/scheduled`, { body, sendAt, ...(attachments.length ? { attachments } : {}) },
   ).then((r) => r.data!.scheduled);
 
 export const cancelScheduled = (id: string) =>
@@ -437,3 +437,23 @@ export const listReports = (status: 'open' | 'resolved' | 'dismissed' | 'all' = 
   apiGet<{ reports: ChatReport[] }>(`/api/chat/reports?status=${status}`).then((r) => r.data!.reports);
 export const resolveReport = (id: string, status: 'resolved' | 'dismissed', note?: string) =>
   apiPatch<{ status: string }>(`/api/chat/reports/${id}`, { status, note });
+
+/** Links shared in a conversation, newest first (B-12). */
+export interface ConversationLink {
+  url: string; title: string | null; siteName: string | null; imageUrl: string | null;
+  messageId: string; senderName: string | null; at: string;
+}
+export const listLinks = (conversationId: string, before?: string) =>
+  apiGet<{ links: ConversationLink[]; nextBefore: string | null }>(
+    `/api/chat/conversations/${conversationId}/links${before ? `?before=${encodeURIComponent(before)}` : ''}`,
+  ).then((r) => r.data!);
+
+/** Invite links still working (B-12). */
+export interface ActiveInvite {
+  code: string; expiresAt: string | null; maxUses: number | null; uses: number;
+  createdByName: string | null; createdAt: string;
+}
+export const listInvites = (conversationId: string) =>
+  apiGet<{ invites: ActiveInvite[] }>(`/api/chat/conversations/${conversationId}/invites`).then((r) => r.data!.invites);
+export const revokeInvite = (code: string) =>
+  apiDelete<{ revoked: boolean }>(`/api/chat/invites/${encodeURIComponent(code)}`);

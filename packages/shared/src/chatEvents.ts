@@ -205,6 +205,8 @@ export interface ChatServerToClientEvents {
       isStarred?: boolean;
       notification?: NotificationLevel;
       mutedUntil?: string | null;
+      /** A DM was hidden on one of this person's devices (B-13). */
+      hidden?: boolean;
     },
   ) => void;
 

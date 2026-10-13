@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   X, Settings, Archive, LogOut, Link2, Crown, Shield, UserMinus, Timer, Copy, Check,
   Camera, Trash2, UserPlus, Search, Loader2,
@@ -79,7 +79,7 @@ const LogoPicker: React.FC<{
             title="Upload a logo"
             disabled={busy}
             onClick={() => input.current?.click()}
-            className="absolute inset-0 grid place-items-center rounded-2xl bg-black/0 text-white opacity-0 transition-all duration-150 hover:bg-black/45 hover:opacity-100 focus-visible:bg-black/45 focus-visible:opacity-100 group-hover:opacity-100"
+            className="absolute inset-0 grid place-items-center rounded-2xl bg-black/0 text-white opacity-0 transition-all duration-150 hover:bg-black/45 [@media(hover:none)]:bg-black/30 [@media(hover:none)]:opacity-100 hover:opacity-100 focus-visible:bg-black/45 focus-visible:opacity-100 group-hover:opacity-100"
           >
             {busy ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
           </button>
@@ -233,21 +233,49 @@ export const ChannelSettings: React.FC<{
     }
   };
 
+  /*
+   * Invite links (B-12): every link still working is listed — who made it,
+   * how often it has been used, when it stops — and can be revoked, so a link
+   * pasted into the wrong group is closed rather than left open for a week.
+   */
+  const [invites, setInvites] = useState<chatApi.ActiveInvite[]>([]);
+  const [inviteHours, setInviteHours] = useState(24 * 7);
+  const [inviteUses, setInviteUses] = useState(0);
+  const loadInvites = useCallback(() => {
+    if (!canManageMembers) return;
+    chatApi.listInvites(c.id).then(setInvites).catch(() => setInvites([]));
+  }, [c.id, canManageMembers]);
+  useEffect(loadInvites, [loadInvites]);
+
   const makeInvite = () => run(async () => {
-    const link = await chatApi.createInvite(c.id, { expiresInHours: 24 * 7 });
+    const link = await chatApi.createInvite(c.id, { expiresInHours: inviteHours, ...(inviteUses ? { maxUses: inviteUses } : {}) });
     setInvite(link);
+    loadInvites();
   });
 
-  const copyInvite = async () => {
-    if (!invite) return;
-    const url = `${window.location.origin}/app/chat/invite/${invite.code}`;
+  const copyInvite = async (code = invite?.code) => {
+    if (!code) return;
+    const url = `${window.location.origin}/app/chat/invite/${code}`;
     try {
       await navigator.clipboard.writeText(url);
-      setCopied(true);
+      setCopied(code === invite?.code ? true : false);
+      notify({ title: 'Invite link copied', tone: 'success', confirmation: true });
       setTimeout(() => setCopied(false), 2000);
     } catch {
       notify({ title: 'Could not copy the link', tone: 'error' });
     }
+  };
+
+  const revokeLink = async (code: string) => {
+    const ok = await confirm({
+      title: 'Revoke this invite link?',
+      body: <p>Anyone who has it can no longer join with it. People who already joined stay.</p>,
+      confirmLabel: 'Revoke', tone: 'danger',
+    });
+    if (!ok) return;
+    await run(() => chatApi.revokeInvite(code), 'Invite link revoked');
+    if (invite?.code === code) setInvite(null);
+    loadInvites();
   };
 
   return (
@@ -468,7 +496,7 @@ export const ChannelSettings: React.FC<{
                 </span>
 
                 {iCanManage && m.userId !== user?.id && m.role !== 'owner' && (
-                  <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                  <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
                     {can('CHANNEL_MEMBERS_MANAGE') && (
                       <IconButton
                         label={m.role === 'admin' ? `Demote ${m.name} to member` : `Make ${m.name} an admin`}
@@ -521,30 +549,55 @@ export const ChannelSettings: React.FC<{
           </ul>
         </section>
 
-        {/* ── Invite link ─────────────────────────────────────────────── */}
+        {/* ── Invite links ────────────────────────────────────────────── */}
         {canManageMembers && (
           <section>
             <h3 className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-secondary-light/80 dark:text-text-secondary-dark/70">
-              <Link2 size={11} /> Invite link
+              <Link2 size={11} /> Invite links
             </h3>
-            {invite ? (
-              <div className="rounded-lg border border-border-light bg-surface-light p-2 dark:border-border-dark/50 dark:bg-elevated-dark/60">
+            {invite && (
+              <div className="mb-2 rounded-lg border border-border-light bg-surface-light p-2 dark:border-border-dark/50 dark:bg-elevated-dark/60">
                 <p className="mb-1.5 break-all font-mono text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
                   /app/chat/invite/{invite.code}
                 </p>
-                <div className="flex items-center gap-2">
-                  <Button onClick={() => void copyInvite()} className="text-xs">
-                    {copied ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy link</>}
-                  </Button>
-                  <span className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
-                    Expires in 7 days
-                  </span>
-                </div>
+                <Button onClick={() => void copyInvite()} className="text-xs">
+                  {copied ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy link</>}
+                </Button>
               </div>
-            ) : (
-              <Button variant="ghost" onClick={makeInvite} className="text-xs">
-                Create an invite link
-              </Button>
+            )}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <select value={inviteHours} onChange={(e) => setInviteHours(Number(e.target.value))} aria-label="Invite link lasts"
+                className="rounded-lg border border-border-light bg-white px-1.5 py-1 text-[11px] dark:border-border-dark dark:bg-elevated-dark dark:text-slate-100">
+                <option value={24}>1 day</option>
+                <option value={24 * 7}>7 days</option>
+                <option value={24 * 30}>30 days</option>
+              </select>
+              <select value={inviteUses} onChange={(e) => setInviteUses(Number(e.target.value))} aria-label="Invite link uses"
+                className="rounded-lg border border-border-light bg-white px-1.5 py-1 text-[11px] dark:border-border-dark dark:bg-elevated-dark dark:text-slate-100">
+                <option value={0}>Any number of people</option>
+                <option value={1}>One person</option>
+                <option value={10}>Up to 10</option>
+                <option value={50}>Up to 50</option>
+              </select>
+              <Button variant="ghost" onClick={makeInvite} className="text-xs">Create an invite link</Button>
+            </div>
+            {invites.length > 0 && (
+              <ul className="mt-2 space-y-1" aria-label="Active invite links">
+                {invites.map((i) => (
+                  <li key={i.code} className="flex items-center gap-2 rounded-lg border border-border-light px-2 py-1.5 text-[11px] dark:border-border-dark/50">
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-mono text-text-primary-light dark:text-text-primary-dark">…{i.code.slice(-6)}</span>
+                      <span className="block text-text-secondary-light dark:text-text-secondary-dark">
+                        {i.uses}{i.maxUses ? `/${i.maxUses}` : ''} used
+                        {i.expiresAt ? ` · until ${new Date(i.expiresAt).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}
+                        {i.createdByName ? ` · by ${i.createdByName}` : ''}
+                      </span>
+                    </span>
+                    <IconButton label="Copy this invite link" size="sm" onClick={() => void copyInvite(i.code)}><Copy size={12} /></IconButton>
+                    <IconButton label="Revoke this invite link" size="sm" onClick={() => void revokeLink(i.code)}><X size={12} /></IconButton>
+                  </li>
+                ))}
+              </ul>
             )}
           </section>
         )}
