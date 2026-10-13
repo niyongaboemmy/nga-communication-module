@@ -152,5 +152,5 @@ export const TEST_USER_PREFIXES = [
   'chatadm-', 'chatfile-', 'chatlive-', 'chatnot-', 'chatpow-', 'chattest-', 'chatthr-', 'chatui-',
   'feedmedia-', 'feedtest-', 'feedui-', 'mailtest-', 'mailui-', 'meetverify-', 'uiverify-', 'ntest-',
   'oversight-', 'pj-', 'pres-', 'v3-', 'vcl-', 'vcs-', 'vcu-', 'vcv-', 'vfa-', 'vmr-', 'vrr-',
-  'vnc-', 'vnv-', 'gap2-', 'gapc-', 'gapp-', 'gapr-', 'gaps-', 'gapu-', 'gapx-', 'suix-',
+  'vnc-', 'vnv-', 'vle-', 'gap2-', 'gapc-', 'gapp-', 'gapr-', 'gaps-', 'gapu-', 'gapx-', 'suix-',
 ];

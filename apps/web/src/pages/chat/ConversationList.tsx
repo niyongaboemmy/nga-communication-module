@@ -13,6 +13,7 @@ import { useChat, isMuted } from './ChatProvider';
 import { ConversationAvatar } from './ConversationAvatar';
 import type { Conversation } from './types';
 import { NewConversationDialog } from './NewConversationDialog';
+import { LoadError } from '../../components/LoadError';
 
 /**
  * The conversation list — the middle pane on desktop, the whole screen on a
@@ -258,7 +259,7 @@ export const ConversationList: React.FC<{
 }> = ({ onOpenSaved, onOpenThreads, onOpenSettings, onOpenSearch, onOpenBrowse }) => {
   const { can } = usePermissions();
   const {
-    conversations, conversationsLoading, activeId, setActiveId, toggleStar, connected,
+    conversations, conversationsLoading, conversationsError, refresh, activeId, setActiveId, toggleStar, connected,
     typingByConversation, totalUnread, totalMentions, threadsUnreadTotal, markEverythingRead,
   } = useChat();
   const [query, setQuery] = useState('');
@@ -383,6 +384,8 @@ export const ConversationList: React.FC<{
           <ul aria-busy="true" aria-label="Loading conversations">
             {Array.from({ length: 7 }, (_, i) => <RowSkeleton key={i} />)}
           </ul>
+        ) : conversationsError && conversations.length === 0 ? (
+          <LoadError compact what="your conversations" onRetry={() => void refresh()} />
         ) : filtered.length === 0 ? (
           <EmptyState
             icon={query ? <Search size={22} /> : <Star size={22} />}

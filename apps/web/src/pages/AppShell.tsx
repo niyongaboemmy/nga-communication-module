@@ -12,6 +12,7 @@ import { AppsSwitcher } from '../components/shell/AppsSwitcher';
 import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
 import { NotificationBell } from '../components/shell/NotificationCenter';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 import { GlobalSearch } from '../components/GlobalSearch';
 import { usePresenceReporter } from '../hooks/usePresenceReporter';
 import { useModuleBadges } from '../hooks/useModuleBadges';
@@ -351,6 +352,7 @@ const TopBar: React.FC<{ onOpenSearch: () => void; myPresence: Presence }> = ({ 
 
 export const AppShell: React.FC = () => {
   const { can } = usePermissions();
+  const location = useLocation();
   const connection = useConnectionStatus();
   const [searchOpen, setSearchOpen] = useState(false);
   // Reports idle/away for this tab, and gives the own-avatar dot something
@@ -396,7 +398,11 @@ export const AppShell: React.FC = () => {
             never overflows this container; the admin pages are ordinary
             documents and scroll here. */}
         <main data-app-scroll className="min-w-0 flex-1 overflow-y-auto bg-surface-light dark:bg-background-dark">
-          <Outlet />
+          {/* One broken screen must not take the shell with it (F-06); moving
+              to another screen clears the error. */}
+          <ErrorBoundary resetKey={location.pathname} label="this screen">
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
 

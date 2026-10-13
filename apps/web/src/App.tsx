@@ -82,7 +82,19 @@ const RequirePermission: React.FC<{ anyOf: string[]; children: React.ReactNode }
   return <>{children}</>;
 };
 
+/** The last line of defence: a failure above every screen still leaves a way back (F-06). */
+const RootFallback: React.FC = () => (
+  <div role="alert" className="grid min-h-screen place-items-center bg-surface-light p-6 text-center dark:bg-background-dark">
+    <div className="max-w-sm">
+      <h1 className="text-lg font-bold text-text-primary-light dark:text-text-primary-dark">Tupo hit a problem</h1>
+      <p className="mt-2 text-sm text-text-secondary-light dark:text-text-secondary-dark">Nothing you sent was lost. Reloading usually fixes it.</p>
+      <button onClick={() => window.location.reload()} className="mt-4 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">Reload Tupo</button>
+    </div>
+  </div>
+);
+
 export const App: React.FC = () => (
+  <ErrorBoundary fallback={<RootFallback />}>
   <AuthProvider>
     <BrowserRouter>
       {/* Usage analytics: one page view per route change, on every route --
@@ -208,4 +220,5 @@ export const App: React.FC = () => (
       </NotificationProvider>
     </BrowserRouter>
   </AuthProvider>
+  </ErrorBoundary>
 );

@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { Avatar, Skeleton } from './ui';
 import { Highlighted } from './Highlighted';
+import { LoadError } from './LoadError';
 import { apiGet } from '../lib/api';
 import { usePermissions } from '../hooks/usePermissions';
 import { shortStamp } from '../pages/chat/data';
@@ -113,10 +114,15 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
 
   /* Debounced fetch. 220ms is long enough that typing a word is one request
      and short enough that the list feels like it is keeping up. */
+  // A failed search is an error, not "nothing matches" (F-06). Bumping
+  // `attempt` retries the same query.
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    if (!searching) { setData(null); setLoading(false); return; }
+    if (!searching) { setData(null); setLoading(false); setFailed(false); return; }
     let cancelled = false;
     setLoading(true);
+    setFailed(false);
     const t = setTimeout(() => {
       const params = new URLSearchParams({ q: term, limit: '5' });
       if (filter) params.set('types', filter);
@@ -130,11 +136,11 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
               .filter((k) => (r.data?.results?.[k] ?? []).length > 0));
           }
         })
-        .catch(() => { if (!cancelled) setData(null); })
+        .catch(() => { if (!cancelled) { setData(null); setFailed(true); } })
         .finally(() => { if (!cancelled) setLoading(false); });
     }, 220);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [term, filter, searching]);
+  }, [term, filter, searching, attempt]);
 
   /* One flat list across every section — the cursor does not care which
      section a row came from, because neither does the person pressing Down. */
@@ -314,6 +320,8 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
             <div className="space-y-2 p-1" aria-busy="true">
               {Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-14 w-full rounded-xl" />)}
             </div>
+          ) : failed ? (
+            <LoadError compact what="results" onRetry={() => setAttempt((n) => n + 1)} />
           ) : rows.length === 0 ? (
             <div className="px-4 py-12 text-center">
               <p className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark">

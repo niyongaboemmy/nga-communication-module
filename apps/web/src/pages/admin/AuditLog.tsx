@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { apiGet } from '../../lib/api';
 import { Card, PageHeader, Spinner, EmptyState, Badge, Avatar } from '../../components/ui';
+import { LoadError } from '../../components/LoadError';
 
 interface AuditEntry {
   id: string; action: string; target_type: string | null; target_id: string | null;
@@ -21,12 +22,16 @@ const TONE: Record<string, 'blue' | 'green' | 'amber' | 'red' | 'slate'> = {
 export const AuditLog: React.FC = () => {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
 
-  useEffect(() => {
+  const load = () => {
+    setLoading(true); setFailed(false);
     apiGet<AuditEntry[]>('/api/audit?limit=200')
       .then((r) => setEntries(r.data ?? []))
+      .catch(() => setFailed(true))
       .finally(() => setLoading(false));
-  }, []);
+  };
+  useEffect(load, []);
 
   return (
     <div className="px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
@@ -37,6 +42,8 @@ export const AuditLog: React.FC = () => {
       <Card className="overflow-hidden">
         {loading ? (
           <div className="grid place-items-center py-16"><Spinner /></div>
+        ) : failed ? (
+          <LoadError what="the audit log" onRetry={load} />
         ) : entries.length === 0 ? (
           <EmptyState title="No audit entries yet" />
         ) : (

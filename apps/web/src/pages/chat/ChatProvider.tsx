@@ -34,6 +34,8 @@ interface Draft { text: string; savedAt: number }
 interface ChatValue {
   conversations: ConversationSummary[];
   conversationsLoading: boolean;
+  /** The conversation list failed to load (F-06): show an error with a retry, not "No conversations yet". */
+  conversationsError: boolean;
   activeId: string | null;
   setActiveId: (id: string | null) => void;
   active: ConversationSummary | null;
@@ -212,6 +214,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(true);
+  const [conversationsError, setConversationsError] = useState(false);
   const [activeId, setActiveIdRaw] = useState<string | null>(null);
 
   const [messages, setMessages] = useState<WireMessage[]>([]);
@@ -286,6 +289,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const list = await chatApi.listConversations();
       setConversations(list);
+      setConversationsError(false);
       // Server-side drafts follow the user between devices; seed the local
       // cache from them, without clobbering something being typed right now.
       setDrafts((prev) => {
@@ -295,6 +299,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         return next;
       });
+    } catch {
+      setConversationsError(true);
     } finally {
       setConversationsLoading(false);
     }
@@ -1168,7 +1174,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const value: ChatValue = {
-    conversations, conversationsLoading, activeId, setActiveId, active,
+    conversations, conversationsLoading, conversationsError, activeId, setActiveId, active,
     messages, messagesLoading, messagesConversationId, hasMore, loadingMore, loadOlder,
     typing: (activeId && typingByConv[activeId]) || [],
     typingByConversation: typingByConv,

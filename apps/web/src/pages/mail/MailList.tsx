@@ -6,6 +6,7 @@ import {
 import { Avatar, IconButton, Spinner, EmptyState } from '../../components/ui';
 import * as api from './api';
 import type { MailFolder, MailThreadSummary, MailLabel } from '@tupo/shared';
+import { LoadError } from '../../components/LoadError';
 
 interface Props {
   folder: MailFolder;
@@ -50,12 +51,18 @@ export const MailList: React.FC<Props> = ({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const senderView = ['sent', 'drafts', 'scheduled'].includes(folder);
 
+  const [failed, setFailed] = useState(false);
   const load = useCallback(async (reset: boolean) => {
     reset ? setLoading(true) : setLoadingMore(true);
     try {
       const page = await api.listThreads({ folder, label: labelId ?? undefined, q: query || undefined, cursor: reset ? undefined : cursor ?? undefined });
       setThreads((prev) => (reset ? page.threads : [...prev, ...page.threads]));
       setCursor(page.nextCursor);
+      setFailed(false);
+    } catch {
+      // A failed first page is an error, not an empty folder (F-06). A failed
+      // "load more" keeps what is already on screen.
+      if (reset) setFailed(true);
     } finally {
       setLoading(false); setLoadingMore(false);
     }
@@ -103,6 +110,8 @@ export const MailList: React.FC<Props> = ({
       <div className="min-h-0 flex-1 overflow-y-auto">
         {loading ? (
           <div className="grid h-40 place-items-center"><Spinner /></div>
+        ) : failed ? (
+          <LoadError compact what="this folder" onRetry={() => load(true)} />
         ) : threads.length === 0 ? (
           <EmptyState icon={<MailIcon />} title="Nothing here" hint={query ? 'No messages match your search.' : `Your ${title.toLowerCase()} is empty.`} />
         ) : (

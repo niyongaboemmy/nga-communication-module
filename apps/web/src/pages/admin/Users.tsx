@@ -3,6 +3,7 @@ import { Search, UserCog, Ban, CheckCircle2 } from 'lucide-react';
 import { apiGet, apiPut } from '../../lib/api';
 import { usePermissions } from '../../hooks/usePermissions';
 import { Avatar, Button, Card, Badge, PageHeader, Spinner, EmptyState } from '../../components/ui';
+import { LoadError } from '../../components/LoadError';
 
 interface RosterUser {
   id: string; mis_user_id: string; name: string; email: string; avatar_url: string | null; role: string; status: string;
@@ -20,12 +21,14 @@ export const Users: React.FC = () => {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const load = async (q = '') => {
     setLoading(true);
     try {
       const res = await apiGet<RosterUser[]>(`/api/users?q=${encodeURIComponent(q)}`);
       setUsers(res.data ?? []);
+      setLoadFailed(false);
       // Role list is only needed to populate the assignment dropdown, and
       // requires its own permission — a USERS_VIEW-only admin still sees the
       // roster, just without the ability to reassign.
@@ -34,6 +37,7 @@ export const Users: React.FC = () => {
         setRoles(r.data ?? []);
       }
     } catch (err) {
+      setLoadFailed(true);
       setError(err instanceof Error ? err.message : 'Could not load users.');
     } finally {
       setLoading(false);
@@ -93,6 +97,10 @@ export const Users: React.FC = () => {
       <Card className="overflow-hidden">
         {loading ? (
           <div className="grid place-items-center py-16"><Spinner /></div>
+        ) : users.length === 0 && loadFailed ? (
+          <LoadError what="users" onRetry={() => void load(query)} />
+        ) : users.length === 0 && query.trim() ? (
+          <EmptyState title={`No one matches “${query.trim()}”`} hint="Try part of a name or an email address." />
         ) : users.length === 0 ? (
           <EmptyState title="No users yet" hint="Users appear here the first time they sign in through the MIS." />
         ) : (
