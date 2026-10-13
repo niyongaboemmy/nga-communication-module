@@ -108,7 +108,13 @@ try {
       await person.click(); await settle(p, 2000);
       const url = p.url();
       const opened = await p.locator('main').getByText('Bosco Gaptwo').count();
-      check('person result opens a DM with that person', /dm=/.test(url) && opened > 0, `${url} matches=${opened}`);
+      // The app resolves ?dm=<person> into that DM's conversation id (?c=), so
+      // check the conversation itself: a DM whose members include Bosco.
+      const c = new URL(url).searchParams.get('c');
+      const isDm = c ? (await pool.query(
+        `SELECT 1 FROM conversations cv JOIN conversation_members m ON m.conversation_id = cv.id
+          WHERE cv.id = $1 AND cv.type = 'dm' AND m.user_id = $2`, [c, B.id])).rowCount > 0 : false;
+      check('person result opens a DM with that person', (/dm=/.test(url) || isDm) && opened > 0, `${url} dm=${isDm} matches=${opened}`);
       await p.screenshot({ path: `${OUT}/search-person-click.png` });
     } else check('palette returns the person hit', false);
 
