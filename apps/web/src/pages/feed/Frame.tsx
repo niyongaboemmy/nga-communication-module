@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError } from '../../lib/api';
 import { Link, useLocation } from 'react-router-dom';
 import {
   Sparkles, Bookmark, ShieldAlert, LayoutGrid, Newspaper, Megaphone, TrendingUp,
@@ -149,14 +150,33 @@ export const RightRail: React.FC<{ suggestions: FeedPageSummary[]; onFollow: (id
  * rather than the Home feed itself. Centralised here so a new screen can't
  * forget to wire it up the way Saved/Moderation/PageDirectory once did.
  */
+/**
+ * Follow state shared across screens (D-08): whoever follows or unfollows a
+ * page announces the updated page, and every list holding it — the rails,
+ * the directory, the page itself — takes the change.
+ */
+export const announcePage = (page: FeedPageSummary) =>
+  window.dispatchEvent(new CustomEvent<FeedPageSummary>('feed:page', { detail: page }));
+export function usePageUpdates(apply: (page: FeedPageSummary) => void): void {
+  const ref = useRef(apply);
+  ref.current = apply;
+  useEffect(() => {
+    const on = (e: Event) => ref.current((e as CustomEvent<FeedPageSummary>).detail);
+    window.addEventListener('feed:page', on);
+    return () => window.removeEventListener('feed:page', on);
+  }, []);
+}
+
 export const useFeedRails = () => {
   const [pages, setPages] = useState<FeedPageSummary[]>([]);
-  useEffect(() => { void api.listPages().then(setPages); }, []);
+  useEffect(() => { void api.listPages().then(setPages).catch(() => {}); }, []);
+  usePageUpdates((u) => setPages((prev) => (prev.some((p) => p.id === u.id)
+    ? prev.map((p) => (p.id === u.id ? { ...p, ...u } : p)) : [...prev, u])));
   const following = useMemo(() => pages.filter((p) => p.following), [pages]);
   const suggestions = useMemo(() => pages.filter((p) => !p.following && !p.mandatory), [pages]);
   const follow = useCallback(async (id: string) => {
     const updated = await api.followPage(id);
-    setPages((prev) => prev.map((p) => (p.id === id ? updated : p)));
+    announcePage(updated);
   }, []);
   return {
     pages, following, suggestions, follow,
@@ -170,26 +190,48 @@ export const ReportDialog: React.FC = () => {
   const [target, setTarget] = useState<{ type: 'post' | 'comment'; id: string } | null>(null);
   const [reason, setReason] = useState<FeedReportReason>('spam');
   const [note, setNote] = useState('');
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    const open = (e: Event) => { setTarget((e as CustomEvent).detail); setDone(false); setReason('spam'); setNote(''); };
+    const open = (e: Event) => { setTarget((e as CustomEvent).detail); setDone(null); setError(null); setReason('spam'); setNote(''); };
     window.addEventListener('feed:report', open);
     return () => window.removeEventListener('feed:report', open);
   }, []);
+  useEffect(() => {
+    if (!target) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setTarget(null); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [target]);
 
   if (!target) return null;
+  // The server's answer is shown (D-07): a second report used to leave the
+  // dialog open with nothing said.
   const submit = async () => {
-    if (target.type === 'post') await api.reportPost(target.id, reason, note);
-    else await api.reportComment(target.id, reason, note);
-    setDone(true);
-    setTimeout(() => setTarget(null), 1400);
+    setBusy(true); setError(null);
+    try {
+      if (target.type === 'post') await api.reportPost(target.id, reason, note);
+      else await api.reportComment(target.id, reason, note);
+      setDone('Thanks — a moderator will review this.');
+      setTimeout(() => setTarget(null), 1400);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        setDone(e.message || 'You have already reported this. A moderator will review it.');
+        setTimeout(() => setTarget(null), 2200);
+      } else {
+        setError(e instanceof Error ? e.message : 'The report could not be sent. Try again.');
+      }
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <div className="fixed inset-0 z-[110] grid place-items-center bg-black/50 p-4" onClick={() => setTarget(null)}>
       <div className="w-full max-w-sm animate-pop rounded-2xl border border-border-light bg-white p-5 dark:border-border-dark/50 dark:bg-elevated-dark" onClick={(e) => e.stopPropagation()}>
         {done ? (
-          <p className="py-6 text-center text-sm font-medium text-text-primary-light dark:text-text-primary-dark">Thanks — a moderator will review this.</p>
+          <p role="status" className="py-6 text-center text-sm font-medium text-text-primary-light dark:text-text-primary-dark">{done}</p>
         ) : (
           <>
             <h2 className="text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">Report this {target.type}</h2>
@@ -203,9 +245,10 @@ export const ReportDialog: React.FC = () => {
             </div>
             <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="Add context (optional)"
               className="mt-2 w-full resize-none rounded-lg border border-border-light bg-surface-light px-2.5 py-1.5 text-sm dark:border-border-dark/60 dark:bg-card-dark/50" />
+            {error && <p role="alert" className="mt-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs text-red-700 dark:bg-red-900/30 dark:text-red-300">{error}</p>}
             <div className="mt-3 flex justify-end gap-2">
               <button onClick={() => setTarget(null)} className="rounded-full px-3 py-1.5 text-sm text-text-secondary-light dark:text-text-secondary-dark">Cancel</button>
-              <button onClick={() => void submit()} className="rounded-full bg-red-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-red-700">Report</button>
+              <button onClick={() => void submit()} disabled={busy} className="rounded-full bg-red-600 disabled:opacity-60 px-4 py-1.5 text-sm font-semibold text-white hover:bg-red-700">Report</button>
             </div>
           </>
         )}

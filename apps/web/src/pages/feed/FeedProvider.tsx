@@ -272,12 +272,15 @@ export function useFeedList(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [more, setMore] = useState(false);
+  /** A failed "load more" (D-07): the posts already shown stay, with a retry. */
+  const [moreError, setMoreError] = useState<string | null>(null);
   const loaderRef = useRef(loader);
   loaderRef.current = loader;
 
   const load = useCallback(async (reset: boolean) => {
     reset ? setLoading(true) : setMore(true);
-    setError(null);
+    if (reset) setError(null);
+    setMoreError(null);
     try {
       const page = await loaderRef.current(reset ? undefined : cursor ?? undefined);
       ingest(page.items);
@@ -286,7 +289,8 @@ export function useFeedList(
       setCursor(page.nextCursor);
       watch(pageIds);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not load the feed.');
+      const message = e instanceof Error ? e.message : 'Could not load the feed.';
+      if (reset) setError(message); else setMoreError(message);
     } finally {
       setLoading(false); setMore(false);
     }
@@ -298,5 +302,5 @@ export function useFeedList(
   // New posts that arrive live get spliced to the top (home only passes a cb).
   const prepend = useCallback((id: string) => setIds((prev) => (prev.includes(id) ? prev : [id, ...prev])), []);
 
-  return { ids, loading, error, more, hasMore: cursor !== null, loadMore: () => load(false), reload: () => load(true), prepend, onNewPost };
+  return { ids, loading, error, moreError, more, hasMore: cursor !== null, loadMore: () => load(false), reload: () => load(true), prepend, onNewPost };
 }

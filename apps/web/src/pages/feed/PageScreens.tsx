@@ -12,10 +12,11 @@ import { FEED_PAGE_KINDS, FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
 import { Avatar, Badge, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useNotify } from '../../context/NotificationContext';
-import { apiGet } from '../../lib/api';
+import { apiGet, ApiError } from '../../lib/api';
+import { LoadError } from '../../components/LoadError';
 import { uploadFile, validateFile } from '../chat/uploads';
 import { useFeed, useFeedList } from './FeedProvider';
-import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
+import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount, announcePage, usePageUpdates } from './Frame';
 import { Composer } from './Composer';
 import { useDismiss, useMediaUrl } from './lib';
 import * as api from './api';
@@ -213,8 +214,18 @@ export const PageProfile: React.FC = () => {
   const cover = useMediaUrl(page?.coverFileId);
   const avatar = useMediaUrl(page?.avatarFileId);
 
-  const reload = useCallback(() => { void api.getPage(slug).then(setPage); }, [slug]);
-  useEffect(() => { reload(); void api.listPages().then(setAllPages); }, [reload]);
+  // Not found, not visible to this person, or the request failed (D-07): each
+  // says so, where a page that cannot load used to spin forever.
+  const [pageError, setPageError] = useState<{ status: number; message: string } | null>(null);
+  const reload = useCallback(() => {
+    setPageError(null);
+    void api.getPage(slug).then(setPage).catch((e: unknown) => {
+      const status = e instanceof ApiError ? e.status : 0;
+      setPageError({ status, message: e instanceof Error ? e.message : 'Could not load this page.' });
+    });
+  }, [slug]);
+  useEffect(() => { reload(); void api.listPages().then(setAllPages).catch(() => {}); }, [reload]);
+  usePageUpdates((u) => setPage((p) => (p && p.id === u.id ? { ...p, ...u } : p)));
 
   const loader = useCallback((cursor?: string) => api.getPagePosts(page?.id ?? slug, { cursor }), [page?.id, slug]);
   const list = useFeedList(loader, [page?.id ?? slug]);
@@ -227,6 +238,22 @@ export const PageProfile: React.FC = () => {
   [list.ids, posts]);
   const { left, right } = useFeedRails();
 
+  if (!page && pageError) {
+    const missing = pageError.status === 404 || pageError.status === 403;
+    return (
+      <div className="grid h-full place-items-center p-6">
+        {missing ? (
+          <EmptyState
+            title="This page isn’t available"
+            hint="It may have been removed, or it is only for a group you are not in."
+            action={<Link to="/app/feed/pages" className="text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">Browse pages</Link>}
+          />
+        ) : (
+          <LoadError what="this page" onRetry={reload} />
+        )}
+      </div>
+    );
+  }
   if (!page) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
   /*
@@ -243,6 +270,7 @@ export const PageProfile: React.FC = () => {
   const toggleFollow = async () => {
     try {
       const updated = page.following ? await api.unfollowPage(page.id) : await api.followPage(page.id);
+      announcePage(updated);
       setPage({ ...page, ...updated });
     } catch (e) {
       notify({ title: e instanceof Error ? e.message : 'Could not update your follow', tone: 'error' });
@@ -760,8 +788,9 @@ export const PageDirectory: React.FC = () => {
 
   const follow = async (id: string, following: boolean) => {
     const updated = following ? await api.unfollowPage(id) : await api.followPage(id);
-    setPages((p) => p.map((x) => (x.id === id ? updated : x)));
+    announcePage(updated);
   };
+  usePageUpdates((u) => setPages((p) => p.map((x) => (x.id === u.id ? { ...x, ...u } : x))));
   const { left, right } = useFeedRails();
 
   return (

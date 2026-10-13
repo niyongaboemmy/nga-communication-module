@@ -96,7 +96,12 @@ export const FeedHome: React.FC = () => {
                 </React.Fragment>
               ))}
               {items.length < REELS_STRIP_AFTER && <ReelsStrip />}
-              {list.hasMore
+              {list.moreError ? (
+                <div role="alert" className="flex flex-col items-center gap-2 py-6 text-center text-sm text-text-secondary-light dark:text-text-secondary-dark">
+                  Couldn’t load more posts.
+                  <button onClick={list.loadMore} className="rounded-full border border-border-light px-3 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:border-border-dark/50 dark:text-blue-400 dark:hover:bg-blue-900/20">Try again</button>
+                </div>
+              ) : list.hasMore
                 ? <LoadMoreSentinel onHit={list.loadMore} disabled={list.more} />
                 : (
                   <p className="flex items-center justify-center gap-2 py-8 text-center text-sm font-medium text-text-secondary-light dark:text-text-secondary-dark">

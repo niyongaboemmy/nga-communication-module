@@ -334,11 +334,22 @@ try {
     // report twice -> dialog stuck, no message
     const pg2 = (await call(ADM, 'POST', '/api/feed/pages', { name: `Gap2 Pub ${tok()}`, audience: 'everyone' })).body?.data?.page;
     pageIds.push(pg2.id);
-    for (let i = 0; i < 24; i++) await call(ADM, 'POST', `/api/feed/pages/${pg2.id}/posts`, { body: `bulk-${i}-${tok()}`, audience: 'everyone' });
+    // Filler written straight to the table: through the API it would use up
+    // the real 20-posts-per-10-minutes limit before the post under test.
+    for (let i = 0; i < 24; i++) {
+      await pool.query(
+        `INSERT INTO feed_posts (id, page_id, author_id, body, published_at, created_at)
+         VALUES ($1, $2, $3, $4, now() - ($5 || ' minutes')::interval, now() - ($5 || ' minutes')::interval)`,
+        [`9${Date.now()}${String(i).padStart(3, '0')}`.slice(0, 18), pg2.id, ADM.id, `bulk-${i}-${tok()}`, String(i + 1)]);
+    }
     const rp = await call(ADM, 'POST', `/api/feed/pages/${pg2.id}/posts`, { body: `REPORT-ME-${tok()}`, audience: 'everyone' });
     const rpId = rp.body?.data?.postId;
     await call(A, 'POST', `/api/feed/posts/${rpId}/report`, { reason: 'spam' });
     await pA.goto(`${BASE}/app/feed/post/${rpId}`, { waitUntil: "domcontentloaded" }); await pA.waitForLoadState('networkidle').catch(() => {}); await sleep(1500);
+    if (!(await pA.getByRole('button', { name: 'Post actions' }).first().isVisible().catch(() => false))) {
+      await pA.screenshot({ path: `${OUT}/feed-permalink-missing.png` }).catch(() => {});
+      console.log('     (permalink body):', (await pA.locator('main').innerText().catch(() => '')).slice(0, 300).replace(/\s+/g, ' '), 'rpId=', rpId, 'status=', rp.status);
+    }
     await pA.getByRole('button', { name: 'Post actions' }).first().click();
     await pA.getByText('Report post').first().click(); await sleep(400);
     await pA.getByRole('button', { name: /^Report$/ }).click(); await sleep(1500);
