@@ -161,9 +161,20 @@ export async function act(
   }>('SELECT target_type, target_id, post_id, status FROM feed_reports WHERE id = $1', [reportId]);
   const report = rows[0];
   if (!report) throw new FeedError('Report not found.', 404);
+  // Two moderators on the same report: the second is told (D-10).
+  if (report.status !== 'open') throw new FeedError('This report has already been handled.', 409);
 
   let authorId: string | null = null;
   let parentId: string | null = null;
+
+  // The author is told about a warning too — it used to be looked up only
+  // for a removal, so "Warn author" warned nobody (D-10).
+  if (action === 'warn') {
+    const { rows: a } = await getPool().query<{ author_id: string }>(
+      report.target_type === 'post' ? 'SELECT author_id FROM feed_posts WHERE id = $1' : 'SELECT author_id FROM feed_comments WHERE id = $1',
+      [report.target_id]);
+    authorId = a[0]?.author_id ?? null;
+  }
 
   if (action === 'remove') {
     if (report.target_type === 'post') {

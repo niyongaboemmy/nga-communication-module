@@ -62,6 +62,7 @@ const RULES: Record<string, Rule> = {
   'feed.reply': { badge: '💬', sound: null, system: false },
   'feed.reaction': { badge: '❤️', sound: null, system: false },
   'feed.mention': { badge: '@', sound: 'mention', system: true },
+  'feed.moderation': { badge: '🛡️', sound: 'message', system: true },
   'meet.live': { badge: '🎥', sound: 'join', system: true },
   'meet.invited': { badge: '📅', sound: 'message', system: true },
   'moderation.report': { badge: '🛡️', sound: null, system: false },

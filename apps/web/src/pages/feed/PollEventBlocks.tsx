@@ -1,3 +1,4 @@
+import { calendarLink } from './calendar';
 import React, { useState } from 'react';
 import { CalendarDays, MapPin, Video, Check, BarChart3, Clock } from 'lucide-react';
 import type { FeedEventView, FeedPollView } from '@tupo/shared';
@@ -130,15 +131,3 @@ export const EventBlock: React.FC<{ postId: string; event: FeedEventView }> = ({
   );
 };
 
-function calendarLink(e: FeedEventView): string {
-  const fmt = (d: string) => new Date(d).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-  const ics = [
-    'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
-    `SUMMARY:${e.title}`,
-    `DTSTART:${fmt(e.startsAt)}`,
-    e.endsAt ? `DTEND:${fmt(e.endsAt)}` : '',
-    e.location ? `LOCATION:${e.location}` : '',
-    'END:VEVENT', 'END:VCALENDAR',
-  ].filter(Boolean).join('\r\n');
-  return `data:text/calendar;charset=utf8,${encodeURIComponent(ics)}`;
-}

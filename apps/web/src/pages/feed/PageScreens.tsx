@@ -11,6 +11,7 @@ import type {
 import { FEED_PAGE_KINDS, FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
 import { Avatar, Badge, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
+import { useAuth } from '../../context/AuthContext';
 import { useNotify } from '../../context/NotificationContext';
 import { apiGet, ApiError } from '../../lib/api';
 import { LoadError } from '../../components/LoadError';
@@ -473,6 +474,7 @@ export const PageProfile: React.FC = () => {
 
           {tab === 'drafts' && page.myRole !== null && <DraftsTab pageId={page.id} />}
           {tab === 'about' && <AboutTab page={page} canManage={canManage} onEdit={() => setEditing(true)} />}
+          {tab === 'about' && <GovernanceCard page={page} onChanged={setPage} />}
           {tab === 'team' && <TeamTab page={page} canManage={canManage} onChanged={setPage} />}
           {tab === 'posts' && (
             <div className="mt-4 space-y-4">
@@ -489,6 +491,64 @@ export const PageProfile: React.FC = () => {
       <EditPostMount pages={allPages} />
       {editing && <EditPageDialog page={page} onClose={() => setEditing(false)} onSaved={(p) => { setPage(p); setEditing(false); }} />}
     </>
+  );
+};
+
+/**
+ * Running the page (D-10): leave it, delete it, and — for administrators —
+ * the institutional flags (verified, required for everyone). These had API
+ * support and no screen.
+ */
+const GovernanceCard: React.FC<{ page: FeedPageDetail; onChanged: (p: FeedPageDetail) => void }> = ({ page, onChanged }) => {
+  const { user } = useAuth();
+  const { can } = usePermissions();
+  const { notify, confirm: confirmed } = useNotify();
+  const [ask, dialog] = useConfirmDialog();
+  const navigate = useNavigate();
+  const owners = page.editors.filter((e) => e.role === 'owner');
+  const iAmOwner = page.myRole === 'owner';
+  const mayGovern = can('FEED_PAGE_MANAGE');
+  if (!page.myRole && !mayGovern) return null;
+
+  const fail = (e: unknown) => notify({ title: e instanceof Error ? e.message : 'That did not work', tone: 'error' });
+  const leave = async () => {
+    if (!user) return;
+    if (iAmOwner && owners.length < 2) { notify({ title: 'Make someone else an owner first', body: 'A page always needs an owner.', tone: 'warning' }); return; }
+    if (!(await ask({ title: `Leave ${page.name}?`, body: <p>You will no longer post as this page or see its drafts. An owner can add you back.</p>, confirmLabel: 'Leave page', tone: 'danger' }))) return;
+    try { await api.removeEditor(page.id, user.id); confirmed(`You left ${page.name}`); onChanged({ ...page, myRole: null, editors: page.editors.filter((e) => e.id !== user.id) }); }
+    catch (e) { fail(e); }
+  };
+  const remove = async () => {
+    if (!(await ask({ title: `Delete ${page.name}?`, body: <p>The page and its posts disappear for everyone, and followers stop seeing it. This cannot be undone here.</p>, confirmLabel: 'Delete page', tone: 'danger' }))) return;
+    try { await api.deletePage(page.id); confirmed(`${page.name} was deleted`); navigate('/app/feed/pages'); }
+    catch (e) { fail(e); }
+  };
+  const flag = async (patch: { verified?: boolean; mandatory?: boolean }, done: string) => {
+    if (patch.mandatory && !(await ask({ title: 'Make this page required for everyone?', body: <p>Everyone in its audience follows it automatically and cannot unfollow.</p>, confirmLabel: 'Make required' }))) return;
+    try { onChanged({ ...page, ...(await api.updatePage(page.id, patch)) }); confirmed(done); }
+    catch (e) { fail(e); }
+  };
+  return (
+    <div className="mt-4 space-y-3 rounded-2xl border border-border-light bg-card-light p-4 text-sm dark:border-border-dark/40 dark:bg-elevated-dark/40 sm:p-5">
+      <p className="text-xs font-semibold uppercase tracking-wide text-text-secondary-light dark:text-text-secondary-dark">Page settings</p>
+      {mayGovern && (
+        <div className="space-y-2">
+          <label className="flex items-center justify-between gap-3">
+            <span><span className="font-medium">Verified</span><span className="block text-xs text-text-secondary-light dark:text-text-secondary-dark">An official page of the school.</span></span>
+            <input type="checkbox" checked={page.verified} onChange={(e) => void flag({ verified: e.target.checked }, e.target.checked ? 'Page verified' : 'Verification removed')} className="h-4 w-4 accent-blue-600" />
+          </label>
+          <label className="flex items-center justify-between gap-3">
+            <span><span className="font-medium">Required for everyone</span><span className="block text-xs text-text-secondary-light dark:text-text-secondary-dark">Everyone in its audience follows it.</span></span>
+            <input type="checkbox" checked={page.mandatory} onChange={(e) => void flag({ mandatory: e.target.checked }, e.target.checked ? 'Page is now required' : 'Page is no longer required')} className="h-4 w-4 accent-blue-600" />
+          </label>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2 pt-1">
+        {page.myRole && <button onClick={() => void leave()} className="rounded-full border border-border-light px-3 py-1.5 text-xs font-semibold dark:border-border-dark/60">Leave page</button>}
+        {(iAmOwner || mayGovern) && <button onClick={() => void remove()} className="rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 dark:border-red-900/50 dark:text-red-400 dark:hover:bg-red-900/20">Delete page</button>}
+      </div>
+      {dialog}
+    </div>
   );
 };
 
@@ -553,8 +613,9 @@ const TeamTab: React.FC<{ page: FeedPageDetail; canManage: boolean; onChanged: (
     catch (e) { notify({ title: e instanceof Error ? e.message : 'That did not work', tone: 'error' }); return false; }
   };
 
-  const remove = (member: FeedPageEditor) => {
-    if (!window.confirm(`Remove ${member.name} from the page team?`)) return;
+  const [ask, dialog] = useConfirmDialog();
+  const remove = async (member: FeedPageEditor) => {
+    if (!(await ask({ title: `Remove ${member.name} from the team?`, body: <p>They stop posting as this page.</p>, confirmLabel: 'Remove', tone: 'danger' }))) return;
     void run(() => api.removeEditor(page.id, member.id), `${member.name} removed`);
   };
 
@@ -607,6 +668,7 @@ const TeamTab: React.FC<{ page: FeedPageDetail; canManage: boolean; onChanged: (
           onAdd={async (userId, role, title) => { if (await run(() => api.addEditor(page.id, userId, role, title), 'Added to the team')) setAdding(false); }}
         />
       )}
+    {dialog}
     </div>
   );
 };

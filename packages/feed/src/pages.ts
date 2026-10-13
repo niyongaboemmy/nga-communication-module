@@ -465,6 +465,16 @@ export async function updateEditor(
 }
 
 export async function removeEditor(actor: FeedActor, pageId: string, userId: string): Promise<void> {
+  // Leaving a page you help run needs no owner's say (D-10); an owner still
+  // has to leave another owner behind.
+  if (userId === actor.id) {
+    const { rows: mine } = await getPool().query<{ role: string }>(
+      'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [pageId, actor.id]);
+    if (!mine[0]) return;
+    if (mine[0].role === 'owner') await assertAnotherOwner(pageId, actor.id);
+    await getPool().query('DELETE FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [pageId, actor.id]);
+    return;
+  }
   const page = await assertPageOwner(actor, pageId);
   const { rows } = await getPool().query<{ role: string }>(
     'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [page.id, userId],

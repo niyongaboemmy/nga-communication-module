@@ -427,13 +427,17 @@ router.post('/moderation/:id/act', authorizePermission('MODERATION_ACT'), wrap(a
     }
   }
   if ((action === 'remove' || action === 'warn') && r.authorId) {
+    // Says what it was about — a post or a comment — under its own kind
+    // (D-10: it always said "post" and arrived as a mention).
+    const what = r.targetType === 'post' ? 'post' : 'comment';
     await notifyAndPush([r.authorId], {
-      kind: 'feed.mention',
-      title: action === 'remove' ? 'A post was removed' : 'A moderator reviewed your content',
+      kind: 'feed.moderation',
+      title: action === 'remove' ? `Your ${what} was removed` : `A moderator reviewed your ${what}`,
       body: action === 'remove'
-        ? 'One of your posts was removed by a moderator for breaching the community rules.'
-        : 'A moderator has reviewed content you posted. Please keep to the community rules.',
-      link: '/app/feed', subjectType: 'feed_moderation', subjectId: r.targetId,
+        ? `A moderator removed your ${what} for breaching the community rules.`
+        : `A moderator looked at a ${what} you posted. Please keep to the community rules.`,
+      link: r.postId && action !== 'remove' ? `/app/feed/post/${r.postId}` : '/app/feed',
+      subjectType: 'feed_moderation', subjectId: r.targetId,
     }).catch(() => {});
   }
   res.json(ok({ acted: true }));
