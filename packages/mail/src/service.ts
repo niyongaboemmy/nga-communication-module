@@ -175,7 +175,7 @@ export async function listLabels(userId: string): Promise<MailLabel[]> {
   }>(
     `SELECT l.id, l.name, l.color, l.ordinal, l.is_system,
             COALESCE((
-              SELECT count(*) FROM mail_recipients r
+              SELECT count(DISTINCT r.thread_id) FROM mail_recipients r
                WHERE r.user_id = $1 AND NOT r.is_read AND r.folder = 'inbox' AND NOT r.is_hidden
                  AND NOT r.pending AND r.labels ? l.id
             ), 0)::text AS unread
@@ -226,10 +226,14 @@ export async function mailboxCounts(userId: string): Promise<MailboxCounts> {
     inbox: string; starred: string; drafts: string; scheduled: string;
   }>(
     `SELECT
-       (SELECT count(*) FROM mail_recipients r
+       -- Conversations, not rows: an internal recipient with email copies on
+       -- has an in-app and an email row for the same mail, and a thread of five
+       -- unread messages is one thing to read.
+       (SELECT count(DISTINCT r.thread_id) FROM mail_recipients r
          WHERE r.user_id = $1 AND NOT r.is_read AND r.folder = 'inbox' AND NOT r.is_hidden AND NOT r.pending)::text AS inbox,
-       (SELECT count(*) FROM mail_recipients r
-         WHERE r.user_id = $1 AND r.is_starred AND NOT r.is_hidden AND NOT r.pending)::text AS starred,
+       (SELECT count(DISTINCT r.thread_id) FROM mail_recipients r
+         WHERE r.user_id = $1 AND r.is_starred AND NOT r.is_hidden AND NOT r.pending
+           AND r.folder <> 'trash')::text AS starred,
        (SELECT count(*) FROM mail_messages m
          WHERE m.from_user_id = $1 AND m.is_draft)::text AS drafts,
        (SELECT count(*) FROM mail_messages m
@@ -409,6 +413,16 @@ async function participates(db: PoolClient | ReturnType<typeof getPool>, userId:
   return rows.length > 0;
 }
 
+function onePerPerson<T extends { user_id: string | null; address: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  return rows.filter((r) => {
+    const key = r.user_id ?? r.address.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export async function getThread(userId: string, threadId: string): Promise<MailThreadView> {
   const db = getPool();
   if (!(await participates(db, userId, threadId))) throw new MailError('Thread not found.', 404);
@@ -500,9 +514,10 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
     messages.push({
       id: m.id, threadId: m.thread_id,
       from: { userId: m.from_user_id, name: m.from_name, address: m.from_address, avatarUrl: m.from_avatar },
-      to: visibleRecips.filter((r) => r.kind === 'to').map(asPerson),
-      cc: visibleRecips.filter((r) => r.kind === 'cc').map(asPerson),
-      bcc: isSender ? recips.filter((r) => r.kind === 'bcc').map(asPerson) : [],
+      // One entry per person: an in-app and an email copy are the same recipient.
+      to: onePerPerson(visibleRecips.filter((r) => r.kind === 'to')).map(asPerson),
+      cc: onePerPerson(visibleRecips.filter((r) => r.kind === 'cc')).map(asPerson),
+      bcc: isSender ? onePerPerson(recips.filter((r) => r.kind === 'bcc')).map(asPerson) : [],
       subject: m.subject, bodyHtml: m.body_html, bodyText: m.body_text, snippet: m.snippet,
       kind: m.kind as MailMessageView['kind'], parentId: m.parent_id,
       isDraft: m.is_draft, scheduledAt: m.scheduled_at, sentAt: m.sent_at, createdAt: m.created_at,

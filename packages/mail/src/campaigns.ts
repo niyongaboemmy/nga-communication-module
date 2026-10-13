@@ -180,8 +180,8 @@ export interface CampaignPreview {
   samples: Array<{ to: string; subject: string; bodyHtml: string }>;
 }
 
-export async function previewCampaign(userId: string, id: string): Promise<CampaignPreview> {
-  const campaign = await getCampaign(userId, id, true);
+export async function previewCampaign(userId: string, id: string, canSeeAll = false): Promise<CampaignPreview> {
+  const campaign = await getCampaign(userId, id, canSeeAll);
   const recipients = await resolveCampaignRecipients(campaign);
   const { extractMergeFields } = await import('./render.js');
   const fields = extractMergeFields(campaign.subject, campaign.bodyHtml);

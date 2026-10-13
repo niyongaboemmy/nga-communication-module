@@ -8,6 +8,10 @@ import * as mailAi from '../services/mailAiService.js';
 import { MailAiError } from '../services/mailAiService.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
+import { emitToUsers } from '../services/chatRealtime.js';
+
+/** Tell every device of this person that their mailbox counts moved. */
+const countsChanged = (userId: string) => emitToUsers([userId], 'mail:counts', { at: new Date().toISOString() });
 import { hasPermission } from '../access/gate.js';
 import { routeCampaignForApproval } from '../access/approvers.js';
 import { audit } from '../services/userService.js';
@@ -79,21 +83,27 @@ router.get('/threads', authorizePermission('MAIL_READ'), wrap(async (req, res) =
 }));
 
 router.get('/threads/:id', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
-  res.json(ok({ thread: await mail.getThread(actor(req).id, req.params.id!) }));
+  const thread = await mail.getThread(actor(req).id, req.params.id!);
+  // Opening marks it read; every other device of this person updates its counts.
+  countsChanged(actor(req).id);
+  res.json(ok({ thread }));
 }));
 
 router.post('/threads/:id/move', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.moveThread(actor(req).id, req.params.id!, str(req.body?.folder) as never);
+  countsChanged(actor(req).id);
   res.json(ok({ moved: true }));
 }));
 
 router.post('/threads/:id/star', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.starThread(actor(req).id, req.params.id!, req.body?.starred !== false);
+  countsChanged(actor(req).id);
   res.json(ok({ starred: req.body?.starred !== false }));
 }));
 
 router.post('/threads/:id/read', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.markThread(actor(req).id, req.params.id!, req.body?.read !== false);
+  countsChanged(actor(req).id);
   res.json(ok({ read: req.body?.read !== false }));
 }));
 
@@ -178,7 +188,12 @@ router.get('/prefs', authorizePermission('MAIL_READ'), wrap(async (req, res) => 
 router.put('/prefs', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   const b = req.body ?? {};
   const patch: Record<string, unknown> = {};
-  if (typeof b.displayName === 'string' || b.displayName === null) patch.displayName = b.displayName;
+  // A display name is a name, not a notice: one line, at most 60 characters.
+  // Recipients always see the real address beside it (ThreadView).
+  if (typeof b.displayName === 'string') {
+    const clean = b.displayName.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+    patch.displayName = clean || null;
+  } else if (b.displayName === null) patch.displayName = null;
   if (typeof b.signatureHtml === 'string') patch.signatureHtml = b.signatureHtml.slice(0, 20_000);
   if (typeof b.signatureEnabled === 'boolean') patch.signatureEnabled = b.signatureEnabled;
   if (typeof b.emailCopies === 'boolean') patch.emailCopies = b.emailCopies;
@@ -233,8 +248,12 @@ router.delete('/lists/:id', authorizePermission('MAIL_LIST_MANAGE'), wrap(async 
   res.json(ok({ deleted: true }));
 }));
 
-router.get('/lists/:id/members', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
-  res.json(ok({ members: await mail.listMembers(req.params.id!) }));
+// Member addresses (and any merge values) are for the people who manage or
+// send to lists, not for everyone with a mailbox.
+router.get('/lists/:id/members', authorizePermission('MAIL_LIST_MANAGE', 'MAIL_BULK_SEND'), wrap(async (req, res) => {
+  const members = await mail.listMembers(req.params.id!);
+  const manager = hasPermission(req, 'MAIL_LIST_MANAGE');
+  res.json(ok({ members: manager ? members : members.map((m) => ({ ...m, mergeVars: {} })) }));
 }));
 
 router.post('/lists/:id/members', authorizePermission('MAIL_LIST_MANAGE'), wrap(async (req, res) => {
@@ -327,7 +346,8 @@ router.delete('/campaigns/:id', authorizePermission('MAIL_BULK_SEND'), wrap(asyn
 }));
 
 router.get('/campaigns/:id/preview', authorizePermission('MAIL_BULK_SEND', 'MAIL_APPROVE'), wrap(async (req, res) => {
-  res.json(ok({ preview: await mail.previewCampaign(actor(req).id, req.params.id!) }));
+  // Its author, or an approver deciding on it — not every bulk sender.
+  res.json(ok({ preview: await mail.previewCampaign(actor(req).id, req.params.id!, hasPermission(req, 'MAIL_APPROVE')) }));
 }));
 
 router.post('/campaigns/:id/submit', authorizePermission('MAIL_BULK_SEND'), wrap(async (req, res) => {

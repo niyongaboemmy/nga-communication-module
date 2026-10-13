@@ -89,6 +89,8 @@ const MessageCard: React.FC<{
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-semibold">{message.from.name}</span>
+            {/* The real address, always: a display name is chosen by the sender. */}
+            <span className="hidden truncate text-xs text-text-secondary-light sm:inline dark:text-text-secondary-dark">&lt;{message.from.address}&gt;</span>
             {message.isDraft && <span className="rounded bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">Draft</span>}
             {message.scheduledAt && !message.sentAt && <span className="inline-flex items-center gap-1 rounded bg-blue-100 px-1.5 text-[10px] text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"><Clock size={10} /> {when(message.scheduledAt)}</span>}
             <span className="ml-auto shrink-0 text-xs text-text-secondary-light dark:text-text-secondary-dark">{when(message.sentAt ?? message.createdAt)}</span>

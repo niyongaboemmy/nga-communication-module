@@ -49,6 +49,10 @@ export const MailLayout: React.FC = () => {
     ]).finally(() => setReady(true));
   }, [refreshMeta]);
 
+  // Read, moved or starred on another device (or in this one's thread view):
+  // the folder counts and label badges move with it.
+  useEffect(() => onSocket('mail:counts', () => { refreshMeta(); }), [refreshMeta]);
+
   // Live: a mail notification means the inbox changed.
   useEffect(() => onSocket('notification:new', (n) => {
     if (typeof n?.kind === 'string' && n.kind.startsWith('mail.')) {

@@ -92,8 +92,10 @@ export async function deliverInApp(messageId: string): Promise<number> {
         title: `${m.from_name}: ${m.subject}`.slice(0, 200),
         body: m.snippet || null,
         link: `/app/mail/t/${m.thread_id}`,
-        subjectType: 'mail_thread',
-        subjectId: m.thread_id,
+        // Per message, not per thread: a notification already read for the
+        // first mail of a thread must not swallow the reply that follows it.
+        subjectType: 'mail_message',
+        subjectId: messageId,
       }).then((rows) => push(rows)).catch(() => { /* a missed toast is not a failed delivery */ });
     }
   }

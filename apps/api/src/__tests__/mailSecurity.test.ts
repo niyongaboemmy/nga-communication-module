@@ -137,3 +137,27 @@ describe('unsent mail is invisible to its recipients', () => {
     expect(JSON.stringify(view.body)).not.toContain('SECRET DRAFT LINE');
   });
 });
+
+describe('mail counts', () => {
+  it('count conversations, not copies: one mail is one unread even with email copies on', async () => {
+    const before = (await as(ben.token).get('/api/mail/counts')).body.data.counts.inbox as number;
+    const r = await as(ada.token).post('/api/mail/compose', { to: [ben.email], subject: 'count me once', bodyHtml: '<p>x</p>' });
+    expect(r.status).toBeLessThan(300);
+    const after = (await as(ben.token).get('/api/mail/counts')).body.data.counts.inbox as number;
+    expect(after - before).toBe(1);
+    const thread = (await as(ben.token).get(`/api/mail/threads/${r.body.data.threadId}`)).body.data.thread;
+    const names = thread.messages[0].to.map((p: { address: string }) => p.address);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('a reply in a thread whose first notification was read raises a fresh one', async () => {
+    const first = await as(ada.token).post('/api/mail/compose', { to: [ben.email], subject: 'thread notify', bodyHtml: '<p>1</p>' });
+    await getPool().query(`UPDATE notifications SET read_at = now() WHERE user_id = $1 AND kind = 'mail.received'`, [ben.id]);
+    await as(ada.token).post('/api/mail/compose', {
+      to: [ben.email], subject: 'Re: thread notify', bodyHtml: '<p>2</p>', threadId: first.body.data.threadId,
+    });
+    const { rows } = await getPool().query(
+      `SELECT count(*)::int AS n FROM notifications WHERE user_id = $1 AND kind = 'mail.received' AND read_at IS NULL`, [ben.id]);
+    expect(rows[0].n).toBeGreaterThanOrEqual(1);
+  });
+});
