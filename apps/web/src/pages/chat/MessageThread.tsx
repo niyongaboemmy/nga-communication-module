@@ -3,7 +3,7 @@ import {
   Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
   RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
-  X, Bookmark, Forward, PinOff, Link2, Quote, Settings,
+  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag,
 } from 'lucide-react';
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -20,6 +20,8 @@ import type { Conversation, Message } from './types';
 import { RichText } from './RichText';
 import { EmojiPicker } from './EmojiPicker';
 import { ForwardDialog } from './ForwardDialog';
+import { ReportDialog } from './ReportDialog';
+import { ProfileCard } from './ProfileCard';
 import { MessageAttachments } from './Attachments';
 import { PinnedBar } from './PinnedBar';
 import { PollCard } from './PollCard';
@@ -208,9 +210,14 @@ const MessageRow: React.FC<{
   const { user } = useAuth();
   const {
     react, edit, remove, pin, save, openThread, setReplyTarget, jumpTo, highlightedId,
-    editingId, setEditingId, threadUnread, discard,
+    editingId, setEditingId, threadUnread, discard, blockedIds,
   } = useChat();
   const newReplies = threadUnread[m.id] ?? 0;
+  const [reporting, setReporting] = useState(false);
+  // The card behind every avatar: who this is, message them, block, report.
+  const [profileOpen, setProfileOpen] = useState(false);
+  // A message from someone you blocked is folded away until you ask (B-05).
+  const [revealBlocked, setRevealBlocked] = useState(false);
   const [picking, setPicking] = useState(false);
   const [forwarding, setForwarding] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -261,6 +268,20 @@ const MessageRow: React.FC<{
     );
   }
 
+  if (!mine && blockedIds.has(m.senderId) && !revealBlocked) {
+    return (
+      <li className={`flex gap-2.5 px-2 sm:px-4 ${newGroup ? 'mt-3' : 'mt-0.5'}`}>
+        <span className="w-9 shrink-0" />
+        <button
+          onClick={() => setRevealBlocked(true)}
+          className="rounded-2xl border border-dashed border-border-light px-3 py-1.5 text-xs text-text-secondary-light hover:bg-surface-light dark:border-border-dark/50 dark:text-text-secondary-dark dark:hover:bg-surface-dark"
+        >
+          Message from someone you blocked · <span className="font-medium text-blue-600 dark:text-blue-400">Show</span>
+        </button>
+      </li>
+    );
+  }
+
   const failed = m.delivery === 'failed';
   const pending = m.delivery === 'pending';
   // A bare 👍 gets no bubble and three times the size.
@@ -293,16 +314,30 @@ const MessageRow: React.FC<{
     >
       {/* The gutter keeps its width when the avatar is hidden, so a grouped run
           stays aligned instead of stepping left. */}
-      <span className="w-9 shrink-0">
-        {newGroup && <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={36} />}
+      <span className="relative w-9 shrink-0">
+        {newGroup && (
+          <button
+            onClick={() => setProfileOpen((v) => !v)}
+            aria-label={`${m.senderName}, profile`}
+            className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={36} />
+          </button>
+        )}
+        {profileOpen && (
+          <ProfileCard userId={m.senderId} anchor={mine ? 'right' : 'left'} onClose={() => setProfileOpen(false)} />
+        )}
       </span>
 
       <div className={`min-w-0 max-w-[min(46rem,85%)] ${mine ? 'items-end' : 'items-start'} flex flex-col`}>
         {newGroup && (
           <div className={`mb-1 flex items-baseline gap-2 ${mine ? 'flex-row-reverse' : ''}`}>
-            <span className="text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
+            <button
+              onClick={() => setProfileOpen((v) => !v)}
+              className="text-sm font-semibold text-text-primary-light hover:underline dark:text-text-primary-dark"
+            >
               {mine ? 'You' : m.senderName}
-            </span>
+            </button>
             {m.senderRole && !mine && (
               <span className="hidden text-[11px] capitalize text-text-secondary-light sm:inline dark:text-text-secondary-dark">
                 {m.senderRole}
@@ -644,6 +679,15 @@ const MessageRow: React.FC<{
                 >
                   <Link2 size={13} /> Copy link to message
                 </button>
+                {!mine && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); setReporting(true); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+                  >
+                    <Flag size={13} /> Report message
+                  </button>
+                )}
                 {m.editedCount > 0 && (
                   <p className="px-3 py-1.5 text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
                     Edited {m.editedCount} {m.editedCount === 1 ? 'time' : 'times'}
@@ -656,6 +700,14 @@ const MessageRow: React.FC<{
       )}
 
       {forwarding && <ForwardDialog message={m} onClose={() => setForwarding(false)} />}
+      {reporting && (
+        <ReportDialog
+          user={{ id: m.senderId, name: m.senderName }}
+          message={{ id: m.id, conversationId: m.conversationId }}
+          alreadyBlocked={blockedIds.has(m.senderId)}
+          onClose={() => setReporting(false)}
+        />
+      )}
     </li>
   );
 };

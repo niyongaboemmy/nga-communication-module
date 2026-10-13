@@ -12,6 +12,7 @@ import * as chat from '@tupo/chat';
 import { ChatError } from '@tupo/chat';
 import { evictFromRooms, emitToConversation, emitToUsers } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
+import { notifyAndPush } from '@tupo/notify';
 import { hasPermission } from '../access/gate.js';
 import { contactDenied } from '../access/contactGate.js';
 import { enqueueUnfurl } from '../services/queue.js';
@@ -1343,9 +1344,78 @@ router.delete('/invites/:code', wrap(async (req, res) => {
 router.get('/profile/:userId', authorizePermission('DIRECTORY_VIEW'), wrap(async (req, res) => {
   const me = actor(req);
   const profile = await chat.getProfile(me.id, req.params.userId!);
+  const block = me.id === profile.id ? { byMe: false, byThem: false } : await chat.blockedBetween(me.id, profile.id);
+  // A block hides presence both ways (B-05): offline, no last seen.
+  if (block.byMe || block.byThem) {
+    return res.json(ok({ profile: { ...profile, presence: 'offline', lastSeenAt: null, blockedByMe: block.byMe } }));
+  }
   const online = await presenceFor([profile.id]);
   const seen = await lastSeenFor([profile.id]);
-  res.json(ok({ profile: withPresence(profile, profile.id, online, seen) }));
+  res.json(ok({ profile: { ...withPresence(profile, profile.id, online, seen), blockedByMe: false } }));
+}));
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Blocking and reporting (B-05, FR-USR-7)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/blocks', wrap(async (req, res) => {
+  res.json(ok({ blocks: await chat.listBlocks(actor(req).id) }));
+}));
+
+router.put('/blocks/:userId', wrap(async (req, res) => {
+  const me = actor(req);
+  await chat.blockUser(me.id, req.params.userId!, req.body?.reason ?? null);
+  await audit({ actorId: me.id, action: 'chat.block', targetType: 'user', targetId: req.params.userId! });
+  // Every device of the blocker updates (composer, presence, menus). The
+  // blocked person is deliberately not told.
+  emitToUsers([me.id], 'block:changed', { userId: req.params.userId!, blocked: true });
+  res.json(ok({ blocked: true }));
+}));
+
+router.delete('/blocks/:userId', wrap(async (req, res) => {
+  const me = actor(req);
+  await chat.unblockUser(me.id, req.params.userId!);
+  await audit({ actorId: me.id, action: 'chat.unblock', targetType: 'user', targetId: req.params.userId! });
+  emitToUsers([me.id], 'block:changed', { userId: req.params.userId!, blocked: false });
+  res.json(ok({ blocked: false }));
+}));
+
+router.post('/reports', authorizePermission('REPORT_SUBMIT'), wrap(async (req, res) => {
+  const me = actor(req);
+  const body = req.body ?? {};
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
+  const result = await chat.submitReport({
+    reporterId: me.id, userId: str(body.userId), conversationId: str(body.conversationId),
+    messageId: str(body.messageId), reason: String(body.reason ?? ''), details: str(body.details),
+  });
+  if (body.alsoBlock === true && str(body.userId)) {
+    await chat.blockUser(me.id, String(body.userId));
+    emitToUsers([me.id], 'block:changed', { userId: String(body.userId), blocked: true });
+  }
+  if (!result.duplicate) {
+    await audit({ actorId: me.id, action: 'chat.report', targetType: 'user_report', targetId: result.id });
+  }
+  res.status(result.duplicate ? 200 : 201).json(ok({ reportId: result.id, duplicate: result.duplicate }));
+}));
+
+router.get('/reports', authorizePermission('MODERATION_QUEUE_VIEW'), wrap(async (req, res) => {
+  const status = String(req.query.status ?? 'open');
+  if (!['open', 'resolved', 'dismissed', 'all'].includes(status)) return res.status(400).json(fail('Unknown status.'));
+  res.json(ok({ reports: await chat.listReports(status as 'open') }));
+}));
+
+router.patch('/reports/:id', authorizePermission('MODERATION_ACT'), wrap(async (req, res) => {
+  const me = actor(req);
+  const status = req.body?.status;
+  const { reporterId } = await chat.resolveReport(req.params.id!, me.id, status, req.body?.note ?? null);
+  await audit({ actorId: me.id, action: `chat.report.${status}`, targetType: 'user_report', targetId: req.params.id! });
+  // The reporter hears that it was looked at — never who was actioned or how.
+  await notifyAndPush([reporterId], {
+    kind: 'moderation.report', title: 'Your report was reviewed',
+    body: 'Thank you — a moderator has looked at what you reported.',
+    link: '/app/chat', subjectType: 'user_report', subjectId: req.params.id!,
+  }).catch(() => {});
+  res.json(ok({ status }));
 }));
 
 router.put('/status', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, res) => {

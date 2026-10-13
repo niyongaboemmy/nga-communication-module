@@ -45,7 +45,8 @@ export type NotificationKind =
   | 'feed.comment'     // someone commented on your post
   | 'feed.reply'       // someone replied to your comment
   | 'feed.reaction'    // someone reacted to your post or comment
-  | 'feed.mention';    // you were @-mentioned in a post or comment
+  | 'feed.mention'     // you were @-mentioned in a post or comment
+  | 'moderation.report'; // a report you made was reviewed
 
 export interface NotificationRow {
   id: string;

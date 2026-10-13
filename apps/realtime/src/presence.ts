@@ -142,7 +142,10 @@ export async function broadcastPresence(
     const at = new Date().toISOString();
     const payload = { userId, status, at, lastSeenAt };
 
-    const peers = await chat.dmPeerIdsOf(userId);
+    // DM counterparts — minus anyone a block separates them from (B-05).
+    const all = await chat.dmPeerIdsOf(userId);
+    const hidden = await chat.separatedFrom(userId, all);
+    const peers = all.filter((id) => !hidden.has(id));
     if (peers.length) io.to(peers.map(userRoom)).emit('presence:update', payload);
 
     // The person's own other devices, so a status set on the phone shows on

@@ -76,6 +76,17 @@ export async function assertCanPost(
   if (membership.type === 'announcement' && !opts.mayAnnounce && !canManage(membership.role)) {
     throw new ChatError('Only announcers can post in this channel.', 403);
   }
+  // A block, either way, closes a direct conversation (B-05). Checked here so
+  // the REST send, the socket send and scheduled sends all honour it.
+  if (membership.type === 'dm') {
+    const { rows } = await getPool().query(
+      `SELECT 1 FROM conversation_members cm
+         JOIN user_blocks b ON (b.blocker_id = $2 AND b.blocked_id = cm.user_id)
+                            OR (b.blocker_id = cm.user_id AND b.blocked_id = $2)
+        WHERE cm.conversation_id = $1 AND cm.user_id <> $2 LIMIT 1`,
+      [conversationId, userId]);
+    if (rows.length) throw new ChatError('You can’t message this person.', 403);
+  }
   return membership;
 }
 

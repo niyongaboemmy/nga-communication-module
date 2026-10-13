@@ -475,6 +475,13 @@ io.on('connection', (socket) => {
     if (!decision?.ok || !decision.access.permissions.has('PRESENCE_VIEW')) return ack({ presence: {} });
     const wanted = [...new Set(Array.isArray(userIds) ? userIds : [])]
       .filter((id): id is string => typeof id === 'string' && id.length <= 32).slice(0, 200);
+    // A block hides presence both ways (B-05): those people read as offline.
+    const hidden = await chat.separatedFrom(user.id, wanted).catch(() => new Set<string>());
+    if (hidden.size) {
+      const shown = await readPresence(redisReady ? presence : null, wanted.filter((id) => !hidden.has(id)));
+      for (const id of hidden) shown[id] = { status: 'offline', lastSeenAt: null } as (typeof shown)[string];
+      return ack({ presence: shown });
+    }
     ack({ presence: await readPresence(redisReady ? presence : null, wanted) });
   });
 

@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { X, Bell, Volume2, Moon, Eye, CornerDownLeft, Check } from 'lucide-react';
-import { IconButton, Spinner } from '../../components/ui';
+import { X, Bell, Volume2, Moon, Eye, CornerDownLeft, Check, Ban } from 'lucide-react';
+import { Avatar, IconButton, Spinner } from '../../components/ui';
+import { useChat } from './ChatProvider';
+import * as chatApi from './api';
 import { useNotify } from '../../context/NotificationContext';
 import { apiGet, apiPatch } from '../../lib/api';
 import type { NotificationLevel } from '@tupo/shared';
@@ -252,8 +254,55 @@ export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClos
               onChange={(v) => void update({ enterToSend: v })}
             />
           </section>
+
+          <BlockedPeople />
         </div>
       )}
     </aside>
+  );
+};
+
+/** The people you have blocked, with the way back (B-05). */
+const BlockedPeople: React.FC = () => {
+  const { blockedIds, setBlocked } = useChat();
+  const { notify } = useNotify();
+  const [people, setPeople] = useState<chatApi.BlockedPerson[] | null>(null);
+
+  // Re-read whenever the set changes (a block from a profile card, another device).
+  useEffect(() => {
+    let cancelled = false;
+    chatApi.listBlocks().then((p) => { if (!cancelled) setPeople(p); }).catch(() => { if (!cancelled) setPeople([]); });
+    return () => { cancelled = true; };
+  }, [blockedIds]);
+
+  return (
+    <section>
+      <h3 className="mb-1 flex items-center gap-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-text-secondary-light/80 dark:text-text-secondary-dark/70">
+        <Ban size={11} /> Blocked people
+      </h3>
+      {people === null ? (
+        <div className="px-2 py-2"><Spinner className="h-4 w-4" /></div>
+      ) : people.length === 0 ? (
+        <p className="px-2 py-1.5 text-xs text-text-secondary-light dark:text-text-secondary-dark">
+          Nobody. Block someone from their profile card — they won’t be told.
+        </p>
+      ) : (
+        <ul className="space-y-0.5">
+          {people.map((p) => (
+            <li key={p.id} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-surface-light dark:hover:bg-surface-dark">
+              <Avatar name={p.name} src={p.avatarUrl ?? undefined} size={28} />
+              <span className="min-w-0 flex-1 truncate text-sm text-text-primary-light dark:text-text-primary-dark">{p.name}</span>
+              <button
+                onClick={() => void setBlocked(p.id, false).catch((err) =>
+                  notify({ title: 'Could not unblock', body: err instanceof Error ? err.message : undefined, tone: 'error' }))}
+                className="rounded-full px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-500/10"
+              >
+                Unblock
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 };

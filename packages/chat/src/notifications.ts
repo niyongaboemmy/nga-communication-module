@@ -1,7 +1,20 @@
 import { getPool } from '@tupo/db';
-import { notifyAndPush } from '@tupo/notify';
+import { notifyAndPush as pushToAll } from '@tupo/notify';
+import { notBlocking } from './safety.js';
 import type { WireMessage } from '@tupo/shared';
 
+
+/**
+ * Every chat notification goes through here: someone who has blocked the
+ * sender is never notified by them — not a mention, a reply or a reaction
+ * (B-05). `sender` is whoever caused the notification.
+ */
+async function notifyAndPush(
+  userIds: string[], n: Parameters<typeof pushToAll>[1], opts?: Parameters<typeof pushToAll>[2], sender?: string,
+): ReturnType<typeof pushToAll> {
+  const ids = sender ? await notBlocking(sender, userIds) : userIds;
+  return pushToAll(ids, n, opts);
+}
 /**
  * Who should be told about a message — and, more importantly, who should not.
  *
@@ -102,7 +115,7 @@ export async function notifyNewMessage(
       link,
       subjectType: 'conversation',
       subjectId: message.conversationId,
-    });
+    }, undefined, message.senderId);
     notified.push(...dm);
   }
 
@@ -116,7 +129,7 @@ export async function notifyNewMessage(
       link,
       subjectType: 'conversation',
       subjectId: message.conversationId,
-    });
+    }, undefined, message.senderId);
     notified.push(...mentions);
   }
 
@@ -128,7 +141,7 @@ export async function notifyNewMessage(
       link,
       subjectType: 'conversation',
       subjectId: message.conversationId,
-    });
+    }, undefined, message.senderId);
     notified.push(...plain);
   }
 
@@ -184,7 +197,7 @@ export async function notifyThreadReply(
       link,
       subjectType: 'thread',
       subjectId: opts.rootId,
-    });
+    }, undefined, message.senderId);
   }
   if (followers.length) {
     await notifyAndPush(followers, {
@@ -194,7 +207,7 @@ export async function notifyThreadReply(
       link,
       subjectType: 'thread',
       subjectId: opts.rootId,
-    });
+    }, undefined, message.senderId);
   }
   return [...mentions, ...followers];
 }
@@ -212,7 +225,7 @@ export async function notifyMention(
     link: `/app/chat/${message.conversationId}`,
     subjectType: 'conversation',
     subjectId: message.conversationId,
-  });
+  }, undefined, message.senderId);
   return targets;
 }
 
@@ -282,6 +295,6 @@ export async function notifyReaction(
     link: `/app/chat/${conversationId}`,
     subjectType: 'message',
     subjectId: message.id,
-  });
+  }, undefined, reactorId);
   return true;
 }

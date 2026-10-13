@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Paperclip, Smile, AtSign, Send, Mic, Lock, Archive, CloudOff, X, Quote,
-  FileText, AlertCircle, Upload, Clock, Slash, CalendarPlus,
+  FileText, AlertCircle, Upload, Clock, Slash, CalendarPlus, Ban,
 } from 'lucide-react';
 import { IconButton } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -48,7 +48,7 @@ export const Composer: React.FC<{
   const navigate = useNavigate();
   const {
     send, notifyTyping, draftFor, setDraft, connected, queued, replyTarget, setReplyTarget,
-    enterToSend, lastEditableOwnMessage, setEditingId,
+    enterToSend, lastEditableOwnMessage, setEditingId, blockedIds, setBlocked,
   } = useChat();
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -301,6 +301,27 @@ export const Composer: React.FC<{
         <p className="flex items-center justify-center gap-2 text-xs text-text-secondary-light dark:text-text-secondary-dark">
           <Archive size={13} />
           This conversation is archived. You can read it, but not post.
+        </p>
+      </div>
+    );
+  }
+
+  // You blocked the other person in this DM (B-05): say so, with the way back.
+  const blockedPeer = conversation.type === 'dm' && conversation.peer && blockedIds.has(conversation.peer.id)
+    ? conversation.peer : null;
+  if (blockedPeer) {
+    return (
+      <div className="pb-safe shrink-0 border-t border-border-light bg-white px-4 py-3 dark:border-border-dark/30 dark:bg-chrome-dark">
+        <p className="flex flex-wrap items-center justify-center gap-2 text-xs text-text-secondary-light dark:text-text-secondary-dark">
+          <Ban size={13} />
+          You blocked {blockedPeer.name}. You can’t message each other.
+          <button
+            onClick={() => void setBlocked(blockedPeer.id, false).catch((err) =>
+              notify({ title: 'Could not unblock', body: err instanceof Error ? err.message : undefined, tone: 'error' }))}
+            className="font-medium text-blue-600 hover:underline dark:text-blue-400"
+          >
+            Unblock
+          </button>
         </p>
       </div>
     );

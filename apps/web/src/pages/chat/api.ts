@@ -378,6 +378,8 @@ export interface UserProfile {
   statusExpiresAt: string | null;
   presence: string;
   directConversationId: string | null;
+  /** You have blocked this person (B-05). */
+  blockedByMe?: boolean;
 }
 
 export const getProfile = (userId: string) =>
@@ -410,3 +412,28 @@ export const translateMessage = (
 ) => apiPost<{ language: LanguageCode; text: string; cached: boolean }>(
   `/api/chat/conversations/${conversationId}/messages/${messageId}/translate`, { language },
 ).then((r) => r.data!);
+
+/* ── Blocking and reporting (B-05) ─────────────────────────────────────── */
+
+export interface BlockedPerson { id: string; name: string; avatarUrl: string | null; blockedAt: string }
+export type ReportReason = 'harassment' | 'spam' | 'inappropriate' | 'safety' | 'other';
+export interface ChatReport {
+  id: string; reason: ReportReason; details: string | null; status: 'open' | 'resolved' | 'dismissed';
+  reporter: { id: string; name: string };
+  reported: { id: string; name: string; avatarUrl: string | null } | null;
+  conversationId: string | null; messageId: string | null; messageExcerpt: string | null;
+  createdAt: string; resolvedAt: string | null; resolutionNote: string | null; priorReports: number;
+}
+
+export const listBlocks = () =>
+  apiGet<{ blocks: BlockedPerson[] }>('/api/chat/blocks').then((r) => r.data!.blocks);
+export const blockUser = (userId: string) => apiPut<{ blocked: boolean }>(`/api/chat/blocks/${userId}`, {});
+export const unblockUser = (userId: string) => apiDelete<{ blocked: boolean }>(`/api/chat/blocks/${userId}`);
+export const submitReport = (input: {
+  userId?: string; conversationId?: string; messageId?: string;
+  reason: ReportReason; details?: string; alsoBlock?: boolean;
+}) => apiPost<{ reportId: string; duplicate: boolean }>('/api/chat/reports', input).then((r) => r.data!);
+export const listReports = (status: 'open' | 'resolved' | 'dismissed' | 'all' = 'open') =>
+  apiGet<{ reports: ChatReport[] }>(`/api/chat/reports?status=${status}`).then((r) => r.data!.reports);
+export const resolveReport = (id: string, status: 'resolved' | 'dismissed', note?: string) =>
+  apiPatch<{ status: string }>(`/api/chat/reports/${id}`, { status, note });

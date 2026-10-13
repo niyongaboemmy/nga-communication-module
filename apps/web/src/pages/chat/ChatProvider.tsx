@@ -5,7 +5,7 @@ import type { ActivityKind,
   ConversationSummary, MessageType, NotificationLevel, TypingUser, WireMessage,
 } from '@tupo/shared';
 import { TYPING_THROTTLE_MS, EDIT_WINDOW_MS } from '@tupo/shared';
-import { getSocket } from '../../lib/socket';
+import { getSocket, onSocket } from '../../lib/socket';
 import { useAuth } from '../../context/AuthContext';
 import { apiGet } from '../../lib/api';
 import * as chatApi from './api';
@@ -129,6 +129,9 @@ interface ChatValue {
   /** Whether Enter sends, from the user's own preferences (FR-USR-8). */
   enterToSend: boolean;
   refresh: () => Promise<void>;
+  /** People this reader has blocked (B-05). */
+  blockedIds: ReadonlySet<string>;
+  setBlocked: (userId: string, blocked: boolean) => Promise<void>;
 }
 
 const ChatContext = createContext<ChatValue | null>(null);
@@ -1135,6 +1138,35 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [threadUnread],
   );
 
+  /*
+   * Blocks (B-05). Loaded once, kept in step across devices by
+   * `block:changed`; the server enforces them, this only shapes the UI.
+   */
+  const [blockedIds, setBlockedIds] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    chatApi.listBlocks()
+      .then((list) => { if (!cancelled) setBlockedIds(new Set(list.map((b) => b.id))); })
+      .catch(() => {});
+    const off = onSocket('block:changed', ({ userId, blocked }) => {
+      setBlockedIds((cur) => {
+        const next = new Set(cur);
+        if (blocked) next.add(userId); else next.delete(userId);
+        return next;
+      });
+    });
+    return () => { cancelled = true; off(); };
+  }, [user]);
+  const setBlocked = useCallback(async (userId: string, blocked: boolean) => {
+    await (blocked ? chatApi.blockUser(userId) : chatApi.unblockUser(userId));
+    setBlockedIds((cur) => {
+      const next = new Set(cur);
+      if (blocked) next.add(userId); else next.delete(userId);
+      return next;
+    });
+  }, []);
+
   const value: ChatValue = {
     conversations, conversationsLoading, activeId, setActiveId, active,
     messages, messagesLoading, messagesConversationId, hasMore, loadingMore, loadOlder,
@@ -1150,7 +1182,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     draftFor, setDraft, toggleStar, setNotificationLevel,
     totalUnread, totalMentions, threadUnread, threadsUnreadTotal,
     markThreadRead, markUnread, markConversationRead,
-    refresh, enterToSend,
+    refresh, enterToSend, blockedIds, setBlocked,
   };
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;

@@ -221,6 +221,8 @@ export interface ChatServerToClientEvents {
 
   /** This user is no longer a member (removed or left), on every device. */
   'conversation:removed': (p: { conversationId: string; reason: 'removed' | 'left' }) => void;
+  /** You blocked or unblocked someone (on another device, or this one). Never sent to the blocked person. */
+  'block:changed': (p: { userId: string; blocked: boolean }) => void;
 
   /** A draft saved on another device (FR-MSG-17). */
   'conversation:draft': (

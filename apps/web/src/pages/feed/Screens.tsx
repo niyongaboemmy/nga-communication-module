@@ -7,6 +7,7 @@ import { useFeed, useFeedList } from './FeedProvider';
 import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
 import { relativeTime } from './lib';
 import * as api from './api';
+import { ChatReportsQueue } from '../chat/ChatReportsQueue';
 
 /* ═══════════════════════════════════════════════════════════ Saved ══ */
 
@@ -74,6 +75,8 @@ export const PostPermalink: React.FC = () => {
 /* ═══════════════════════════════════════════════════════ Moderation ══ */
 
 export const ModerationQueue: React.FC = () => {
+  // Feed posts and comments, or people and chat messages (B-05).
+  const [source, setSource] = useState<'feed' | 'chat'>('feed');
   const [tab, setTab] = useState<'open' | 'actioned' | 'dismissed'>('open');
   const [reports, setReports] = useState<FeedReportView[] | null>(null);
 
@@ -95,6 +98,17 @@ export const ModerationQueue: React.FC = () => {
         <h1 className="mb-3 flex items-center gap-2 text-lg font-bold text-text-primary-light dark:text-text-primary-dark">
           <ShieldAlert size={18} /> Moderation queue
         </h1>
+        <div role="tablist" className="mb-3 inline-flex rounded-full bg-surface-light p-1 dark:bg-card-dark/60">
+          {(['feed', 'chat'] as const).map((s) => (
+            <button key={s} role="tab" aria-selected={source === s} onClick={() => setSource(s)}
+              className={`rounded-full px-4 py-1.5 text-xs font-semibold ${source === s
+                ? 'bg-white text-text-primary-light shadow-sm dark:bg-elevated-dark dark:text-text-primary-dark'
+                : 'text-text-secondary-light dark:text-text-secondary-dark'}`}>
+              {s === 'feed' ? 'Posts & comments' : 'People & messages'}
+            </button>
+          ))}
+        </div>
+        {source === 'chat' ? <ChatReportsQueue /> : (<>
         <div className="mb-4 flex gap-1 border-b border-border-light dark:border-border-dark/40">
           {(['open', 'actioned', 'dismissed'] as const).map((t) => (
             <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm font-semibold capitalize ${
@@ -137,6 +151,7 @@ export const ModerationQueue: React.FC = () => {
             ))}
           </ul>
         )}
+        </>)}
       </div>
     </FeedFrame>
   );

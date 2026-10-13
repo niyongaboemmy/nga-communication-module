@@ -17,6 +17,7 @@ import { ConversationAvatar } from './ConversationAvatar';
 import { toPresence } from './types';
 import type { Conversation, Member } from './types';
 import { PRESENCE_REFRESH_MS } from '@tupo/shared';
+import { ProfileCard } from './ProfileCard';
 
 /**
  * The right-hand context panel (§15.1) — thread, members, files and details for
@@ -42,6 +43,7 @@ export const ContextPanel: React.FC<{
   /** Opens the settings panel — where members are added and details edited. */
   onOpenSettings?: () => void;
 }> = ({ conversation: c, members, onClose, onOpenSettings }) => {
+  const [profileFor, setProfileFor] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('about');
   const {
     toggleStar, setNotificationLevel, jumpTo, setActiveId, refresh, conversationPresence,
@@ -337,8 +339,14 @@ export const ContextPanel: React.FC<{
                 const presence = toPresence(m.presence);
                 const seen = presence === 'offline' ? lastSeenLabel(m.lastSeenAt) : null;
                 return (
-                  <li key={m.userId}>
-                    <button className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors duration-150 hover:bg-surface-light dark:hover:bg-surface-dark">
+                  <li key={m.userId} className="relative">
+                    {profileFor === m.userId && (
+                      <ProfileCard userId={m.userId} anchor="right" onClose={() => setProfileFor(null)} />
+                    )}
+                    <button
+                      onClick={() => setProfileFor((cur) => (cur === m.userId ? null : m.userId))}
+                      className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors duration-150 hover:bg-surface-light dark:hover:bg-surface-dark"
+                    >
                       <Avatar
                         name={m.name}
                         src={m.avatarUrl ?? undefined}
