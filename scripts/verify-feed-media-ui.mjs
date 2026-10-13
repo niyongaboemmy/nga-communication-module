@@ -19,6 +19,7 @@ import { readFileSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const env = Object.fromEntries(readFileSync(`${ROOT}/apps/api/.env`, 'utf8').split('\n')
@@ -59,7 +60,7 @@ const cleanup = async () => {
   await pool.query(`DELETE FROM feed_posts WHERE body LIKE 'media-%' AND author_id LIKE 'feedmedia-%'`).catch(() => {});
   await pool.query(`DELETE FROM feed_pages WHERE name LIKE 'Media Demo %'`).catch(() => {});
   await pool.query(`DELETE FROM files WHERE owner_id LIKE 'feedmedia-%'`).catch(() => {});
-  await pool.query(`DELETE FROM users WHERE id LIKE 'feedmedia-%'`);
+  await purgeUsersLike(pool, 'feedmedia-');
 };
 
 /* Test pictures of known shapes, drawn by the browser itself. */

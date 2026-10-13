@@ -18,6 +18,7 @@ import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
 import { io as ioClient } from 'socket.io-client';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
@@ -157,8 +158,7 @@ async function main() {
   studentSocket.close();
 
   // Cleanup
-  await pool.query(`DELETE FROM users WHERE id LIKE 'feedtest-%'`);
-  await pool.query(`DELETE FROM feed_pages WHERE created_by IS NULL AND name LIKE 'Verify %' OR name LIKE 'Students %'`).catch(() => {});
+  await purgeUsersLike(pool, 'feedtest-');
   await pool.end();
 
   process.stderr.write(`\n  ${pass.length} passed, ${fails.length} failed\n`);

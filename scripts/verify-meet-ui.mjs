@@ -17,6 +17,7 @@ try {
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import { randomBytes } from 'node:crypto';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const ROOT = process.cwd();
 const SHOTS = process.argv[2] ?? `${ROOT}/.meet-ui-shots`;
@@ -773,7 +774,7 @@ try {
 } finally {
   await browser.close();
   await pool.query(`DELETE FROM meetings WHERE host_id LIKE 'uiverify-%'`).catch(() => {});
-  await pool.query(`DELETE FROM users WHERE id LIKE 'uiverify-%'`).catch(() => {});
+  await purgeUsersLike(pool, 'uiverify-');
   await pool.end();
 }
 

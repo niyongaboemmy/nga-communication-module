@@ -13,6 +13,7 @@ import pg from 'pg';
 import { io } from 'socket.io-client';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const env = Object.fromEntries(
   readFileSync('apps/api/.env', 'utf8').split('\n')
@@ -111,7 +112,7 @@ try {
   check('files rejects reuse of a spent upload ticket', replay.status === 409, `HTTP ${replay.status}`);
 } finally {
   await pool.query('DELETE FROM files WHERE owner_id = $1', [userId]);
-  await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+  await purgeUsers(pool, [userId]);
   await pool.end();
 }
 

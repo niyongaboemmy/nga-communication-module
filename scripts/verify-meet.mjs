@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import { io } from 'socket.io-client';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const env = Object.fromEntries(
   readFileSync('apps/api/.env', 'utf8').split('\n')
@@ -958,7 +959,7 @@ try {
   await new Promise((r) => setTimeout(r, 3000));
   // Clean up after ourselves: meetings cascade to every child table.
   if (meeting) await pool.query('DELETE FROM meetings WHERE id = $1', [meeting.id]).catch(() => {});
-  await pool.query(`DELETE FROM users WHERE id LIKE 'meetverify-%'`).catch(() => {});
+  await purgeUsersLike(pool, 'meetverify-');
   await pool.end();
 }
 

@@ -19,6 +19,7 @@ import pg from 'pg';
 import { readFileSync } from 'node:fs';
 import { io as ioClient } from 'socket.io-client';
 import { Redis } from 'ioredis';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
@@ -208,7 +209,7 @@ main()
     for (const id of made) {
       await pool.query('DELETE FROM conversation_members WHERE user_id = $1', [id]).catch(() => {});
       await pool.query('DELETE FROM user_chat_prefs WHERE user_id = $1', [id]).catch(() => {});
-      await pool.query('DELETE FROM users WHERE id = $1', [id]).catch(() => {});
+      await purgeUsers(pool, [id]).catch(() => {});
       await redis.del(`presence:${id}`, `lastseen:${id}`).catch(() => {});
     }
     console.log(`\n  ${pass.length} passed, ${fails.length} failed`);

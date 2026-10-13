@@ -20,6 +20,7 @@ import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
 import { startSmtpSink } from './lib/smtp-sink.mjs';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
@@ -63,7 +64,7 @@ const api = async (path, token, init = {}) => {
 
 const cleanup = async () => {
   await pool.query(`DELETE FROM files WHERE owner_id LIKE 'mailtest-%'`);
-  await pool.query(`DELETE FROM users WHERE id LIKE 'mailtest-%'`);
+  await purgeUsersLike(pool, 'mailtest-');
   await pool.query(`DELETE FROM mail_distribution_lists WHERE slug LIKE 'verify-%'`);
   await pool.query(`DELETE FROM mail_suppressions WHERE address LIKE 'mailtest-%' OR address LIKE '%@nowhere.invalid'`);
 };

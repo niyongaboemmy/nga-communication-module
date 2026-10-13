@@ -16,6 +16,7 @@ import pg from 'pg';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const env = Object.fromEntries(readFileSync(`${ROOT}/apps/api/.env`, 'utf8').split('\n')
@@ -47,7 +48,7 @@ const seed = (u) => ({
   tupo_role_permissions: JSON.stringify({ keys: u.perms, name: 'Staff' }),
 });
 
-const cleanup = () => pool.query(`DELETE FROM users WHERE id LIKE 'mailui-%'`);
+const cleanup = () => purgeUsersLike(pool, 'mailui-');
 
 let browser;
 try {
