@@ -105,6 +105,7 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   const [available, setAvailable] = useState<SectionKey[]>([]);
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const term = query.trim();
@@ -180,6 +181,20 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
+      // A modal keeps focus inside it: Tab cycles through its own controls
+      // instead of wandering into the page underneath.
+      if (e.key === 'Tab' && dialogRef.current) {
+        const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>(
+          'input, button:not([tabindex="-1"]), [href], [tabindex]:not([tabindex="-1"])')]
+          .filter((el) => !el.hasAttribute('disabled') && el.offsetParent !== null);
+        if (focusable.length) {
+          const first = focusable[0]!, last = focusable[focusable.length - 1]!;
+          const inside = dialogRef.current.contains(document.activeElement);
+          if (!inside || (e.shiftKey && document.activeElement === first)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+          else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+        return;
+      }
       if (!rows.length) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -210,6 +225,7 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
 
   return createPortal(
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-[110] flex items-start justify-center p-4 pt-[10vh]"
       role="dialog"
       aria-modal="true"

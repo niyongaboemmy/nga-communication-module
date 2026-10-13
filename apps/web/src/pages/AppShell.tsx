@@ -13,6 +13,7 @@ import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
 import { NotificationBell } from '../components/shell/NotificationCenter';
 import { ErrorBoundary } from '../components/ErrorBoundary';
+import { UpdateNotice } from '../pwa/UpdateNotice';
 import { GlobalSearch } from '../components/GlobalSearch';
 import { usePresenceReporter } from '../hooks/usePresenceReporter';
 import { useModuleBadges } from '../hooks/useModuleBadges';
@@ -150,6 +151,13 @@ const BottomTabs: React.FC<{ modules: NavEntry[]; admin: NavEntry[]; badges: Rec
   const location = useLocation();
 
   useEffect(() => { setSheetOpen(false); }, [location.pathname]);
+  // Escape closes the sheet, like every other dialog.
+  useEffect(() => {
+    if (!sheetOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSheetOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [sheetOpen]);
 
   const primary = modules.slice(0, 4);
   const overflow = [...modules.slice(4), ...admin];
@@ -389,6 +397,7 @@ export const AppShell: React.FC = () => {
     <div className="h-app flex flex-col overflow-hidden bg-background-light text-text-primary-light dark:bg-background-dark dark:text-text-primary-dark">
       <TopBar onOpenSearch={() => setSearchOpen(true)} myPresence={toPresence(myPresence)} />
       <ConnectionBanner status={connection} />
+      <UpdateNotice />
       {searchOpen && <GlobalSearch onClose={() => setSearchOpen(false)} />}
 
       <div className="flex min-h-0 flex-1">

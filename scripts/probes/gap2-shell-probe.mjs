@@ -129,7 +129,7 @@ try {
     const ctx = await ctxFor(browser, STU);
     const p = await ctx.newPage();
     await p.goto(`${BASE}/app/admin/users`, { waitUntil: 'domcontentloaded' }); await settle(p);
-    const denied = await visible(p, 'You do not have access', 3000);
+    const denied = await visible(p, 'open to you', 3000);
     const leaks = await p.getByText(/USERS_VIEW/).first().isVisible().catch(() => false);
     check('student deep-linking /app/admin/users sees an access-denied page', denied);
     check('access-denied page does not expose raw permission keys', !leaks, leaks ? 'shows "Requires one of: USERS_VIEW, USERS_MANAGE"' : '');

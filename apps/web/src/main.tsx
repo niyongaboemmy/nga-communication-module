@@ -2,7 +2,8 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import './index.css';
-import { initNgaInstall, NgaInstallPrompt } from './pwa/ngaInstall';
+import { initNgaInstall } from './pwa/ngaInstall';
+import { InstallPromptGate } from './pwa/InstallPromptGate';
 import { startActivity } from './activity';
 
 // Installable app + "install this too" when opened from the installed NGA app.
@@ -15,6 +16,6 @@ startActivity();
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
-    <NgaInstallPrompt appName="Tupo" accent="#005EF9" startPath="/app" />
+    <InstallPromptGate />
   </React.StrictMode>
 );
