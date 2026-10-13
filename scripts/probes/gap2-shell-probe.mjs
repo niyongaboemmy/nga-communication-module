@@ -240,7 +240,7 @@ try {
     const p = await ctx.newPage();
     await p.goto(`${BASE}/app/admin/audit`, { waitUntil: 'domcontentloaded' }); await settle(p);
     const routine = await p.locator('tbody tr', { hasText: /feed\.post\.create|mail\.send/ }).count();
-    const roleRow = p.locator('tbody tr', { hasText: 'user.role.assign' }).first();
+    const roleRow = p.locator('tbody tr', { hasText: /user\.role\.assign|Changed a role/ }).first();
     const metaShown = (await roleRow.count()) ? /→|from|to:/i.test((await roleRow.innerText()).replace('Admin Gaptwo','')) : null;
     check('audit role-assign row shows what changed (from → to)', metaShown === true, `metaShown=${metaShown}`);
     check('audit log is limited to privileged actions (no routine feed/mail rows)', routine === 0, `routineRows=${routine}`);

@@ -232,6 +232,56 @@ try {
     await ctx.close();
   }
 
+  console.log('── Audit log: privileged first, readable, filterable');
+  {
+    const { ctx, page } = await pageFor(browser, admin);
+    await page.goto(`${BASE}/app/admin/audit`, { waitUntil: 'networkidle' });
+    const rows = page.locator('tbody tr');
+    const assign = rows.filter({ hasText: `Stu Pupil ${tag}` }).filter({ hasText: 'Changed a role' }).first();
+    check('the role change reads in words: who, what, from → to',
+      await assign.isVisible().catch(() => false) && /Student\s*→\s*Staff/.test(await assign.innerText().catch(() => '')),
+      (await assign.innerText().catch(() => 'row not found')).replace(/\s+/g, ' ').slice(0, 120));
+    const routine = await rows.filter({ hasText: /Feed post create|Mail send|Signed in/ }).count();
+    check('the default view holds no routine activity or sign-ins', routine === 0, `routine=${routine}`);
+    const link = assign.getByRole('link', { name: `Stu Pupil ${tag}` });
+    check('the target is a name with a link, not an id', await link.isVisible().catch(() => false));
+    await assign.getByRole('button', { name: 'Show details' }).click();
+    check('details open with the raw entry', await page.getByText('"roleNameTo": "Staff"').isVisible().catch(() => false));
+
+    await page.getByRole('tab', { name: 'Sign-ins' }).click();
+    await page.waitForLoadState('networkidle'); await sleep(300);
+    const nonSignin = await rows.filter({ hasNotText: 'Signed in' }).filter({ has: page.locator('td[data-label="Action"]') }).count();
+    check('the Sign-ins tab shows only sign-ins', nonSignin === 0 && /view=signins/.test(page.url()), `others=${nonSignin}`);
+    await page.getByRole('tab', { name: 'Everything' }).click();
+    await page.waitForLoadState('networkidle'); await sleep(300);
+    check('Everything includes routine entries, marked as such', (await page.getByText('routine', { exact: true }).count()) > 0);
+
+    await page.getByRole('tab', { name: 'Privileged' }).click();
+    await page.waitForLoadState('networkidle'); await sleep(300);
+    await page.getByLabel('Filter by action').selectOption('user.role.assign');
+    await page.waitForLoadState('networkidle'); await sleep(400);
+    const actionsShown = await page.locator('td[data-label="Action"]').allInnerTexts();
+    check('filtering by action shows only that action', actionsShown.length > 0 && actionsShown.every((t) => t.includes('Changed a role')), `${actionsShown.length} rows`);
+    await page.getByLabel('Filter by action').selectOption('');
+    await page.waitForLoadState('networkidle'); await sleep(400);
+    const before = await rows.filter({ has: page.locator('td[data-label="Action"]') }).count();
+    const older = page.getByRole('button', { name: 'Load older entries' });
+    if (await older.isVisible().catch(() => false)) {
+      await older.click();
+      await sleep(1200);
+      const after = await rows.filter({ has: page.locator('td[data-label="Action"]') }).count();
+      check('"Load older entries" appends the next page', after > before, `${before} → ${after}`);
+    } else {
+      check('short history says it is complete', await page.getByText(/That is everything/).isVisible());
+    }
+    await link.click().catch(() => {});
+    await page.waitForLoadState('networkidle');
+    check('the target link opens that person in Users', /\/app\/admin\/users\?q=/.test(page.url()), page.url());
+    await page.goto(`${BASE}/app/admin/audit`, { waitUntil: 'networkidle' });
+    await page.screenshot({ path: `${OUT}/audit.png`, fullPage: false });
+    await ctx.close();
+  }
+
   console.log('── Users: phone');
   {
     const { ctx, page } = await pageFor(browser, admin, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });

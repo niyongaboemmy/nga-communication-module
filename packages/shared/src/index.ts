@@ -11,3 +11,4 @@ export * from './mail.js';
 export * from './feed.js';
 export * from './feedEvents.js';
 export * from './emoji.js';
+export * from './audit.js';
