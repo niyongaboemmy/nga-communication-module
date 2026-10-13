@@ -246,7 +246,8 @@ try {
 
     // recipient paste of two addresses
     await pB.getByRole('button', { name: /^Compose$/ }).first().click(); await sleep(600);
-    const toInput = pB.getByPlaceholder('Name or email address').first();
+    // By its label: the placeholder goes once there are chips.
+    const toInput = pB.getByLabel('To recipients').first();
     await toInput.fill('x1@example.com, x2@example.com');
     await toInput.press('Enter');
     await sleep(300);

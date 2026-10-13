@@ -347,7 +347,7 @@ export async function runCampaign(id: string): Promise<{ delivered: number; fail
   const { rows: doneRows } = await pool.query<{ address: string }>(
     `SELECT r.address FROM mail_recipients r
        JOIN mail_messages m ON m.id = r.message_id
-      WHERE m.campaign_id = $1`, [id],
+      WHERE m.campaign_id = $1 AND r.kind <> 'self'`, [id],
   );
   const done = new Set(doneRows.map((r) => r.address.toLowerCase()));
 

@@ -3,8 +3,10 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ArrowLeft, Reply, ReplyAll, Forward, Archive, Trash2, Star, Tag, MoreVertical,
   Paperclip, Download, ChevronDown, ChevronRight, BarChart3, Clock, X, Send, Edit3, Loader2,
-  Sparkles, ListChecks, CheckCircle2,
+  Sparkles, ListChecks, CheckCircle2, RotateCcw, Inbox, Mail as MailIcon, Printer,
 } from 'lucide-react';
+import { usePermissions } from '../../hooks/usePermissions';
+import { useNotify } from '../../context/NotificationContext';
 import type { MailAiThreadSummary } from '@tupo/shared';
 import { Avatar, IconButton, Spinner, EmptyState, Button } from '../../components/ui';
 import { apiDownload } from '../../lib/api';
@@ -80,6 +82,10 @@ const MessageCard: React.FC<{
   onReply: (k: MailMessageKind) => void; onDelivery: () => void; onEditDraft: () => void; onChanged: () => void;
 }> = ({ message, myUserId, expanded, onToggle, onReply, onDelivery, onEditDraft, onChanged }) => {
   const isMine = message.from.userId === myUserId;
+  // Reply and forward only for those who can send (C-12): the buttons used to
+  // show for everyone and fail on press.
+  const { can } = usePermissions();
+  const maySend = can('MAIL_SEND');
   const ds = message.deliverySummary;
 
   return (
@@ -127,7 +133,7 @@ const MessageCard: React.FC<{
               <Button size="sm" variant="secondary" onClick={() => api.cancelScheduled(message.id).then(onChanged)}>
                 <X size={14} /> Cancel scheduled send
               </Button>
-            ) : (
+            ) : !maySend ? null : (
               <>
                 <Button size="sm" variant="secondary" onClick={() => onReply('reply')}><Reply size={14} /> Reply</Button>
                 {(message.to.length + message.cc.length > 0) && (
@@ -152,6 +158,21 @@ const MessageCard: React.FC<{
 
 export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack, onChanged, onCompose }) => {
   const [thread, setThread] = useState<MailThreadView | null>(null);
+  const [starred, setStarred] = useState(false);
+  useEffect(() => { setStarred(thread?.starred === true); }, [thread]);
+  const { notify, confirm: confirmed } = useNotify();
+  /** A thread action: done says so, a failure says so (C-12); `leave` closes the thread. */
+  const act = async (fn: () => Promise<unknown>, leave: boolean, after?: () => void, done?: string) => {
+    try {
+      await fn();
+      after?.();
+      if (done) confirmed(done);
+      onChanged();
+      if (leave) onBack();
+    } catch (e) {
+      notify({ title: 'That did not work', body: e instanceof Error ? e.message : undefined, tone: 'error' });
+    }
+  };
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [replyTo, setReplyTo] = useState<{ id: string; kind: MailMessageKind; initialBody?: string } | null>(null);
@@ -196,6 +217,7 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   if (!thread) return <EmptyState title="Thread not found" hint="It may have been deleted." />;
 
   const currentLabels = thread.labels;
+  const where = thread.folder ?? 'inbox';
   const toggleLabel = async (id: string) => {
     const next = currentLabels.includes(id) ? currentLabels.filter((x) => x !== id) : [...currentLabels, id];
     await api.setThreadLabels(threadId, next).catch(() => {});
@@ -239,12 +261,31 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
               {summaryBusy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={16} />}
             </IconButton>
           )}
-          <IconButton label="Archive" size="sm" onClick={() => { api.moveThread(threadId, 'archive').then(() => { onBack(); onChanged(); }); }}><Archive size={16} /></IconButton>
-          <IconButton label="Delete" size="sm" onClick={() => { api.moveThread(threadId, 'trash').then(() => { onBack(); onChanged(); }); }}><Trash2 size={16} /></IconButton>
+          <IconButton label={starred ? 'Unstar' : 'Star'} size="sm" active={starred}
+            onClick={() => void act(() => api.starThread(threadId, !starred), false, () => setStarred(!starred))}>
+            <Star size={16} className={starred ? 'fill-amber-400 text-amber-400' : ''} />
+          </IconButton>
+          {where !== 'trash' && where !== 'spam' && (
+            <IconButton label="Mark unread" size="sm" onClick={() => void act(() => api.markThread(threadId, false), true, undefined, 'Marked unread')}><MailIcon size={16} /></IconButton>
+          )}
+          {where === 'trash' || where === 'spam' ? (
+            <>
+              <IconButton label={where === 'spam' ? 'Not spam' : 'Restore'} size="sm" onClick={() => void act(() => api.restoreThread(threadId), true, undefined, where === 'spam' ? 'Moved to the Inbox' : 'Restored')}><RotateCcw size={16} /></IconButton>
+              {where === 'trash' && <IconButton label="Delete forever" size="sm" onClick={() => void act(() => api.purgeThread(threadId), true, undefined, 'Deleted forever')}><Trash2 size={16} /></IconButton>}
+            </>
+          ) : (
+            <>
+              {where === 'archive'
+                ? <IconButton label="Move to Inbox" size="sm" onClick={() => void act(() => api.moveThread(threadId, 'inbox'), true, undefined, 'Moved to the Inbox')}><Inbox size={16} /></IconButton>
+                : where !== 'sent' && <IconButton label="Archive" size="sm" onClick={() => void act(() => api.moveThread(threadId, 'archive'), true, undefined, 'Archived')}><Archive size={16} /></IconButton>}
+              <IconButton label="Delete" size="sm" onClick={() => void act(() => api.moveThread(threadId, 'trash'), true, undefined, 'Moved to Trash')}><Trash2 size={16} /></IconButton>
+            </>
+          )}
+          <IconButton label="Print" size="sm" onClick={() => window.print()} className="hidden sm:grid"><Printer size={16} /></IconButton>
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+      <div className="mail-print min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         {summary && (
           <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-900/50 dark:bg-blue-900/15">
             <div className="mb-1.5 flex items-center gap-1.5 text-blue-700 dark:text-blue-300">

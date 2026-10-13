@@ -156,6 +156,9 @@ export interface MailThreadView {
   subject: string;
   messages: MailMessageView[];
   labels: string[];
+  /** Where the conversation sits for this reader (C-12). */
+  folder?: MailFolder;
+  starred?: boolean;
 }
 
 export interface MailRecipientDelivery {

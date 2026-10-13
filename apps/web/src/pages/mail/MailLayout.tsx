@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useNotify } from '../../context/NotificationContext';
 import { Menu, X, Mails, PenSquare } from 'lucide-react';
 import { EmptyState, IconButton, Spinner } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
@@ -26,14 +27,30 @@ export const MailLayout: React.FC = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const [folder, setFolder] = useState<MailFolder>('inbox');
-  const [labelId, setLabelId] = useState<string | null>(null);
+  const { confirm: confirmed } = useNotify();
+  // Folder and label live in the address (C-11): a reload, a shared link or
+  // Back lands on the same view.
+  const [params] = useSearchParams();
+  const FOLDERS: MailFolder[] = ['inbox', 'starred', 'sent', 'drafts', 'scheduled', 'archive', 'spam', 'trash'];
+  const folder: MailFolder = FOLDERS.includes(params.get('folder') as MailFolder) ? params.get('folder') as MailFolder : 'inbox';
+  const labelId = params.get('label');
+  const setView = useCallback((next: { folder?: MailFolder | null; label?: string | null }) => {
+    const q = new URLSearchParams();
+    if (next.folder && next.folder !== 'inbox') q.set('folder', next.folder);
+    if (next.label) q.set('label', next.label);
+    return q.toString();
+  }, []);
   const [counts, setCounts] = useState<MailboxCounts>(EMPTY_COUNTS);
   const [labels, setLabels] = useState<MailLabel[]>([]);
   const [selected, setSelected] = useState<string | null>(routeThreadId ?? null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [drawer, setDrawer] = useState(false);
-  const [composer, setComposer] = useState<{ seed?: ComposerSeed } | null>(null);
+  // `n` remounts the composer: a new compose or forward while one is open
+  // replaces it, and the one being replaced saves itself as a draft (C-10).
+  const [composer, setComposerState] = useState<{ seed?: ComposerSeed; n: number } | null>(null);
+  const composeCount = useRef(0);
+  const setComposer = (c: { seed?: ComposerSeed } | null) =>
+    setComposerState(c ? { ...c, n: ++composeCount.current } : null);
   const [signatureHtml, setSignatureHtml] = useState<string>('');
   const [ready, setReady] = useState(false);
 
@@ -64,16 +81,24 @@ export const MailLayout: React.FC = () => {
   // Keep the URL in step so a thread is linkable and Back works.
   useEffect(() => { setSelected(routeThreadId ?? null); }, [routeThreadId]);
 
+  const viewQuery = setView({ folder, label: labelId });
   const openThread = (t: MailThreadSummary) => {
     setSelected(t.threadId);
-    navigate(`/app/mail/t/${t.threadId}`);
+    navigate(`/app/mail/t/${t.threadId}${viewQuery ? `?${viewQuery}` : ''}`);
   };
-  const closeThread = () => { setSelected(null); navigate('/app/mail'); };
+  const closeThread = () => { setSelected(null); navigate(`/app/mail${viewQuery ? `?${viewQuery}` : ''}`); };
 
   const bumpAll = () => { refreshMeta(); setRefreshKey((k) => k + 1); };
 
-  const pickFolder = (f: MailFolder) => { setFolder(f); setLabelId(null); closeThread(); };
-  const pickLabel = (id: string) => { setLabelId(id); setFolder('inbox'); closeThread(); };
+  const pickFolder = (f: MailFolder) => {
+    const q = setView({ folder: f });
+    setSelected(null);
+    navigate(`/app/mail${q ? `?${q}` : ''}`);
+  };
+  const pickLabel = (id: string) => {
+    setSelected(null);
+    navigate(`/app/mail?${setView({ label: id })}`);
+  };
 
   if (!ready) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
@@ -154,13 +179,15 @@ export const MailLayout: React.FC = () => {
 
       {composer && (
         <Composer
+          key={composer.n}
           seed={composer.seed}
           signatureHtml={signatureHtml}
           onClose={() => setComposer(null)}
+          onDraftSaved={() => { confirmed('Draft saved'); refreshMeta(); }}
           onSent={(r) => {
             setComposer(null);
             bumpAll();
-            if (!r.draft && !r.scheduled) { navigate(`/app/mail/t/${r.threadId}`); setSelected(r.threadId); }
+            if (!r.draft && !r.scheduled) { navigate(`/app/mail/t/${r.threadId}${viewQuery ? `?${viewQuery}` : ''}`); setSelected(r.threadId); }
           }}
         />
       )}

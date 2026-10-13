@@ -47,6 +47,11 @@ export const setThreadLabels = (id: string, labels: string[]) =>
   apiPost(`/api/mail/threads/${id}/labels`, { labels });
 
 export const purgeThread = (id: string) => apiDelete(`/api/mail/threads/${id}`);
+/** Out of Trash or Spam: received copies to the Inbox, your own to Sent (C-08). */
+export const restoreThread = (id: string) => apiPost(`/api/mail/threads/${id}/restore`, {});
+export const emptyTrash = () => apiPost<{ removed: number }>('/api/mail/trash/empty', {}).then((r) => r.data!.removed);
+export const updateLabel = (id: string, patch: { name?: string; color?: string }) =>
+  apiPatch<{ label: MailLabel }>(`/api/mail/labels/${id}`, patch).then((r) => r.data!.label);
 
 export interface ComposeResult { messageId: string; threadId: string; draft: boolean; scheduled: boolean }
 

@@ -63,6 +63,14 @@ router.post('/labels', authorizePermission('MAIL_READ'), wrap(async (req, res) =
   res.status(201).json(ok({ label }));
 }));
 
+router.patch('/labels/:id', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  const label = await mail.updateLabel(actor(req).id, req.params.id!, {
+    name: typeof req.body?.name === 'string' ? req.body.name : undefined,
+    color: typeof req.body?.color === 'string' ? req.body.color : undefined,
+  });
+  res.json(ok({ label }));
+}));
+
 router.delete('/labels/:id', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.deleteLabel(actor(req).id, req.params.id!);
   res.json(ok({ deleted: true }));
@@ -112,6 +120,18 @@ router.post('/threads/:id/read', authorizePermission('MAIL_READ'), wrap(async (r
 router.post('/threads/:id/labels', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.setThreadLabels(actor(req).id, req.params.id!, arr(req.body?.labels));
   res.json(ok({ labels: arr(req.body?.labels) }));
+}));
+
+router.post('/threads/:id/restore', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  await mail.restoreThread(actor(req).id, req.params.id!);
+  countsChanged(actor(req).id);
+  res.json(ok({ restored: true }));
+}));
+
+router.post('/trash/empty', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  const removed = await mail.emptyTrash(actor(req).id);
+  countsChanged(actor(req).id);
+  res.json(ok({ removed }));
 }));
 
 router.delete('/threads/:id', authorizePermission('MAIL_READ'), wrap(async (req, res) => {

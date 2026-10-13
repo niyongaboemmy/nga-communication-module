@@ -50,10 +50,41 @@ export const RecipientInput: React.FC<Props> = ({ label, values, onChange, autof
 
   const commitTyped = () => {
     const v = text.trim().replace(/[,;]$/, '');
-    if (EMAIL_RE.test(v)) add(v);
+    if (EMAIL_RE.test(v)) { add(v); return; }
+    // A typed list ("a@x.org, b@y.org") becomes chips too (C-10).
+    const parts = v.split(/[,;\s]+/).map((p) => /<([^>]+)>/.exec(p)?.[1] ?? p).filter(Boolean);
+    const good = parts.filter((p) => EMAIL_RE.test(p));
+    if (good.length) {
+      const next = [...values];
+      for (const a of good) if (!next.some((x) => x.toLowerCase() === a.toLowerCase())) next.push(a);
+      onChange(next);
+      setText(parts.filter((p) => !EMAIL_RE.test(p)).join(', '));
+      setResults([]);
+      setOpen(false);
+    }
   };
 
   const remove = (token: RecipientToken) => onChange(values.filter((t) => t !== token));
+
+  /**
+   * A pasted list becomes chips (C-10): "a@x.org, b@y.org; Name <c@z.org>"
+   * — separated by commas, semicolons, spaces or new lines. Whatever is not
+   * an address stays in the box to be fixed.
+   */
+  const onPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const pasted = e.clipboardData.getData('text');
+    const parts = pasted.split(/[,;\n\r\t]+|\s{2,}/).map((p) => p.trim()).filter(Boolean);
+    const addresses = parts.map((p) => /<([^>]+)>/.exec(p)?.[1]?.trim() ?? p.replace(/^mailto:/i, ''))
+      .flatMap((p) => p.split(/\s+/)).filter(Boolean);
+    const good = addresses.filter((a) => EMAIL_RE.test(a));
+    if (good.length < 2 && !(good.length === 1 && addresses.length === 1)) return; // ordinary typing paste
+    e.preventDefault();
+    const next = [...values];
+    for (const a of good) if (!next.some((v) => v.toLowerCase() === a.toLowerCase())) next.push(a);
+    onChange(next);
+    const bad = addresses.filter((a) => !EMAIL_RE.test(a));
+    setText(bad.join(', '));
+  };
 
   const labelFor = (token: RecipientToken) =>
     token.startsWith('userId:')
@@ -81,6 +112,7 @@ export const RecipientInput: React.FC<Props> = ({ label, values, onChange, autof
           autoFocus={autofocus}
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onPaste={onPaste}
           onBlur={() => { commitTyped(); setTimeout(() => setOpen(false), 150); }}
           onKeyDown={(e) => {
             if ((e.key === 'Enter' || e.key === 'Tab' || e.key === ',') && (open && results[active])) {
@@ -93,6 +125,7 @@ export const RecipientInput: React.FC<Props> = ({ label, values, onChange, autof
             else if (e.key === 'Backspace' && !text && values.length) remove(values[values.length - 1]!);
           }}
           placeholder={values.length ? '' : 'Name or email address'}
+          aria-label={`${label} recipients`}
           className="min-w-[8rem] flex-1 bg-transparent py-1 text-sm outline-none"
         />
       </div>

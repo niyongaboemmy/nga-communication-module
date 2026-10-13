@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   Inbox, Star, Send, FileEdit, Clock, Archive, Trash2, Ban, PenSquare, Tag, Plus,
-  Users, LayoutTemplate, Megaphone, Settings, X,
+  Users, LayoutTemplate, Megaphone, Settings, X, Pencil,
 } from 'lucide-react';
 import { Button, UnreadBadge } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -39,6 +39,13 @@ export const Sidebar: React.FC<Props> = ({
 }) => {
   const { can } = usePermissions();
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editColor, setEditColor] = useState('');
+  const saveEdit = async (id: string) => {
+    try { await api.updateLabel(id, { name: editName, color: editColor }); setEditing(null); onLabelsChanged(); }
+    catch { /* the editor stays open to try again */ }
+  };
   const [name, setName] = useState('');
   const [color, setColor] = useState(LABEL_COLORS[3]!);
 
@@ -97,18 +104,40 @@ export const Sidebar: React.FC<Props> = ({
         </div>
       )}
 
-      {labels.map((l) => (
+      {labels.map((l) => editing === l.id ? (
+        // Rename and recolour in place (C-09).
+        <div key={l.id} className="mb-1 space-y-1.5 px-2 py-1">
+          <div className="flex gap-1">
+            {LABEL_COLORS.map((c) => (
+              <button key={c} aria-label={`Colour ${c}`} onClick={() => setEditColor(c)} style={{ background: c }}
+                className={`h-4 w-4 rounded-full ${editColor === c ? 'ring-2 ring-offset-1 ring-blue-500' : ''}`} />
+            ))}
+          </div>
+          <div className="flex gap-1">
+            <input autoFocus value={editName} onChange={(e) => setEditName(e.target.value)} aria-label="Label name"
+              onKeyDown={(e) => { if (e.key === 'Enter') void saveEdit(l.id); if (e.key === 'Escape') setEditing(null); }}
+              className="min-w-0 flex-1 rounded-lg border border-border-light bg-transparent px-2 py-1 text-sm dark:border-border-dark/60" />
+            <button onClick={() => void saveEdit(l.id)} className="rounded-lg bg-blue-600 px-2 text-xs text-white">Save</button>
+          </div>
+        </div>
+      ) : (
         <div key={l.id} className={`${row} group ${labelId === l.id ? activeRow : idleRow}`}>
-          <button onClick={() => { onSelectLabel(l.id); onNavigate?.(); }} className="flex flex-1 items-center gap-3">
+          <button onClick={() => { onSelectLabel(l.id); onNavigate?.(); }} className="flex min-w-0 flex-1 items-center gap-3">
             <Tag size={16} style={{ color: l.color }} />
-            <span className="flex-1 text-left">{l.name}</span>
+            <span className="flex-1 truncate text-left">{l.name}</span>
             {(l.unread ?? 0) > 0 && <UnreadBadge count={l.unread!} />}
           </button>
           {!l.isSystem && (
-            <button aria-label={`Delete ${l.name}`} onClick={() => api.deleteLabel(l.id).then(onLabelsChanged)}
-              className="hidden text-text-secondary-light hover:text-red-600 group-hover:block">
-              <X size={13} />
-            </button>
+            <span className="hidden shrink-0 items-center gap-1 group-hover:flex [@media(hover:none)]:flex">
+              <button aria-label={`Edit ${l.name}`} onClick={() => { setEditing(l.id); setEditName(l.name); setEditColor(l.color); }}
+                className="text-text-secondary-light hover:text-blue-600">
+                <Pencil size={12} />
+              </button>
+              <button aria-label={`Delete ${l.name}`} onClick={() => api.deleteLabel(l.id).then(onLabelsChanged)}
+                className="text-text-secondary-light hover:text-red-600">
+                <X size={13} />
+              </button>
+            </span>
           )}
         </div>
       ))}

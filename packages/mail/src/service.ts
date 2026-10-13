@@ -25,7 +25,7 @@ import type {
 import { MailError } from './errors.js';
 import { sanitizeMailHtml } from './sanitize.js';
 import { internalEmailDelivery } from './config.js';
-import { htmlToText, snippetOf, isEmailAddress } from './render.js';
+import { htmlToText, snippetOf, isEmailAddress, extractMergeFields, renderMerge } from './render.js';
 import { deliverInApp, isSuppressed, recordEvent } from './delivery.js';
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -206,6 +206,29 @@ export async function createLabel(userId: string, name: string, color: string): 
   }
 }
 
+/** Rename or recolour one of your labels (C-09). System labels are fixed. */
+export async function updateLabel(
+  userId: string, labelId: string, patch: { name?: string; color?: string },
+): Promise<MailLabel> {
+  const name = patch.name === undefined ? undefined : patch.name.trim().slice(0, 60);
+  if (name !== undefined && !name) throw new MailError('A label needs a name.');
+  const color = patch.color === undefined ? undefined : patch.color.trim();
+  if (color !== undefined && !/^#[0-9a-f]{6}$/i.test(color)) throw new MailError('Choose a colour like #6366f1.');
+  try {
+    const { rows } = await getPool().query<{ id: string; name: string; color: string; ordinal: number }>(
+      `UPDATE mail_labels SET name = COALESCE($3, name), color = COALESCE($4, color)
+        WHERE id = $1 AND owner_id = $2
+        RETURNING id, name, color, ordinal`,
+      [labelId, userId, name ?? null, color ?? null],
+    );
+    if (!rows[0]) throw new MailError('Label not found.', 404);
+    return { id: rows[0].id, name: rows[0].name, color: rows[0].color, ordinal: rows[0].ordinal, isSystem: false, unread: 0 };
+  } catch (err) {
+    if (err instanceof MailError) throw err;
+    throw new MailError('You already have a label with that name.', 409);
+  }
+}
+
 export async function deleteLabel(userId: string, labelId: string): Promise<void> {
   const { rowCount } = await getPool().query(
     `DELETE FROM mail_labels WHERE id = $1 AND owner_id = $2`, [labelId, userId],
@@ -272,11 +295,16 @@ export async function listThreads(userId: string, opts: ListOpts): Promise<{
 
   let threadIds: Array<{ thread_id: string; sort_at: string }>;
 
-  if (senderFolders.includes(opts.folder)) {
+  if (senderFolders.includes(opts.folder) && !opts.labelId) {
     const cond =
       opts.folder === 'drafts' ? 'm.is_draft'
       : opts.folder === 'scheduled' ? 'NOT m.is_draft AND m.scheduled_at IS NOT NULL AND m.sent_at IS NULL'
-      : 'NOT m.is_draft AND (m.scheduled_at IS NULL OR m.sent_at IS NOT NULL)';
+      // Sent leaves out what the sender put in Trash or deleted (C-08); mail
+      // sent before sender copies existed has none, and stays.
+      : `NOT m.is_draft AND (m.scheduled_at IS NULL OR m.sent_at IS NOT NULL)
+         AND (NOT EXISTS (SELECT 1 FROM mail_recipients sr WHERE sr.message_id = m.id AND sr.user_id = $1 AND sr.kind = 'self')
+              OR EXISTS (SELECT 1 FROM mail_recipients sr WHERE sr.message_id = m.id AND sr.user_id = $1
+                          AND sr.kind = 'self' AND sr.folder = 'sent' AND NOT sr.is_hidden))`;
     const { rows } = await db.query<{ thread_id: string; sort_at: string }>(
       `SELECT DISTINCT ON (m.thread_id) m.thread_id,
               COALESCE(m.sent_at, m.updated_at) AS sort_at
@@ -290,8 +318,11 @@ export async function listThreads(userId: string, opts: ListOpts): Promise<{
     threadIds = rows.sort((a, b) => (a.sort_at < b.sort_at ? 1 : -1)).slice(0, limit + 1);
   } else {
     // The folder is always a bound parameter, never part of the SQL text.
+    // A label is a view across folders (C-09): an archived conversation with
+    // the label is still found under it. Trash and Spam stay out.
     const folderCond =
-      opts.folder === 'starred' ? `r.is_starred AND r.folder <> 'trash'`
+      opts.labelId ? `r.folder NOT IN ('trash', 'spam')`
+      : opts.folder === 'starred' ? `r.is_starred AND r.folder <> 'trash'`
       : `r.folder = $5`;
     // Sorted and searched by what this person can see of each thread (C-04),
     // and limited in SQL rather than after loading the whole mailbox.
@@ -312,7 +343,7 @@ export async function listThreads(userId: string, opts: ListOpts): Promise<{
        WHERE ($4::timestamptz IS NULL OR sort_at < $4::timestamptz)
        ORDER BY sort_at DESC
        LIMIT ${limit + 1}`,
-      opts.folder === 'starred'
+      opts.folder === 'starred' || opts.labelId
         ? [userId, opts.labelId ?? null, like, opts.cursor ?? null]
         : [userId, opts.labelId ?? null, like, opts.cursor ?? null, opts.folder],
     );
@@ -361,7 +392,7 @@ async function threadSummary(
          UNION ALL
          SELECT r.user_id, r.name, r.address, m.created_at
            FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id
-          WHERE r.thread_id = $1 AND r.kind <> 'bcc' AND NOT r.pending AND ${visibleTo('m', '$2')}
+          WHERE r.thread_id = $1 AND r.kind NOT IN ('bcc', 'self') AND NOT r.pending AND ${visibleTo('m', '$2')}
        ) x
        LEFT JOIN users u ON u.id = x.user_id
       ORDER BY COALESCE(x.user_id, x.address), x.created_at DESC`,
@@ -384,7 +415,7 @@ async function threadSummary(
                   WHEN bool_and(rr.delivery_status = 'delivered') THEN 'delivered'
                   WHEN bool_or(rr.delivery_status = 'sent') THEN 'sent'
                   ELSE 'queued' END
-                FROM mail_recipients rr WHERE rr.message_id = m.id
+                FROM mail_recipients rr WHERE rr.message_id = m.id AND rr.kind <> 'self'
               ), 'queued') AS delivery
          FROM mail_messages m
         WHERE m.thread_id = $1 AND m.from_user_id = $2
@@ -405,7 +436,7 @@ async function threadSummary(
     unread: boolean; starred: boolean; folder: MailFolder; labels: string[];
   }>(
     `SELECT bool_or(NOT is_read) AS unread, bool_or(is_starred) AS starred,
-            (array_agg(folder ORDER BY created_at DESC))[1] AS folder,
+            (array_agg(folder ORDER BY (kind = 'self'), created_at DESC))[1] AS folder,
             COALESCE((array_agg(labels ORDER BY created_at DESC))[1], '[]'::jsonb) AS labels
        FROM mail_recipients WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden AND NOT pending`,
     [threadId, userId],
@@ -497,7 +528,7 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
       `SELECT r.id, r.kind, r.user_id, r.name, r.address, u.avatar_url,
               r.is_read, r.is_starred, r.folder, r.labels
          FROM mail_recipients r LEFT JOIN users u ON u.id = r.user_id
-        WHERE r.message_id = $1
+        WHERE r.message_id = $1 AND r.kind <> 'self'
         ORDER BY r.kind, r.name`,
       [m.id],
     );
@@ -531,7 +562,7 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
                     WHEN bool_and(delivery_status = 'delivered') THEN 'delivered'
                     WHEN bool_or(delivery_status IN ('delivered','sent')) THEN 'sent'
                     ELSE 'queued' END AS state
-             FROM mail_recipients WHERE message_id = $1
+             FROM mail_recipients WHERE message_id = $1 AND kind <> 'self'
             GROUP BY coalesce(user_id, lower(address))
          )
          SELECT count(*)::text total,
@@ -580,15 +611,21 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
     [threadId, userId],
   );
 
-  const { rows: lbl } = await db.query<{ labels: string[] }>(
-    `SELECT COALESCE((array_agg(labels ORDER BY created_at DESC))[1], '[]'::jsonb) AS labels
-       FROM mail_recipients WHERE thread_id = $1 AND user_id = $2 AND NOT pending`,
+  const { rows: lbl } = await db.query<{ labels: string[]; folder: MailFolder | null; starred: boolean | null }>(
+    `SELECT COALESCE((array_agg(labels ORDER BY created_at DESC))[1], '[]'::jsonb) AS labels,
+            (array_agg(folder ORDER BY (kind = 'self'), created_at DESC))[1] AS folder,
+            bool_or(is_starred) AS starred
+       FROM mail_recipients WHERE thread_id = $1 AND user_id = $2 AND NOT pending AND NOT is_hidden`,
     [threadId, userId],
   );
 
   return {
     threadId, subject: tRows[0].subject, messages,
     labels: Array.isArray(lbl[0]?.labels) ? lbl[0]!.labels : [],
+    // Where this conversation sits for the reader, so the thread toolbar
+    // offers the right actions (C-12): Restore in Trash, Move to Inbox in Archive.
+    folder: lbl[0]?.folder ?? 'sent',
+    starred: lbl[0]?.starred === true,
   };
 }
 
@@ -612,7 +649,7 @@ export async function threadPlainText(
   }>(
     `SELECT m.from_name, m.created_at, m.body_text, m.body_html,
             (SELECT string_agg(r.name, ', ') FROM mail_recipients r
-              WHERE r.message_id = m.id AND r.kind <> 'bcc') AS to_names
+              WHERE r.message_id = m.id AND r.kind NOT IN ('bcc', 'self')) AS to_names
        FROM mail_messages m
       WHERE m.thread_id = $1 AND NOT m.is_draft AND m.sent_at IS NOT NULL
         AND ${visibleTo('m', '$2')}
@@ -685,10 +722,10 @@ async function assertUnderRecipientCaps(
 export async function compose(
   userId: string, payload: MailComposePayload, opts: { recipientCaps?: RecipientCaps | null } = {},
 ): Promise<ComposeResult> {
-  const subject = (payload.subject ?? '').trim().slice(0, MAIL_MAX_SUBJECT) || '(no subject)';
+  let subject = (payload.subject ?? '').trim().slice(0, MAIL_MAX_SUBJECT) || '(no subject)';
   // Sanitised on write: what is stored is safe for every reader and client.
-  const bodyHtml = sanitizeMailHtml((payload.bodyHtml ?? '').slice(0, MAIL_MAX_BODY_HTML));
-  const bodyText = (payload.bodyText?.trim() || htmlToText(bodyHtml)).slice(0, MAIL_MAX_BODY_HTML);
+  let bodyHtml = sanitizeMailHtml((payload.bodyHtml ?? '').slice(0, MAIL_MAX_BODY_HTML));
+  let bodyText = (payload.bodyText?.trim() || htmlToText(bodyHtml)).slice(0, MAIL_MAX_BODY_HTML);
   const isDraft = payload.draft === true;
   const scheduledAt = payload.scheduledAt ? new Date(payload.scheduledAt) : null;
   if (scheduledAt && Number.isNaN(scheduledAt.getTime())) throw new MailError('Invalid schedule time.');
@@ -703,12 +740,43 @@ export async function compose(
 
     const sender = await personById(client, userId);
     const prefs = await getPrefs(userId);
-    const fromName = prefs.displayName || sender.name;
+    // Mail goes out under the person's NGA account name, always (C-13 /
+    // MAIL2): a free-text display name let anyone appear as "Head Teacher
+    // (Official Notice)".
+    const fromName = sender.name;
 
     const to = await resolveRecipients(client, payload.to, 'to');
     const cc = await resolveRecipients(client, payload.cc, 'cc');
     const bcc = await resolveRecipients(client, payload.bcc, 'bcc');
     const all = [...to, ...cc, ...bcc];
+
+    /*
+     * Merge fields in personal mail (C-13). A template dropped into the
+     * composer used to arrive as "Dear {{first_name}}". With one recipient
+     * their own details fill the fields; anything else is refused with what
+     * to do about it, rather than sent raw. Drafts keep the tokens.
+     */
+    const fields = isDraft ? [] : extractMergeFields(subject, bodyHtml);
+    if (fields.length) {
+      // People, not delivery channels: someone with email copies appears twice.
+      const people = new Set(all.map((r) => r.userId ?? r.address.toLowerCase()));
+      if (people.size !== 1) {
+        throw new MailError(`{{${fields[0]}}} would read the same for everyone. Fill it in, or use a bulk send for personalised mail.`, 400);
+      }
+      const r = all[0]!;
+      const full = (r.name || '').trim();
+      const vars: Record<string, string> = {
+        name: full, full_name: full, first_name: full.split(/\s+/)[0] ?? '',
+        last_name: full.split(/\s+/).slice(1).join(' '), email: r.address,
+      };
+      const missing = fields.filter((f) => !vars[f]);
+      if (missing.length) {
+        throw new MailError(`Fill in {{${missing[0]}}} before sending — it has no value for ${full || r.address}.`, 400);
+      }
+      subject = renderMerge(subject, vars);
+      bodyHtml = renderMerge(bodyHtml, vars, { escape: true });
+      bodyText = renderMerge(bodyText, vars);
+    }
 
     if (!isDraft && all.length === 0) throw new MailError('Add at least one recipient.');
     if (all.length > MAIL_MAX_RECIPIENTS) {
@@ -808,6 +876,22 @@ export async function compose(
       if (!isDraft) await recordEvent(client, recipientId, messageId, 'queued', { channel: r.channel });
     }
 
+    /*
+     * The sender's own copy (C-08): a 'self' row in Sent, so the sender can
+     * star, label, trash and restore a conversation they only wrote in, like
+     * one they received. Not a recipient: never delivered, never listed as
+     * one. Someone writing to themselves already has their received copy.
+     */
+    if (!all.some((r) => r.userId === userId)) {
+      await client.query(
+        `INSERT INTO mail_recipients
+           (id, message_id, thread_id, kind, user_id, address, name, merge_vars, channel, delivery_status,
+            folder, is_read, read_at, pending)
+         VALUES ($1,$2,$3,'self',$4,$5,$6,'{}'::jsonb,'self','none','sent',true,now(),$7)`,
+        [`s${messageId}`, messageId, threadId, userId, sender.email ?? '', fromName, isDraft || Boolean(scheduledAt)],
+      );
+    }
+
     // ── release ───────────────────────────────────────────────────────────
     // Sent now: recipients see it and the thread summary moves. Scheduled
     // mail is released by the sweep at its time; drafts never are.
@@ -867,6 +951,7 @@ export async function releaseMessage(db: PoolClient | ReturnType<typeof getPool>
   const m = rows[0];
   if (!m) return;
   await db.query('UPDATE mail_recipients SET pending = false WHERE message_id = $1 AND pending', [messageId]);
+  await inheritThreadState(db, messageId, m.thread_id);
   await db.query(
     `UPDATE mail_threads t SET
        last_message_at = now(), last_sender_id = $2, last_sender_name = $3,
@@ -878,6 +963,44 @@ export async function releaseMessage(db: PoolClient | ReturnType<typeof getPool>
   );
 }
 
+/**
+ * One state per conversation (C-08 / C-09). State is stored per message, so a
+ * reply used to arrive bare: no labels, no star, and in Inbox while the rest
+ * of the conversation sat in Archive — listed in both. Now each new copy takes
+ * the person's labels and star for the thread; a conversation in Spam keeps
+ * new mail there, and otherwise a new message brings an archived
+ * conversation back to the Inbox, whole.
+ */
+async function inheritThreadState(db: PoolClient | ReturnType<typeof getPool>, messageId: string, threadId: string): Promise<void> {
+  await db.query(
+    `WITH prior AS (
+       SELECT r.user_id,
+              COALESCE(jsonb_agg(DISTINCT l.value) FILTER (WHERE l.value IS NOT NULL), '[]'::jsonb) AS labels,
+              bool_or(r.is_starred) AS starred,
+              bool_or(r.folder = 'spam' AND r.kind <> 'self') AS spam
+         FROM mail_recipients r
+         LEFT JOIN LATERAL jsonb_array_elements(r.labels) l ON true
+        WHERE r.thread_id = $2 AND r.message_id <> $1 AND r.user_id IS NOT NULL
+          AND NOT r.is_hidden AND NOT r.pending
+          AND r.user_id IN (SELECT user_id FROM mail_recipients WHERE message_id = $1 AND user_id IS NOT NULL)
+        GROUP BY r.user_id)
+     UPDATE mail_recipients r
+        SET labels = p.labels,
+            is_starred = r.is_starred OR p.starred,
+            folder = CASE WHEN r.kind <> 'self' AND p.spam THEN 'spam' ELSE r.folder END
+       FROM prior p
+      WHERE r.message_id = $1 AND r.user_id = p.user_id`,
+    [messageId, threadId],
+  );
+  await db.query(
+    `UPDATE mail_recipients o SET folder = 'inbox'
+      WHERE o.thread_id = $2 AND o.kind <> 'self' AND o.folder = 'archive' AND NOT o.is_hidden
+        AND o.user_id IN (SELECT user_id FROM mail_recipients
+                           WHERE message_id = $1 AND kind <> 'self' AND folder = 'inbox' AND user_id IS NOT NULL)`,
+    [messageId, threadId],
+  );
+}
+
 /* ────────────────────────────────────────────────────────────────────────── *
  * Mailbox actions
  * ────────────────────────────────────────────────────────────────────────── */
@@ -886,11 +1009,38 @@ const MOVABLE: MailFolder[] = ['inbox', 'archive', 'trash', 'spam'];
 
 export async function moveThread(userId: string, threadId: string, folder: MailFolder): Promise<void> {
   if (!MOVABLE.includes(folder)) throw new MailError('Cannot move mail there.');
+  // The sender's own copies live in Sent: they follow the conversation into
+  // Trash and back out of it, but are never "in the Inbox" or archived away.
   const { rowCount } = await getPool().query(
-    `UPDATE mail_recipients SET folder = $3 WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden AND NOT pending`,
+    `UPDATE mail_recipients
+        SET folder = CASE WHEN kind = 'self' THEN (CASE WHEN $3 = 'trash' THEN 'trash' ELSE 'sent' END) ELSE $3 END
+      WHERE thread_id = $1 AND user_id = $2 AND NOT is_hidden AND NOT pending`,
     [threadId, userId, folder],
   );
   if (!rowCount) throw new MailError('Thread not found in your mailbox.', 404);
+}
+
+/** Restore from Trash (C-08): received copies to the Inbox, the sender's to Sent. */
+export async function restoreThread(userId: string, threadId: string): Promise<void> {
+  const { rowCount } = await getPool().query(
+    `UPDATE mail_recipients SET folder = CASE WHEN kind = 'self' THEN 'sent' ELSE 'inbox' END
+      WHERE thread_id = $1 AND user_id = $2 AND folder IN ('trash', 'spam') AND NOT is_hidden AND NOT pending`,
+    [threadId, userId],
+  );
+  if (!rowCount) throw new MailError('Nothing to restore in that conversation.', 404);
+}
+
+/** Empty Trash (C-08): every conversation in it, gone for this person. */
+export async function emptyTrash(userId: string): Promise<number> {
+  const { rows } = await getPool().query<{ n: number }>(
+    `WITH gone AS (
+       UPDATE mail_recipients SET is_hidden = true
+        WHERE user_id = $1 AND folder = 'trash' AND NOT is_hidden
+        RETURNING thread_id)
+     SELECT count(DISTINCT thread_id)::int AS n FROM gone`,
+    [userId],
+  );
+  return rows[0]?.n ?? 0;
 }
 
 export async function starThread(userId: string, threadId: string, starred: boolean): Promise<void> {
@@ -946,7 +1096,7 @@ export async function deliveryFor(userId: string, messageId: string): Promise<Ma
     delivery_status: string; delivery_error: string | null; sent_at: string | null; delivered_at: string | null;
   }>(
     `SELECT id, name, address, kind, channel, delivery_status, delivery_error, sent_at, delivered_at
-       FROM mail_recipients WHERE message_id = $1 ORDER BY kind, name`,
+       FROM mail_recipients WHERE message_id = $1 AND kind <> 'self' ORDER BY kind, name`,
     [messageId],
   );
 

@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Star, Archive, Trash2, MailOpen, Mail as MailIcon, RefreshCw, Search, Paperclip,
-  Clock, AlertTriangle, CheckCheck, Loader2,
+  Clock, AlertTriangle, CheckCheck, Loader2, RotateCcw, Inbox, ShieldCheck, MoreVertical,
 } from 'lucide-react';
+import { useNotify } from '../../context/NotificationContext';
+import { useConfirmDialog } from '../../components/ConfirmDialog';
 import { Avatar, IconButton, Spinner, EmptyState } from '../../components/ui';
 import * as api from './api';
 import type { MailFolder, MailThreadSummary, MailLabel } from '@tupo/shared';
@@ -52,12 +54,28 @@ export const MailList: React.FC<Props> = ({
   const senderView = ['sent', 'drafts', 'scheduled'].includes(folder);
 
   const [failed, setFailed] = useState(false);
-  const load = useCallback(async (reset: boolean) => {
-    reset ? setLoading(true) : setLoadingMore(true);
+  const { notify, confirm: confirmed } = useNotify();
+  const [confirm, dialog] = useConfirmDialog();
+  const [rowMenu, setRowMenu] = useState<string | null>(null);
+  /**
+   * `soft`: live news (C-11) — the first page is fetched again and merged in
+   * place, with no spinner, keeping the selection, the scroll position and
+   * any pages already loaded. A new folder, label or search starts afresh.
+   */
+  const load = useCallback(async (reset: boolean, soft = false) => {
+    if (!soft) { reset ? setLoading(true) : setLoadingMore(true); }
     try {
       const page = await api.listThreads({ folder, label: labelId ?? undefined, q: query || undefined, cursor: reset ? undefined : cursor ?? undefined });
-      setThreads((prev) => (reset ? page.threads : [...prev, ...page.threads]));
-      setCursor(page.nextCursor);
+      setThreads((prev) => {
+        if (!reset) return [...prev, ...page.threads];
+        if (!soft) return page.threads;
+        const fresh = new Set(page.threads.map((t) => t.threadId));
+        const oldestFresh = page.threads[page.threads.length - 1]?.lastMessageAt ?? '';
+        // Keep what was loaded beyond the first page; drop what left it.
+        return [...page.threads, ...prev.filter((t) => !fresh.has(t.threadId) && t.lastMessageAt < oldestFresh)];
+      });
+      if (!soft || reset) setCursor((c) => (soft ? c ?? page.nextCursor : page.nextCursor));
+      if (soft) setSelected((sel) => new Set([...sel].filter((id) => page.threads.some((t) => t.threadId === id) || threadsRef.current.some((t) => t.threadId === id))));
       setFailed(false);
     } catch {
       // A failed first page is an error, not an empty folder (F-06). A failed
@@ -68,14 +86,77 @@ export const MailList: React.FC<Props> = ({
     }
   }, [folder, labelId, query, cursor]);
 
-  useEffect(() => { setSelected(new Set()); load(true); /* eslint-disable-next-line */ }, [folder, labelId, query, refreshKey]);
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
+  useEffect(() => { setSelected(new Set()); load(true); /* eslint-disable-next-line */ }, [folder, labelId, query]);
+  const firstKey = useRef(true);
+  useEffect(() => {
+    if (firstKey.current) { firstKey.current = false; return; }
+    void load(true, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   useEffect(() => { const t = setTimeout(() => setQuery(q.trim()), 300); return () => clearTimeout(t); }, [q]);
 
-  const act = async (fn: () => Promise<unknown>) => { await fn().catch(() => {}); load(true); onChanged(); };
-  const bulk = async (fn: (id: string) => Promise<unknown>) => {
-    await Promise.all([...selected].map((id) => fn(id).catch(() => {})));
-    setSelected(new Set()); load(true); onChanged();
+  const act = async (fn: () => Promise<unknown>, done?: string) => {
+    try { await fn(); if (done) confirmed(done); }
+    catch (e) { notify({ title: 'That did not work', body: e instanceof Error ? e.message : undefined, tone: 'error' }); }
+    void load(true, true); onChanged();
+  };
+  const bulk = async (fn: (id: string) => Promise<unknown>, done?: string) => {
+    const results = await Promise.allSettled([...selected].map((id) => fn(id)));
+    const failedCount = results.filter((r) => r.status === 'rejected').length;
+    if (failedCount) notify({ title: `${failedCount} of ${results.length} could not be changed`, tone: 'error' });
+    else if (done) confirmed(done);
+    setSelected(new Set()); void load(true, true); onChanged();
+  };
+
+  /*
+   * What can be done with a conversation depends on where it is (C-08 /
+   * C-12): Trash offers Restore and Delete forever, Spam offers Not spam,
+   * Archive offers Move to Inbox. The same list drives the row buttons, the
+   * phone row menu and the bulk bar.
+   */
+  type RowAction = { key: string; label: string; icon: React.ReactNode; run: (id: string) => Promise<unknown>; done: string };
+  const actionsFor = (t: MailThreadSummary | null): RowAction[] => {
+    const read = t ? t.unread : true;
+    const list: RowAction[] = [];
+    if (folder === 'trash') {
+      list.push({ key: 'restore', label: 'Restore', icon: <RotateCcw size={15} />, run: api.restoreThread, done: 'Restored' });
+      list.push({ key: 'purge', label: 'Delete forever', icon: <Trash2 size={15} />, run: api.purgeThread, done: 'Deleted forever' });
+      return list;
+    }
+    if (folder === 'spam') {
+      list.push({ key: 'notspam', label: 'Not spam', icon: <ShieldCheck size={15} />, run: api.restoreThread, done: 'Moved to the Inbox' });
+      list.push({ key: 'trash', label: 'Delete', icon: <Trash2 size={15} />, run: (id) => api.moveThread(id, 'trash'), done: 'Moved to Trash' });
+      return list;
+    }
+    if (folder === 'archive') list.push({ key: 'inbox', label: 'Move to Inbox', icon: <Inbox size={15} />, run: (id) => api.moveThread(id, 'inbox'), done: 'Moved to the Inbox' });
+    else if (!senderView) list.push({ key: 'archive', label: 'Archive', icon: <Archive size={15} />, run: (id) => api.moveThread(id, 'archive'), done: 'Archived' });
+    if (folder !== 'drafts' && folder !== 'scheduled') {
+      list.push({ key: 'trash', label: 'Delete', icon: <Trash2 size={15} />, run: (id) => api.moveThread(id, 'trash'), done: 'Moved to Trash' });
+    }
+    if (!senderView) {
+      list.push(read
+        ? { key: 'read', label: 'Mark read', icon: <MailOpen size={15} />, run: (id) => api.markThread(id, true), done: 'Marked read' }
+        : { key: 'unread', label: 'Mark unread', icon: <MailIcon size={15} />, run: (id) => api.markThread(id, false), done: 'Marked unread' });
+    }
+    return list;
+  };
+  const bulkActions: RowAction[] = [
+    ...actionsFor(null),
+    ...(!senderView && folder !== 'trash' && folder !== 'spam'
+      ? [{ key: 'unread', label: 'Mark unread', icon: <MailIcon size={15} />, run: (id: string) => api.markThread(id, false), done: 'Marked unread' },
+         { key: 'star', label: 'Star', icon: <Star size={15} />, run: (id: string) => api.starThread(id, true), done: 'Starred' }]
+      : []),
+  ].filter((a, i, all) => all.findIndex((b) => b.key === a.key) === i);
+
+  const emptyTrash = async () => {
+    const ok = await confirm({
+      title: 'Empty Trash?', body: <p>Every conversation in Trash is deleted for good. This cannot be undone.</p>,
+      confirmLabel: 'Empty Trash', tone: 'danger',
+    });
+    if (ok) await act(() => api.emptyTrash(), 'Trash emptied');
   };
 
   const labelById = (id: string) => labels.find((l) => l.id === id);
@@ -89,14 +170,18 @@ export const MailList: React.FC<Props> = ({
           <>
             <span className="text-sm font-medium">{selected.size} selected</span>
             <div className="ml-auto flex items-center gap-1">
-              <IconButton label="Archive" size="sm" onClick={() => bulk((id) => api.moveThread(id, 'archive'))}><Archive size={16} /></IconButton>
-              <IconButton label="Delete" size="sm" onClick={() => bulk((id) => api.moveThread(id, folder === 'trash' ? 'trash' : 'trash'))}><Trash2 size={16} /></IconButton>
-              <IconButton label="Mark read" size="sm" onClick={() => bulk((id) => api.markThread(id, true))}><MailOpen size={16} /></IconButton>
+              {bulkActions.map((a) => (
+                <IconButton key={a.key} label={a.label} size="sm" onClick={() => void bulk(a.run, a.done)}>{a.icon}</IconButton>
+              ))}
+              <button onClick={() => setSelected(new Set())} className="ml-1 text-xs text-blue-600 hover:underline dark:text-blue-400">Clear</button>
             </div>
           </>
         ) : (
           <>
             <h2 className="shrink-0 text-sm font-semibold">{title}</h2>
+            {folder === 'trash' && threads.length > 0 && (
+              <button onClick={() => void emptyTrash()} className="shrink-0 text-xs font-medium text-red-600 hover:underline dark:text-red-400">Empty Trash</button>
+            )}
             <div className="relative ml-auto min-w-0">
               <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-secondary-light" />
               <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search mail"
@@ -168,13 +253,35 @@ export const MailList: React.FC<Props> = ({
                       )}
                     </div>
                     <div className="hidden shrink-0 items-center gap-0.5 sm:flex" onClick={(e) => e.stopPropagation()}>
-                      {folder !== 'archive' && !senderView && <IconButton label="Archive" size="sm" onClick={() => act(() => api.moveThread(t.threadId, 'archive'))}><Archive size={15} /></IconButton>}
-                      {folder === 'trash'
-                        ? <IconButton label="Delete forever" size="sm" onClick={() => act(() => api.purgeThread(t.threadId))}><Trash2 size={15} /></IconButton>
-                        : <IconButton label="Delete" size="sm" onClick={() => act(() => api.moveThread(t.threadId, 'trash'))}><Trash2 size={15} /></IconButton>}
-                      {!senderView && <IconButton label={t.unread ? 'Mark read' : 'Mark unread'} size="sm" onClick={() => act(() => api.markThread(t.threadId, t.unread))}>
-                        {t.unread ? <MailOpen size={15} /> : <MailIcon size={15} />}
-                      </IconButton>}
+                      {actionsFor(t).map((a) => (
+                        <IconButton key={a.key} label={a.label} size="sm" onClick={() => void act(() => a.run(t.threadId), a.done)}>{a.icon}</IconButton>
+                      ))}
+                    </div>
+                    {/* Phones have no hover (C-12): the folder's main action is one
+                        tap, the rest sit behind ⋯. */}
+                    {actionsFor(t)[0] && (
+                      <span className="shrink-0 sm:hidden" onClick={(e) => e.stopPropagation()}>
+                        <IconButton label={actionsFor(t)[0]!.label} size="sm"
+                          onClick={() => void act(() => actionsFor(t)[0]!.run(t.threadId), actionsFor(t)[0]!.done)}>
+                          {actionsFor(t)[0]!.icon}
+                        </IconButton>
+                      </span>
+                    )}
+                    <div className="relative shrink-0 sm:hidden" onClick={(e) => e.stopPropagation()}>
+                      <IconButton label={`Actions for ${t.subject}`} size="sm" aria-haspopup="menu" aria-expanded={rowMenu === t.threadId}
+                        onClick={() => setRowMenu((m) => (m === t.threadId ? null : t.threadId))}>
+                        <MoreVertical size={15} />
+                      </IconButton>
+                      {rowMenu === t.threadId && (
+                        <div role="menu" className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-xl border border-border-light bg-white py-1 shadow-xl dark:border-border-dark/50 dark:bg-elevated-dark">
+                          {actionsFor(t).slice(1).map((a) => (
+                            <button key={a.key} role="menuitem" onClick={() => { setRowMenu(null); void act(() => a.run(t.threadId), a.done); }}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-surface-light dark:hover:bg-surface-dark">
+                              {a.icon} {a.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </li>
@@ -188,6 +295,7 @@ export const MailList: React.FC<Props> = ({
           </button>
         )}
       </div>
+      {dialog}
     </div>
   );
 };
