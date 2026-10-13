@@ -64,7 +64,8 @@ export const Lightbox: React.FC<{
   onClose: () => void;
 }> = ({ items, index, onIndex, onClose }) => {
   const current = items[index];
-  const { url, failed } = useMediaUrl(current?.fileId ?? '', Boolean(current));
+  const { url, failed, refresh } = useMediaUrl(current?.fileId ?? '', Boolean(current));
+  const videoResume = useRef<number | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -126,6 +127,12 @@ export const Lightbox: React.FC<{
             src={url}
             controls
             autoPlay
+            onError={(e) => { videoResume.current = (e.target as HTMLVideoElement).currentTime; refresh(); }}
+            onLoadedMetadata={(e) => {
+              if (videoResume.current == null) return;
+              (e.target as HTMLVideoElement).currentTime = videoResume.current;
+              videoResume.current = null;
+            }}
             onClick={(e) => e.stopPropagation()}
             className="max-h-full max-w-full rounded-lg"
           />
@@ -179,8 +186,10 @@ const SPEEDS = [1, 1.5, 2] as const;
 export const VoiceNote: React.FC<{ attachment: Attachment; onDark: boolean }> = (
   { attachment: a, onDark },
 ) => {
-  const { url } = useMediaUrl(a.fileId, true);
+  const { url, refresh } = useMediaUrl(a.fileId, true);
   const audioRef = useRef<HTMLAudioElement>(null);
+  /** Where to pick up after a ticket refresh swaps the source mid-play. */
+  const resumeAt = useRef<{ time: number; play: boolean } | null>(null);
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
@@ -221,6 +230,22 @@ export const VoiceNote: React.FC<{ attachment: Attachment; onDark: boolean }> = 
           onPause={() => setPlaying(false)}
           onEnded={() => { setPlaying(false); setPosition(0); }}
           onTimeUpdate={(e) => setPosition((e.target as HTMLAudioElement).currentTime)}
+          // A failed load (expired ticket, dropped connection) gets a fresh
+          // ticket and carries on from the same place.
+          onError={(e) => {
+            const el = e.target as HTMLAudioElement;
+            resumeAt.current = { time: el.currentTime || position, play: playing };
+            if (!refresh()) setPlaying(false);
+          }}
+          onLoadedMetadata={(e) => {
+            const r = resumeAt.current;
+            if (!r) return;
+            resumeAt.current = null;
+            const el = e.target as HTMLAudioElement;
+            el.currentTime = r.time;
+            el.playbackRate = speed;
+            if (r.play) void el.play();
+          }}
         />
       )}
 

@@ -23,6 +23,8 @@ export interface UploadTray {
   /** File ids ready to be attached to a message. */
   readyIds: string[];
   busy: boolean;
+  /** Uploads that failed and are still in the tray — sending would drop them. */
+  failedCount: number;
   /**
    * Add files to the tray.
    *
@@ -182,6 +184,7 @@ export function useUploads(): UploadTray {
     readyIds: uploads.filter((u) => u.state === 'ready' && u.fileId).map((u) => u.fileId!),
     // Send waits for uploads in flight rather than silently dropping them.
     busy: uploads.some((u) => u.state === 'uploading' || u.state === 'pending'),
+    failedCount: uploads.filter((u) => u.state === 'failed').length,
     add, remove, clear, errors, dismissError,
   };
 }

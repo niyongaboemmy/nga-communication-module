@@ -66,6 +66,8 @@ interface ChatValue {
     metadata?: Record<string, unknown>;
   }) => Promise<void>;
   retry: (nonce: string) => Promise<void>;
+  /** Drop a message that failed to send. */
+  discard: (nonce: string) => Promise<void>;
   react: (messageId: string, emoji: string) => Promise<void>;
 
   /** The message the composer is answering, if any (FR-MSG-7). */
@@ -264,6 +266,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   activeIdRef.current = activeId;
 
   const lastTypingSentAt = useRef(0);
+  /** What each unsent message was, for an exact retry. */
+  const pendingPayloads = useRef(new Map<string, Parameters<typeof chatApi.sendMessage>[1]>());
   const draftTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const active = useMemo(
@@ -294,6 +298,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => { if (user) void refresh(); }, [user, refresh]);
+  // The offline queue belongs to whoever is signed in.
+  useEffect(() => { outbox.setOutboxOwner(user?.id ?? null); }, [user]);
 
   /** Seed the per-thread counters from the Threads inbox. */
   const refreshThreadUnread = useCallback(async () => {
@@ -799,14 +805,21 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
     void outbox.pending().then((q) => setQueued(q.length));
 
+    pendingPayloads.current.set(nonce, payload);
+    // Acks can arrive after the person has switched conversation: they belong
+    // to the conversation they were sent in, never to whichever one is open.
+    const stillHere = () => activeIdRef.current === conversationId;
     const settle = async (message: WireMessage) => {
       await outbox.dequeue(nonce);
+      pendingPayloads.current.delete(nonce);
       void outbox.pending().then((q) => setQueued(q.length));
-      setMessages((prev) => reconcile(prev, message, nonce));
+      if (stillHere()) setMessages((prev) => reconcile(prev, message, nonce));
     };
-    const failed = () =>
+    const failed = () => {
+      if (!stillHere()) return;
       setMessages((prev) => prev.map((m) => (m.nonce === nonce
         ? { ...m, delivery: 'failed' as const } : m)));
+    };
 
     const socket = getSocket();
     if (socket?.connected) {
@@ -833,21 +846,36 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setMessages((prev) => prev.map((m) => (m.nonce === nonce
       ? { ...m, delivery: 'pending' as const } : m)));
 
-    const conversationId = activeIdRef.current;
-    if (!conversationId) return;
+    const conversationId = failedMsg.conversationId;
+    // The original payload — attachments, type and metadata included — not a
+    // text-only rebuild that would post a voice note as an empty message.
+    const original = pendingPayloads.current.get(nonce);
     try {
       // Same nonce: if the original in fact landed, this resolves to it rather
       // than posting a second copy.
-      const r = await chatApi.sendMessage(conversationId, {
+      const r = await chatApi.sendMessage(conversationId, original ?? {
         body: failedMsg.body ?? '', nonce,
         threadRootId: failedMsg.threadRootId, replyToId: failedMsg.replyTo?.id ?? null,
       });
-      setMessages((prev) => reconcile(prev, r.message, nonce));
+      await outbox.dequeue(nonce);
+      pendingPayloads.current.delete(nonce);
+      void outbox.pending().then((q) => setQueued(q.length));
+      if (activeIdRef.current === conversationId) setMessages((prev) => reconcile(prev, r.message, nonce));
     } catch {
-      setMessages((prev) => prev.map((m) => (m.nonce === nonce
-        ? { ...m, delivery: 'failed' as const } : m)));
+      if (activeIdRef.current === conversationId) {
+        setMessages((prev) => prev.map((m) => (m.nonce === nonce
+          ? { ...m, delivery: 'failed' as const } : m)));
+      }
     }
   }, [messages]);
+
+  /** Give up on a message that did not send: off the screen and out of the queue. */
+  const discard = useCallback(async (nonce: string) => {
+    setMessages((prev) => prev.filter((m) => m.nonce !== nonce || m.delivery !== 'failed'));
+    pendingPayloads.current.delete(nonce);
+    await outbox.dequeue(nonce).catch(() => {});
+    void outbox.pending().then((q) => setQueued(q.length));
+  }, []);
 
   /* ────────────────────────────────────────────────────────────────────── *
    * Reactions, edits, deletions
@@ -1114,7 +1142,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     typingByConversation: typingByConv,
     conversationPresence: convPresence,
     connected,
-    send, retry, react, edit, remove, notifyTyping, markReadTo, queued,
+    send, retry, discard, react, edit, remove, notifyTyping, markReadTo, queued,
     markEverythingRead, lastEditableOwnMessage, editingId, setEditingId,
     replyTarget, setReplyTarget,
     threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,

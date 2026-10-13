@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { SESSION_KEY } from '../../lib/api';
 import type { WireAttachment } from '@tupo/shared';
 
@@ -254,9 +254,11 @@ export function bustTicket(fileId: string): void {
  */
 export function useMediaUrl(
   fileId: string | null | undefined, enabled = true,
-): { url: string | null; failed: boolean } {
+): { url: string | null; failed: boolean; refresh: () => boolean } {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [version, setVersion] = useState(0);
+  const refreshes = useRef(0);
 
   useEffect(() => {
     // Reset on change, or a swapped-out logo keeps showing the old picture
@@ -269,9 +271,25 @@ export function useMediaUrl(
       .then((u) => { if (!cancelled) setUrl(u); })
       .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
-  }, [fileId, enabled]);
+  }, [fileId, enabled, version]);
 
-  return { url, failed };
+  // A file change starts the retry budget again.
+  useEffect(() => { refreshes.current = 0; }, [fileId]);
+
+  /**
+   * Mint a fresh ticket — for a media element's `error` (an expired ticket
+   * mid-playback, a dropped connection). Bounded, so a file that is really
+   * gone fails instead of looping. Returns whether a retry was started.
+   */
+  const refresh = useCallback(() => {
+    if (!fileId || refreshes.current >= 3) return false;
+    refreshes.current += 1;
+    bustTicket(fileId);
+    setVersion((v) => v + 1);
+    return true;
+  }, [fileId]);
+
+  return { url, failed, refresh };
 }
 
 /**

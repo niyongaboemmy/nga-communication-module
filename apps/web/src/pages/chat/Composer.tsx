@@ -164,6 +164,18 @@ export const Composer: React.FC<{
 
   const submit = useCallback(() => {
     const text = value.trim();
+    // Over the limit is refused here, not after a round trip that wipes the
+    // text and leaves a "Not sent" bubble that can never succeed (B-06).
+    if (value.length > MAX_MESSAGE_LENGTH) {
+      notify({ title: `Messages can be up to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters`, tone: 'warning' });
+      return;
+    }
+    // A failed upload is not silently dropped: the person decides to retry or
+    // remove it before anything is sent.
+    if (tray.failedCount > 0) {
+      notify({ title: 'An attachment did not upload', body: 'Remove it or try again before sending.', tone: 'warning' });
+      return;
+    }
     // An attachment on its own is a message. Requiring a caption for a photo
     // is a rule no chat product has ever had.
     if (!text && tray.readyIds.length === 0) return;
@@ -194,10 +206,10 @@ export const Composer: React.FC<{
         return;
 
       case 'poll':
-        setDraft(conversation.id, '');
+        // The text stays until the poll exists: a refused poll keeps what was typed.
         void chatApi.createPoll(conversation.id, {
           question: command.question, options: command.options,
-        }).catch((err) => notify({
+        }).then(() => setDraft(conversation.id, '')).catch((err) => notify({
           title: 'The poll could not be created',
           body: err instanceof Error ? err.message : undefined,
           tone: 'error',

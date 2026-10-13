@@ -208,7 +208,7 @@ const MessageRow: React.FC<{
   const { user } = useAuth();
   const {
     react, edit, remove, pin, save, openThread, setReplyTarget, jumpTo, highlightedId,
-    editingId, setEditingId, threadUnread,
+    editingId, setEditingId, threadUnread, discard,
   } = useChat();
   const newReplies = threadUnread[m.id] ?? 0;
   const [picking, setPicking] = useState(false);
@@ -444,12 +444,20 @@ const MessageRow: React.FC<{
         {/* UX-1: a failure is never silent, and the retry sits on the message
             itself rather than in a toast that scrolls out of reach. */}
         {failed && m.nonce && (
-          <button
-            onClick={() => onRetry(m.nonce!)}
-            className="mt-1 flex items-center gap-1 text-[11px] font-medium text-red-600 hover:underline dark:text-red-400"
-          >
-            <RotateCcw size={11} /> Not sent — tap to retry
-          </button>
+          <div className={`mt-1 flex items-center gap-3 text-[11px] font-medium ${mine ? 'justify-end' : ''}`}>
+            <button
+              onClick={() => onRetry(m.nonce!)}
+              className="flex items-center gap-1 text-red-600 hover:underline dark:text-red-400"
+            >
+              <RotateCcw size={11} /> Not sent — retry
+            </button>
+            <button
+              onClick={() => void discard(m.nonce!)}
+              className="text-text-secondary-light hover:underline dark:text-text-secondary-dark"
+            >
+              Discard
+            </button>
+          </div>
         )}
 
         {(m.reactions.length > 0 || m.replyCount > 0) && (
@@ -496,7 +504,7 @@ const MessageRow: React.FC<{
       {/* UX-7: hover actions. Hidden until hover on pointer devices; the `…`
           button opens the same set as a menu, so nothing is unreachable
           without a mouse, and everything here is keyboard-focusable. */}
-      {!editing && !pending && (
+      {!editing && !pending && !failed && (
         <div
           className={`absolute -top-3 z-10 flex items-center gap-0.5 rounded-xl border border-border-light bg-white p-0.5 opacity-0 pointer-events-none transition-opacity duration-150 focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
             /* Anchored to the side the bubble is actually on. `left-12` for an

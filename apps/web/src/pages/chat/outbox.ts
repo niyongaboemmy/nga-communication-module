@@ -25,6 +25,12 @@ const STORE = 'outbox';
 
 export interface OutboxEntry {
   nonce: string;
+  /**
+   * Whose message this is. The store is per browser, not per account: without
+   * an owner, a message queued by one person could be sent as whoever signs
+   * in next on the same device (CHAT-M12).
+   */
+  ownerId?: string;
   conversationId: string;
   body: string;
   replyToId: string | null;
@@ -34,6 +40,10 @@ export interface OutboxEntry {
   /** Bumped on each failed flush, so a poisonous entry cannot loop forever. */
   attempts: number;
 }
+
+let owner: string | null = null;
+/** Set by ChatProvider when a session starts; entries are tagged and filtered by it. */
+export function setOutboxOwner(userId: string | null): void { owner = userId; }
 
 /** After this many failed attempts an entry is surfaced as failed, not retried. */
 export const MAX_ATTEMPTS = 5;
@@ -88,17 +98,24 @@ function tx<T>(
 export async function enqueue(
   entry: Omit<OutboxEntry, 'createdAt' | 'attempts'>,
 ): Promise<void> {
-  await tx('readwrite', (s) => s.put({ ...entry, createdAt: Date.now(), attempts: 0 }));
+  await tx('readwrite', (s) => s.put({ ...entry, ownerId: owner ?? undefined, createdAt: Date.now(), attempts: 0 }));
 }
 
 export async function dequeue(nonce: string): Promise<void> {
   await tx('readwrite', (s) => s.delete(nonce));
 }
 
-/** Everything waiting, oldest first. */
+/** Everything this person has waiting, oldest first. Never anyone else's. */
 export async function pending(): Promise<OutboxEntry[]> {
   const all = await tx<OutboxEntry[]>('readonly', (s) => s.getAll() as IDBRequest<OutboxEntry[]>);
-  return (all ?? []).sort((a, b) => a.createdAt - b.createdAt);
+  return (all ?? [])
+    .filter((e) => owner !== null && e.ownerId === owner)
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/** Empty the queue — on sign-out, so nothing is left for the next person. */
+export async function clearAll(): Promise<void> {
+  await tx('readwrite', (s) => s.clear());
 }
 
 export async function recordAttempt(nonce: string): Promise<number> {

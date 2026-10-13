@@ -92,6 +92,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // Tell usage analytics this tab's session is over while the token that
     // identifies it still exists (it is read synchronously, before the clear).
     void endActivity();
+    // Nothing queued offline survives a sign-out to be sent as someone else.
+    void import('../pages/chat/outbox').then((o) => o.clearAll()).catch(() => {});
     clearSession();
     setToken(null);
     setUser(null);

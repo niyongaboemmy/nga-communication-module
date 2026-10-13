@@ -52,7 +52,11 @@ function requireSession(req: express.Request, res: express.Response, next: expre
  * ticket was issued is refused by the same check as everyone else, and a copied
  * URL is worthless to anyone other than the person it was minted for.
  */
-const MEDIA_TICKET_TTL_SECONDS = 60;
+// Long enough to play a voice note or watch a clip — media players keep making
+// range requests with the same URL as they buffer and seek, and a 60s ticket
+// stopped playback a minute in (A-08). Still bound to one file and one person,
+// and canReadFile re-runs on every request, so revoking access still works.
+const MEDIA_TICKET_TTL_SECONDS = 15 * 60;
 
 interface MediaTicketClaims { sub: string; fid: string; aud: string }
 
