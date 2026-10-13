@@ -77,7 +77,11 @@ const seed = (u) => ({
  * for edit and delete, both of which were working the whole time.
  */
 const visible = (locator, ms = 6000) =>
-  locator.waitFor({ state: 'visible', timeout: ms }).then(() => true).catch(() => false);
+  locator.waitFor({ state: 'visible', timeout: ms }).then(() => true).catch((err) => {
+    // DEBUG_VISIBLE=1: say why — a strict-mode clash and a timeout look the same otherwise.
+    if (process.env.DEBUG_VISIBLE) console.log(`    · not visible: ${String(err.message).split('\n').slice(0, 3).join(' | ')}`);
+    return false;
+  });
 
 const hidden = (locator, ms = 6000) =>
   locator.waitFor({ state: 'hidden', timeout: ms }).then(() => true).catch(() => false);
@@ -426,7 +430,7 @@ try {
   check('a chosen file appears in the composer tray',
     await visible(A.page.getByRole('list', { name: 'Attachments' })));
   check('and it uploads without being asked to',
-    await visible(A.page.getByRole('list', { name: 'Attachments' }).getByText('lesson-plan.png')));
+    await visible(A.page.getByRole('list', { name: 'Attachments' }).getByText('lesson-plan.png').first()));
 
   await A.page.locator('#composer').fill('Here is the plan');
   check('send unlocks once the attachment has finished uploading', await sendReady(A.page));
@@ -497,7 +501,7 @@ try {
   await B.page.getByRole('tab', { name: 'Files' }).click();
   const filesPanel = B.page.getByRole('complementary', { name: 'Conversation details' });
   check('the Files tab lists what has been shared',
-    await visible(filesPanel.getByText('lesson-plan.png'), 6000));
+    await visible(filesPanel.getByText('lesson-plan.png').first(), 6000));
   check('with who shared it',
     await visible(filesPanel.getByText(/Ada Umutoni/).first()));
   await B.page.screenshot({ path: `${SHOTS}/10-bob-files-tab.png` });
@@ -1009,13 +1013,17 @@ try {
   const bulkConv = await fetch(`${API}/api/chat/conversations`, { headers: bulkHeaders })
     .then((r) => r.json())
     .then((r) => r.data.conversations.find((c) => c.name?.startsWith('Names')));
+  // Through the chat service's own write path rather than HTTP: the API rate
+  // limits a person to 60 sends a minute (A-03), which a 600-message fixture
+  // is not, and going around it is a test concern, not a product one. Sequence
+  // numbers, previews and counters are written exactly as a real send.
+  process.env.DATABASE_URL ??= env.DATABASE_URL;
+  const chatSvc = await import('@tupo/chat');
   for (let k = 0; k < 20; k++) {
-    await Promise.all(Array.from({ length: 30 }, (_, i) => fetch(
-      `${API}/api/chat/conversations/${bulkConv.id}/messages`, {
-        method: 'POST',
-        headers: bulkHeaders,
-        body: JSON.stringify({ body: `bulk ${k}-${i} filler text of ordinary length`, nonce: `bulk-${k}-${i}` }),
-      })));
+    await Promise.all(Array.from({ length: 30 }, (_, i) => chatSvc.sendMessage({
+      conversationId: bulkConv.id, senderId: A.id,
+      body: `bulk ${k}-${i} filler text of ordinary length`, nonce: `bulk-${k}-${i}`,
+    })));
   }
   const bulkCount = Number((await pool.query(
     'SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1', [bulkConv.id])).rows[0].n);
@@ -1030,7 +1038,7 @@ try {
   /** Geometry of the scroller that actually holds the log. */
   const logState = () => A.page.evaluate(() => {
     let el = document.querySelector('[role="log"]');
-    while (el && el.scrollHeight <= el.clientHeight + 4) el = el.parentElement;
+    while (el && !(/(auto|scroll)/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight + 4)) el = el.parentElement;
     if (!el) return null;
     const box = el.getBoundingClientRect();
     const rows = [...document.querySelectorAll('[data-message-row]')];
@@ -1054,7 +1062,7 @@ try {
 
   const scrollLogTo = (frac) => A.page.evaluate((f) => {
     let el = document.querySelector('[role="log"]');
-    while (el && el.scrollHeight <= el.clientHeight + 4) el = el.parentElement;
+    while (el && !(/(auto|scroll)/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight + 4)) el = el.parentElement;
     el.scrollTop = (el.scrollHeight - el.clientHeight) * f;
   }, frac);
 

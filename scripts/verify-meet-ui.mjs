@@ -618,9 +618,12 @@ try {
   await hostP.page.waitForTimeout(2500);
   await hostP.page.screenshot({ path: `${SHOTS}/24b-sharing-host.png` });
 
+  // Waited for, not sampled: on a loaded machine the banner can land after a
+  // fixed sleep, which made this check fail one run in three.
   check('the room shows the host as presenting',
-    await pupilP.page.getByText(/presenting|is sharing/i).first().isVisible().catch(() => false)
-    || await pupilP.page.locator('video.object-contain').first().isVisible().catch(() => false));
+    await pupilP.page.getByText(/presenting|is sharing/i).first()
+      .or(pupilP.page.locator('video.object-contain').first())
+      .first().waitFor({ state: 'visible', timeout: 10_000 }).then(() => true).catch(() => false));
 
   await pupilP.page.bringToFront();
   // The shared surface renders letterboxed — object-contain — which is set only
@@ -649,10 +652,12 @@ try {
   await hostP.page.bringToFront();
   await hostP.page.getByRole('button', { name: /Stop presenting|Stop sharing/i }).first()
     .click().catch(() => {});
-  await pupilP.page.waitForTimeout(2500);
+  // Waited for: the stop travels host → gateway → pupil, then a re-render.
   check('stopping the share removes it from the other side',
-    await pupilP.page.locator('video.object-contain').count() === 0
-    || !await pupilP.page.locator('video.object-contain').first().isVisible().catch(() => true));
+    await pupilP.page.waitForFunction(
+      () => ![...document.querySelectorAll('video.object-contain')].some((v) => v.offsetParent !== null),
+      undefined, { timeout: 10_000 },
+    ).then(() => true).catch(() => false));
   await hostP.page.waitForTimeout(400);
 
   // ---- the mini call: navigate away, stay in the meeting ----

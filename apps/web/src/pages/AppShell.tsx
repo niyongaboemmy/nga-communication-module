@@ -370,7 +370,10 @@ export const AppShell: React.FC = () => {
    */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      // Plain Ctrl/⌘ K only: with Shift it is the chat command palette's, and
+      // opening both meant one Enter ran both — the search's navigation then
+      // closed the conversation the palette was acting on.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setSearchOpen(true);
       }

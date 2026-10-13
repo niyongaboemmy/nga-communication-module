@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs';
 import './utils/asyncErrors.js';
 import express from 'express';
 import cors from 'cors';
@@ -47,6 +48,25 @@ app.use((_req, res, next) => {
 app.use('/api/activity', activityRoutes);
 
 app.use(express.json({ limit: '1mb' }));
+
+// LOG_HTTP_ERRORS=1 (console) or =/path/to/file: log every 4xx/5xx with its
+// message — for chasing a test or probe that only fails inside a long run
+// (test runners hide console output of passing tests). Off unless asked for.
+const httpErrorLog = process.env.LOG_HTTP_ERRORS;
+if (httpErrorLog) {
+  app.use((req, res, next) => {
+    const json = res.json.bind(res);
+    res.json = (body: unknown) => {
+      if (res.statusCode >= 400) {
+        const line = `${new Date().toISOString()} [${process.pid}] [http ${res.statusCode}] ${req.method} ${req.originalUrl} — ${JSON.stringify(body).slice(0, 200)}`;
+        if (httpErrorLog === '1') console.log(line);
+        else try { appendFileSync(httpErrorLog, line + '\n'); } catch { /* best effort */ }
+      }
+      return json(body);
+    };
+    next();
+  });
+}
 // Per-person ceilings on the write paths that can be flooded (A-03).
 app.use(rateLimit);
 

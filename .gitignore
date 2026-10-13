@@ -150,5 +150,10 @@ brand/src/baked-path.txt
 brand/src/_render.html
 brand/src/icon-transparent-full.png
 
-# Local test artefacts
-.feed-ui-shots/media-*.png
+
+# Screenshots written by the browser verify suites on every run (G-03). Not
+# source: tracking them dirtied the tree on every run and shipped them with
+# each deploy (OPS-08).
+.chat-ui-shots/
+.feed-ui-shots/
+.meet-ui-shots/
