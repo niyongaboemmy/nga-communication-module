@@ -81,7 +81,7 @@ interface ChatValue {
   threadMessages: WireMessage[];
   threadLoading: boolean;
   openThread: (rootId: string | null) => void;
-  sendThreadReply: (body: string, alsoSendToChannel: boolean) => Promise<void>;
+  sendThreadReply: (body: string, alsoSendToChannel: boolean, attachments?: string[]) => Promise<void>;
 
   pin: (messageId: string, pinned: boolean) => Promise<void>;
   save: (messageId: string, saved: boolean) => Promise<void>;
@@ -976,14 +976,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       .finally(() => setThreadLoading(false));
   }, []);
 
-  const sendThreadReply = useCallback(async (body: string, alsoSendToChannel: boolean) => {
+  const sendThreadReply = useCallback(async (body: string, alsoSendToChannel: boolean, attachments: string[] = []) => {
     const conversationId = activeIdRef.current;
     const rootId = threadRootId;
-    if (!conversationId || !rootId || !body.trim()) return;
+    if (!conversationId || !rootId || (!body.trim() && attachments.length === 0)) return;
 
     const nonce = newNonce();
     const r = await chatApi.replyInThread(conversationId, rootId, {
-      body: body.trim(), nonce, alsoSendToChannel,
+      body: body.trim(), nonce, alsoSendToChannel, ...(attachments.length ? { attachments } : {}),
     });
     setThreadMessages((prev) => reconcile(prev, r.message, nonce));
     // The parent's reply count moved; the main flow has to show it.

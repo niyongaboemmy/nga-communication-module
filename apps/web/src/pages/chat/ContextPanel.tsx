@@ -157,7 +157,7 @@ export const ContextPanel: React.FC<{
   }), [membersWithPresence]);
 
   const [files, setFiles] = useState<ConversationFile[] | null>(null);
-  const [filter, setFilter] = useState<'all' | 'image' | 'document'>('all');
+  const [filter, setFilter] = useState<'all' | 'media' | 'document'>('all');
 
   // Fetched when the tab is opened, not on mount: a channel's file history can
   // be long, and most people never open this tab at all.
@@ -395,7 +395,7 @@ export const ContextPanel: React.FC<{
             <div className="mb-2 flex gap-1 rounded-lg border border-border-light p-1 dark:border-border-dark/50">
               {([
                 { id: 'all', label: 'All' },
-                { id: 'image', label: 'Media' },
+                { id: 'media', label: 'Media' },
                 { id: 'document', label: 'Documents' },
               ] as const).map(({ id, label }) => (
                 <button

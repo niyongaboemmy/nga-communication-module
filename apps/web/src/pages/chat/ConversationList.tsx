@@ -43,6 +43,12 @@ const Row: React.FC<{
   const Icon = c.type === 'dm' ? null : KIND_ICON[c.type];
   const mine = c.lastMessage?.senderId && c.lastMessage.senderId === user?.id;
   const [menuOpen, setMenuOpen] = useState(false);
+  // The live draft (B-09): what is in the composer now, kept in the provider
+  // and seeded from the server. The list's own copy is only as fresh as the
+  // last list load, so a draft typed a moment ago never showed and a sent
+  // one lingered as "Draft: …".
+  const { draftFor } = useChat();
+  const draft = draftFor(c.id).trim();
 
   return (
     <li className="group/row relative">
@@ -103,8 +109,8 @@ const Row: React.FC<{
                   one of the three that is happening right now. */}
               {typing.length > 0
                 ? <span className="text-blue-600 dark:text-blue-400">{typingLabel(typing, typingKind)}…</span>
-                : c.draft
-                ? <span className="text-amber-600 dark:text-amber-400">Draft: {c.draft}</span>
+                : draft && !active
+                ? <span className="text-amber-600 dark:text-amber-400">Draft: {draft}</span>
                 : c.lastMessage
                   ? `${mine ? 'You: ' : c.type !== 'dm' && c.lastMessage.senderName ? `${c.lastMessage.senderName.split(' ')[0]}: ` : ''}${c.lastMessage.preview}`
                   : 'No messages yet'}

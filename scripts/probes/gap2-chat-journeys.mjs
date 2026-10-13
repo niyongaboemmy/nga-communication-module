@@ -8,7 +8,8 @@ import { chromium } from 'playwright';
 import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import { purgeUsers } from '../lib/purge.mjs';
@@ -16,6 +17,15 @@ import { purgeUsers } from '../lib/purge.mjs';
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const OUT = process.env.OUT ?? '/tmp/gap2-chat';
 const MEDIA = process.env.MEDIA ?? OUT;
+// Test media, made on first run (needs ffmpeg): a 2 s clip, a still, a voice note.
+mkdirSync(MEDIA, { recursive: true });
+for (const [file, args] of [
+  ['clip.mp4', ['-f', 'lavfi', '-i', 'testsrc=duration=2:size=320x240:rate=15', '-pix_fmt', 'yuv420p']],
+  ['pic.png', ['-f', 'lavfi', '-i', 'testsrc=size=320x240', '-frames:v', '1']],
+  ['voice.webm', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=8', '-c:a', 'libopus']],
+]) {
+  if (!existsSync(`${MEDIA}/${file}`)) execFileSync('ffmpeg', ['-loglevel', 'error', '-y', ...args, `${MEDIA}/${file}`]);
+}
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',')) : null;
 mkdirSync(OUT, { recursive: true });
 const env = Object.fromEntries(readFileSync(`${ROOT}/apps/api/.env`, 'utf8').split('\n')

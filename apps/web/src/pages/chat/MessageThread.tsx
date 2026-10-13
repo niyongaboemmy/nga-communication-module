@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useStartCall } from './useStartCall';
 import {
   Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
@@ -66,7 +67,9 @@ const ThreadHeader: React.FC<{
   contextOpen: boolean;
   onOpenSearch: () => void;
   onOpenChannelSettings: () => void;
-}> = ({ conversation: c, onBack, onToggleContext, contextOpen, onOpenSearch, onOpenChannelSettings }) => {
+  onOpenPinned: () => void;
+}> = ({ conversation: c, onBack, onToggleContext, contextOpen, onOpenSearch, onOpenChannelSettings, onOpenPinned }) => {
+  const { start: startCall, starting } = useStartCall(c);
   const { can } = usePermissions();
   const { typing, conversationPresence } = useChat();
   const Icon = c.type === 'dm' ? null : KIND_ICON[c.type];
@@ -161,15 +164,15 @@ const ThreadHeader: React.FC<{
 
       <div className="flex items-center gap-0.5">
         {can('MESSAGE_PIN') && (
-          <IconButton label="Pinned messages" className="hidden sm:grid"><Pin size={17} /></IconButton>
+          <IconButton label="Pinned messages" className="hidden sm:grid" onClick={onOpenPinned}><Pin size={17} /></IconButton>
         )}
         <IconButton label="Search in conversation" className="hidden sm:grid" onClick={onOpenSearch}>
           <Search size={17} />
         </IconButton>
         {can('MEET_START') && (
           <>
-            <IconButton label="Start an audio call" className="hidden sm:grid"><Phone size={17} /></IconButton>
-            <IconButton label="Start a video meeting"><Video size={17} /></IconButton>
+            <IconButton label="Start an audio call" className="hidden sm:grid" disabled={starting} onClick={() => void startCall(true)}><Phone size={17} /></IconButton>
+            <IconButton label="Start a video meeting" disabled={starting} onClick={() => void startCall(false)}><Video size={17} /></IconButton>
           </>
         )}
         {c.type !== 'dm' && (c.myRole === 'owner' || c.myRole === 'admin') && (
@@ -733,10 +736,11 @@ export const MessageThread: React.FC<{
   contextOpen: boolean;
   onOpenSearch: () => void;
   onOpenChannelSettings: () => void;
+  onOpenPinned: () => void;
   children: React.ReactNode; // the composer
 }> = ({
   conversation, onBack, onToggleContext, contextOpen, onOpenSearch,
-  onOpenChannelSettings, children,
+  onOpenChannelSettings, onOpenPinned, children,
 }) => {
   const { user } = useAuth();
   const {
@@ -854,6 +858,7 @@ export const MessageThread: React.FC<{
         contextOpen={contextOpen}
         onOpenSearch={onOpenSearch}
         onOpenChannelSettings={onOpenChannelSettings}
+        onOpenPinned={onOpenPinned}
       />
 
       <PinnedBar conversation={conversation} />

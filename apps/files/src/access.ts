@@ -261,7 +261,11 @@ export async function listConversationFiles(
         AND m.deleted_at IS NULL
        LEFT JOIN users u ON u.id = m.sender_id
       WHERE ma.conversation_id = $1
-        AND ($2::text IS NULL OR ma.kind = $2)
+        -- 'media' is photos and videos together, 'document' takes the
+        -- unclassified files too, as the Files tab groups them (B-10).
+        AND ($2::text IS NULL OR ma.kind = $2
+             OR ($2 = 'media' AND ma.kind IN ('image', 'video'))
+             OR ($2 = 'document' AND ma.kind = 'other'))
       ORDER BY ma.created_at DESC
       LIMIT $3`,
     [conversationId, opts.kind ?? null, limit],

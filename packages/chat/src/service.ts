@@ -2591,11 +2591,18 @@ export async function searchMessages(
   const limit = Math.min(Math.max(filters.limit ?? 25, 1), 50);
   const offset = Math.max(filters.offset ?? 0, 0);
 
-  const params: unknown[] = [viewerId, term];
+  // Search as you type (B-12): every word also matches as a prefix, so
+  // "homew" finds "homework" before it is finished. Built from letters and
+  // digits only, so nothing typed can reach to_tsquery's own syntax; left out
+  // when the person used quotes or -exclusions, which mean something exact.
+  const words = /["-]/.test(term) ? [] : (term.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, 8);
+  const prefix = words.length ? words.map((w) => `${w}:*`).join(' & ') : null;
+  const params: unknown[] = [viewerId, term, prefix];
+  const tsq = `(websearch_to_tsquery('english', $2) || coalesce(to_tsquery('english', $3), ''::tsquery))`;
   const where: string[] = [
     'm.deleted_at IS NULL',
     "m.type <> 'system'",
-    `to_tsvector('english', coalesce(m.body, '')) @@ websearch_to_tsquery('english', $2)`,
+    `to_tsvector('english', coalesce(m.body, '')) @@ ${tsq}`,
   ];
 
   const add = (value: unknown, clause: (i: number) => string) => {
@@ -2628,7 +2635,7 @@ export async function searchMessages(
             false AS mentions_me, false AS saved, '0'::text AS read_count,
             c.name AS conversation_name, c.type AS conversation_type, peer.name AS peer_name,
             ts_headline('english', coalesce(m.body, ''),
-                        websearch_to_tsquery('english', $2),
+                        ${tsq},
                         'StartSel=' || $${startParam} || ', StopSel=' || $${endParam} ||
                         ', MaxFragments=2, MaxWords=18, MinWords=5') AS highlight
        FROM messages m

@@ -69,16 +69,19 @@ export const Lightbox: React.FC<{
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      // The viewer is on top, so its Escape closes only the viewer (B-08): it
+      // runs first (capture) and goes no further, or the details panel behind
+      // it closed too.
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); }
       if (e.key === 'ArrowRight' && index < items.length - 1) onIndex(index + 1);
       if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1);
     };
-    document.addEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
     // The page behind must not scroll while a full-screen viewer is open.
     const previous = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onKey, true);
       document.body.style.overflow = previous;
     };
   }, [index, items.length, onIndex, onClose]);
@@ -88,6 +91,7 @@ export const Lightbox: React.FC<{
   return (
     <div
       role="dialog"
+      data-lightbox
       aria-modal="true"
       aria-label={`${current.name}, ${index + 1} of ${items.length}`}
       className="fixed inset-0 z-100 flex flex-col bg-black/92"
@@ -336,6 +340,19 @@ const ImageTileInner: React.FC<{
         <span className="grid h-full w-full place-items-center text-slate-500">
           <ImageOff size={20} />
         </span>
+      ) : url && a.kind === 'video' ? (
+        // A video's own first frame is its thumbnail (B-10): an <img> pointed
+        // at an mp4 drew a broken picture. `#t=0.1` asks for a frame just in,
+        // past the black that many recordings start on; only metadata and that
+        // frame are fetched until it is opened.
+        <video
+          src={`${url}#t=0.1`}
+          preload="metadata"
+          muted
+          playsInline
+          aria-label={a.name}
+          className="pointer-events-none h-full w-full object-cover"
+        />
       ) : url ? (
         <img
           src={url}

@@ -516,8 +516,9 @@ try {
     await visible(picker2.getByRole('option', { name: /Bosco Rugema/ })));
 
   await A.page.keyboard.press('Enter');
-  check('Enter inserts the mention rather than sending the message',
-    (await A.page.locator('#composer').inputValue()).startsWith('<@'),
+  // The box shows the name (B-09); it becomes an id only as it is sent.
+  check('Enter inserts the mention (as a readable name) rather than sending the message',
+    (await A.page.locator('#composer').inputValue()).startsWith('@Bosco Rugema'),
     await A.page.locator('#composer').inputValue());
   check('and the picker closes', await hidden(picker2, 3000));
 

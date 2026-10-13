@@ -18,6 +18,7 @@ import type { WireMember } from '@tupo/shared';
 import { VoiceRecorder, canRecordVoice } from './VoiceRecorder';
 import { formatBytes } from './data';
 import { parseSlashCommand, matchCommands } from './slashCommands';
+import { toDisplay, toWire, type MentionTarget } from './mentionText';
 import { SchedulePopover } from './SchedulePopover';
 import { MeetSchedulePopover } from './MeetSchedulePopover';
 import type { Conversation } from './types';
@@ -127,8 +128,12 @@ export const Composer: React.FC<{
   }, []);
 
   /** Replace the `@…` token under the caret with the chosen mention. */
-  const applyMention = useCallback((replacement: string) => {
+  /** People picked in this box, so "@Name" resolves to them even when names repeat. */
+  const picked = useRef<MentionTarget[]>([]);
+  const applyMention = useCallback((raw: string) => {
     if (!mention) return;
+    const { text: replacement, target } = toDisplay(raw, members.map((m) => ({ id: m.userId, name: m.name })));
+    if (target) picked.current = [target, ...picked.current.filter((t) => t.id !== target.id)];
     const el = ref.current;
     const caret = el?.selectionStart ?? value.length;
     const next = value.slice(0, mention.start) + replacement + value.slice(caret);
@@ -139,7 +144,7 @@ export const Composer: React.FC<{
       const pos = mention.start + replacement.length;
       el?.setSelectionRange(pos, pos);
     });
-  }, [mention, value, conversation.id, setDraft]);
+  }, [mention, value, conversation.id, setDraft, members]);
 
   /**
    * Insert at the caret, not at the end.
@@ -162,11 +167,13 @@ export const Composer: React.FC<{
     });
   }, [value, conversation.id, setDraft]);
 
-  const submit = useCallback(() => {
-    const text = value.trim();
+  /** `override`: run this text instead of the box's (a picked slash command). */
+  const submit = useCallback((override?: string) => {
+    const source = toWire(override ?? value, [...picked.current, ...members.map((m) => ({ id: m.userId, name: m.name }))]);
+    const text = source.trim();
     // Over the limit is refused here, not after a round trip that wipes the
     // text and leaves a "Not sent" bubble that can never succeed (B-06).
-    if (value.length > MAX_MESSAGE_LENGTH) {
+    if (source.length > MAX_MESSAGE_LENGTH) {
       notify({ title: `Messages can be up to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters`, tone: 'warning' });
       return;
     }
@@ -230,9 +237,42 @@ export const Composer: React.FC<{
         void send({ body: command.body, attachments: tray.readyIds });
         tray.clear();
     }
-  }, [value, send, tray, conversation.id, setDraft, onOpenPanel, notify, navigate]);
+  }, [value, send, tray, conversation.id, setDraft, onOpenPanel, notify, navigate, members]);
+
+  /*
+   * The slash list answers the keyboard (B-09): ↑/↓ move the highlight, Enter
+   * or Tab takes it. A command that needs nothing more ("/search") runs at
+   * once; one that takes arguments ("/poll") is completed in the box. Before
+   * this, Enter on "/sea" sent "/sea" as a message.
+   */
+  const slashMatches = matchCommands(value);
+  const [slashIndex, setSlashIndex] = useState(0);
+  useEffect(() => { setSlashIndex(0); }, [value]);
+  const takeSlash = (c: (typeof slashMatches)[number]) => {
+    if (c.args) {
+      setDraft(conversation.id, `/${c.name} `);
+      ref.current?.focus();
+    } else {
+      submit(`/${c.name}`);
+    }
+  };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashMatches.length > 0 && !mention) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const step = e.key === 'ArrowDown' ? 1 : -1;
+        setSlashIndex((i) => (i + step + slashMatches.length) % slashMatches.length);
+        return;
+      }
+      if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+        e.preventDefault();
+        const c = slashMatches[Math.min(slashIndex, slashMatches.length - 1)];
+        if (c) takeSlash(c);
+        return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); setDraft(conversation.id, ''); return; }
+    }
     // Escape drops the quote rather than clearing what has been typed —
     // clearing a half-written message with one key is unforgivable.
     if (e.key === 'Escape' && replyTarget) {
@@ -566,17 +606,20 @@ export const Composer: React.FC<{
 
         {/* The slash hint list. Shown only while the whole message is still
             just "/word" — once there are arguments, the list is in the way. */}
-        {matchCommands(value).length > 0 && (
-          <div className="absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-2xl border border-border-light bg-white py-1 shadow-2xl dark:border-border-dark/50 dark:bg-elevated-dark">
-            {matchCommands(value).map((c) => (
+        {slashMatches.length > 0 && (
+          <div role="listbox" aria-label="Commands" className="absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-2xl border border-border-light bg-white py-1 shadow-2xl dark:border-border-dark/50 dark:bg-elevated-dark">
+            {slashMatches.map((c, i) => (
               <button
                 key={c.name}
+                role="option"
+                aria-selected={i === slashIndex}
+                onMouseEnter={() => setSlashIndex(i)}
                 onMouseDown={(e) => {
                   e.preventDefault();
-                  setDraft(conversation.id, `/${c.name} `);
-                  ref.current?.focus();
+                  takeSlash(c);
                 }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-surface-light dark:hover:bg-surface-dark"
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-surface-light dark:hover:bg-surface-dark ${
+                  i === slashIndex ? 'bg-surface-light dark:bg-surface-dark' : ''}`}
               >
                 <Slash size={11} className="shrink-0 opacity-50" />
                 <span className="min-w-0 flex-1">
@@ -645,7 +688,7 @@ export const Composer: React.FC<{
 
         {value.trim() || tray.uploads.length > 0 ? (
           <button
-            onClick={submit}
+            onClick={() => submit()}
             disabled={over || tray.busy}
             aria-label={tray.busy ? 'Waiting for attachments to finish uploading' : 'Send message'}
             title={tray.busy ? 'Waiting for attachments' : undefined}

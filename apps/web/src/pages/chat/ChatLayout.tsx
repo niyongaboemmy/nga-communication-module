@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PinnedPanel } from './PinnedPanel';
 import { MessagesSquare } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { EmptyState } from '../../components/ui';
@@ -41,10 +42,10 @@ import type { Member } from './types';
 /** Everything that can occupy the right-hand column. */
 export type Panel =
   | 'none' | 'details' | 'thread' | 'saved' | 'settings' | 'search' | 'scheduled'
-  | 'browse' | 'channel' | 'threads';
+  | 'browse' | 'channel' | 'threads' | 'pinned';
 
 /** Panels a URL can name (`?panel=`). */
-const PANELS_IN_URL = new Set<Panel>(['details', 'saved', 'settings', 'search', 'scheduled', 'channel', 'threads']);
+const PANELS_IN_URL = new Set<Panel>(['details', 'saved', 'settings', 'search', 'scheduled', 'channel', 'threads', 'pinned']);
 
 const SidePanel: React.FC<{
   width: 'wide' | 'narrow';
@@ -282,6 +283,7 @@ const ChatWorkspace: React.FC = () => {
           contextOpen={panel === 'details'}
           onOpenSearch={() => setPanel('search')}
           onOpenChannelSettings={() => setPanel('channel')}
+          onOpenPinned={() => setPanel((p) => (p === 'pinned' ? 'none' : 'pinned'))}
         >
           <Composer
             conversation={active}
@@ -304,6 +306,11 @@ const ChatWorkspace: React.FC = () => {
       {panel === 'thread' && active && (
         <SidePanel width="wide" onDismiss={closePanel}>
           <ThreadPanel conversation={active} />
+        </SidePanel>
+      )}
+      {panel === 'pinned' && active && (
+        <SidePanel width="narrow" onDismiss={closePanel}>
+          <PinnedPanel conversation={active} onClose={closePanel} />
         </SidePanel>
       )}
       {panel === 'details' && active && (
