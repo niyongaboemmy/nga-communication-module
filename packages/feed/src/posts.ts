@@ -65,6 +65,28 @@ interface PostRow {
  * attachment was already accepted onto this post once, by its actual owner,
  * and re-sending it back unchanged is not a new grant of access to anything.
  */
+/**
+ * A page avatar/cover or a reel poster: must be the actor's own finished image
+ * upload (FEED-S1). Setting it makes the file readable by everyone who can see
+ * the feed, so it can never be someone else's file. `keep` is the value
+ * already stored — re-sending it unchanged is not a new grant.
+ */
+export async function assertOwnImage(
+  db: PoolClient | ReturnType<typeof getPool>, fileId: unknown, ownerId: string, keep?: string | null,
+): Promise<string | null> {
+  if (fileId === null || fileId === undefined || fileId === '') return null;
+  if (typeof fileId !== 'string') throw new FeedError('That image is not valid.', 400);
+  if (keep && fileId === keep) return fileId;
+  const { rows } = await db.query<{ owner_id: string; status: string; mime_type: string }>(
+    'SELECT owner_id, status, mime_type FROM files WHERE id = $1', [fileId]);
+  const f = rows[0];
+  if (!f) throw new FeedError('That image could not be found.', 400);
+  if (f.owner_id !== ownerId) throw new FeedError('That image is not yours to use.', 403);
+  if (f.status !== 'ready') throw new FeedError('That image has not finished uploading.', 409);
+  if (!f.mime_type.startsWith('image/')) throw new FeedError('That file is not an image.', 400);
+  return fileId;
+}
+
 export async function resolveMedia(
   client: PoolClient, media: FeedMediaItem[] | undefined, ownerId: string,
   limit: number = FEED_LIMITS.MAX_MEDIA, trustedIds?: ReadonlySet<string>,

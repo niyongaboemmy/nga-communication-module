@@ -15,7 +15,7 @@ import type {
 import { FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
 import { FeedError } from './errors.js';
 import { type FeedActor, assertVisible, can, canTargetAudience, clampLimit, decodeCursor, encodeCursor, visibleAudiences } from './common.js';
-import { resolveMedia } from './posts.js';
+import { assertOwnImage, resolveMedia } from './posts.js';
 
 interface ReelRow {
   id: string;
@@ -47,6 +47,18 @@ export async function createReel(actor: FeedActor, payload: ComposeReelPayload):
     await client.query('BEGIN');
     const [media] = await resolveMedia(client, [payload.media], actor.id, 1);
     if (!media || media.kind !== 'video') throw new FeedError('A reel needs a video file.', 400);
+    // The 90 s limit is the server's, not just the composer's (FEED-V3): the
+    // length the client declares and the one recorded at upload both count.
+    const { rows: meta } = await client.query<{ duration_ms: string | null }>(
+      `SELECT metadata->>'durationMs' AS duration_ms FROM files WHERE id = $1`, [media.fileId]);
+    const declared = Number(payload.media.durationSeconds);
+    const recorded = meta[0]?.duration_ms ? Number(meta[0].duration_ms) / 1000 : NaN;
+    const seconds = [declared, recorded].filter((n) => Number.isFinite(n) && n > 0);
+    if (seconds.some((n) => n > FEED_LIMITS.REEL_MAX_DURATION_SECONDS + 0.5)) {
+      throw new FeedError(`Reels can be at most ${FEED_LIMITS.REEL_MAX_DURATION_SECONDS} seconds.`, 400);
+    }
+    media.durationSeconds = seconds.length ? Math.round(Math.max(...seconds)) : null;
+    media.posterFileId = await assertOwnImage(client, payload.media.posterFileId, actor.id);
     const id = snowflake();
     await client.query(
       `INSERT INTO feed_reels (id, author_id, caption, media, audience) VALUES ($1,$2,$3,$4,$5)`,

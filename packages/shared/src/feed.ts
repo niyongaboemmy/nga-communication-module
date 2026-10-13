@@ -94,7 +94,16 @@ export interface FeedMediaItem {
   /** Short-lived signed URL, filled by the API on read. */
   url?: string | null;
   posterUrl?: string | null;
+  /** Reels: length in seconds and an optional poster image (the author's own upload). */
+  durationSeconds?: number | null;
+  posterFileId?: string | null;
 }
+
+/** A page accent: a six-digit hex colour (the UI appends alpha to it). */
+export const FEED_ACCENT_RE = /^#[0-9a-fA-F]{6}$/;
+/** A story background: a hex colour or a two-stop angled gradient of them — never free CSS. */
+export const FEED_STORY_BACKGROUND_RE =
+  /^(#[0-9a-fA-F]{6}|linear-gradient\(\d{1,3}deg, ?#[0-9a-fA-F]{6}, ?#[0-9a-fA-F]{6}\))$/;
 
 export interface FeedLinkPreview {
   url: string;

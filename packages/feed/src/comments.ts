@@ -246,7 +246,10 @@ async function loadCommentForWrite(actor: FeedActor, commentId: string, moderato
 }
 
 export async function editComment(actor: FeedActor, commentId: string, body: string): Promise<FeedCommentView> {
-  await loadCommentForWrite(actor, commentId);
+  const c = await loadCommentForWrite(actor, commentId);
+  // Words are only ever the author's (FEED-A2). Page admins and moderators may
+  // remove a comment, never put words in someone else's mouth.
+  if (c.author_id !== actor.id) throw new FeedError('Only the author can edit a comment.', 403);
   const trimmed = (body ?? '').trim().slice(0, FEED_LIMITS.COMMENT_BODY_MAX);
   if (!trimmed) throw new FeedError('A comment cannot be empty.', 400);
   await getPool().query('UPDATE feed_comments SET body = $2, edited_at = now() WHERE id = $1', [commentId, trimmed]);
