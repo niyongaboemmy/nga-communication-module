@@ -225,7 +225,7 @@ try {
     p.on('dialog', async (d) => { dialogs.push(d.message()); await d.dismiss(); });
     await p.goto(`${BASE}/app/admin/roles`, { waitUntil: 'domcontentloaded' }); await settle(p);
     await p.getByRole('button', { name: /Parent/ }).first().click(); await sleep(400);
-    const first = p.locator('input[type="checkbox"]').first();
+    const first = p.locator('section input[type="checkbox"]').first();
     await first.click(); await sleep(200);
     const dirtyLabel = await p.getByRole('button', { name: /Save \(/ }).isVisible().catch(() => false);
     await p.getByRole('button', { name: /Staff/ }).first().click(); await sleep(400);

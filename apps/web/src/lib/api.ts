@@ -2,7 +2,9 @@ import type { Envelope } from '@tupo/shared';
 import { getDeviceId } from '../vendor/nga-activity';
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  /** `body`: the server's whole answer, for a refusal that carries more than a message (a code, the newer record). */
+  constructor(message: string, readonly status: number, readonly body?: unknown) { super(message); }
+  get code(): string | undefined { return (this.body as { code?: string } | undefined)?.code; }
 }
 
 export const SESSION_KEY = 'tupo_token';
@@ -62,7 +64,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<Envelop
   }
 
   if (!res.ok || body.success === false) {
-    throw new ApiError(body.message ?? `Request failed (${res.status})`, res.status);
+    throw new ApiError(body.message ?? `Request failed (${res.status})`, res.status, body);
   }
   return body;
 }

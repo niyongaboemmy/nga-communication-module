@@ -40,10 +40,18 @@ router.get('/permissions', (_req: Request, res: Response) => {
   }));
 });
 
+/**
+ * A role's version for concurrent-edit checks (F-12): its updated_at to the
+ * microsecond, as text, since JSON dates stop at milliseconds.
+ */
+const ROLE_VERSION = `(extract(epoch from updated_at) * 1000000)::bigint::text`;
+
 async function loadRole(id: number) {
   const pool = getPool();
   const { rows } = await pool.query(
-    `SELECT id, name, level, description, is_system, created_at, updated_at FROM roles WHERE id = $1`,
+    `SELECT id, name, level, description, is_system, created_at, updated_at,
+            ${ROLE_VERSION} AS version
+       FROM roles WHERE id = $1`,
     [id]
   );
   const role = rows[0];
@@ -96,8 +104,10 @@ function validatePermissionKeys(keys: unknown): string[] | null {
   return unique;
 }
 
-async function replacePermissions(roleId: number, keys: string[]): Promise<void> {
-  const pool = getPool();
+async function replacePermissions(
+  roleId: number, keys: string[], db: Pick<ReturnType<typeof getPool>, 'query'> = getPool(),
+): Promise<void> {
+  const pool = db;
   await pool.query('DELETE FROM role_permissions WHERE role_id = $1', [roleId]);
   if (keys.length > 0) {
     await pool.query(
@@ -192,17 +202,52 @@ router.put('/roles/:id',
       (req as AuthenticatedRequest & { roleDiff?: unknown }).roleDiff = { added, removed };
     }
 
-    const pool = getPool();
-    await pool.query(
-      `UPDATE roles SET name = COALESCE($2, name), description = COALESCE($3, description),
-                        updated_at = now()
-        WHERE id = $1`,
-      [id, name ?? null, description ?? null]
-    );
+    // Name and description (F-12): validated like a new role's.
+    const nextName = name === undefined ? undefined : String(name).trim();
+    if (nextName !== undefined && (nextName.length === 0 || nextName.length > 60)) {
+      return res.status(400).json(fail('Role name is required (max 60 characters).'));
+    }
+    const nextDescription = description === undefined ? undefined : String(description ?? '').trim();
+    if (nextDescription !== undefined && nextDescription.length > 300) {
+      return res.status(400).json(fail('The description can be at most 300 characters.'));
+    }
+    if (nextName !== undefined && nextName !== role.name) {
+      const { rows: clash } = await getPool().query('SELECT 1 FROM roles WHERE lower(name) = lower($1) AND id <> $2', [nextName, id]);
+      if (clash.length) return res.status(409).json(fail('A role with that name already exists.'));
+    }
+
+    // Saved against the version this administrator was looking at (F-12):
+    // somebody else's save in between is reported, not silently overwritten.
+    const expectedVersion = req.body?.expectedVersion === undefined ? null : String(req.body.expectedVersion);
+    const client = await getPool().connect();
+    try {
+      await client.query('BEGIN');
+      const { rows: locked } = await client.query<{ version: string }>(
+        `SELECT ${ROLE_VERSION} AS version FROM roles WHERE id = $1 FOR UPDATE`, [id]);
+      if (expectedVersion !== null && locked[0]?.version !== expectedVersion) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          ...fail('Someone else saved changes to this role while you were editing.'),
+          code: 'ROLE_STALE', data: await loadRole(id),
+        });
+      }
+      await client.query(
+        `UPDATE roles SET name = COALESCE($2, name), description = COALESCE($3, description),
+                          updated_at = clock_timestamp()
+          WHERE id = $1`,
+        [id, nextName ?? null, nextDescription ?? null]
+      );
+      if (keysProvided) await replacePermissions(id, permissionKeys!, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
     if (keysProvided) {
-      await replacePermissions(id, permissionKeys!);
       // Everyone holding this role re-reads permissions now (F-07).
-      const { rows: holders } = await pool.query<{ id: string }>('SELECT id FROM users WHERE role_id = $1', [id]);
+      const { rows: holders } = await getPool().query<{ id: string }>('SELECT id FROM users WHERE role_id = $1', [id]);
       for (let i = 0; i < holders.length; i += 500) {
         emitToUsers(holders.slice(i, i + 500).map((h) => h.id), 'access:changed', { reason: 'permissions' });
       }
@@ -211,8 +256,14 @@ router.put('/roles/:id',
     await audit({
       actorId: actor.id, action: 'role.update', targetType: 'role', targetId: String(id),
       // The change itself, so the audit log says what moved, not just the end state.
-      metadata: { name, permissionKeys: keysProvided ? permissionKeys : undefined,
-        diff: (req as AuthenticatedRequest & { roleDiff?: unknown }).roleDiff },
+      metadata: {
+        name: role.name,
+        renamed: nextName !== undefined && nextName !== role.name ? { from: role.name, to: nextName } : undefined,
+        description: nextDescription !== undefined && nextDescription !== (role.description ?? '')
+          ? { from: role.description ?? '', to: nextDescription } : undefined,
+        permissionKeys: keysProvided ? permissionKeys : undefined,
+        diff: (req as AuthenticatedRequest & { roleDiff?: unknown }).roleDiff,
+      },
       ipAddress: req.ip, userAgent: req.headers['user-agent'],
     });
     return res.json(ok(await loadRole(id)));

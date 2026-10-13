@@ -28,7 +28,7 @@ const env = Object.fromEntries(readFileSync(`${ROOT}/apps/api/.env`, 'utf8').spl
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
 const BASE = 'http://localhost:5194';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const results = []; const ids = [];
+const results = []; const ids = []; const createdRoles = [];
 const check = (n, ok, d = '') => { results.push({ n, ok, d }); console.log(`  ${ok ? '✅' : '❌'} ${n}${d ? `  — ${d}` : ''}`); };
 const tag = randomBytes(3).toString('hex');
 
@@ -144,6 +144,94 @@ try {
     await ctx.close();
   }
 
+  console.log('── Roles: drafts, leaving, search, rename, conflicts');
+  {
+    const API = 'http://localhost:5190';
+    const put = (id, body) => fetch(`${API}/api/roles-permissions/roles/${id}`, {
+      method: 'PUT', headers: { authorization: `Bearer ${admin.token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then((r) => r.json());
+    const { rows: made } = await pool.query(
+      `INSERT INTO roles (name, description, level, is_system) VALUES ($1, 'Probe role', 'STAFF', false) RETURNING id`, [`Vad Role ${tag}`]);
+    const rid = made[0].id;
+    createdRoles.push(rid);
+    await pool.query(`INSERT INTO role_permissions (role_id, permission_id) SELECT $1, id FROM permissions WHERE key = 'MESSAGE_READ'`, [rid]);
+    const keysOf = async () => (await pool.query(`SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id = rp.permission_id WHERE rp.role_id = $1 ORDER BY 1`, [rid])).rows.map((r) => r.key);
+
+    const { ctx, page } = await pageFor(browser, admin);
+    await page.goto(`${BASE}/app/admin/roles?role=${rid}`, { waitUntil: 'networkidle' });
+    const box = (key) => page.locator('label', { hasText: key }).locator('input[type="checkbox"]').first();
+    await box('MESSAGE_SEND').check();
+    check('an edit marks the role Unsaved and lists the change',
+      await page.getByText('Unsaved', { exact: true }).first().isVisible() && await page.getByText('+MESSAGE_SEND').isVisible());
+    await page.getByRole('button', { name: /^Staff/ }).first().click();
+    await sleep(300);
+    await page.getByRole('button', { name: new RegExp(`^Vad Role ${tag}`) }).click();
+    await sleep(300);
+    check('moving to another role and back keeps the draft', await box('MESSAGE_SEND').isChecked()
+      && await page.getByRole('button', { name: /Save \(/ }).isVisible());
+
+    await page.getByLabel('Search permissions').fill('mail');
+    await sleep(200);
+    const sections = await page.locator('section[aria-label]').count();
+    const sendVisible = await page.getByText('MESSAGE_SEND', { exact: true }).isVisible().catch(() => false);
+    check('searching permissions narrows the list', sections >= 1 && !sendVisible, `sections=${sections}`);
+    await page.getByLabel('Search permissions').fill('');
+    await page.getByLabel('Only granted').check();
+    await sleep(200);
+    const shownBoxes = await page.locator('section[aria-label] input[type="checkbox"]').count();
+    check('"Only granted" shows just the granted ones', shownBoxes === 2, `shown=${shownBoxes}`);
+    await page.getByLabel('Only granted').uncheck();
+
+    await page.locator('a[href="/app/admin/users"]').first().click();
+    const leave = page.getByRole('alertdialog');
+    await leave.waitFor({ timeout: 3000 }).catch(() => {});
+    check('leaving with unsaved changes asks first', await leave.isVisible() && /Leave without saving/.test(await leave.innerText()));
+    await leave.getByRole('button', { name: 'Keep editing' }).click();
+    await sleep(300);
+    check('"Keep editing" stays on the roles screen with the draft', /\/admin\/roles/.test(page.url()) && await box('MESSAGE_SEND').isChecked());
+
+    await page.getByLabel('Role name').fill(`Vad Renamed ${tag}`);
+    await page.getByLabel('Role description').fill('Edited by the probe');
+    await page.getByRole('button', { name: /Save \(/ }).click();
+    await sleep(1200);
+    const row = (await pool.query('SELECT name, description FROM roles WHERE id = $1', [rid])).rows[0];
+    check('saving applies the name, description and permissions together',
+      row.name === `Vad Renamed ${tag}` && row.description === 'Edited by the probe'
+      && JSON.stringify(await keysOf()) === JSON.stringify(['MESSAGE_READ', 'MESSAGE_SEND']), JSON.stringify(row));
+    check('…and the Unsaved marker clears', !(await page.getByText('Unsaved', { exact: true }).first().isVisible().catch(() => false)));
+
+    // Somebody else saves in between.
+    await box('MAIL_READ').check();
+    const now = (await (await fetch(`${API}/api/roles-permissions/roles/${rid}`, { headers: { authorization: `Bearer ${admin.token}` } })).json()).data;
+    await put(rid, { permissionKeys: ['MESSAGE_READ'], expectedVersion: now.version });
+    await page.getByRole('button', { name: /Save \(/ }).click();
+    await sleep(1000);
+    const banner = page.getByText(/Someone else saved changes/);
+    check('a save over a colleague\'s newer save is caught', await banner.isVisible()
+      && JSON.stringify(await keysOf()) === JSON.stringify(['MESSAGE_READ']));
+    await page.getByRole('button', { name: 'Save mine over it' }).click();
+    await sleep(1200);
+    check('"Save mine over it" saves deliberately', (await keysOf()).includes('MAIL_READ') && !(await banner.isVisible().catch(() => false)),
+      JSON.stringify(await keysOf()));
+    await box('MAIL_READ').uncheck();
+    const now2 = (await (await fetch(`${API}/api/roles-permissions/roles/${rid}`, { headers: { authorization: `Bearer ${admin.token}` } })).json()).data;
+    await put(rid, { permissionKeys: ['MESSAGE_READ', 'MESSAGE_SEND', 'MAIL_READ', 'FEED_VIEW'], expectedVersion: now2.version });
+    await page.getByRole('button', { name: /Save \(/ }).click();
+    await sleep(1000);
+    await page.getByRole('button', { name: 'Load their version' }).click();
+    await sleep(500);
+    check('"Load their version" drops the draft and shows theirs',
+      await box('FEED_VIEW').isChecked() && await box('MAIL_READ').isChecked()
+      && !(await page.getByText('Unsaved', { exact: true }).first().isVisible().catch(() => false)));
+
+    await page.getByRole('button', { name: 'Delete' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Delete role' }).click();
+    await sleep(1000);
+    check('deleting asks first, then removes the role', (await pool.query('SELECT 1 FROM roles WHERE id = $1', [rid])).rowCount === 0);
+    await page.screenshot({ path: `${OUT}/roles.png`, fullPage: false });
+    await ctx.close();
+  }
+
   console.log('── Users: phone');
   {
     const { ctx, page } = await pageFor(browser, admin, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
@@ -158,6 +246,7 @@ try {
 } finally {
   await browser?.close();
   await purgeUsers(pool, ids).catch(() => {});
+  for (const id of createdRoles) await pool.query('DELETE FROM roles WHERE id = $1 AND is_system = false', [id]).catch(() => {});
   await pool.end();
   const failed = results.filter((r) => !r.ok).length;
   console.log(`\nverify:admin:ui: ${results.length - failed} passed, ${failed} failed · screenshots in ${OUT}`);
