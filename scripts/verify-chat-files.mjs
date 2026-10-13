@@ -193,7 +193,8 @@ try {
   const ticket = await api(FILES, `/api/files/${imageId}/ticket`, bob.token, { method: 'POST' });
   check('a member can mint a media ticket', ticket.status === 200 && Boolean(ticket.data.token),
     String(ticket.status));
-  check('it is short-lived', ticket.data.expiresIn <= 120, String(ticket.data.expiresIn));
+  // Bounded — long enough to play a voice note or clip (A-08), never a standing key.
+  check('it is short-lived (at most 15 minutes)', ticket.data.expiresIn > 0 && ticket.data.expiresIn <= 900, String(ticket.data.expiresIn));
 
   const viaTicket = await fetch(
     `${FILES}/api/files/${imageId}/content?inline=1&t=${encodeURIComponent(ticket.data.token)}`);
