@@ -13,6 +13,7 @@ import { ChatError } from '@tupo/chat';
 import { evictFromRooms, emitToConversation, emitToUsers } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
 import { notifyAndPush } from '@tupo/notify';
+import { clearConversationNotifications, clearNotificationsAbout } from '../services/notificationSync.js';
 import { hasPermission } from '../access/gate.js';
 import { contactDenied } from '../access/contactGate.js';
 import { enqueueUnfurl } from '../services/queue.js';
@@ -577,6 +578,8 @@ router.post('/conversations/:id/read', wrap(async (req, res) => {
   emitToConversation(id, 'read:update', {
     conversationId: id, userId: me.id, seq: result.lastReadSeq, at: new Date().toISOString(),
   });
+  // Read to the end: what the bell had about it is read too (F-01).
+  if (result.unread === 0) void clearConversationNotifications(me.id, id);
 
   res.json(ok(result));
 }));
@@ -776,6 +779,7 @@ router.post('/conversations/:id/threads/:rootId/read', wrap(async (req, res) => 
   const lastReadSeq = await chat.markThreadRead(me.id, id, rootId, seq);
   // Every device this person owns drops the marker together.
   emitToUsers([me.id], 'thread:unread', { conversationId: id, rootId, unread: 0 });
+  void clearNotificationsAbout(me.id, 'thread', [rootId]);
   res.json(ok({ lastReadSeq }));
 }));
 

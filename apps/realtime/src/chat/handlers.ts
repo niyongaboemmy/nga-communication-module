@@ -3,6 +3,7 @@ import type { Redis } from 'ioredis';
 import * as chat from '@tupo/chat';
 import { enqueueUnfurl } from './queue.js';
 import { ChatError } from '@tupo/chat';
+import * as notify from '@tupo/notify';
 import {
   TYPING_TTL_SECONDS, conversationRoom, typingKey, userRoom,
 } from '@tupo/shared';
@@ -370,6 +371,12 @@ export function registerChatHandlers(
       io.to(conversationRoom(conversationId)).emit('read:update', {
         conversationId, userId: user.id, seq: result.lastReadSeq, at: new Date().toISOString(),
       });
+      // Read to the end: the bell's notifications about it are read too (F-01).
+      if (result.unread === 0) {
+        void notify.markConversationNotificationsRead(user.id, conversationId).then(async (ids) => {
+          if (ids.length) io.to(userRoom(user.id)).emit('notification:read', { ids, unread: await notify.unreadCount(user.id) });
+        }).catch(() => {});
+      }
     } catch {
       ack?.({ ok: false, unread: 0, unreadMentions: 0 });
     }

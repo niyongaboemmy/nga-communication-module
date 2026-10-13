@@ -30,6 +30,12 @@ export interface ServerToClientEvents extends ChatServerToClientEvents, FeedServ
   /** Raised on the recipient's own user room. See AppNotification. */
   'notification:new': (p: AppNotification) => void;
   /**
+   * Notifications were read on one of this person's devices (or by reading
+   * what they were about). `ids: 'all'` after "mark all read". Carries the new
+   * unread total so every bell agrees without refetching.
+   */
+  'notification:read': (p: { ids: string[] | 'all'; unread: number }) => void;
+  /**
    * This person's mailbox counters moved — read, moved or deleted on one of
    * their devices (delivered on `user:<id>`). Carries nothing: every client
    * refetches its own counts rather than trusting a pushed number.

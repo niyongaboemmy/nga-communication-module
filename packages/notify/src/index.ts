@@ -112,18 +112,45 @@ export async function notify(
 }
 
 /** Everything for one person, newest first. */
+/** The modules a notification can belong to, by its kind's prefix. */
+export const NOTIFICATION_MODULES = ['chat', 'mail', 'feed', 'meet'] as const;
+export type NotificationModule = (typeof NOTIFICATION_MODULES)[number] | 'other';
+
 export async function listFor(
-  userId: string, opts: { unreadOnly?: boolean; limit?: number } = {},
+  userId: string,
+  opts: { unreadOnly?: boolean; limit?: number; before?: string | null; module?: NotificationModule | null } = {},
 ): Promise<NotificationRow[]> {
   const limit = Math.min(Math.max(opts.limit ?? 30, 1), 100);
+  const before = opts.before && !Number.isNaN(Date.parse(opts.before)) ? new Date(opts.before).toISOString() : null;
+  const module = opts.module && (NOTIFICATION_MODULES as readonly string[]).includes(opts.module) ? opts.module : null;
   const { rows } = await getPool().query<NotificationRow>(
     `SELECT * FROM notifications
       WHERE user_id = $1 ${opts.unreadOnly ? 'AND read_at IS NULL' : ''}
+        AND ($3::timestamptz IS NULL OR created_at < $3::timestamptz)
+        AND ($4::text IS NULL OR kind LIKE $4 || '.%')
       ORDER BY created_at DESC
       LIMIT $2`,
-    [userId, limit],
+    [userId, limit, before, module],
   );
   return rows;
+}
+
+/**
+ * Mark read everything about one subject — the conversation the person just
+ * read, the mail thread they opened, the post they looked at (F-01). Returns
+ * the ids it changed, so the person's other devices can be told.
+ */
+export async function markSubjectRead(
+  userId: string, subjectType: string, subjectIds: string[],
+): Promise<string[]> {
+  if (!subjectIds.length) return [];
+  const { rows } = await getPool().query<{ id: string }>(
+    `UPDATE notifications SET read_at = now()
+      WHERE user_id = $1 AND read_at IS NULL AND subject_type = $2 AND subject_id = ANY($3::text[])
+      RETURNING id`,
+    [userId, subjectType, subjectIds],
+  );
+  return rows.map((r) => r.id);
 }
 
 export async function unreadCount(userId: string): Promise<number> {
@@ -139,6 +166,35 @@ export async function markRead(userId: string, id: string): Promise<boolean> {
     `UPDATE notifications SET read_at = COALESCE(read_at, now())
       WHERE id = $1 AND user_id = $2`, [id, userId]);
   return (rowCount ?? 0) > 0;
+}
+
+/**
+ * A conversation was read to its end: its own notifications (DMs, mentions,
+ * new messages) and reactions to messages in it. One statement, shared by the
+ * REST read and the socket read.
+ */
+export async function markConversationNotificationsRead(userId: string, conversationId: string): Promise<string[]> {
+  const { rows } = await getPool().query<{ id: string }>(
+    `UPDATE notifications n SET read_at = now()
+      WHERE n.user_id = $1 AND n.read_at IS NULL
+        AND ((n.subject_type = 'conversation' AND n.subject_id = $2)
+          OR (n.subject_type = 'message'
+              AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = $2 AND m.id = n.subject_id)))
+      RETURNING n.id`,
+    [userId, conversationId],
+  );
+  return rows.map((r) => r.id);
+}
+
+/** Mark several read at once (the panel's visible page, a group). */
+export async function markManyRead(userId: string, ids: string[]): Promise<string[]> {
+  if (!ids.length) return [];
+  const { rows } = await getPool().query<{ id: string }>(
+    `UPDATE notifications SET read_at = now()
+      WHERE user_id = $1 AND read_at IS NULL AND id = ANY($2::text[]) RETURNING id`,
+    [userId, ids.slice(0, 500)],
+  );
+  return rows.map((r) => r.id);
 }
 
 export async function markAllRead(userId: string): Promise<number> {

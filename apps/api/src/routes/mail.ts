@@ -16,6 +16,7 @@ import { hasPermission } from '../access/gate.js';
 import { routeCampaignForApproval } from '../access/approvers.js';
 import { audit } from '../services/userService.js';
 import { enqueueMailSend, enqueueMailCampaign, enqueueMailListSync } from '../services/queue.js';
+import { clearMailThreadNotifications } from '../services/notificationSync.js';
 import { activity } from '../activity/relay.js';
 
 /**
@@ -86,6 +87,7 @@ router.get('/threads/:id', authorizePermission('MAIL_READ'), wrap(async (req, re
   const thread = await mail.getThread(actor(req).id, req.params.id!);
   // Opening marks it read; every other device of this person updates its counts.
   countsChanged(actor(req).id);
+  void clearMailThreadNotifications(actor(req).id, req.params.id!);
   res.json(ok({ thread }));
 }));
 

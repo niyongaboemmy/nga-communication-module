@@ -11,6 +11,7 @@ import { authorizePermission } from '../middleware/authorize.js';
 import { emitToRooms } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
 import { enqueueFeedAnnounce } from '../services/queue.js';
+import { clearNotificationsAbout } from '../services/notificationSync.js';
 import { activity } from '../activity/relay.js';
 
 /**
@@ -264,7 +265,9 @@ router.delete('/posts/:id/bookmark', authorizePermission('FEED_VIEW'), wrap(asyn
 }));
 
 router.get('/posts/:id', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
-  res.json(ok({ post: await feed.getPostView(actorOf(req), req.params.id!) }));
+  const post = await feed.getPostView(actorOf(req), req.params.id!);
+  void clearNotificationsAbout(actorOf(req).id, 'feed_post', [req.params.id!]);
+  res.json(ok({ post }));
 }));
 
 /* ── Reactions ─────────────────────────────────────────────────────────── */

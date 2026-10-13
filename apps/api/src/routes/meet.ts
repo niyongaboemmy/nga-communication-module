@@ -29,6 +29,7 @@ import * as ai from '../services/meetAiService.js';
 import * as notes from '../services/meetNotesService.js';
 import { getProviderStatus, isAnyProviderConfigured } from '../services/aiProviders/index.js';
 import { endMeetingEverywhere } from '../services/meetLifecycle.js';
+import { clearNotificationsAbout } from '../services/notificationSync.js';
 import { audit } from '../services/userService.js';
 import { activity } from '../activity/relay.js';
 
@@ -878,6 +879,8 @@ router.post('/:idOrCode/join', async (req: Request, res: Response) => {
       : {}),
   };
 
+  // Joined: the "has started" / invitation notifications are read (F-01).
+  if (participant.user_id) void clearNotificationsAbout(participant.user_id, 'meeting', [m.id]);
   res.json(ok(ticket));
 });
 

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
-  Bell, LogOut, Sun, Moon, Search, MoreHorizontal, Command,
+  LogOut, Sun, Moon, Search, MoreHorizontal, Command,
 } from 'lucide-react';
 import { Logo } from '../components/Logo';
 import { useAuth } from '../context/AuthContext';
@@ -11,6 +11,8 @@ import { avatarPreviewOpen } from '../components/AvatarPreview';
 import { AppsSwitcher } from '../components/shell/AppsSwitcher';
 import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
+import { NotificationBell } from '../components/shell/NotificationCenter';
+import { NotificationCenterProvider } from '../context/NotificationCenterContext';
 import { GlobalSearch } from '../components/GlobalSearch';
 import { usePresenceReporter } from '../hooks/usePresenceReporter';
 import { useModuleBadges } from '../hooks/useModuleBadges';
@@ -331,11 +333,7 @@ const TopBar: React.FC<{ onOpenSearch: () => void; myPresence: Presence }> = ({ 
           <Search size={18} />
         </IconButton>
 
-        <IconButton label="Notifications" className="relative">
-          <Bell size={18} />
-          {/* Placeholder dot until the Phase 5 notification centre feeds it. */}
-          <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-red-500 ring-2 ring-white dark:ring-border-dark" />
-        </IconButton>
+        <NotificationBell />
 
         <IconButton label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} onClick={toggleTheme}>
           {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
@@ -387,6 +385,7 @@ export const AppShell: React.FC = () => {
   const badges = useModuleBadges();
 
   return (
+    <NotificationCenterProvider>
     <div className="h-app flex flex-col overflow-hidden bg-background-light text-text-primary-light dark:bg-background-dark dark:text-text-primary-dark">
       <TopBar onOpenSearch={() => setSearchOpen(true)} myPresence={toPresence(myPresence)} />
       <ConnectionBanner status={connection} />
@@ -405,6 +404,7 @@ export const AppShell: React.FC = () => {
 
       <BottomTabs modules={modules} admin={admin} badges={badges} />
     </div>
+    </NotificationCenterProvider>
   );
 };
 
