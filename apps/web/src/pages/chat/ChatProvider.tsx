@@ -416,7 +416,26 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } catch { /* the next message or switch will fill it */ }
     };
 
+    /*
+     * "Delivered" (B-11): this device has the message. Batched per second and
+     * per conversation, so a busy channel is one packet, not one per line.
+     */
+    const deliveredQueue = new Map<string, Set<string>>();
+    let deliveredTimer: ReturnType<typeof setTimeout> | null = null;
+    const reportDelivered = (conversationId: string, messageId: string) => {
+      const set = deliveredQueue.get(conversationId) ?? new Set<string>();
+      set.add(messageId);
+      deliveredQueue.set(conversationId, set);
+      if (deliveredTimer) return;
+      deliveredTimer = setTimeout(() => {
+        deliveredTimer = null;
+        for (const [cid, ids] of deliveredQueue) socket.emit('receipt:delivered', { conversationId: cid, messageIds: [...ids] });
+        deliveredQueue.clear();
+      }, 1000);
+    };
+
     const onNew = ({ conversationId, message }: { conversationId: string; message: WireMessage }) => {
+      if (message.senderId !== user.id) reportDelivered(conversationId, message.id);
       // Thread replies arrive as `thread:reply`; one reaching here (an older
       // gateway) still belongs in the thread pane, not the main flow.
       if (message.threadRootId) { onThreadReply({ conversationId, rootId: message.threadRootId, message }); return; }
@@ -484,6 +503,22 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       inBoth((prev) => prev.map((m) => (m.id === messageId
         ? { ...m, deletedAt: new Date().toISOString(), body: null, attachments: [], reactions: [] }
         : m)));
+    };
+
+    // The sender's ticks, live (B-11): sent → delivered → read.
+    const onReceipt = (
+      { conversationId, messageId, delivery, readCount }:
+      { conversationId: string; messageId: string; delivery: WireMessage['delivery']; readCount: number },
+    ) => {
+      if (conversationId !== activeIdRef.current) return;
+      inBoth((prev) => prev.map((m) => (m.id === messageId ? { ...m, delivery, readCount } : m)));
+    };
+
+    // Disappearing messages whose time ran out (B-11): gone, not tombstoned.
+    const onExpired = ({ conversationId, messageIds }: { conversationId: string; messageIds: string[] }) => {
+      if (conversationId !== activeIdRef.current) return;
+      const gone = new Set(messageIds);
+      inBoth((prev) => prev.filter((m) => !gone.has(m.id)));
     };
 
     const onReaction = (
@@ -602,6 +637,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     socket.on('message:new', onNew);
     socket.on('message:updated', onUpdated);
     socket.on('message:deleted', onDeleted);
+    socket.on('messages:expired', onExpired);
+    socket.on('receipt:update', onReceipt);
     socket.on('message:reaction', onReaction);
     socket.on('typing:update', onTyping);
     socket.on('conversation:unread', onUnread);
@@ -621,6 +658,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       socket.off('message:new', onNew);
       socket.off('message:updated', onUpdated);
       socket.off('message:deleted', onDeleted);
+      socket.off('messages:expired', onExpired);
+      socket.off('receipt:update', onReceipt);
+      if (deliveredTimer) clearTimeout(deliveredTimer);
       socket.off('message:reaction', onReaction);
       socket.off('typing:update', onTyping);
       socket.off('conversation:unread', onUnread);

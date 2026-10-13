@@ -124,6 +124,13 @@ export interface ChatServerToClientEvents {
     p: { conversationId: string; messageId: string; deletedBy: string; byModerator: boolean },
   ) => void;
 
+  /**
+   * Disappearing messages whose time is up, removed outright (B-11): no
+   * tombstone, since a message that leaves "deleted" behind has not
+   * disappeared. Sent by the worker's sweep to the conversation's room.
+   */
+  'messages:expired': (p: { conversationId: string; messageIds: string[] }) => void;
+
   'message:reaction': (
     p: { conversationId: string; messageId: string; reactions: WireReaction[] },
   ) => void;

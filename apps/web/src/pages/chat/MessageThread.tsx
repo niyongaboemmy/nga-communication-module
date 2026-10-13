@@ -4,7 +4,7 @@ import {
   Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
   RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
-  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag,
+  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag, Timer,
 } from 'lucide-react';
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -144,6 +144,17 @@ const ThreadHeader: React.FC<{
               {c.name}
             </span>
             {c.isPrivate && c.type !== 'dm' && <Lock size={12} className="shrink-0 opacity-60" />}
+            {/* Disappearing messages are on (B-07): everyone here should know. */}
+            {c.retentionDays != null && (
+              <span
+                title={`Messages disappear after ${c.retentionDays === 1 ? '24 hours' : `${c.retentionDays} days`}`}
+                className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-amber-100 px-1.5 py-px text-[10px] font-medium text-amber-800 dark:bg-amber-500/15 dark:text-amber-200"
+              >
+                <Timer size={10} aria-hidden="true" />
+                {c.retentionDays === 1 ? '24h' : `${c.retentionDays}d`}
+                <span className="sr-only"> — messages disappear after {c.retentionDays === 1 ? '24 hours' : `${c.retentionDays} days`}</span>
+              </span>
+            )}
           </span>
           <span
             className={`block truncate text-xs ${

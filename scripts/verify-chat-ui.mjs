@@ -838,6 +838,10 @@ try {
   /* ── Disappearing messages ────────────────────────────────────────────── */
 
   await chanSettings.getByRole('button', { name: '7 days', exact: true }).click();
+  // Shortening history deletes messages for everyone, so it asks first (B-07).
+  const retentionConfirm = A.page.getByRole('alertdialog');
+  check('turning on disappearing messages asks first', await visible(retentionConfirm, 4000));
+  await retentionConfirm.getByRole('button', { name: 'Turn on' }).click();
   check('retention can be set from the panel, and is announced',
     await visible(A.page.getByRole('log', { name: 'Messages' })
       .getByText(/disappear after 7 days/).first(), 8000));

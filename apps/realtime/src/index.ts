@@ -421,7 +421,7 @@ io.on('connection', (socket) => {
    * instead would mean one forgotten call site quietly leaking the thing the
    * setting was flicked to hide.
    */
-  void (async () => {
+  socket.data.presenceReady = (async () => {
     await socket.join(`user:${user.id}`);
     const visible = await chat.showsPresence(user.id).catch(() => true);
     socket.data.presenceVisible = visible;
@@ -430,7 +430,7 @@ io.on('connection', (socket) => {
     // green dot only ever appears on a reload. A status picked on another
     // device (busy, do not disturb) holds; this tab only adds its activity.
     await recomputePresence(io, redisReady ? presence : null, user.id).catch(() => {});
-  })();
+  })().catch(() => { /* presence is decoration */ });
 
   socket.emit('connection:ready', {
     userId: user.id,

@@ -8,6 +8,7 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { useNotify } from '../../context/NotificationContext';
 import { useAuth } from '../../context/AuthContext';
 import { apiGet } from '../../lib/api';
+import { useConfirmDialog } from '../../components/ConfirmDialog';
 import { useChat } from './ChatProvider';
 import * as chatApi from './api';
 import { uploadFile, validateFile, useMediaUrl } from './uploads';
@@ -155,8 +156,13 @@ export const ChannelSettings: React.FC<{
     setDescription(c.description ?? '');
   }, [c.id, c.name, c.topic, c.description]);
 
+  // Consequential member and retention changes are confirmed first (B-07).
+  const [confirm, dialog] = useConfirmDialog();
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e: KeyboardEvent) => {
+      // A confirmation open over the panel owns Escape.
+      if (e.key === 'Escape' && !document.querySelector('[role="alertdialog"]')) onClose();
+    };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
@@ -479,10 +485,15 @@ export const ChannelSettings: React.FC<{
                       <IconButton
                         label={`Make ${m.name} the owner`}
                         size="sm"
-                        onClick={() => void run(
-                          () => chatApi.transferOwnership(c.id, m.userId),
-                          `${m.name} now owns this ${kind}`,
-                        )}
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: `Make ${m.name} the owner?`,
+                            body: <p>{m.name} will own this {kind}: they can rename it, archive it, change who manages it and remove anyone — including you.</p>,
+                            warning: 'You become an admin. Only the new owner can give ownership back.',
+                            confirmLabel: 'Make owner', tone: 'danger',
+                          });
+                          if (ok) void run(() => chatApi.transferOwnership(c.id, m.userId), `${m.name} now owns this ${kind}`);
+                        }}
                       >
                         <Crown size={13} />
                       </IconButton>
@@ -491,8 +502,14 @@ export const ChannelSettings: React.FC<{
                       <IconButton
                         label={`Remove ${m.name} from the ${kind}`}
                         size="sm"
-                        onClick={() => void run(
-                          () => chatApi.removeMember(c.id, m.userId), `${m.name} was removed`)}
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: `Remove ${m.name}?`,
+                            body: <p>They stop receiving messages here and lose access to its history{c.isPrivate ? ' — this is a private ' + kind + ', so they cannot rejoin unless someone adds them' : ''}.</p>,
+                            confirmLabel: 'Remove', tone: 'danger',
+                          });
+                          if (ok) void run(() => chatApi.removeMember(c.id, m.userId), `${m.name} was removed`);
+                        }}
                       >
                         <UserMinus size={13} />
                       </IconButton>
@@ -539,18 +556,38 @@ export const ChannelSettings: React.FC<{
               <Timer size={11} /> Disappearing messages
             </h3>
             <div className="flex flex-wrap gap-1">
-              {RETENTION_CHOICES.map(({ days, label }) => (
-                <button
-                  key={label}
-                  onClick={() => void run(
-                    () => chatApi.setRetention(c.id, days),
-                    days === null ? 'Messages will be kept' : `Messages will disappear after ${label}`,
-                  )}
-                  className="rounded-full border border-border-light px-2 py-0.5 text-[11px] font-medium text-text-secondary-light transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-border-dark dark:text-text-secondary-dark"
-                >
-                  {label}
-                </button>
-              ))}
+              {RETENTION_CHOICES.map(({ days, label }) => {
+                const current = (c.retentionDays ?? null) === days;
+                return (
+                  <button
+                    key={label}
+                    aria-pressed={current}
+                    disabled={current}
+                    onClick={async () => {
+                      // Shortening deletes history for everyone, at once: ask.
+                      const shorter = days !== null && (c.retentionDays === null || days < c.retentionDays);
+                      if (shorter) {
+                        const ok = await confirm({
+                          title: `Make messages disappear after ${label.toLowerCase()}?`,
+                          body: <p>Messages older than {label.toLowerCase()} are deleted permanently for everyone in this {kind}, starting now — including ones already sent.</p>,
+                          confirmLabel: 'Turn on', tone: 'danger',
+                        });
+                        if (!ok) return;
+                      }
+                      void run(
+                        () => chatApi.setRetention(c.id, days),
+                        days === null ? 'Messages will be kept' : `Messages will disappear after ${label}`,
+                      );
+                    }}
+                    className={`rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                      current
+                        ? 'border-blue-500 bg-blue-50 text-blue-700 dark:border-blue-400 dark:bg-blue-500/10 dark:text-blue-300'
+                        : 'border-border-light text-text-secondary-light hover:border-blue-400 hover:text-blue-600 dark:border-border-dark dark:text-text-secondary-dark'}`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
             <p className="mt-1 text-[11px] leading-relaxed text-text-secondary-light dark:text-text-secondary-dark">
               Applies to messages already sent as well as new ones. Deleted permanently — no
@@ -639,6 +676,7 @@ export const ChannelSettings: React.FC<{
           )}
         </section>
       </div>
+      {dialog}
     </aside>
   );
 };

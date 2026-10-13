@@ -150,7 +150,7 @@ export const canManage = (role: MemberRole) => ROLE_RANK[role] >= ROLE_RANK.admi
 interface ConversationRow {
   id: string; type: ConversationType; slug: string | null; name: string | null;
   topic: string | null; description: string | null; is_private: boolean;
-  is_archived: boolean; icon_emoji: string | null; avatar_color: string | null;
+  is_archived: boolean; retention_days: number | null; icon_emoji: string | null; avatar_color: string | null;
   avatar_file_id: string | null;
   member_count: number; last_seq: string;
   last_message_at: string | null; last_message_preview: string | null;
@@ -172,7 +172,7 @@ interface ConversationRow {
  */
 const CONVERSATION_SELECT = `
   SELECT c.id, c.type, c.slug, c.name, c.topic, c.description, c.is_private,
-         c.is_archived, c.icon_emoji, c.avatar_color, c.avatar_file_id,
+         c.is_archived, c.retention_days, c.icon_emoji, c.avatar_color, c.avatar_file_id,
          c.member_count, c.last_seq,
          c.last_message_at, c.last_message_preview, c.last_message_sender,
          ls.name AS last_sender_name,
@@ -205,6 +205,7 @@ function toConversation(r: ConversationRow): ConversationSummary {
     description: r.description,
     isPrivate: r.is_private,
     isArchived: r.is_archived,
+    retentionDays: r.retention_days ?? null,
     iconEmoji: r.icon_emoji,
     avatarColor: r.avatar_color,
     avatarUrl: isDm ? r.peer_avatar : null,
@@ -423,6 +424,12 @@ export interface SendMessageInput {
   metadata?: Record<string, unknown>;
   /** Set by the system-message helpers; skips permission and policy checks. */
   system?: boolean;
+  /**
+   * Files the sender may attach although someone else uploaded them: the
+   * attachments of a message being forwarded, which the forwarder can already
+   * read (B-10 / CHAT-H10).
+   */
+  reshareFileIds?: string[];
 }
 
 export interface SendResult {
@@ -659,7 +666,7 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
     const seq = Number(seqRows[0].last_seq);
 
     const attachmentJson = attachments.length
-      ? await resolveAttachments(client, attachments, input.senderId)
+      ? await resolveAttachments(client, attachments, input.senderId, input.reshareFileIds ?? [])
       : [];
 
     const messageType: MessageType =
@@ -813,7 +820,7 @@ function previewOf(body: string, attachmentCount: number, type?: MessageType): s
  * thereby republish someone else's upload into a conversation of their own.
  */
 async function resolveAttachments(
-  client: PoolClient, fileIds: string[], senderId: string,
+  client: PoolClient, fileIds: string[], senderId: string, reshare: string[] = [],
 ): Promise<WireAttachment[]> {
   const { rows } = await client.query<{
     id: string; original_name: string; mime_type: string; size_bytes: string;
@@ -829,7 +836,7 @@ async function resolveAttachments(
   for (const id of fileIds) {
     const f = byId.get(id);
     if (!f) throw new ChatError('Attachment not found.', 404);
-    if (f.owner_id !== senderId) throw new ChatError('That attachment is not yours to send.', 403);
+    if (f.owner_id !== senderId && !reshare.includes(id)) throw new ChatError('That attachment is not yours to send.', 403);
     if (f.status !== 'ready') throw new ChatError('An attachment is still uploading.', 409);
     const meta = (f.metadata ?? {}) as Record<string, number | number[] | undefined>;
     out.push({
@@ -940,6 +947,7 @@ interface MessageRow {
   reply_body: string | null; reply_sender_id: string | null;
   reply_sender_name: string | null; reply_deleted: boolean | null;
   mentions_me: boolean; saved: boolean; read_count: string;
+  delivered_count?: string; viewer_receipts?: boolean;
 }
 
 /**
@@ -966,7 +974,10 @@ const MESSAGE_SELECT = `
          EXISTS (SELECT 1 FROM message_saves ms
                   WHERE ms.message_id = m.id AND ms.user_id = $1) AS saved,
          (SELECT count(*) FROM message_receipts mr
-           WHERE mr.message_id = m.id AND mr.state = 'read')::text AS read_count
+           WHERE mr.message_id = m.id AND mr.state = 'read')::text AS read_count,
+         (SELECT count(*) FROM message_receipts mr
+           WHERE mr.message_id = m.id)::text AS delivered_count,
+         COALESCE((SELECT p.read_receipts FROM user_chat_prefs p WHERE p.user_id = $1), true) AS viewer_receipts
     FROM messages m
     LEFT JOIN users u ON u.id = m.sender_id
     LEFT JOIN messages rp ON rp.id = m.reply_to_id AND rp.conversation_id = m.conversation_id
@@ -980,6 +991,19 @@ const MESSAGE_SELECT = `
  *   academic-conduct review can read what was said. Never pass it on an
  *   ordinary read path.
  */
+/**
+ * The sender's ticks (B-11 / CHAT-H7), as the *weakest* state across
+ * recipients: "read" on a 40-person channel means everyone read it, and
+ * "delivered" that it reached every one of them — not that somebody did.
+ * It used to call a message delivered once one person had read it.
+ */
+export function deliveryState(memberCount: number, deliveredCount: number, readCount: number): DeliveryState {
+  const others = Math.max(memberCount - 1, 1);
+  if (readCount >= others) return 'read';
+  if (Math.max(deliveredCount, readCount) >= others) return 'delivered';
+  return 'sent';
+}
+
 function toWireMessage(
   r: MessageRow, viewerId: string, memberCount = 2, revealDeleted = false,
 ): WireMessage {
@@ -998,20 +1022,14 @@ function toWireMessage(
     .map(([emoji, g]) => ({ emoji, ...g }))
     .sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
 
-  const readCount = Number(r.read_count ?? 0);
   const isMine = r.sender_id === viewerId;
-
-  /*
-   * Delivery is only meaningful to the sender, and only as the *weakest* state
-   * across recipients: "read" on a 40-person channel means everyone read it, not
-   * that somebody did. Anything else and the second tick becomes a lie.
-   */
-  let delivery: DeliveryState = 'sent';
-  if (isMine) {
-    const others = Math.max(memberCount - 1, 1);
-    if (readCount >= others) delivery = 'read';
-    else if (readCount > 0) delivery = 'delivered';
-  }
+  // Reciprocity (FR-MSG-13): someone who keeps their own reads private does
+  // not see anyone else's either — "read" is shown to them as "delivered".
+  const seesReads = r.viewer_receipts !== false;
+  const readCount = seesReads ? Number(r.read_count ?? 0) : 0;
+  const delivery: DeliveryState = isMine
+    ? deliveryState(memberCount, Number(r.delivered_count ?? r.read_count ?? 0), readCount)
+    : 'sent';
 
   const reveal = Boolean(r.deleted_at) && revealDeleted;
 
@@ -1256,14 +1274,19 @@ export async function advanceRead(
 /** Record that messages reached a device (the second tick). */
 export async function markDelivered(
   userId: string, conversationId: string, messageIds: string[],
-): Promise<void> {
-  if (!messageIds.length) return;
-  await getPool().query(
+): Promise<string[]> {
+  if (!messageIds.length) return [];
+  // Only messages of this conversation, from someone else.
+  const { rows } = await getPool().query<{ message_id: string }>(
     `INSERT INTO message_receipts (message_id, conversation_id, user_id, state)
-     SELECT unnest($3::text[]), $1, $2, 'delivered'
-     ON CONFLICT (message_id, user_id) DO NOTHING`,
+     SELECT m.id, $1, $2, 'delivered'
+       FROM messages m
+      WHERE m.conversation_id = $1 AND m.id = ANY($3::text[]) AND m.sender_id <> $2
+     ON CONFLICT (message_id, user_id) DO NOTHING
+     RETURNING message_id`,
     [conversationId, userId, messageIds],
   );
+  return rows.map((r) => r.message_id);
 }
 
 /**
@@ -1276,12 +1299,12 @@ export async function markDelivered(
  */
 export async function markRead(
   userId: string, conversationId: string, upToSeq: number,
-): Promise<number> {
+): Promise<string[]> {
   const { rows: prefs } = await getPool().query<{ read_receipts: boolean }>(
     'SELECT read_receipts FROM user_chat_prefs WHERE user_id = $1', [userId]);
-  if (prefs[0] && prefs[0].read_receipts === false) return 0;
+  if (prefs[0] && prefs[0].read_receipts === false) return [];
 
-  const { rowCount } = await getPool().query(
+  const { rows } = await getPool().query<{ message_id: string }>(
     `INSERT INTO message_receipts (message_id, conversation_id, user_id, state)
      SELECT m.id, m.conversation_id, $2, 'read'
        FROM messages m
@@ -1289,10 +1312,66 @@ export async function markRead(
             AND m.deleted_at IS NULL
      ON CONFLICT (message_id, user_id)
        DO UPDATE SET state = 'read', at = now()
-       WHERE message_receipts.state <> 'read'`,
+       WHERE message_receipts.state <> 'read'
+     RETURNING message_id`,
     [conversationId, userId, upToSeq],
   );
-  return rowCount ?? 0;
+  return rows.map((r) => r.message_id);
+}
+
+export interface ReceiptState {
+  messageId: string; conversationId: string; senderId: string;
+  delivery: DeliveryState; readCount: number;
+}
+
+/**
+ * Fresh tick states for messages whose receipts just changed, for telling
+ * their senders — newest first, at most `limit` (a first read of a long
+ * backlog changes hundreds; only the recent ones are on anyone's screen).
+ */
+export async function receiptStates(conversationId: string, messageIds: string[], limit = 50): Promise<ReceiptState[]> {
+  if (!messageIds.length) return [];
+  const { rows } = await getPool().query<{
+    id: string; sender_id: string; member_count: number; delivered: string; read: string;
+  }>(
+    `SELECT m.id, m.sender_id, c.member_count,
+            (SELECT count(*) FROM message_receipts r WHERE r.message_id = m.id)::text AS delivered,
+            (SELECT count(*) FROM message_receipts r WHERE r.message_id = m.id AND r.state = 'read')::text AS read
+       FROM messages m JOIN conversations c ON c.id = m.conversation_id
+      WHERE m.conversation_id = $1 AND m.id = ANY($2::text[])
+      ORDER BY m.seq DESC LIMIT $3`,
+    [conversationId, messageIds, limit],
+  );
+  return rows.map((r) => ({
+    messageId: r.id, conversationId, senderId: r.sender_id,
+    delivery: deliveryState(r.member_count, Number(r.delivered), Number(r.read)),
+    readCount: Number(r.read),
+  }));
+}
+
+/**
+ * What to tell each sender after receipts changed: their own devices only,
+ * and with reciprocity applied — a sender who keeps their reads private sees
+ * "delivered", never "read".
+ */
+export async function receiptUpdatesFor(conversationId: string, messageIds: string[]): Promise<Array<{
+  senderId: string;
+  payload: { conversationId: string; messageId: string; delivery: DeliveryState; readCount: number };
+}>> {
+  const states = await receiptStates(conversationId, messageIds);
+  const sees = new Map<string, boolean>();
+  for (const st of states) if (!sees.has(st.senderId)) sees.set(st.senderId, await receiptsVisibleTo(st.senderId));
+  return states.map((st) => {
+    const visible = sees.get(st.senderId) !== false;
+    return {
+      senderId: st.senderId,
+      payload: {
+        conversationId, messageId: st.messageId,
+        delivery: !visible && st.delivery === 'read' ? 'delivered' : st.delivery,
+        readCount: visible ? st.readCount : 0,
+      },
+    };
+  });
 }
 
 export async function receiptsVisibleTo(userId: string): Promise<boolean> {
@@ -2297,8 +2376,9 @@ export async function listSaved(
  */
 export async function forwardMessage(
   userId: string, sourceConversationId: string, messageId: string,
-  targetConversationIds: string[], comment?: string,
-): Promise<Array<{ conversationId: string; result: SendResult }>> {
+  targetConversationIds: string[], comment_?: string,
+): Promise<Array<{ conversationId: string; result: SendResult; comment?: SendResult }>> {
+  const comment_text = (c?: string) => (c ?? '').trim().slice(0, MAX_MESSAGE_LENGTH);
   await requireMembership(userId, sourceConversationId);
 
   const original = await getMessage(userId, sourceConversationId, messageId);
@@ -2310,50 +2390,61 @@ export async function forwardMessage(
   // in a channel would leak who is talking to whom.
   const sourceName = src[0]?.type === 'dm' ? null : (src[0]?.name ?? null);
 
-  const out: Array<{ conversationId: string; result: SendResult }> = [];
+  // A poll travels as a snapshot of its question and results (B-10): a
+  // forwarded poll message with no poll behind it rendered as an empty card.
+  let body = original.body ?? '';
+  let type: MessageType = original.type === 'system' ? 'text' : original.type;
+  if (original.type === 'poll') {
+    const poll = await getPollByMessage(userId, sourceConversationId, messageId);
+    if (poll) {
+      const lines = poll.options.map((o) => `• ${o.text} — ${o.votes} ${o.votes === 1 ? 'vote' : 'votes'}`);
+      body = `📊 ${poll.question}\n${lines.join('\n')}`;
+    }
+    type = 'text';
+  }
+  const forwardedFrom = {
+    senderId: original.senderId,
+    senderName: original.senderName,
+    conversationName: sourceName,
+  };
+
+  const out: Array<{ conversationId: string; result: SendResult; comment?: SendResult }> = [];
   for (const targetId of [...new Set(targetConversationIds)].slice(0, 20)) {
     const membership = await requireMembership(userId, targetId);
     if (membership.isArchived) continue;
 
-    if (comment?.trim()) {
-      await sendMessage({
+    // The note goes first and is returned, so it is broadcast like the
+    // forward itself (it used to be written and never sent to anyone).
+    const comment = comment_text(comment_)
+      ? await sendMessage({
         conversationId: targetId, senderId: userId,
-        body: comment.trim(), nonce: `fwd-note-${snowflake()}`,
-      });
-    }
+        body: comment_text(comment_), nonce: `fwd-note-${snowflake()}`,
+      })
+      : undefined;
 
     const result = await sendMessage({
       conversationId: targetId,
       senderId: userId,
-      body: original.body ?? '',
+      body,
       nonce: `fwd-${messageId}-${targetId}`,
-      type: original.type === 'system' ? 'text' : original.type,
+      type,
       attachments: original.attachments.map((a) => a.fileId),
+      reshareFileIds: original.attachments.map((a) => a.fileId),
       // Attribution rides on the message itself, not on a convention in the
       // body text that a client could choose not to render.
-      metadata: {
-        forwardedFrom: {
-          senderId: original.senderId,
-          senderName: original.senderName,
-          conversationName: sourceName,
-          messageId,
-          at: original.createdAt,
-        },
-      },
+      metadata: { forwardedFrom: { ...forwardedFrom, messageId, at: original.createdAt } },
       system: true,
     });
 
     await getPool().query(
       `UPDATE messages SET forwarded_from = $3
         WHERE conversation_id = $1 AND id = $2`,
-      [targetId, result.message.id, JSON.stringify({
-        senderId: original.senderId,
-        senderName: original.senderName,
-        conversationName: sourceName,
-      })],
+      [targetId, result.message.id, JSON.stringify(forwardedFrom)],
     );
+    // What is broadcast carries the attribution too, not only a reload.
+    result.message = { ...result.message, forwardedFrom } as WireMessage;
 
-    out.push({ conversationId: targetId, result });
+    out.push({ conversationId: targetId, result, comment });
   }
 
   if (!out.length) throw new ChatError('Nowhere to forward that to.', 400);
@@ -2849,7 +2940,7 @@ export async function createPoll(
     question: string; options: string[];
     multiChoice?: boolean; anonymous?: boolean; closesAt?: string | null;
   },
-): Promise<{ poll: WirePoll; message: WireMessage }> {
+): Promise<{ poll: WirePoll; message: WireMessage; sent: SendResult }> {
   const question = (input.question ?? '').trim();
   const options = (input.options ?? []).map((o) => String(o ?? '').trim()).filter(Boolean);
 
@@ -2871,10 +2962,11 @@ export async function createPoll(
    * to, pinned, forwarded and searched like anything else. A poll held outside
    * the message stream is a poll that scrolls away from its own discussion.
    */
-  const { message } = await sendMessage({
+  const sent = await sendMessage({
     conversationId, senderId: userId, body: question,
     nonce: `poll-${snowflake()}`, type: 'poll', system: true,
   });
+  const { message } = sent;
 
   const pollId = snowflake();
   await getPool().query(
@@ -2888,7 +2980,7 @@ export async function createPoll(
 
   const poll = await getPoll(userId, pollId);
   if (!poll) throw new ChatError('The poll could not be read back.', 500);
-  return { poll, message };
+  return { poll, message, sent };
 }
 
 export async function getPoll(viewerId: string, pollId: string): Promise<WirePoll | null> {
@@ -2954,7 +3046,9 @@ export async function votePoll(
   const poll = rows[0];
   if (!poll) throw new ChatError('Poll not found.', 404);
 
-  await requireMembership(userId, poll.conversation_id);
+  const membership = await requireMembership(userId, poll.conversation_id);
+  // An archived conversation is read-only, its polls included (B-11).
+  if (membership.isArchived) throw new ChatError('This conversation is archived.', 409);
 
   if (poll.closed_at || (poll.closes_at && new Date(poll.closes_at).getTime() < Date.now())) {
     throw new ChatError('This poll has closed.', 409);
@@ -2969,13 +3063,27 @@ export async function votePoll(
   // Replaced rather than appended: changing your mind is the normal case, and a
   // vote endpoint that only ever adds turns a single-choice poll into a
   // multiple-choice one on the second click.
-  await getPool().query('DELETE FROM poll_votes WHERE poll_id = $1 AND user_id = $2',
-    [pollId, userId]);
-  for (const optionId of chosen) {
-    await getPool().query(
-      `INSERT INTO poll_votes (poll_id, user_id, option_id) VALUES ($1,$2,$3)
-       ON CONFLICT DO NOTHING`,
-      [pollId, userId, optionId]);
+  //
+  // One transaction, serialised per (poll, voter) (B-11 / CHAT-M5): two quick
+  // clicks on a single-choice poll used to interleave their delete and insert
+  // and leave two votes.
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`poll:${pollId}:${userId}`]);
+    await client.query('DELETE FROM poll_votes WHERE poll_id = $1 AND user_id = $2', [pollId, userId]);
+    if (chosen.length) {
+      await client.query(
+        `INSERT INTO poll_votes (poll_id, user_id, option_id)
+         SELECT $1, $2, unnest($3::text[]) ON CONFLICT DO NOTHING`,
+        [pollId, userId, chosen]);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
 
   const updated = await getPoll(userId, pollId);
@@ -3405,7 +3513,10 @@ export async function applyRetention(conversationId: string, messageId: string):
  * and its timing all survive, which is most of what the setting exists to
  * remove.
  */
-export async function sweepExpiredMessages(limit = 500): Promise<number> {
+export async function sweepExpiredMessages(
+  limit = 500,
+  onRemoved?: (conversationId: string, messageIds: string[]) => void | Promise<void>,
+): Promise<number> {
   const { rows } = await getPool().query<{ id: string; conversation_id: string }>(
     `SELECT id, conversation_id, created_at FROM messages
       WHERE expires_at IS NOT NULL AND expires_at <= now()
@@ -3418,15 +3529,34 @@ export async function sweepExpiredMessages(limit = 500): Promise<number> {
   // The child tables carry message_id without a foreign key — `messages` is
   // partitioned, so one is not possible — which means they are swept here
   // rather than by a cascade.
+  // Translations, link previews and nonces too (B-11 / CHAT-M6): a
+  // translation left behind is the message, still readable. A poll goes with
+  // its message (its votes cascade).
   for (const table of ['message_reactions', 'message_receipts', 'message_mentions',
-                       'message_saves', 'message_edits', 'message_attachments']) {
+                       'message_saves', 'message_edits', 'message_attachments',
+                       'message_translations', 'message_links', 'message_nonces', 'polls']) {
     await getPool().query(`DELETE FROM ${table} WHERE message_id = ANY($1::text[])`, [ids]);
   }
+  // The conversation ids let Postgres skip every other partition.
+  const conversations = [...new Set(rows.map((r) => r.conversation_id))];
   await getPool().query(
-    `DELETE FROM messages WHERE id = ANY($1::text[]) AND expires_at <= now()`, [ids]);
+    `DELETE FROM messages
+      WHERE conversation_id = ANY($2::text[]) AND id = ANY($1::text[]) AND expires_at <= now()`,
+    [ids, conversations]);
 
-  for (const conversationId of new Set(rows.map((r) => r.conversation_id))) {
+  for (const conversationId of conversations) {
+    // Badges stop counting what is gone.
+    await getPool().query(
+      `UPDATE conversation_members m
+          SET unread_count = ${unreadCountSql('m.last_read_seq')},
+              unread_mentions = ${unreadMentionsSql('m.last_read_seq')}
+        WHERE m.conversation_id = $1 AND m.left_at IS NULL
+          AND (m.unread_count > 0 OR m.unread_mentions > 0)`,
+      [conversationId],
+    );
     await refreshPreview(conversationId);
+    // Open screens drop them too, rather than showing them until a reload.
+    await onRemoved?.(conversationId, rows.filter((r) => r.conversation_id === conversationId).map((r) => r.id));
   }
   return ids.length;
 }

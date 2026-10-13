@@ -31,6 +31,8 @@ export interface ConversationSummary {
   description: string | null;
   isPrivate: boolean;
   isArchived: boolean;
+  /** Disappearing messages: kept this many days, or null for always (B-07). */
+  retentionDays: number | null;
   iconEmoji: string | null;
   avatarColor: string | null;
   avatarUrl: string | null;

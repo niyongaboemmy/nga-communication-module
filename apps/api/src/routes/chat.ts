@@ -567,17 +567,24 @@ router.post('/conversations/:id/read', wrap(async (req, res) => {
   if (!Number.isFinite(seq)) return res.status(400).json(fail('A sequence number is required.'));
 
   const result = await chat.advanceRead(me.id, id, seq);
-  await chat.markRead(me.id, id, seq);
+  const newlyRead = await chat.markRead(me.id, id, seq);
 
   // Other devices of the same person clear their badge too.
   emitToUsers([me.id], 'conversation:unread', {
     conversationId: id, unread: result.unread,
     unreadMentions: result.unreadMentions, lastReadSeq: result.lastReadSeq,
   });
-  // And everyone in the room repaints this person's read marker.
-  emitToConversation(id, 'read:update', {
-    conversationId: id, userId: me.id, seq: result.lastReadSeq, at: new Date().toISOString(),
-  });
+  // And everyone in the room repaints this person's read marker — unless
+  // they keep their reads private (B-11).
+  if (await chat.receiptsVisibleTo(me.id)) {
+    emitToConversation(id, 'read:update', {
+      conversationId: id, userId: me.id, seq: result.lastReadSeq, at: new Date().toISOString(),
+    });
+  }
+  // Senders' ticks move live, on their own devices only.
+  for (const u of await chat.receiptUpdatesFor(id, newlyRead)) {
+    emitToUsers([u.senderId], 'receipt:update', u.payload);
+  }
   // Read to the end: what the bell had about it is read too (F-01).
   if (result.unread === 0) void clearConversationNotifications(me.id, id);
 
@@ -883,13 +890,15 @@ router.post('/conversations/:id/messages/:messageId/forward',
       me.id, id, messageId, targets, typeof req.body?.comment === 'string' ? req.body.comment : undefined,
     );
 
-    for (const { conversationId, result } of results) {
+    for (const { conversationId, result, comment } of results) {
       const target = await chat.requireMembership(me.id, conversationId);
-      await fanOutNewMessage(conversationId, result, {
+      const context = {
         name: target.name ?? 'a conversation',
         type: target.type,
         senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
-      });
+      };
+      if (comment) await fanOutNewMessage(conversationId, comment, context);
+      await fanOutNewMessage(conversationId, result, context);
     }
 
     res.json(ok({ forwarded: results.map((r) => r.conversationId) }));
@@ -1051,7 +1060,7 @@ router.post('/conversations/:id/polls', authorizePermission('MESSAGE_SEND'),
     const id = req.params.id!;
     const membership = await chat.assertCanPost(me.id, id, { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
 
-    const { poll, message } = await chat.createPoll(me.id, id, {
+    const { poll, message, sent } = await chat.createPoll(me.id, id, {
       question: String(req.body?.question ?? ''),
       options: Array.isArray(req.body?.options) ? req.body.options : [],
       multiChoice: req.body?.multiChoice === true,
@@ -1059,8 +1068,13 @@ router.post('/conversations/:id/polls', authorizePermission('MESSAGE_SEND'),
       closesAt: req.body?.closesAt ?? null,
     });
 
-    // The poll is a message, so it fans out as one — and notifies as one.
-    emitToConversation(id, 'message:new', { conversationId: id, message });
+    // The poll is a message, so it fans out as one — badges and notifications
+    // included (B-11: it used to emit the message and nothing else).
+    await fanOutNewMessage(id, sent, {
+      name: membership.name ?? 'a conversation',
+      type: membership.type,
+      senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
+    });
     emitToConversation(id, 'poll:updated', { conversationId: id, poll: { ...poll, myVotes: [] }, actorId: me.id });
     res.status(201).json(ok({ poll, message }));
   }));
@@ -1310,6 +1324,8 @@ router.post('/conversations/:id/retention', authorizePermission('RETENTION_MANAG
       actorId: me.id, action: 'chat.retention.set', targetType: 'conversation', targetId: id,
       metadata: { days }, ipAddress: req.ip, userAgent: req.headers['user-agent'],
     });
+    // Every member's header and settings follow at once (B-11).
+    void announceConversation(id).catch(() => {});
     res.json(ok({ conversation }));
   }));
 

@@ -94,7 +94,12 @@ export function registerChatHandlers(
     // Opening a conversation changes who is in the room, so everyone already
     // there needs the new roster — and the arriving socket needs its first
     // copy. One broadcast serves both.
-    for (const id of granted) void emitConversationPresence(io, redis, id);
+    // The roster says who is online, so it waits for this socket's own
+    // presence to be written: a client subscribes the instant it connects,
+    // and a roster built before then showed its owner as offline.
+    void Promise.resolve((socket.data as { presenceReady?: Promise<unknown> }).presenceReady)
+      .catch(() => {})
+      .then(() => { for (const id of granted) void emitConversationPresence(io, redis, id); });
   });
 
   socket.on('conversation:unsubscribe', async ({ conversationIds }) => {
@@ -356,7 +361,7 @@ export function registerChatHandlers(
     try {
       await chat.requireMembership(user.id, conversationId);
       const result = await chat.advanceRead(user.id, conversationId, seq);
-      await chat.markRead(user.id, conversationId, seq);
+      const newlyRead = await chat.markRead(user.id, conversationId, seq);
 
       ack?.({ ok: true, unread: result.unread, unreadMentions: result.unreadMentions });
 
@@ -367,10 +372,17 @@ export function registerChatHandlers(
         unreadMentions: result.unreadMentions,
         lastReadSeq: result.lastReadSeq,
       });
-      // …and everyone in the room repaints their read marker.
-      io.to(conversationRoom(conversationId)).emit('read:update', {
-        conversationId, userId: user.id, seq: result.lastReadSeq, at: new Date().toISOString(),
-      });
+      // …and everyone in the room repaints their read marker — unless this
+      // person keeps their reads private (B-11): then nobody is told.
+      if (await chat.receiptsVisibleTo(user.id)) {
+        io.to(conversationRoom(conversationId)).emit('read:update', {
+          conversationId, userId: user.id, seq: result.lastReadSeq, at: new Date().toISOString(),
+        });
+      }
+      // Senders' ticks move live, on their own devices only.
+      for (const u of await chat.receiptUpdatesFor(conversationId, newlyRead)) {
+        io.to(userRoom(u.senderId)).emit('receipt:update', u.payload);
+      }
       // Read to the end: the bell's notifications about it are read too (F-01).
       if (result.unread === 0) {
         void notify.markConversationNotificationsRead(user.id, conversationId).then(async (ids) => {
@@ -385,13 +397,12 @@ export function registerChatHandlers(
   socket.on('receipt:delivered', async ({ conversationId, messageIds }) => {
     if (!inRoom(conversationId) || !messageIds?.length) return;
     try {
-      await chat.markDelivered(user.id, conversationId, messageIds.slice(0, 200));
-      // The sender's ticks are the only thing that changes; the room is the
-      // cheapest way to reach them without looking up who they are.
-      io.to(conversationRoom(conversationId)).emit('receipt:update', {
-        conversationId, messageId: messageIds[messageIds.length - 1]!,
-        delivery: 'delivered', readCount: 0,
-      });
+      const reached = await chat.markDelivered(user.id, conversationId, messageIds.slice(0, 200));
+      // Only the senders' ticks change, so only their devices are told, with
+      // each message's real state rather than a blanket "delivered" (B-11).
+      for (const u of await chat.receiptUpdatesFor(conversationId, reached)) {
+        io.to(userRoom(u.senderId)).emit('receipt:update', u.payload);
+      }
     } catch { /* ignore */ }
   });
 
