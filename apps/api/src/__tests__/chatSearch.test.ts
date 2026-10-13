@@ -5,11 +5,15 @@ import { randomBytes } from 'node:crypto';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
 import { app } from '../app.js';
 import { config } from '../config.js';
+import { purgeTestUsers } from './purge.js';
+
+const created: string[] = [];
 
 /** B-12: message search matches while a word is still being typed, and only where the viewer belongs. */
 
 async function user(name: string): Promise<{ id: string; token: string }> {
   const id = snowflake();
+  created.push(id);
   const { rows } = await getPool().query<{ id: number }>(`SELECT id FROM roles WHERE name = 'Staff'`);
   await getPool().query(`INSERT INTO users (id, mis_user_id, name, email, role, role_id) VALUES ($1,$1,$2,$3,'staff',$4)`,
     [id, name, `${id}@amashuri.com`, rows[0]!.id]);
@@ -31,7 +35,7 @@ beforeAll(async () => {
   await request(app).post(`/api/chat/conversations/${conv}/messages`).set('Authorization', `Bearer ${ben.token}`)
     .send({ body: `Remember the homework${tag} assignment for Thursday`, nonce: nonce() });
 });
-afterAll(async () => { await closeDb(); });
+afterAll(async () => { await purgeTestUsers(created); await closeDb(); });
 
 describe('GET /api/chat/search', () => {
   it('finds a word from its first letters', async () => {

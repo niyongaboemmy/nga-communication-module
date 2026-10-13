@@ -286,7 +286,7 @@ export interface ComposePostPayload {
 }
 
 export type EditPostPayload = Partial<
-  Pick<ComposePostPayload, 'body' | 'format' | 'media' | 'linkPreview' | 'audience' | 'commentPolicy' | 'pinned'>
+  Pick<ComposePostPayload, 'body' | 'format' | 'media' | 'linkPreview' | 'audience' | 'commentPolicy' | 'pinned' | 'poll' | 'event'>
 >;
 
 /* ────────────────────────────────────────────────────────────────────────── *

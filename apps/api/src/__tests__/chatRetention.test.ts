@@ -6,11 +6,15 @@ import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
 import * as chat from '@tupo/chat';
 import { app } from '../app.js';
 import { config } from '../config.js';
+import { purgeTestUsers } from './purge.js';
+
+const created: string[] = [];
 
 /** B-07 / B-11: retention is visible, and expired messages leave nothing behind. */
 
 async function user(name: string): Promise<{ id: string; token: string }> {
   const id = snowflake();
+  created.push(id);
   const { rows } = await getPool().query<{ id: number }>(`SELECT id FROM roles WHERE name = 'Admin'`);
   await getPool().query(`INSERT INTO users (id, mis_user_id, name, email, role, role_id) VALUES ($1,$1,$2,$3,'admin',$4)`,
     [id, name, `${id}@amashuri.com`, rows[0]!.id]);
@@ -31,7 +35,7 @@ beforeAll(async () => {
   ada = await user('Ada'); ben = await user('Ben');
   conv = (await as(ada).post('/api/chat/conversations', { type: 'group', name: `ret-${nonce()}`, memberIds: [ben.id] })).body.data.conversation.id;
 });
-afterAll(async () => { await closeDb(); });
+afterAll(async () => { await purgeTestUsers(created); await closeDb(); });
 
 describe('retention', () => {
   it('the conversation says how long messages are kept', async () => {

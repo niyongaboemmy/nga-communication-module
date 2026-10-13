@@ -6,11 +6,15 @@ import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
 import * as chat from '@tupo/chat';
 import { app } from '../app.js';
 import { config } from '../config.js';
+import { purgeTestUsers } from './purge.js';
+
+const created: string[] = [];
 
 /** B-11 / CHAT-H7: honest ticks — weakest state across recipients — and reciprocity. */
 
 async function user(name: string): Promise<{ id: string; token: string }> {
   const id = snowflake();
+  created.push(id);
   const { rows } = await getPool().query<{ id: number }>(`SELECT id FROM roles WHERE name = 'Staff'`);
   await getPool().query(`INSERT INTO users (id, mis_user_id, name, email, role, role_id) VALUES ($1,$1,$2,$3,'staff',$4)`,
     [id, name, `${id}@amashuri.com`, rows[0]!.id]);
@@ -27,7 +31,7 @@ const tickOf = async (u: { token: string }, conv: string, id: string) =>
     .find((m) => m.id === id)?.delivery;
 
 beforeAll(async () => { await seedRbac(getPool()); });
-afterAll(async () => { await closeDb(); });
+afterAll(async () => { await purgeTestUsers(created); await closeDb(); });
 
 describe('deliveryState', () => {
   it('is the weakest state across recipients', () => {

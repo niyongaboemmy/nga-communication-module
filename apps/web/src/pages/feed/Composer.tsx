@@ -12,6 +12,7 @@ import { useAuth } from '../../context/AuthContext';
 import { uploadFile, probeMedia, validateFile } from '../chat/uploads';
 import { useMediaUrl, firstName, useDismiss } from './lib';
 import * as api from './api';
+import { SchedulePicker } from './SchedulePicker';
 
 interface PendingMedia {
   localId: string;
@@ -53,6 +54,7 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
   });
   const [isAnnouncement, setIsAnnouncement] = useState(editing?.type === 'announcement');
   const [scheduleAt, setScheduleAt] = useState('');
+  const [schedulePanel, setSchedulePanel] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -138,8 +140,9 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
         media: media.filter((m) => m.fileId).map((m) => ({ fileId: m.fileId!, kind: m.kind, name: m.name, w: m.w ?? null, h: m.h ?? null })),
         audience,
         type: isAnnouncement ? 'announcement' : 'standard',
-        status: validSchedule ? 'scheduled' : mode,
-        scheduledAt: validSchedule ? scheduleDate!.toISOString() : null,
+        // "Save draft" saves a draft, whatever time was picked (D-05).
+        status: mode === 'draft' ? 'draft' : validSchedule ? 'scheduled' : 'published',
+        scheduledAt: mode !== 'draft' && validSchedule ? scheduleDate!.toISOString() : null,
       };
       // A half-filled poll/event the user abandoned in favour of plain text
       // must not be sent — an incomplete one would either 400 on the server
@@ -148,8 +151,11 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
       if (validEvent) payload.event = { title: evt.title.trim(), startsAt: eventDate!.toISOString(), location: evt.location.trim() || null };
 
       if (editing) {
+        // Poll and event changes are kept (D-06); clearing a tool clears it.
         const updated = await api.editPost(editing.id, {
           body: payload.body, media: payload.media, audience: payload.audience,
+          poll: validPoll ? payload.poll : (editing.poll && tool !== 'poll' ? null : undefined),
+          event: validEvent ? payload.event : (editing.event && tool !== 'event' ? null : undefined),
         });
         onPublished?.(updated);
         onClose?.();
@@ -302,6 +308,9 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
           </div>
         )}
 
+        {schedulePanel && !editing && (
+          <SchedulePicker value={scheduleAt} onChange={setScheduleAt} onClose={() => setSchedulePanel(false)} />
+        )}
         {scheduleAt && (
           <p className="mt-2 flex items-center gap-1.5 text-xs font-medium text-blue-600 dark:text-blue-400">
             <CalendarClock size={13} /> Scheduled for {new Date(scheduleAt).toLocaleString()}
@@ -317,10 +326,8 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
           <ToolBtn active={tool === 'poll'} onClick={() => setTool((t) => t === 'poll' ? 'none' : 'poll')} icon={<BarChart3 size={18} className="text-purple-500" />} label="Poll" />
           <ToolBtn active={tool === 'event'} onClick={() => setTool((t) => t === 'event' ? 'none' : 'event')} icon={<CalendarDays size={18} className="text-orange-500" />} label="Event" />
           {!editing && (
-            <label className="grid h-9 w-9 cursor-pointer place-items-center rounded-full text-blue-500 hover:bg-surface-light dark:hover:bg-card-dark" title="Schedule">
-              <CalendarClock size={18} />
-              <input type="datetime-local" hidden onChange={(e) => setScheduleAt(e.target.value)} />
-            </label>
+            <ToolBtn active={schedulePanel || Boolean(scheduleAt)} onClick={() => setSchedulePanel((v) => !v)}
+              icon={<CalendarClock size={18} className="text-blue-500" />} label="Schedule" />
           )}
         </div>
         <div className="flex items-center gap-2">

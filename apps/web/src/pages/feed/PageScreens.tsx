@@ -14,10 +14,12 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { useNotify } from '../../context/NotificationContext';
 import { apiGet, ApiError } from '../../lib/api';
 import { LoadError } from '../../components/LoadError';
+import { useConfirmDialog } from '../../components/ConfirmDialog';
 import { uploadFile, validateFile } from '../chat/uploads';
 import { useFeed, useFeedList } from './FeedProvider';
 import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount, announcePage, usePageUpdates } from './Frame';
 import { Composer } from './Composer';
+import { SchedulePicker, toLocalInput } from './SchedulePicker';
 import { useDismiss, useMediaUrl } from './lib';
 import * as api from './api';
 
@@ -73,10 +75,81 @@ const BrandingImageButton: React.FC<{
 
 const PAGE_TABS = [
   { id: 'posts', label: 'Posts' },
+  { id: 'drafts', label: 'Drafts & scheduled' },
   { id: 'about', label: 'About' },
   { id: 'team', label: 'Team' },
 ] as const;
 type PageTab = (typeof PAGE_TABS)[number]['id'];
+
+/**
+ * Drafts and scheduled posts (D-05), for the people who run the page: edit,
+ * publish now, move in time, turn back into a draft, delete.
+ */
+const DraftsTab: React.FC<{ pageId: string }> = ({ pageId }) => {
+  const { notify, confirm: confirmed } = useNotify();
+  const [ask, dialog] = useConfirmDialog();
+  const [posts, setPosts] = useState<FeedPostView[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [picking, setPicking] = useState<string | null>(null);
+  const load = useCallback(() => {
+    setFailed(false);
+    api.listDrafts(pageId).then(setPosts).catch(() => setFailed(true));
+  }, [pageId]);
+  useEffect(load, [load]);
+  // An edit made in the shared editor shows here when it closes.
+  useEffect(() => {
+    const on = () => window.setTimeout(load, 600);
+    window.addEventListener('feed:edited', on);
+    return () => window.removeEventListener('feed:edited', on);
+  }, [load]);
+  const run = async (fn: () => Promise<unknown>, done: string) => {
+    try { await fn(); confirmed(done); load(); }
+    catch (e) { notify({ title: e instanceof Error ? e.message : 'That did not work', tone: 'error' }); }
+  };
+  if (failed) return <div className="mt-4"><LoadError what="drafts" onRetry={load} /></div>;
+  if (!posts) return <div className="mt-4 space-y-3"><PostSkeleton /></div>;
+  if (!posts.length) return <EmptyState title="No drafts or scheduled posts" hint="Use “Save draft” or the schedule button in the composer." />;
+  return (
+    <>
+    <ul className="mt-4 space-y-3">
+      {posts.map((p) => (
+        <li key={p.id} className="feed-card p-4">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {p.status === 'scheduled'
+              ? <Badge tone="blue">Scheduled · {p.scheduledAt ? new Date(p.scheduledAt).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}</Badge>
+              : <Badge tone="amber">Draft</Badge>}
+            <span className="text-text-secondary-light dark:text-text-secondary-dark">by {p.author.name}</span>
+          </div>
+          <p className="mt-2 line-clamp-3 whitespace-pre-line text-sm text-text-primary-light dark:text-text-primary-dark">
+            {p.body || (p.poll ? `Poll: ${p.poll.question}` : p.event ? `Event: ${p.event.title}` : p.media.length ? `${p.media.length} attachment(s)` : '(empty)')}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs font-medium">
+            <button onClick={() => window.dispatchEvent(new CustomEvent('feed:edit', { detail: p.id }))} className="rounded-full border border-border-light px-3 py-1 dark:border-border-dark/60">Edit</button>
+            <button onClick={() => void run(() => api.publishPost(p.id), 'Published')} className="rounded-full bg-blue-600 px-3 py-1 text-white">Publish now</button>
+            <button onClick={() => setPicking((v) => (v === p.id ? null : p.id))} className="rounded-full border border-border-light px-3 py-1 dark:border-border-dark/60">
+              {p.status === 'scheduled' ? 'Reschedule' : 'Schedule'}
+            </button>
+            {p.status === 'scheduled' && (
+              <button onClick={() => void run(() => api.schedulePost(p.id, null), 'Moved back to drafts')} className="rounded-full border border-border-light px-3 py-1 dark:border-border-dark/60">Make draft</button>
+            )}
+            <button onClick={async () => {
+              if (await ask({ title: 'Delete this post?', body: <p>It has not been published; deleting it cannot be undone.</p>, confirmLabel: 'Delete', tone: 'danger' })) {
+                await run(() => api.deletePost(p.id), 'Deleted');
+              }
+            }}
+              className="rounded-full px-3 py-1 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20">Delete</button>
+          </div>
+          {picking === p.id && (
+            <SchedulePicker value={p.scheduledAt ? toLocalInput(new Date(p.scheduledAt)) : ''}
+              onChange={(local) => { setPicking(null); void run(() => api.schedulePost(p.id, new Date(local).toISOString()), 'Scheduled'); }} />
+          )}
+        </li>
+      ))}
+    </ul>
+    {dialog}
+    </>
+  );
+};
 
 const MenuPanel: React.FC<{ children: React.ReactNode; align?: 'left' | 'right' }> = ({ children, align = 'right' }) => (
   <div role="menu" className={`animate-pop absolute top-full z-30 mt-1.5 w-60 rounded-xl bg-white p-1 shadow-[0_12px_28px_rgba(0,0,0,0.2)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10 ${align === 'right' ? 'right-0' : 'left-0'}`}>
@@ -382,7 +455,7 @@ export const PageProfile: React.FC = () => {
           </section>
 
           <div role="tablist" aria-label="Page sections" className="mt-4 flex border-b border-border-light dark:border-border-dark/40">
-            {PAGE_TABS.map((t) => {
+            {PAGE_TABS.filter((t) => t.id !== 'drafts' || page.myRole !== null).map((t) => {
               const active = tab === t.id;
               return (
                 <button
@@ -398,6 +471,7 @@ export const PageProfile: React.FC = () => {
             })}
           </div>
 
+          {tab === 'drafts' && page.myRole !== null && <DraftsTab pageId={page.id} />}
           {tab === 'about' && <AboutTab page={page} canManage={canManage} onEdit={() => setEditing(true)} />}
           {tab === 'team' && <TeamTab page={page} canManage={canManage} onChanged={setPage} />}
           {tab === 'posts' && (

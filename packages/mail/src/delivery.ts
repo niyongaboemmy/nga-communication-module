@@ -161,6 +161,11 @@ export async function deliverSmtp(
     [messageId, MAX_SMTP_ATTEMPTS],
   );
 
+  // In the order they were added: RETURNING has no order, and whether the
+  // copies after a relay failure were tried depended on how rows came back.
+  const toId = (id: string) => { try { return BigInt(id); } catch { return 0n; } };
+  recipients.sort((a, b) => (toId(a.id) < toId(b.id) ? -1 : toId(a.id) > toId(b.id) ? 1 : a.id.localeCompare(b.id)));
+
   let sent = 0, failed = 0, skipped = 0;
   let transportDown = false;
   for (const r of recipients) {

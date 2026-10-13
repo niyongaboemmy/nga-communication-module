@@ -177,6 +177,11 @@ router.get('/pages/:id/posts', authorizePermission('FEED_VIEW'), wrap(async (req
  * administrator compares pages they do not run — so it is checked there, not
  * here.
  */
+/** Drafts and scheduled posts of a page, for its editors (D-05). */
+router.get('/pages/:id/drafts', authorizePermission('FEED_POST'), wrap(async (req, res) => {
+  res.json(ok({ posts: await feed.posts.listUnpublished(actorOf(req), req.params.id!) }));
+}));
+
 router.get('/pages/:id/analytics', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
   const range = (['7d', '30d', 'all'] as const).find((r) => r === req.query.range) ?? '30d';
   res.json(ok({ analytics: await feed.analytics.pageAnalytics(actorOf(req), req.params.id!, range) }));
@@ -224,6 +229,13 @@ router.post('/posts/:id/publish', authorizePermission('FEED_POST'), wrap(async (
   activity().trackFor(req, 'tupo.feed.post', { post_id: req.params.id!, page_id: post.page.id, status: 'published' });
   await announceSoon(req.params.id!);
   res.json(ok({ post }));
+}));
+
+router.post('/posts/:id/schedule', authorizePermission('FEED_POST'), wrap(async (req, res) => {
+  const actor = actorOf(req);
+  const at = req.body?.scheduledAt;
+  await feed.posts.schedulePost(actor, req.params.id!, typeof at === 'string' && at ? at : null);
+  res.json(ok({ post: await feed.getPostView(actor, req.params.id!) }));
 }));
 
 router.post('/posts/:id/unpublish', authorizePermission('FEED_POST'), wrap(async (req, res) => {

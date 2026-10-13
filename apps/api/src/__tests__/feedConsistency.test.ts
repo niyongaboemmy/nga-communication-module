@@ -108,6 +108,9 @@ describe('concurrency', () => {
 describe('page post count (FEED-B12)', () => {
   it('deleting a draft or an unpublished post does not change it', async () => {
     const count = async () => (await getPool().query<{ post_count: number }>('SELECT post_count FROM feed_pages WHERE id = $1', [page])).rows[0]!.post_count;
+    // Earlier tests leave announce/recount work finishing in the background
+    // (inline without a job queue); let it land before taking the baseline.
+    await new Promise((r) => setTimeout(r, 750));
     const before = await count();
     const draft = (await as(admin.token).post(`/api/feed/pages/${page}/posts`, { body: 'draft', status: 'draft' })).body.data.postId;
     expect((await as(admin.token).del(`/api/feed/posts/${draft}`)).status).toBeLessThan(300);

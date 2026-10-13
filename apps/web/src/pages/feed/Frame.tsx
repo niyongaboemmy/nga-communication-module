@@ -275,7 +275,12 @@ export const EditPostMount: React.FC<{ pages: FeedPageSummary[] }> = ({ pages })
       pages={pages}
       editing={post}
       onClose={() => setPost(null)}
-      onPublished={(updated) => { if (updated) patch(updated.id, updated); setPost(null); }}
+      onPublished={(updated) => {
+        if (updated) patch(updated.id, updated);
+        setPost(null);
+        // Lists holding drafts refresh (D-05).
+        window.dispatchEvent(new CustomEvent('feed:edited', { detail: updated?.id }));
+      }}
     />
   );
 };

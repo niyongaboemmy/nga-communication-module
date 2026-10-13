@@ -5,11 +5,15 @@ import { randomBytes, createHash } from 'node:crypto';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
 import { app } from '../app.js';
 import { config } from '../config.js';
+import { purgeTestUsers } from './purge.js';
+
+const created: string[] = [];
 
 /** B-12 / B-13: the Links tab, directory paging, hidden DMs and timed mute. */
 
 async function user(name: string): Promise<{ id: string; token: string }> {
   const id = snowflake();
+  created.push(id);
   const { rows } = await getPool().query<{ id: number }>(`SELECT id FROM roles WHERE name = 'Staff'`);
   await getPool().query(`INSERT INTO users (id, mis_user_id, name, email, role, role_id) VALUES ($1,$1,$2,$3,'staff',$4)`,
     [id, name, `${id}@amashuri.com`, rows[0]!.id]);
@@ -30,7 +34,7 @@ beforeAll(async () => {
   await seedRbac(getPool());
   ada = await user(`Ada ${tag}`); ben = await user(`Ben ${tag}`);
 });
-afterAll(async () => { await closeDb(); });
+afterAll(async () => { await purgeTestUsers(created); await closeDb(); });
 
 describe('links', () => {
   it('lists links shared in a conversation, newest first, without deleted messages', async () => {

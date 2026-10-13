@@ -5,11 +5,15 @@ import { randomBytes } from 'node:crypto';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
 import { app } from '../app.js';
 import { config } from '../config.js';
+import { purgeTestUsers } from './purge.js';
+
+const created: string[] = [];
 
 /** B-10 / CHAT-H10: forwarding works for others' files, keeps attribution, sends the note, and polls. */
 
 async function user(name: string): Promise<{ id: string; token: string }> {
   const id = snowflake();
+  created.push(id);
   const { rows } = await getPool().query<{ id: number }>(`SELECT id FROM roles WHERE name = 'Admin'`);
   await getPool().query(`INSERT INTO users (id, mis_user_id, name, email, role, role_id) VALUES ($1,$1,$2,$3,'admin',$4)`,
     [id, name, `${id}@amashuri.com`, rows[0]!.id]);
@@ -41,6 +45,7 @@ afterAll(async () => {
   const owners = [ada.id, ben.id];
   await getPool().query(`DELETE FROM message_attachments WHERE file_id IN (SELECT id FROM files WHERE owner_id = ANY($1::text[]))`, [owners]).catch(() => {});
   await getPool().query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [owners]);
+  await purgeTestUsers(created);
   await closeDb();
 });
 

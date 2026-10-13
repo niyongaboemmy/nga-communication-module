@@ -318,6 +318,45 @@ export async function publishPost(actor: FeedActor, postId: string): Promise<voi
   }
 }
 
+/**
+ * Move a draft or scheduled post in time (D-05): a future time schedules it,
+ * null puts it back to a draft. Published posts are not rescheduled.
+ */
+export async function schedulePost(actor: FeedActor, postId: string, scheduledAt: string | null): Promise<void> {
+  const post = await loadForWrite(actor, postId);
+  if (post.status !== 'draft' && post.status !== 'scheduled') {
+    throw new FeedError('Only a draft or a scheduled post can be rescheduled.', 409);
+  }
+  if (scheduledAt !== null) {
+    const at = Date.parse(scheduledAt);
+    if (!Number.isFinite(at) || at <= Date.now()) throw new FeedError('Pick a time in the future.', 400);
+    if (at > Date.now() + 366 * 86_400_000) throw new FeedError('That is too far ahead to schedule.', 400);
+  }
+  await getPool().query(
+    `UPDATE feed_posts SET status = $2, scheduled_at = $3, updated_at = now() WHERE id = $1`,
+    [postId, scheduledAt === null ? 'draft' : 'scheduled', scheduledAt === null ? null : new Date(scheduledAt).toISOString()],
+  );
+}
+
+/**
+ * A page's drafts and scheduled posts, for the people who run it (D-05):
+ * scheduled first by time, then drafts newest first.
+ */
+export async function listUnpublished(actor: FeedActor, pageId: string): Promise<FeedPostView[]> {
+  const { rows: who } = await getPool().query<{ role: string | null }>(
+    'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [pageId, actor.id]);
+  if (!who.length && actor.roleLevel !== 'ADMIN') throw new FeedError('Only editors of this page can see its drafts.', 403);
+  const { rows } = await getPool().query<{ id: string }>(
+    `SELECT id FROM feed_posts
+      WHERE page_id = $1 AND deleted_at IS NULL AND status IN ('draft', 'scheduled')
+      ORDER BY (status = 'draft'), scheduled_at ASC NULLS LAST, updated_at DESC
+      LIMIT 200`,
+    [pageId],
+  );
+  const map = await hydratePosts(actor, rows.map((r) => r.id));
+  return rows.map((r) => map.get(r.id)).filter((v): v is FeedPostView => Boolean(v));
+}
+
 export async function unpublishPost(actor: FeedActor, postId: string): Promise<void> {
   await loadForWrite(actor, postId);
   await getPool().query(`UPDATE feed_posts SET status = 'unpublished', updated_at = now() WHERE id = $1`, [postId]);
@@ -391,6 +430,18 @@ export async function editPost(actor: FeedActor, postId: string, patch: EditPost
     if (patch.commentPolicy !== undefined) {
       if (!(COMMENT_POLICIES as readonly string[]).includes(patch.commentPolicy)) throw new FeedError('Unknown comment setting.', 400);
       params.push(patch.commentPolicy); sets.push(`comment_policy = $${params.length}`);
+    }
+    // Poll and event changes are kept on edit (D-06). A poll people have
+    // already voted in cannot be rewritten under them.
+    if (patch.poll !== undefined) {
+      const { rows: votes } = await client.query('SELECT 1 FROM feed_poll_votes WHERE post_id = $1 LIMIT 1', [postId]);
+      if (votes.length) throw new FeedError('People have voted in this poll, so it can no longer be changed.', 409);
+      const poll = patch.poll === null ? null : validatePoll(patch.poll);
+      params.push(poll ? JSON.stringify(poll) : null); sets.push(`poll = $${params.length}`);
+    }
+    if (patch.event !== undefined) {
+      const event = patch.event === null ? null : validateEvent(patch.event);
+      params.push(event ? JSON.stringify(event) : null); sets.push(`event = $${params.length}`);
     }
     // Pinning goes through setPinned (cap, editor-only); an edit cannot pin.
     params.push(postId);

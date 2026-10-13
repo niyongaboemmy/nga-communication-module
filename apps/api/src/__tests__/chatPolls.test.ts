@@ -5,11 +5,15 @@ import { randomBytes } from 'node:crypto';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
 import { app } from '../app.js';
 import { config } from '../config.js';
+import { purgeTestUsers } from './purge.js';
+
+const created: string[] = [];
 
 /** B-11 / CHAT-M5: polls badge and notify like messages, votes are atomic, archived means read-only. */
 
 async function user(name: string, role = 'Admin'): Promise<{ id: string; token: string }> {
   const id = snowflake();
+  created.push(id);
   const { rows } = await getPool().query<{ id: number }>(`SELECT id FROM roles WHERE name = $1`, [role]);
   await getPool().query(`INSERT INTO users (id, mis_user_id, name, email, role, role_id) VALUES ($1,$1,$2,$3,'admin',$4)`,
     [id, name, `${id}@amashuri.com`, rows[0]!.id]);
@@ -30,7 +34,7 @@ beforeAll(async () => {
   ada = await user('Ada'); ben = await user('Ben');
   conv = (await as(ada).post('/api/chat/conversations', { type: 'group', name: `poll-${nonce()}`, memberIds: [ben.id] })).body.data.conversation.id;
 });
-afterAll(async () => { await closeDb(); });
+afterAll(async () => { await purgeTestUsers(created); await closeDb(); });
 
 describe('polls', () => {
   it('a new poll badges and notifies like a message', async () => {
