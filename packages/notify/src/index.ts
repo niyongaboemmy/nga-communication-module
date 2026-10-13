@@ -200,6 +200,24 @@ function getPublisher(): Redis | null {
   return publisher;
 }
 
+/**
+ * Publish once the connection is up. The publisher is lazy and has no offline
+ * queue (so an outage never stalls a request), which meant the first publishes
+ * after a restart — sent while it was still connecting — were silently lost
+ * (RT-02). Wait briefly for `ready`; give up after two seconds.
+ */
+async function publishWhenReady(client: Redis, channel: string, message: string): Promise<void> {
+  if (client.status !== 'ready') {
+    if (client.status === 'end' || client.status === 'close') void client.connect().catch(() => {});
+    await new Promise<void>((resolve) => {
+      const done = () => { clearTimeout(t); client.off('ready', done); resolve(); };
+      const t = setTimeout(done, 2000);
+      client.once('ready', done);
+    });
+  }
+  await client.publish(channel, message);
+}
+
 export function toWire(row: NotificationRow): AppNotification {
   return {
     id: row.id,
@@ -232,7 +250,7 @@ export async function push(rows: NotificationRow[]): Promise<void> {
 
   for (const { userIds, row } of byKey.values()) {
     try {
-      await client.publish(NOTIFY_CHANNEL, JSON.stringify({
+      await publishWhenReady(client, NOTIFY_CHANNEL, JSON.stringify({
         userIds, notification: toWire(row),
       }));
     } catch {

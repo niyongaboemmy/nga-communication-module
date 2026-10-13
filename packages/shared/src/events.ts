@@ -21,6 +21,12 @@ export interface ServerToClientEvents extends ChatServerToClientEvents, FeedServ
   }) => void;
   'pong': (p: { at: string }) => void;
   'system:reconnect_required': (p: { reason: string }) => void;
+  /**
+   * The gateway is about to cut this socket off because the session is over:
+   * the account was suspended, the person signed out of NGA MIS, or the token
+   * expired. The client signs out rather than retrying forever.
+   */
+  'session:ended': (p: { reason: 'suspended' | 'signed_out' | 'expired' }) => void;
   /** Raised on the recipient's own user room. See AppNotification. */
   'notification:new': (p: AppNotification) => void;
   /**

@@ -2,7 +2,7 @@
   "name": "tupo",
   "version": "0.1.0",
   "private": true,
-  "description": "Tupo \u2014 NGA unified communication platform (chat, meet, files, mail, feed)",
+  "description": "Tupo — NGA unified communication platform (chat, meet, files, mail, feed)",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -52,7 +52,8 @@
     "verify:feed:ui": "node scripts/verify-feed-ui.mjs",
     "verify:feed:media": "node scripts/verify-feed-media-ui.mjs",
     "verify:oversight": "node scripts/verify-oversight.mjs",
-    "activity:catalog": "node -e \"require('fs').copyFileSync('apps/api/src/activity/catalog.json','apps/web/src/activity/tupo.catalog.json')\""
+    "activity:catalog": "node -e \"require('fs').copyFileSync('apps/api/src/activity/catalog.json','apps/web/src/activity/tupo.catalog.json')\"",
+    "verify:realtime": "node scripts/verify-realtime-robustness.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

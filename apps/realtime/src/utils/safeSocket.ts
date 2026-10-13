@@ -21,6 +21,7 @@ const EVENT_LIMITS: Array<{ match: RegExp; limit: number; windowMs: number; sile
   { match: /^message:send$/, limit: 60, windowMs: 60_000 },
   { match: /^message:(react|edit|delete)$/, limit: 120, windowMs: 60_000 },
   { match: /^(conversation|feed):subscribe$/, limit: 60, windowMs: 60_000 },
+  { match: /^presence:query$/, limit: 30, windowMs: 60_000 },
   { match: /^meet:(chat|caption|reaction|hand|poll|question)/, limit: 120, windowMs: 60_000 },
   { match: /./, limit: 600, windowMs: 60_000 },
 ];

@@ -112,6 +112,14 @@ export async function findInactiveUsers(userIds: string[]): Promise<Set<string>>
   return new Set(userIds.filter((id) => !active.has(id)));
 }
 
+/** user id → revoked_at, for the sweep: one query for every connected user. */
+export async function revocationsFor(userIds: string[]): Promise<Map<string, Date>> {
+  if (!userIds.length) return new Map();
+  const { rows } = await getPool().query<{ user_id: string; revoked_at: Date }>(
+    'SELECT user_id, revoked_at FROM session_revocations WHERE user_id = ANY($1::text[])', [userIds]);
+  return new Map(rows.map((r) => [r.user_id, r.revoked_at]));
+}
+
 /**
  * Single sign-out (nga_central_mis/docs/SINGLE_SIGN_OUT.md): was this session
  * token issued before the user signed out of NGA MIS? Fails open -- a lookup

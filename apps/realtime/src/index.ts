@@ -15,7 +15,8 @@ import * as chat from '@tupo/chat';
 import { registerChatHandlers } from './chat/handlers.js';
 import { hardenSocket, installProcessGuards } from './utils/safeSocket.js';
 import { registerFeedHandlers } from './feed/handlers.js';
-import { createAccessCache, findInactiveUsers, sessionEnded } from './access.js';
+import { createAccessCache, findInactiveUsers, revocationsFor, sessionEnded } from './access.js';
+import { issuedBeforeRevocation } from './utils/ssoLogout.js';
 import { stopActivity } from './activity.js';
 import {
   broadcastPresence, markOffline, markOnline, readPresence, toStatus,
@@ -72,13 +73,19 @@ const LOGOUT_CHANNEL = 'tupo:logout';
 const logoutSub = pubClient.duplicate();
 const SESSION_ENDED = 'unauthorized: you signed out of NGA MIS, please sign in again';
 
-async function connectRedis(): Promise<void> {
-  try {
-    await Promise.all([pubClient.connect(), subClient.connect(), presence.connect()]);
-    io.adapter(createAdapter(pubClient, subClient));
+/*
+ * Relay listeners are attached once, at load. Every instance subscribes to the
+ * same channels, so each delivers to its OWN sockets only (`io.local`): with
+ * the Redis adapter attached, a plain `io.to` would also broadcast to every
+ * other instance, and N instances would each deliver N copies (RT-03).
+ */
+for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub]) {
+  // ioredis reconnects by itself once connected; an unhandled 'error' event
+  // would otherwise crash the process on the first blip.
+  c.on('error', () => {});
+}
 
-    await notifySub.connect();
-    await notifySub.subscribe(NOTIFY_CHANNEL);
+{
     notifySub.on('message', (_channel, payload) => {
       try {
         const { userIds, notification } = JSON.parse(payload) as {
@@ -87,15 +94,13 @@ async function connectRedis(): Promise<void> {
         // Delivery is per-user-room, so a notification reaches every device
         // that person has open and nobody else's.
         for (const id of userIds ?? []) {
-          io.to(`user:${id}`).emit('notification:new', notification);
+          io.local.to(`user:${id}`).emit('notification:new', notification);
         }
       } catch {
         // A malformed message must not take the gateway down with it.
       }
     });
 
-    await chatSub.connect();
-    await chatSub.subscribe(CHAT_CHANNEL);
     chatSub.on('message', (_channel, payload) => {
       try {
         const parsed = JSON.parse(payload) as {
@@ -104,12 +109,12 @@ async function connectRedis(): Promise<void> {
         };
         // Eviction: these people's sockets leave these rooms, everywhere.
         if (parsed.leave && Array.isArray(parsed.leave.userIds) && Array.isArray(parsed.leave.rooms)) {
-          io.in(parsed.leave.userIds.map((id) => `user:${id}`)).socketsLeave(parsed.leave.rooms);
+          io.local.in(parsed.leave.userIds.map((id) => `user:${id}`)).socketsLeave(parsed.leave.rooms);
           return;
         }
         const { rooms, event, payload: data, exceptSocketId } = parsed;
         if (!Array.isArray(rooms) || !event) return;
-        const target = exceptSocketId ? io.except(exceptSocketId) : io;
+        const target = exceptSocketId ? io.local.except(exceptSocketId) : io.local;
         // Rooms are named by the publisher, which is our own API — the payload
         // is not client-controlled, so relaying it verbatim is safe.
         (target.to(rooms) as unknown as { emit: (e: string, d: unknown) => void })
@@ -119,8 +124,6 @@ async function connectRedis(): Promise<void> {
       }
     });
 
-    await logoutSub.connect();
-    await logoutSub.subscribe(LOGOUT_CHANNEL);
     logoutSub.on('message', (_channel, payload) => {
       void (async () => {
         try {
@@ -141,12 +144,44 @@ async function connectRedis(): Promise<void> {
         }
       })();
     });
+}
 
+/**
+ * Connect, attach the adapter and subscribe. If Redis is down at boot the
+ * gateway still serves (single-instance, no relay) while ioredis keeps
+ * reconnecting, and this attaches as soon as every client is up — before, one
+ * failed attempt left notifications and the chat relay dead until someone
+ * restarted the process (RT-02). After that ioredis resubscribes on its own.
+ */
+const redisClients = [pubClient, subClient, presence, notifySub, chatSub, logoutSub];
+
+/** Resolve once this client is connected; ioredis keeps retrying underneath. */
+async function ensureReady(c: Redis): Promise<void> {
+  if (c.status === 'ready') return;
+  if (c.status === 'wait' || c.status === 'end') {
+    await c.connect();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const ok = () => { clearTimeout(t); resolve(); };
+    const t = setTimeout(() => { c.off('ready', ok); reject(new Error(`redis ${c.status}`)); }, 5_000);
+    c.once('ready', ok);
+  });
+}
+
+async function connectRedis(): Promise<void> {
+  try {
+    await Promise.all(redisClients.map(ensureReady));
+    io.adapter(createAdapter(pubClient, subClient));
+    await notifySub.subscribe(NOTIFY_CHANNEL);
+    await chatSub.subscribe(CHAT_CHANNEL);
+    await logoutSub.subscribe(LOGOUT_CHANNEL);
     redisReady = true;
     console.log('[realtime] redis adapter attached');
   } catch (err) {
-    console.warn('[realtime] redis unavailable — running single-instance:',
+    console.warn('[realtime] redis unavailable — single-instance for now, retrying:',
       err instanceof Error ? err.message : err);
+    setTimeout(() => void connectRedis(), 2_000).unref();
   }
 }
 
@@ -243,14 +278,24 @@ function startAccessSweep(): NodeJS.Timeout {
           if (u?.id && !s.data.guest) ids.add(u.id);
         }
         const inactive = await findInactiveUsers([...ids]);
+        const revokedAt = await revocationsFor([...ids]);
+        const nowSec = Date.now() / 1000;
         for (const s of sockets) {
-          const u = s.data.user as SessionClaims | undefined;
-          if (u?.id && inactive.has(u.id)) {
-            accessCache.invalidate(u.id);
-            // A server-side disconnect: the client does not auto-reconnect,
-            // and if it tries, the handshake check refuses it.
-            s.disconnect(true);
-          }
+          const u = s.data.user as (SessionClaims & { iat?: number; exp?: number }) | undefined;
+          if (!u?.id || s.data.guest) continue;
+          // The JWT is checked at the handshake; a socket lives for hours, so
+          // the sweep also ends sessions that expired or were revoked since
+          // (single sign-out, suspension) — RT-04.
+          const reason = inactive.has(u.id) ? 'suspended'
+            : issuedBeforeRevocation(u.iat, revokedAt.get(u.id) ?? null) ? 'signed_out'
+            : u.exp && u.exp < nowSec ? 'expired'
+            : null;
+          if (!reason) continue;
+          accessCache.invalidate(u.id);
+          s.emit('session:ended', { reason });
+          // A server-side disconnect: the client does not auto-reconnect,
+          // and if it tries, the handshake check refuses it.
+          s.disconnect(true);
         }
         accessCache.prune();
       } catch {
@@ -415,7 +460,10 @@ io.on('connection', (socket) => {
    */
   socket.on('presence:query', async ({ userIds }, ack) => {
     if (typeof ack !== 'function') return;
-    const wanted = [...new Set(userIds ?? [])].slice(0, 500);
+    const decision = await accessCache.get(user.id).catch(() => null);
+    if (!decision?.ok || !decision.access.permissions.has('PRESENCE_VIEW')) return ack({ presence: {} });
+    const wanted = [...new Set(Array.isArray(userIds) ? userIds : [])]
+      .filter((id): id is string => typeof id === 'string' && id.length <= 32).slice(0, 200);
     ack({ presence: await readPresence(redisReady ? presence : null, wanted) });
   });
 

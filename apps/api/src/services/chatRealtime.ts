@@ -49,6 +49,24 @@ function getPublisher(): Redis | null {
 }
 
 /**
+ * Publish once the connection is up. The publisher is lazy and has no offline
+ * queue (so an outage never stalls a request), which meant the first publishes
+ * after a restart — sent while it was still connecting — were silently lost
+ * (RT-02). Wait briefly for `ready`; give up after two seconds.
+ */
+async function publishWhenReady(client: Redis, channel: string, message: string): Promise<void> {
+  if (client.status !== 'ready') {
+    if (client.status === 'end' || client.status === 'close') void client.connect().catch(() => {});
+    await new Promise<void>((resolve) => {
+      const done = () => { clearTimeout(t); client.off('ready', done); resolve(); };
+      const t = setTimeout(done, 2000);
+      client.once('ready', done);
+    });
+  }
+  await client.publish(channel, message);
+}
+
+/**
  * Single sign-out: tell the realtime gateway to drop every socket of these
  * users (their sessions just ended via MIS back-channel logout).
  */
@@ -57,7 +75,7 @@ export function publishSessionEnd(userIds: string[]): void {
   if (!userIds.length) return;
   const client = getPublisher();
   if (!client) return;
-  void client.publish(LOGOUT_CHANNEL, JSON.stringify({ userIds })).catch(() => {});
+  void publishWhenReady(client, LOGOUT_CHANNEL, JSON.stringify({ userIds })).catch(() => {});
 }
 
 function relay(msg: ChatRelayMessage): void {
@@ -66,7 +84,7 @@ function relay(msg: ChatRelayMessage): void {
   if (!client) return;
   // Deliberately not awaited: an emit is best-effort and must not add latency
   // to the request that triggered it.
-  void client.publish(CHAT_CHANNEL, JSON.stringify(msg)).catch(() => {});
+  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify(msg)).catch(() => {});
 }
 
 /** Everyone with this conversation open. */
@@ -101,7 +119,7 @@ export function evictFromRooms(userIds: string[], rooms: string[]): void {
   if (!userIds.length || !rooms.length) return;
   const client = getPublisher();
   if (!client) return;
-  void client.publish(CHAT_CHANNEL, JSON.stringify({ leave: { userIds, rooms } })).catch(() => {});
+  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ leave: { userIds, rooms } })).catch(() => {});
 }
 
 export async function closeChatRealtime(): Promise<void> {

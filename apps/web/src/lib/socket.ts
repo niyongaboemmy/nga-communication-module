@@ -1,6 +1,6 @@
 import { io, type Socket } from 'socket.io-client';
 import type { ClientToServerEvents, ServerToClientEvents } from '@tupo/shared';
-import { SESSION_KEY } from './api';
+import { SESSION_KEY, apiGet, clearSession } from './api';
 import { getDeviceId } from '../vendor/nga-activity';
 
 /**
@@ -78,11 +78,75 @@ export function getSocket(): AppSocket | null {
       reconnectionDelayMax: 5_000,
       timeout: 10_000,
     });
+    wireLifecycle(socket);
   }
   return socket;
 }
 
+/* ---------------------------------------------------------------------------
+ * Connection state, for the banner (RT-04).
+ *
+ * `reconnecting` is only reported after a short grace period, so the first
+ * connect of a page load and a sub-second blip never flash a banner.
+ * ------------------------------------------------------------------------- */
+export type SocketState = 'connected' | 'reconnecting';
+let state: SocketState = 'connected';
+let graceTimer: ReturnType<typeof setTimeout> | null = null;
+const stateListeners = new Set<(s: SocketState) => void>();
+
+function setState(next: SocketState) {
+  if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+  if (next === 'reconnecting') {
+    graceTimer = setTimeout(() => { state = 'reconnecting'; stateListeners.forEach((l) => l(state)); }, 2_000);
+    return;
+  }
+  if (state !== next) { state = next; stateListeners.forEach((l) => l(state)); }
+}
+
+export function getSocketState(): SocketState { return state; }
+export function onSocketState(fn: (s: SocketState) => void): () => void {
+  stateListeners.add(fn);
+  return () => { stateListeners.delete(fn); };
+}
+
+function endSession(reason: string) {
+  clearSession();
+  disconnectSocket();
+  window.location.href = reason === 'suspended' ? '/suspended' : '/';
+}
+
+/**
+ * The gateway refused or dropped us on purpose (a middleware error or a
+ * server-side disconnect), and socket.io does not retry those by itself. Ask
+ * the API whether the session is still good: if it is, this was a blip and we
+ * reconnect; if not, the API's 401/403 handling signs the person out.
+ */
+async function recheckAndReconnect(s: AppSocket) {
+  try {
+    await apiGet('/api/roles-permissions/me');
+    setTimeout(() => { if (socket === s && s.disconnected) s.connect(); }, 1_500);
+  } catch {
+    // apiGet has already redirected on 401 / suspension; a network failure
+    // leaves the banner up and the next online event retries.
+  }
+}
+
+function wireLifecycle(s: AppSocket) {
+  s.on('connect', () => setState('connected'));
+  s.on('disconnect', (reason) => {
+    setState('reconnecting');
+    if (reason === 'io server disconnect') void recheckAndReconnect(s);
+  });
+  s.on('connect_error', (err) => {
+    setState('reconnecting');
+    if (/^(unauthorized|forbidden)/.test(err.message)) void recheckAndReconnect(s);
+  });
+  s.on('session:ended', ({ reason }) => endSession(reason));
+  s.io.on('reconnect_failed', () => setState('reconnecting'));
+}
+
 export function disconnectSocket(): void {
+  setState('connected');
   socket?.removeAllListeners();
   socket?.disconnect();
   socket = null;
