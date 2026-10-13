@@ -63,7 +63,8 @@
     "verify:notifications:ui": "node scripts/verify-notification-center.mjs",
     "verify:navigation": "node scripts/verify-navigation.mjs",
     "verify:errors": "node scripts/verify-load-errors.mjs",
-    "verify:access:ui": "node scripts/verify-access-ux.mjs"
+    "verify:access:ui": "node scripts/verify-access-ux.mjs",
+    "verify:sessions": "node scripts/verify-sessions.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

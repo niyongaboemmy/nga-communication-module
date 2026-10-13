@@ -219,6 +219,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [token, refreshPermissions]);
 
   /*
+   * One identity across tabs (F-08). localStorage is shared by every tab, so:
+   *   - the session removed elsewhere (sign-out in another tab) → this tab is
+   *     signed out too, instead of carrying on as a ghost;
+   *   - a different person signed in elsewhere → this tab restarts as them,
+   *     never a page showing one person's data under another's session;
+   *   - the same person's refreshed token → just picked up.
+   */
+  useEffect(() => {
+    const subjectOf = (jwtToken: string | null): string | null => {
+      try { return jwtToken ? JSON.parse(atob(jwtToken.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/'))).id ?? null : null; }
+      catch { return null; }
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== SESSION_KEY && e.key !== null) return;
+      const next = localStorage.getItem(SESSION_KEY);
+      if (!next) {
+        if (!token) return;
+        setToken(null); setUser(null); setPermissions([]); setRolePermissions([]); setRoleName(null);
+        window.location.href = '/';
+        return;
+      }
+      if (next === token) return;
+      if (token && subjectOf(next) !== subjectOf(token)) { window.location.reload(); return; }
+      setToken(next);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [token]);
+
+  /*
    * And while signed in (F-07): when an administrator changes this person's
    * role or what their role allows, the server says so over the socket; as a
    * backstop, the set is re-read when the tab comes back into view (at most
