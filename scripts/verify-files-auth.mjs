@@ -64,6 +64,25 @@ try {
   roleless.token = jwt.sign({ id: roleless.id, misUserId: roleless.id, name: 'No Role', email: 'x', role: 'staff' }, env.JWT_SECRET);
   check('an account with no role (no FILE_UPLOAD) cannot upload', (await ticket(roleless)).status === 403);
 
+  console.log('\n── Upload limits (A-07)');
+  const b = await user('Staff');
+  const t1 = await (await ticket(b)).json();          // declares 5 bytes
+  const big = await fetch(`${FILES}${t1.data.uploadUrl}`, { method: 'PUT', headers: { authorization: `Bearer ${b.token}`, 'content-type': 'text/plain' }, body: 'x'.repeat(5000) });
+  check('an upload larger than it declared is refused', big.status === 413, `status ${big.status}`);
+  const { rows: st } = await pool.query('SELECT status FROM files WHERE id = $1', [t1.data.fileId]);
+  check('…and nothing of it is kept as ready', st[0]?.status === 'failed', st[0]?.status);
+
+  const t2 = await (await ticket(b)).json();
+  await pool.query(`UPDATE files SET created_at = now() - interval '2 hours' WHERE id = $1`, [t2.data.fileId]);
+  const late = await fetch(`${FILES}${t2.data.uploadUrl}`, { method: 'PUT', headers: { authorization: `Bearer ${b.token}`, 'content-type': 'text/plain' }, body: 'hello' });
+  check('an expired upload ticket is refused', late.status === 410, `status ${late.status}`);
+
+  await pool.query(`INSERT INTO files (id, owner_id, storage_driver, storage_key, original_name, mime_type, size_bytes, status)
+    VALUES ($1, $2, 'local', $3, 'huge.bin', 'application/octet-stream', $4, 'ready')`,
+    [`vfa-big-${randomBytes(3).toString('hex')}`, b.id, `vfa/${randomBytes(3).toString('hex')}`, 11 * 1024 ** 3]);
+  const over = await ticket(b);
+  check('a new upload over the storage allowance is refused', over.status === 413, `status ${over.status}`);
+
   await pool.query('DELETE FROM files WHERE owner_id = ANY($1::text[])', [ids]);
 } catch (e) { console.error('suite crashed:', e); results.push({ n: 'crash', ok: false }); }
 finally {

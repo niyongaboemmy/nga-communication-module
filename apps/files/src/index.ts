@@ -172,6 +172,17 @@ app.post('/api/files/tickets', requireSession, requireFilePermission('FILE_UPLOA
     return res.status(400).json(fail('That is not a folder this service will write to.'));
   }
 
+  // Per-person quota (A-07): what they already store, plus uploads in flight.
+  if (!(await hasFilePermission(user.id, 'FILE_QUOTA_MANAGE'))) {
+    const { rows: used } = await getPool().query<{ bytes: string }>(
+      `SELECT COALESCE(sum(size_bytes), 0)::text AS bytes FROM files
+        WHERE owner_id = $1 AND deleted_at IS NULL AND status IN ('ready', 'pending')`, [user.id]);
+    if (Number(used[0]?.bytes ?? 0) + size > config.userQuotaBytes) {
+      return res.status(413).json(fail(
+        `This would go over your storage allowance of ${Math.floor(config.userQuotaBytes / 1024 ** 3)} GB. Delete some files and try again.`));
+    }
+  }
+
   const id = snowflake();
   const now = new Date();
   // Server-generated key — the client never influences the storage path.
@@ -197,19 +208,30 @@ app.post('/api/files/tickets', requireSession, requireFilePermission('FILE_UPLOA
 /** Step 2 — receive the bytes and checksum them on the way past. */
 app.put('/api/files/:id/content', requireSession, requireFilePermission('FILE_UPLOAD'), async (req, res) => {
   const user = (req as FileRequest).user!;
-  const { rows } = await getPool().query<{ storage_key: string; owner_id: string; status: string }>(
-    'SELECT storage_key, owner_id, status FROM files WHERE id = $1',
+  const { rows } = await getPool().query<{
+    storage_key: string; owner_id: string; status: string; size_bytes: string; created_at: Date;
+  }>(
+    'SELECT storage_key, owner_id, status, size_bytes, created_at FROM files WHERE id = $1',
     [req.params.id]
   );
   const file = rows[0];
   if (!file) return res.status(404).json(fail('Upload ticket not found.'));
   if (file.owner_id !== user.id) return res.status(403).json(fail('This upload ticket is not yours.'));
   if (file.status !== 'pending') return res.status(409).json(fail('This ticket has already been used.'));
+  // The ticket's expiresAt is a promise, not decoration.
+  if (Date.now() - file.created_at.getTime() > config.signedUrlTtlSeconds * 1000) {
+    return res.status(410).json(fail('This upload ticket has expired. Start the upload again.'));
+  }
+
+  // Never more bytes than were declared (and reserved against the quota), and
+  // never more than the service allows — counted as they arrive, not trusted
+  // from a header (A-07). The limit runs inside the storage pipeline.
+  const limit = Math.min(Number(file.size_bytes), config.maxFileSizeBytes);
 
   try {
     // The driver hashes as it writes — see the comment on hashingStage for why
     // this must not be done with a listener on `req`.
-    const { sizeBytes, checksum } = await storage.put(file.storage_key, req);
+    const { sizeBytes, checksum } = await storage.put(file.storage_key, req, { maxBytes: limit });
 
     if (sizeBytes === 0) {
       await storage.remove(file.storage_key);
@@ -225,7 +247,13 @@ app.put('/api/files/:id/content', requireSession, requireFilePermission('FILE_UP
     );
     res.json(ok({ fileId: req.params.id, sizeBytes, checksum, status: 'ready' }));
   } catch (err) {
+    await storage.remove(file.storage_key).catch(() => {});
     await getPool().query(`UPDATE files SET status = 'failed' WHERE id = $1`, [req.params.id]);
+    if ((err as { tooLarge?: boolean }).tooLarge) {
+      // Tell the client and stop reading; the connection closes after.
+      res.setHeader('Connection', 'close');
+      return res.status(413).json(fail('The file is larger than declared.'));
+    }
     console.error('[files] upload failed:', err);
     res.status(500).json(fail('Upload failed.'));
   }
@@ -460,6 +488,31 @@ app.get('/health', async (_req, res) => {
 });
 
 app.use((_req, res) => res.status(404).json(fail('Not found')));
+
+/**
+ * Housekeeping (A-07): uploads that were started and never finished, and
+ * uploads that failed, are removed from storage after a day, so abandoned
+ * bytes do not quietly fill the disk. Their rows are marked deleted.
+ */
+async function collectAbandonedUploads(): Promise<void> {
+  try {
+    const { rows } = await getPool().query<{ id: string; storage_key: string }>(
+      `SELECT id, storage_key FROM files
+        WHERE deleted_at IS NULL AND status IN ('pending', 'failed') AND created_at < now() - interval '24 hours'
+        LIMIT 500`);
+    for (const r of rows) {
+      await storage.remove(r.storage_key).catch(() => {});
+      await getPool().query('UPDATE files SET deleted_at = now() WHERE id = $1', [r.id]);
+    }
+    if (rows.length) console.log(`[files] cleaned up ${rows.length} abandoned upload(s)`);
+  } catch (err) {
+    console.error('[files] clean-up failed:', err instanceof Error ? err.message : err);
+  }
+}
+if (process.env.NODE_ENV !== 'test') {
+  setInterval(() => void collectAbandonedUploads(), 30 * 60_000).unref();
+  setTimeout(() => void collectAbandonedUploads(), 60_000).unref();
+}
 
 // Every error a route passes on (including rejected async handlers, see
 // utils/asyncErrors) ends here: a clean status, no internals, never a crash.

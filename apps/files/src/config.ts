@@ -15,6 +15,8 @@ export const config = {
   localStoragePath: process.env.LOCAL_STORAGE_PATH ?? './storage',
   maxFileSizeBytes: parseInt(process.env.MAX_FILE_SIZE_BYTES ?? '5368709120', 10),
   signedUrlTtlSeconds: parseInt(process.env.SIGNED_URL_TTL_SECONDS ?? '900', 10),
+  /** Per-person storage quota (A-07). Holders of FILE_QUOTA_MANAGE are exempt. */
+  userQuotaBytes: parseInt(process.env.FILE_USER_QUOTA_BYTES ?? String(10 * 1024 ** 3), 10),
 };
 
 // apps/api refuses to boot on this same default in production (see its
