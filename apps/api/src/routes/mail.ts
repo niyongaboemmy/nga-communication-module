@@ -145,6 +145,9 @@ router.post('/compose', wrap(async (req, res) => {
     draft: isDraft,
     scheduledAt: body.scheduledAt ?? null,
     draftId: body.draftId ? str(body.draftId) : undefined,
+  }, {
+    // Bulk senders are reviewed through campaigns instead (MAIL-H6).
+    recipientCaps: hasPermission(req, 'MAIL_BULK_SEND') ? null : mail.defaultRecipientCaps(),
   });
 
   if (!result.draft) {

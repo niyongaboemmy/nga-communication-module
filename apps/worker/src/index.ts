@@ -12,6 +12,7 @@ import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
 import { runPartitionMaintenance, partitionsAhead } from './jobs/partitions.js';
 import { reminders, profileMedia } from '@tupo/notify';
+import * as mailDelivery from '@tupo/mail';
 
 // Last-resort guards: a stray rejection is logged, not fatal; an uncaught
 // exception exits so pm2 restarts the worker from a clean state.
@@ -303,6 +304,13 @@ app.get('/health', async (_req, res) => {
   const ahead = await partitionsAhead();
   checks.partitionsAheadMonths = ahead === null ? 'unknown' : String(ahead);
   if (ahead !== null && ahead < 2) healthy = false;
+
+  // A relay failure in the last hour (wrong password, relay down) is reported,
+  // not turned into a 503: mail is queued and retried, and a deploy health
+  // check must not fail over the school's mail relay.
+  const smtpError = mailDelivery.lastTransportError;
+  const smtpRecent = smtpError && Date.now() - Date.parse(smtpError.at) < 3_600_000;
+  checks.smtp = smtpRecent ? `relay failing since ${smtpError!.at}: ${smtpError!.error.slice(0, 120)}` : 'ok';
 
   res.status(healthy ? 200 : 503).json({
     service: 'tupo-worker',

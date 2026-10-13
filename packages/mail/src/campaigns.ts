@@ -246,11 +246,14 @@ export async function submitCampaign(
   if (needsApproval) status = 'pending_approval';
   else status = scheduled ? 'scheduled' : 'approved';
 
+  // Frozen here: the approver reviews this list, and exactly this list is
+  // sent — a distribution list that grows after approval cannot widen the
+  // reach of an approved send (MAIL-H6).
   await getPool().query(
     `UPDATE mail_campaigns SET status = $2, requires_approval = $3, total_recipients = $4,
-           updated_at = now()
+           recipient_snapshot = $5::jsonb, updated_at = now()
       WHERE id = $1`,
-    [id, status, needsApproval, recipients.length],
+    [id, status, needsApproval, recipients.length, JSON.stringify(recipients)],
   );
   return getCampaign(userId, id, true);
 }
@@ -286,7 +289,8 @@ export async function rejectCampaign(approverId: string, id: string, reason: str
   if (!rows[0]) throw new MailError('Campaign not found.', 404);
   if (rows[0].status !== 'pending_approval') throw new MailError('This campaign is not awaiting approval.', 409);
   await getPool().query(
-    `UPDATE mail_campaigns SET status = 'draft', rejected_reason = $2, updated_at = now() WHERE id = $1`,
+    `UPDATE mail_campaigns SET status = 'draft', rejected_reason = $2, recipient_snapshot = NULL,
+            updated_at = now() WHERE id = $1`,
     [id, reason.slice(0, 500)],
   );
   await notify([rows[0].created_by], {
@@ -316,9 +320,16 @@ export async function cancelCampaign(userId: string, id: string): Promise<void> 
  */
 export async function runCampaign(id: string): Promise<{ delivered: number; failed: number }> {
   const pool = getPool();
+  // A lease, not just a status: two sweeps (or a sweep and the inline run)
+  // can never run the same campaign at once, and a run whose worker died is
+  // picked up again once its lease lapses (MAIL-H4).
   const { rows: cRows } = await pool.query(
-    `UPDATE mail_campaigns SET status = 'sending', started_at = COALESCE(started_at, now()), updated_at = now()
-      WHERE id = $1 AND status IN ('approved', 'scheduled')
+    `UPDATE mail_campaigns SET status = 'sending', started_at = COALESCE(started_at, now()),
+            lease_until = now() + interval '5 minutes', updated_at = now()
+      WHERE id = $1
+        AND (status = 'approved'
+             OR (status = 'scheduled' AND (scheduled_at IS NULL OR scheduled_at <= now()))
+             OR (status = 'sending' AND (lease_until IS NULL OR lease_until < now())))
       RETURNING *`,
     [id],
   );
@@ -327,7 +338,11 @@ export async function runCampaign(id: string): Promise<{ delivered: number; fail
 
   const from = await personFor(c.from_user_id);
   const campaign = rowTo(c, from);
-  const recipients = await resolveCampaignRecipients(campaign);
+  // The list frozen at submission; campaigns submitted before snapshots
+  // existed fall back to resolving now.
+  const recipients: ResolvedCampaignRecipient[] = Array.isArray(c.recipient_snapshot)
+    ? c.recipient_snapshot
+    : await resolveCampaignRecipients(campaign);
 
   const { rows: doneRows } = await pool.query<{ address: string }>(
     `SELECT r.address FROM mail_recipients r
@@ -336,11 +351,17 @@ export async function runCampaign(id: string): Promise<{ delivered: number; fail
   );
   const done = new Set(doneRows.map((r) => r.address.toLowerCase()));
 
-  let delivered = 0, failed = 0;
+  let delivered = 0, failed = 0, n = 0;
   for (const r of recipients) {
     if (done.has(r.address.toLowerCase())) continue;
+    if (++n % 25 === 0) {
+      // Still alive: keep the lease, and stop if someone cancelled meanwhile.
+      const { rows: live } = await pool.query<{ status: string }>(
+        `UPDATE mail_campaigns SET lease_until = now() + interval '5 minutes' WHERE id = $1 RETURNING status`, [id]);
+      if (live[0]?.status !== 'sending') return { delivered, failed };
+    }
     try {
-      const messageId = await materialiseCampaignMessage(pool, campaign, from, r);
+      const messageId = await materialiseCampaignMessage(campaign, from, r);
       await deliverInApp(messageId);
       const smtp = await deliverSmtp(messageId);
       delivered += smtp.sent + 1; // rough; real numbers come from the rollup
@@ -354,9 +375,9 @@ export async function runCampaign(id: string): Promise<{ delivered: number; fail
   const counts = await rollupCampaignCounts(id);
   const allDone = counts.queued === 0;
   await pool.query(
-    `UPDATE mail_campaigns SET status = $2, counts = $3::jsonb,
+    `UPDATE mail_campaigns SET status = $2, counts = $3::jsonb, lease_until = NULL,
            finished_at = CASE WHEN $4 THEN now() ELSE finished_at END, updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1 AND status = 'sending'`,
     [id, allDone ? 'sent' : 'sending', JSON.stringify(counts), allDone],
   );
   if (allDone) {
@@ -370,8 +391,30 @@ export async function runCampaign(id: string): Promise<{ delivered: number; fail
   return { delivered, failed };
 }
 
+/**
+ * One recipient's personalised message, written in one transaction: a crash
+ * half-way can never leave a message with no recipient row, which the resume
+ * check (by recipient address) would not see and would send again.
+ */
 async function materialiseCampaignMessage(
-  db: PoolClient | ReturnType<typeof getPool>,
+  campaign: MailCampaignView, from: MailPerson, r: ResolvedCampaignRecipient,
+): Promise<string> {
+  const db = await getPool().connect();
+  try {
+    await db.query('BEGIN');
+    const id = await writeCampaignMessage(db, campaign, from, r);
+    await db.query('COMMIT');
+    return id;
+  } catch (e) {
+    await db.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    db.release();
+  }
+}
+
+async function writeCampaignMessage(
+  db: PoolClient,
   campaign: MailCampaignView, from: MailPerson, r: ResolvedCampaignRecipient,
 ): Promise<string> {
   const vars = mergeVarsFor(r);

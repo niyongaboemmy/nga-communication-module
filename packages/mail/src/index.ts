@@ -16,7 +16,7 @@ export * from './lists.js';
 export * from './templates.js';
 export * from './campaigns.js';
 
-import { deliverSmtp } from './delivery.js';
+import { deliverSmtp, MAX_SMTP_ATTEMPTS } from './delivery.js';
 import { getPool } from '@tupo/db';
 
 /**
@@ -29,7 +29,10 @@ export async function dispatchPendingSmtp(env: NodeJS.ProcessEnv = process.env):
     `SELECT DISTINCT r.message_id
        FROM mail_recipients r
        JOIN mail_messages m ON m.id = r.message_id
-      WHERE r.channel = 'smtp' AND r.delivery_status IN ('queued', 'failed') AND r.attempts < 4
+      WHERE r.channel = 'smtp'
+        AND ((r.delivery_status IN ('queued', 'failed') AND r.attempts < ${MAX_SMTP_ATTEMPTS}
+              AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= now()))
+          OR (r.delivery_status = 'sending' AND (r.claimed_at IS NULL OR r.claimed_at < now() - interval '10 minutes')))
         AND NOT m.is_draft
         AND (m.scheduled_at IS NULL OR m.scheduled_at <= now())
       LIMIT 200`,

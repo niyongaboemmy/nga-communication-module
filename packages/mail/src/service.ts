@@ -647,7 +647,44 @@ export interface ComposeResult {
  * the same call with `draft:false` and the `draftId` set — the row is promoted,
  * not copied.
  */
-export async function compose(userId: string, payload: MailComposePayload): Promise<ComposeResult> {
+export interface RecipientCaps { hourly: number; daily: number }
+
+/** Caps for people without MAIL_BULK_SEND; env-tunable. */
+export function defaultRecipientCaps(env: NodeJS.ProcessEnv = process.env): RecipientCaps {
+  return {
+    hourly: Math.max(1, parseInt(env.MAIL_RECIPIENTS_PER_HOUR ?? '300', 10) || 300),
+    daily: Math.max(1, parseInt(env.MAIL_RECIPIENTS_PER_DAY ?? '1000', 10) || 1000),
+  };
+}
+
+/**
+ * The per-message limit alone let ten quick sends of 200 reach the whole
+ * school without the bulk-send approval (MAIL-H6). People are counted once
+ * per message (an in-app and an email copy are one person), and scheduled
+ * mail counts from when it was written.
+ */
+async function assertUnderRecipientCaps(
+  db: PoolClient, userId: string, adding: number, caps: RecipientCaps,
+): Promise<void> {
+  const { rows } = await db.query<{ hour: number; day: number }>(
+    `SELECT count(*) FILTER (WHERE x.at > now() - interval '1 hour')::int AS hour, count(*)::int AS day
+       FROM (SELECT DISTINCT r.message_id, COALESCE(r.user_id, lower(r.address)) AS who, m.created_at AS at
+               FROM mail_messages m JOIN mail_recipients r ON r.message_id = m.id
+              WHERE m.from_user_id = $1 AND NOT m.is_draft AND m.campaign_id IS NULL
+                AND m.created_at > now() - interval '1 day') x`,
+    [userId],
+  );
+  const used = rows[0] ?? { hour: 0, day: 0 };
+  if (used.hour + adding > caps.hourly || used.day + adding > caps.daily) {
+    throw new MailError(
+      `You have reached the sending limit (${caps.hourly} recipients an hour, ${caps.daily} a day). ` +
+      'For a large audience, use a bulk send so it can be reviewed.', 429);
+  }
+}
+
+export async function compose(
+  userId: string, payload: MailComposePayload, opts: { recipientCaps?: RecipientCaps | null } = {},
+): Promise<ComposeResult> {
   const subject = (payload.subject ?? '').trim().slice(0, MAIL_MAX_SUBJECT) || '(no subject)';
   // Sanitised on write: what is stored is safe for every reader and client.
   const bodyHtml = sanitizeMailHtml((payload.bodyHtml ?? '').slice(0, MAIL_MAX_BODY_HTML));
@@ -676,6 +713,9 @@ export async function compose(userId: string, payload: MailComposePayload): Prom
     if (!isDraft && all.length === 0) throw new MailError('Add at least one recipient.');
     if (all.length > MAIL_MAX_RECIPIENTS) {
       throw new MailError(`A single message is limited to ${MAIL_MAX_RECIPIENTS} recipients. Use a distribution list for more.`);
+    }
+    if (!isDraft && opts.recipientCaps) {
+      await assertUnderRecipientCaps(client, userId, new Set(all.map((r) => r.userId ?? r.address.toLowerCase())).size, opts.recipientCaps);
     }
 
     // ── thread ────────────────────────────────────────────────────────────

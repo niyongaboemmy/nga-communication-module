@@ -19,6 +19,8 @@ export interface SmtpConfig {
   user?: string;
   pass?: string;
   from: string;
+  /** FR-MAIL-7: messages per minute the relay accepts from us. */
+  ratePerMin: number;
 }
 
 export function smtpConfigFromEnv(env: NodeJS.ProcessEnv = process.env): SmtpConfig | null {
@@ -33,6 +35,7 @@ export function smtpConfigFromEnv(env: NodeJS.ProcessEnv = process.env): SmtpCon
     user: env.SMTP_USER,
     pass: env.SMTP_PASS,
     from: env.MAIL_FROM || env.EMAIL_FROM || (env.SMTP_USER ?? 'no-reply@localhost'),
+    ratePerMin: Math.max(1, parseInt(env.MAIL_SMTP_RATE_PER_MIN ?? '60', 10) || 60),
   };
 }
 
@@ -40,7 +43,7 @@ let transporter: Transporter | null = null;
 let cachedKey = '';
 
 export function getTransport(cfg: SmtpConfig): Transporter {
-  const key = `${cfg.host}:${cfg.port}:${cfg.user ?? ''}`;
+  const key = `${cfg.host}:${cfg.port}:${cfg.user ?? ''}:${cfg.ratePerMin}`;
   if (transporter && cachedKey === key) return transporter;
   transporter = nodemailer.createTransport({
     host: cfg.host,
@@ -49,8 +52,10 @@ export function getTransport(cfg: SmtpConfig): Transporter {
     auth: cfg.user ? { user: cfg.user, pass: cfg.pass } : undefined,
     pool: true,
     maxConnections: 3,
-    // FR-MAIL-7: per-minute rate limiting at the transport.
     maxMessages: 100,
+    // FR-MAIL-7: per-minute rate limiting at the transport (MAIL_SMTP_RATE_PER_MIN).
+    rateDelta: 60_000,
+    rateLimit: cfg.ratePerMin,
   });
   cachedKey = key;
   return transporter;
@@ -67,12 +72,40 @@ export interface OutboundMail {
   attachments?: Array<{ filename: string; content: Buffer; contentType: string }>;
 }
 
+/**
+ * Why a send failed, which decides what happens next (MAIL-H5):
+ *   recipient — the relay refused this address (RCPT 5.1.x etc.): bounce and
+ *               suppress it (external addresses only).
+ *   message   — the relay refused this message's content (DATA 5xx): fail it,
+ *               no retry, but the address is fine.
+ *   transport — anything about us or the relay (auth, connection, timeouts,
+ *               4xx, relay denied 5.7.x): retry later and stop the batch —
+ *               never suppress, or a wrong password would blacklist everyone.
+ */
+export type SmtpFailure = 'recipient' | 'message' | 'transport';
+
 export interface SmtpResult {
   ok: boolean;
   messageId?: string;
-  /** A permanent failure (5xx) — the address should be suppressed. */
+  failure?: SmtpFailure;
+  /** Kept for callers that only need yes/no: a recipient-level rejection. */
   permanent?: boolean;
   error?: string;
+}
+
+export function classifySmtpError(e: {
+  code?: string; command?: string; responseCode?: number; response?: string;
+}): SmtpFailure {
+  const status = e.responseCode ?? 0;
+  const response = e.response ?? '';
+  if (status >= 500 && status < 600) {
+    // 5.7.x is policy: relay denied, authentication required, sender rejected —
+    // a configuration problem on our side, not a bad address.
+    if (/\b5\.7\.\d+/.test(response) || status === 530 || status === 535) return 'transport';
+    if (e.command === 'RCPT TO' || e.code === 'EENVELOPE') return 'recipient';
+    if (e.command === 'DATA' || e.code === 'EMESSAGE') return 'message';
+  }
+  return 'transport';
 }
 
 /**
@@ -94,12 +127,13 @@ export async function sendSmtp(cfg: SmtpConfig, mail: OutboundMail): Promise<Smt
     });
     return { ok: true, messageId: info.messageId };
   } catch (err) {
-    const e = err as { responseCode?: number; message?: string };
-    const code = e.responseCode ?? 0;
+    const e = err as { code?: string; command?: string; responseCode?: number; response?: string; message?: string };
+    const failure = classifySmtpError(e);
     return {
       ok: false,
-      permanent: code >= 500 && code < 600,
-      error: e.message ?? 'SMTP send failed',
+      failure,
+      permanent: failure === 'recipient',
+      error: (e.message ?? 'SMTP send failed').slice(0, 500),
     };
   }
 }

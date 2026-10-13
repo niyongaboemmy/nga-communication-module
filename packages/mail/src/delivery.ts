@@ -102,9 +102,24 @@ export async function deliverInApp(messageId: string): Promise<number> {
   return delivered;
 }
 
+export const MAX_SMTP_ATTEMPTS = 5;
+/** Retry spacing after the n-th failed attempt: 1 min, 5 min, 30 min, 2 h. */
+const BACKOFF = ['1 minute', '5 minutes', '30 minutes', '2 hours'];
+const backoff = (attempts: number) => BACKOFF[Math.min(attempts, BACKOFF.length - 1)]!;
 /**
- * Send the SMTP copies for one message. Called by the worker. Idempotent:
- * only touches rows still `queued`/`failed` on the smtp channel.
+ * A transient failure stays 'queued' (still being tried — counts and the
+ * campaign roll-up keep waiting for it) until the last attempt, then 'failed'.
+ * `$3` is MAX_SMTP_ATTEMPTS in the statement it is used in.
+ */
+const RETRY_OR_FAIL = `CASE WHEN attempts + 1 >= $3 THEN 'failed' ELSE 'queued' END`;
+
+/** The most recent relay-level failure, for the worker's health endpoint. */
+export let lastTransportError: { at: string; error: string } | null = null;
+
+/**
+ * Send the SMTP copies for one message. Called by the worker, the sweep and
+ * campaign runs — safely at the same time: rows are claimed atomically, so
+ * each copy is sent once.
  */
 export async function deliverSmtp(
   messageId: string, env: NodeJS.ProcessEnv = process.env,
@@ -127,21 +142,41 @@ export async function deliverSmtp(
     return { sent: 0, failed: 0, skipped: 0 };
   }
 
+  // Claim, atomically: only rows due now, and rows another worker left in
+  // 'sending' long enough ago that it must have died. SKIP LOCKED means the
+  // mail:send job, the 30 s sweep and a campaign run can overlap without two
+  // of them ever sending the same copy (MAIL-H4).
   const { rows: recipients } = await pool.query<{
-    id: string; address: string; name: string;
+    id: string; address: string; name: string; user_id: string | null; attempts: number;
   }>(
-    `SELECT id, address, name FROM mail_recipients
-      WHERE message_id = $1 AND channel = 'smtp'
-        AND delivery_status IN ('queued', 'failed') AND attempts < 4`,
-    [messageId],
+    `UPDATE mail_recipients r SET delivery_status = 'sending', claimed_at = now()
+      WHERE r.id IN (
+        SELECT id FROM mail_recipients
+         WHERE message_id = $1 AND channel = 'smtp'
+           AND ((delivery_status IN ('queued', 'failed') AND attempts < $2
+                 AND (next_attempt_at IS NULL OR next_attempt_at <= now()))
+             OR (delivery_status = 'sending' AND (claimed_at IS NULL OR claimed_at < now() - interval '10 minutes')))
+         FOR UPDATE SKIP LOCKED)
+      RETURNING r.id, r.address, r.name, r.user_id, r.attempts`,
+    [messageId, MAX_SMTP_ATTEMPTS],
   );
 
   let sent = 0, failed = 0, skipped = 0;
+  let transportDown = false;
   for (const r of recipients) {
+    // The relay itself is failing: put the rest back untouched for the next
+    // attempt rather than burning an attempt on every one of them.
+    if (transportDown) {
+      await pool.query(
+        `UPDATE mail_recipients SET delivery_status = 'queued', claimed_at = NULL,
+                next_attempt_at = now() + interval '1 minute' WHERE id = $1`, [r.id]);
+      continue;
+    }
+
     const supp = await isSuppressed(r.address);
     if (supp) {
       await pool.query(
-        `UPDATE mail_recipients SET delivery_status = 'suppressed', delivery_error = $2 WHERE id = $1`,
+        `UPDATE mail_recipients SET delivery_status = 'suppressed', delivery_error = $2, claimed_at = NULL WHERE id = $1`,
         [r.id, `address suppressed (${supp.reason})`],
       );
       await recordEvent(pool, r.id, messageId, 'suppressed', supp);
@@ -151,16 +186,16 @@ export async function deliverSmtp(
 
     if (!cfg) {
       await pool.query(
-        `UPDATE mail_recipients SET delivery_status = 'failed',
-                delivery_error = 'no SMTP relay configured', attempts = attempts + 1 WHERE id = $1`,
-        [r.id],
+        `UPDATE mail_recipients SET delivery_status = ${RETRY_OR_FAIL}, claimed_at = NULL,
+                delivery_error = 'no SMTP relay configured', attempts = attempts + 1,
+                next_attempt_at = now() + $2::interval WHERE id = $1`,
+        [r.id, backoff(r.attempts), MAX_SMTP_ATTEMPTS],
       );
       await recordEvent(pool, r.id, messageId, 'failed', { reason: 'no SMTP relay configured' });
       failed++;
       continue;
     }
 
-    await pool.query(`UPDATE mail_recipients SET delivery_status = 'sending' WHERE id = $1`, [r.id]);
     const result = await sendSmtp(cfg, {
       to: r.address,
       toName: r.name,
@@ -173,25 +208,45 @@ export async function deliverSmtp(
 
     if (result.ok) {
       await pool.query(
-        `UPDATE mail_recipients SET delivery_status = 'delivered', sent_at = now(),
+        `UPDATE mail_recipients SET delivery_status = 'delivered', sent_at = now(), claimed_at = NULL,
                 delivered_at = now(), attempts = attempts + 1, delivery_error = NULL WHERE id = $1`,
         [r.id],
       );
       await recordEvent(pool, r.id, messageId, 'sent', { messageId: result.messageId });
       await recordEvent(pool, r.id, messageId, 'delivered', { channel: 'smtp' });
       sent++;
-    } else {
-      const permanent = result.permanent ?? false;
-      await pool.query(
-        `UPDATE mail_recipients
-            SET delivery_status = $2, delivery_error = $3, attempts = attempts + 1 WHERE id = $1`,
-        [r.id, permanent ? 'bounced' : 'failed', result.error ?? 'send failed'],
-      );
-      await recordEvent(pool, r.id, messageId, permanent ? 'bounced' : 'failed',
-        { error: result.error, permanent });
-      if (permanent) await suppress(r.address, 'bounce', result.error ?? '', messageId);
-      failed++;
+      continue;
     }
+
+    const failure = result.failure ?? 'transport';
+    if (failure === 'transport') {
+      transportDown = true;
+      lastTransportError = { at: new Date().toISOString(), error: result.error ?? 'send failed' };
+      console.error(`[mail] SMTP relay failure — retrying later, nothing suppressed: ${result.error}`);
+      await pool.query(
+        `UPDATE mail_recipients SET delivery_status = ${RETRY_OR_FAIL.replace('$3', '$4')}, claimed_at = NULL,
+                delivery_error = $2, attempts = attempts + 1, next_attempt_at = now() + $3::interval WHERE id = $1`,
+        [r.id, result.error ?? 'send failed', backoff(r.attempts), MAX_SMTP_ATTEMPTS],
+      );
+      await recordEvent(pool, r.id, messageId, 'failed', { error: result.error, transient: true });
+      failed++;
+      continue;
+    }
+
+    // Refused for good: this address (recipient) or this message (content).
+    // attempts is pushed to the cap so no sweep retries it.
+    const bounced = failure === 'recipient';
+    await pool.query(
+      `UPDATE mail_recipients
+          SET delivery_status = $2, delivery_error = $3, claimed_at = NULL,
+              attempts = GREATEST(attempts + 1, $4) WHERE id = $1`,
+      [r.id, bounced ? 'bounced' : 'failed', result.error ?? 'send failed', MAX_SMTP_ATTEMPTS],
+    );
+    await recordEvent(pool, r.id, messageId, bounced ? 'bounced' : 'failed', { error: result.error, failure });
+    // Suppression is for outside addresses. A colleague's school address that
+    // bounced once is a relay problem to fix, not a person to stop mailing.
+    if (bounced && !r.user_id) await suppress(r.address, 'bounce', result.error ?? '', messageId);
+    failed++;
   }
   return { sent, failed, skipped };
 }
