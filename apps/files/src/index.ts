@@ -21,16 +21,61 @@ app.use(express.json({ limit: '256kb' }));
 
 interface FileRequest extends express.Request { user?: SessionClaims }
 
+/**
+ * The account behind a valid token, checked the way the API checks it (A-06):
+ * it still exists, it is active, and it has not signed out of NGA (single
+ * sign-out) since the token was issued. A signature alone said nothing about
+ * any of that — a suspended or signed-out token kept uploading and
+ * downloading for the rest of its 24 hours.
+ */
+async function accountState(userId: string, iatSeconds: number | undefined): Promise<'ok' | 'gone' | 'suspended' | 'signed-out'> {
+  const { rows } = await getPool().query<{ status: string; revoked_at: Date | null }>(
+    `SELECT u.status, r.revoked_at FROM users u
+       LEFT JOIN session_revocations r ON r.user_id = u.id
+      WHERE u.id = $1`, [userId]);
+  const u = rows[0];
+  if (!u) return 'gone';
+  if (u.status !== 'active') return 'suspended';
+  if (u.revoked_at && (!iatSeconds || iatSeconds * 1000 <= u.revoked_at.getTime())) return 'signed-out';
+  return 'ok';
+}
+
+/** Whether the person's role grants a permission (read fresh, never from the token). */
+async function hasFilePermission(userId: string, key: string): Promise<boolean> {
+  const { rows } = await getPool().query(
+    `SELECT 1 FROM users u
+       JOIN role_permissions rp ON rp.role_id = u.role_id
+       JOIN permissions p ON p.id = rp.permission_id
+      WHERE u.id = $1 AND p.key = $2 LIMIT 1`, [userId, key]);
+  return rows.length > 0;
+}
+
 /** Same session token as the API — this service issues no credential of its own. */
-function requireSession(req: express.Request, res: express.Response, next: express.NextFunction) {
+async function requireSession(req: express.Request, res: express.Response, next: express.NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return res.status(401).json(fail('Authentication required.'));
+  let claims: SessionClaims & { iat?: number };
   try {
-    (req as FileRequest).user = jwt.verify(header.slice(7), config.jwtSecret) as SessionClaims;
-    next();
+    claims = jwt.verify(header.slice(7), config.jwtSecret) as SessionClaims & { iat?: number };
   } catch {
     return res.status(401).json(fail('Invalid or expired session token.'));
   }
+  const state = await accountState(claims.id, claims.iat);
+  if (state === 'suspended') return res.status(403).json(fail('This account has been suspended.'));
+  if (state !== 'ok') return res.status(401).json(fail('Your session is no longer valid. Please sign in again.'));
+  (req as FileRequest).user = claims;
+  next();
+}
+
+/** A platform permission, checked on the live role. */
+function requireFilePermission(key: string) {
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const user = (req as FileRequest).user;
+    if (!user || !(await hasFilePermission(user.id, key))) {
+      return res.status(403).json(fail('You do not have permission to do that.'));
+    }
+    next();
+  };
 }
 
 /**
@@ -60,7 +105,7 @@ const MEDIA_TICKET_TTL_SECONDS = 15 * 60;
 
 interface MediaTicketClaims { sub: string; fid: string; aud: string }
 
-app.post('/api/files/:id/ticket', requireSession, async (req, res) => {
+app.post('/api/files/:id/ticket', requireSession, requireFilePermission('FILE_DOWNLOAD'), async (req, res) => {
   const user = (req as FileRequest).user!;
   // Minting is itself authorised, so a ticket cannot even be obtained for a
   // file the caller may not read.
@@ -81,23 +126,27 @@ app.post('/api/files/:id/ticket', requireSession, async (req, res) => {
  * A ticket is accepted only for the exact file in the path, so one minted for a
  * harmless image cannot be replayed against anything else.
  */
-function resolveMediaCaller(req: express.Request): string | null {
+async function resolveMediaCaller(req: express.Request): Promise<string | null> {
+  let who: { id: string; iat?: number } | null = null;
   const header = req.headers.authorization;
   if (header?.startsWith('Bearer ')) {
     try {
-      return (jwt.verify(header.slice(7), config.jwtSecret) as SessionClaims).id;
+      const c = jwt.verify(header.slice(7), config.jwtSecret) as SessionClaims & { iat?: number };
+      who = { id: c.id, iat: c.iat };
     } catch { return null; }
+  } else {
+    const ticket = typeof req.query.t === 'string' ? req.query.t : null;
+    if (!ticket) return null;
+    try {
+      const claims = jwt.verify(ticket, config.jwtSecret, { audience: 'file' }) as MediaTicketClaims & { iat?: number };
+      if (claims.fid !== req.params.id) return null;
+      who = { id: claims.sub, iat: claims.iat };
+    } catch {
+      return null;
+    }
   }
-
-  const ticket = typeof req.query.t === 'string' ? req.query.t : null;
-  if (!ticket) return null;
-  try {
-    const claims = jwt.verify(ticket, config.jwtSecret, { audience: 'file' }) as MediaTicketClaims;
-    if (claims.fid !== req.params.id) return null;
-    return claims.sub;
-  } catch {
-    return null;
-  }
+  // A ticket or token is only as good as the account behind it, right now.
+  return (await accountState(who.id, who.iat)) === 'ok' ? who.id : null;
 }
 
 /**
@@ -105,7 +154,7 @@ function resolveMediaCaller(req: express.Request): string | null {
  * and hand back a key. In production this returns a presigned URL so bytes go
  * straight to object storage; the local driver uploads through step 2 instead.
  */
-app.post('/api/files/tickets', requireSession, async (req, res) => {
+app.post('/api/files/tickets', requireSession, requireFilePermission('FILE_UPLOAD'), async (req, res) => {
   const user = (req as FileRequest).user!;
   const { name, size, mime, folder } = req.body ?? {};
 
@@ -146,7 +195,7 @@ app.post('/api/files/tickets', requireSession, async (req, res) => {
 });
 
 /** Step 2 — receive the bytes and checksum them on the way past. */
-app.put('/api/files/:id/content', requireSession, async (req, res) => {
+app.put('/api/files/:id/content', requireSession, requireFilePermission('FILE_UPLOAD'), async (req, res) => {
   const user = (req as FileRequest).user!;
   const { rows } = await getPool().query<{ storage_key: string; owner_id: string; status: string }>(
     'SELECT storage_key, owner_id, status FROM files WHERE id = $1',
@@ -253,8 +302,11 @@ app.patch('/api/files/:id/metadata', requireSession, async (req, res) => {
 const INLINE_SAFE = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/(mp4|webm|ogg|quicktime)|audio\/(mpeg|mp4|ogg|wav|webm))$/;
 
 app.get('/api/files/:id/content', async (req, res) => {
-  const callerId = resolveMediaCaller(req);
+  const callerId = await resolveMediaCaller(req);
   if (!callerId) return res.status(401).json(fail('Authentication required.'));
+  if (!(await hasFilePermission(callerId, 'FILE_DOWNLOAD'))) {
+    return res.status(403).json(fail('You do not have permission to open files.'));
+  }
 
   const { rows } = await getPool().query<{
     storage_key: string; original_name: string; mime_type: string;

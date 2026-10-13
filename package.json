@@ -41,6 +41,7 @@
     "verify:chat:links": "node scripts/verify-chat-links.mjs",
     "verify:chat:liveness": "node scripts/verify-chat-liveness.mjs",
     "verify:chat:sending": "node scripts/verify-chat-sending.mjs",
+    "verify:files:auth": "node scripts/verify-files-auth.mjs",
     "verify:chat:files": "node scripts/verify-chat-files.mjs",
     "verify:chat:notifications": "node scripts/verify-chat-notifications.mjs",
     "verify:chat:power": "node scripts/verify-chat-power.mjs",
