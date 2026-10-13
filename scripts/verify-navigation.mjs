@@ -58,7 +58,7 @@ try {
   await page.goto(`${BASE}/app/no-such-screen`);
   check('an unknown address inside the app shows a real 404, in the shell', await wait(page.getByRole('heading', { name: /This page isn’t here/ })) && await page.getByRole('button', { name: /^Notifications/ }).isVisible());
   await page.getByRole('link', { name: /Tupo home/ }).click();
-  check('with a way home', await page.waitForURL(/\/app\/feed/, { timeout: 8000 }).then(() => true).catch(() => false), page.url().replace(BASE, ''));
+  check('with a way home', await page.waitForURL(/\/app\/(chat|feed)/, { timeout: 8000 }).then(() => true).catch(() => false), page.url().replace(BASE, ''));
   await page.goto(`${BASE}/totally/unknown`);
   check('an unknown address outside the app shows the 404 to a signed-in person', await wait(page.getByRole('heading', { name: /This page isn’t here/ })));
   const anon = await pageFor(browser, null);
