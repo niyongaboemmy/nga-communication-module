@@ -37,6 +37,8 @@ export interface FloatingReaction {
 export interface MeetRoomState {
   phase: RoomPhase;
   error: string | null;
+  /** The live connection dropped mid-call and is being restored (MEET-RT1). */
+  reconnecting: boolean;
   settings: MeetSettings;
   you: MeetParticipant | null;
   participants: MeetParticipant[];
@@ -134,6 +136,7 @@ export function useMeetRoom(
   const [state, setState] = useState<MeetRoomState>(() => ({
     phase: 'connecting',
     error: null,
+    reconnecting: false,
     settings: ticket ? ticket.meeting.settings : DEFAULT_MEET_SETTINGS,
     you: null,
     participants: [],
@@ -307,7 +310,12 @@ export function useMeetRoom(
     });
     socketRef.current = socket;
 
+    let connectedOnce = false;
     socket.on('connect', () => {
+      connectedOnce = true;
+      patch(() => ({ reconnecting: false }));
+      // Also on every reconnect: the gateway restores an admitted participant
+      // straight into the call (a fresh meet:state follows).
       socket.emit('meet:join', {
         meetingId: ticket.meeting.meetingId,
         participantId: ticket.participantId,
@@ -317,7 +325,16 @@ export function useMeetRoom(
     });
 
     socket.on('connect_error', (err: Error) => {
+      // Mid-call, a failed reconnect attempt is just "still reconnecting" —
+      // socket.io keeps trying. Only a first connection that fails is fatal.
+      if (connectedOnce && !/^(unauthorized|forbidden)/.test(err.message)) {
+        patch(() => ({ reconnecting: true }));
+        return;
+      }
       patch(() => ({ phase: 'error', error: err.message || 'Could not reach the meeting server.' }));
+    });
+    socket.on('disconnect', (reason) => {
+      if (reason !== 'io client disconnect') patch(() => ({ reconnecting: true }));
     });
 
     socket.on('meet:state', (p: {

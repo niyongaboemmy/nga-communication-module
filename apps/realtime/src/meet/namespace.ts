@@ -222,6 +222,22 @@ export function registerMeetNamespace(io: Server): Namespace {
         : await db.loadParticipant(meetingId, participantId, user.id);
       if (!record) return reply(false, 'You are not a participant in this meeting.');
 
+      // Reconnecting after a drop (MEET-RT1): the disconnect closed the row,
+      // so it reads 'left'. Someone who had been in the call goes straight
+      // back in, on a new attendance leg; someone who was still knocking
+      // knocks again so the host actually sees them.
+      if (record.state === 'left') {   // live or scheduled: ended/cancelled were refused above
+        if (record.joined_at) {
+          const back = await db.rejoinParticipant(participantId);
+          if (back) Object.assign(record, { state: back.state });
+        } else {
+          db.setParticipantState(participantId, 'knocking');
+          record.state = 'knocking';
+        }
+      } else if (record.state === 'left' || record.state === 'removed' || record.state === 'denied') {
+        return reply(false, 'You are no longer in this meeting. Join again from the meeting page.');
+      }
+
       const settings = parseMeetSettings(meeting.settings);
       const room = getRoom(meetingId);
       room.startedAt ??= meeting.started_at ? meeting.started_at.toISOString() : null;

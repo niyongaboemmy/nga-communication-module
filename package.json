@@ -53,7 +53,8 @@
     "verify:feed:media": "node scripts/verify-feed-media-ui.mjs",
     "verify:oversight": "node scripts/verify-oversight.mjs",
     "activity:catalog": "node -e \"require('fs').copyFileSync('apps/api/src/activity/catalog.json','apps/web/src/activity/tupo.catalog.json')\"",
-    "verify:realtime": "node scripts/verify-realtime-robustness.mjs"
+    "verify:realtime": "node scripts/verify-realtime-robustness.mjs",
+    "verify:meet:reconnect": "node scripts/verify-meet-reconnect.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

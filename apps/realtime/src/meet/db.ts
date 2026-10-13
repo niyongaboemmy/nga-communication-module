@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { config } from '../config.js';
+import { closeAttendanceLegs, OPEN_ATTENDANCE_LEG } from '@tupo/db';
 
 /**
  * The realtime gateway's own database handle.
@@ -227,7 +228,9 @@ export function setParticipantState(participantId: string, state: string): void 
   getPool().query(
     `UPDATE meeting_participants
         SET state = $2,
-            joined_at = COALESCE(joined_at, CASE WHEN $2 = 'active' THEN now() END)
+            joined_at = COALESCE(joined_at, CASE WHEN $2 = 'active' THEN now() END),
+            segment_started_at = CASE WHEN $2 = 'active' THEN COALESCE(segment_started_at, now())
+                                      ELSE segment_started_at END
       WHERE id = $1`,
     [participantId, state],
   ).catch(soft('participant state'));
@@ -240,14 +243,23 @@ export function setParticipantState(participantId: string, state: string): void 
  * rejoined shows one attendance with the right total, not two partial ones.
  */
 export function closeParticipant(participantId: string, state = 'left'): void {
-  getPool().query(
+  closeAttendanceLegs(getPool(), { participantId }, state).catch(soft('close participant'));
+}
+
+/**
+ * Back in after a dropped connection (MEET-RT1): someone who had been let in
+ * returns to the call — a new attendance leg — rather than to a lobby whose
+ * host never sees them. Returns the refreshed row.
+ */
+export async function rejoinParticipant(participantId: string) {
+  const { rows } = await getPool().query(
     `UPDATE meeting_participants
-        SET state = $2, left_at = now(),
-            duration_seconds = duration_seconds + GREATEST(
-              EXTRACT(EPOCH FROM (now() - COALESCE(joined_at, now())))::int, 0)
-      WHERE id = $1 AND left_at IS NULL`,
-    [participantId, state],
-  ).catch(soft('close participant'));
+        SET state = 'active', left_at = NULL, ${OPEN_ATTENDANCE_LEG}
+      WHERE id = $1 AND state = 'left'
+      RETURNING *`,
+    [participantId],
+  );
+  return rows[0] ?? null;
 }
 
 export function setMediaState(
@@ -288,7 +300,8 @@ export function setQuality(participantId: string, quality: string): void {
 export function admit(participantId: string, byUserId: string | null): void {
   getPool().query(
     `UPDATE meeting_participants
-        SET state = 'active', admitted_at = now(), admitted_by = $2, joined_at = COALESCE(joined_at, now())
+        SET state = 'active', admitted_at = now(), admitted_by = $2, joined_at = COALESCE(joined_at, now()),
+            left_at = NULL, ${OPEN_ATTENDANCE_LEG}
       WHERE id = $1`,
     [participantId, byUserId],
   ).catch(soft('admit'));
@@ -503,12 +516,7 @@ export function startMeeting(meetingId: string): void {
 
 export async function endMeeting(meetingId: string) {
   const pool = getPool();
-  await pool.query(
-    `UPDATE meeting_participants
-        SET state = 'left', left_at = now(),
-            duration_seconds = duration_seconds + GREATEST(
-              EXTRACT(EPOCH FROM (now() - COALESCE(joined_at, now())))::int, 0)
-      WHERE meeting_id = $1 AND left_at IS NULL`, [meetingId]);
+  await closeAttendanceLegs(pool, { meetingId });
   await pool.query(
     `UPDATE meetings SET status = 'ended', ended_at = now() WHERE id = $1 AND status <> 'ended'`,
     [meetingId]);
