@@ -12,7 +12,7 @@ import {
   startRecordingSchema, attachRecordingSchema, meetingFolder, MAX_RECORDING_BYTES,
   isSfuTransport, capacityFor, SFU_MAX_TRACKS_PER_CALL, parseSfuTrackName,
 } from '@tupo/shared';
-import type { MeetJoinTicket, MeetRole, MeetTransport } from '@tupo/shared';
+import type { MeetCategory, MeetJoinTicket, MeetRole, MeetSettings, MeetTransport } from '@tupo/shared';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 import {
   meetAuth, denyGuests, isGuestRequest, issueGuestToken, newGuestTokenId,
@@ -178,7 +178,7 @@ router.post('/:idOrCode/guest', async (req: Request, res: Response) => {
       name: parsed.data.displayName,
       tokenId,
     }),
-    iceServers: await getIceServers(),
+    iceServers: await getIceServers(`guest:${participant.id}`),
   };
   return res.status(201).json(ok(ticket));
 });
@@ -390,8 +390,10 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
  * ICE servers. Behind auth on purpose — TURN relay bandwidth is metered, and an
  * open endpoint minting Cloudflare credentials is an open relay.
  */
-router.get('/ice', async (_req: Request, res: Response) => {
-  res.json(ok({ iceServers: await getIceServers() }));
+router.get('/ice', async (req: Request, res: Response) => {
+  const u = (req as AuthenticatedRequest).user;
+  const guest = (req as AuthenticatedRequest & { guest?: { participantId: string } }).guest;
+  res.json(ok({ iceServers: await getIceServers(guest ? `guest:${guest.participantId}` : u!.id) }));
 });
 
 /**
@@ -506,6 +508,43 @@ router.get('/', denyGuests, async (req: Request, res: Response) => {
   res.json(ok(rows.map((r) => ({ ...r, settings: parseMeetSettings(r.settings) })), { total: rows.length }));
 });
 
+/**
+ * Feature switches need the matching permission wherever they are flipped —
+ * create, instant, PATCH or the settings endpoint (MEET-SEC8). A co-host
+ * without MEET_TRANSCRIBE cannot switch transcription on for a class.
+ */
+function featureRefusal(req: Request, s: Partial<MeetSettings> | undefined): string | null {
+  if (!s) return null;
+  if ((s.recordingEnabled || s.autoRecord) && !can(req, 'MEET_RECORD')) return 'You do not have permission to record meetings.';
+  if (s.aiAssistantEnabled && !can(req, 'MEET_AI_USE')) return 'You do not have permission to use the AI notetaker.';
+  if (s.transcriptionEnabled && !can(req, 'MEET_TRANSCRIBE')) return 'You do not have permission to enable transcription.';
+  return null;
+}
+
+/**
+ * Who a new meeting is for (MEET-SEC4). The composer picks a category
+ * (private / signed in / public), which is the admission policy by another
+ * name; a meeting started from a conversation defaults to that conversation's
+ * members plus invitees, and its creator must be a member of it.
+ */
+async function admissionFor(
+  req: Request, settings: Partial<MeetSettings> | undefined, conversationId: unknown,
+): Promise<{ settings: Partial<MeetSettings>; error?: { status: number; message: string } }> {
+  const out: Partial<MeetSettings> = { ...(settings ?? {}) };
+  const category = (req.body?.settings as { category?: unknown } | undefined)?.category;
+  if (typeof category === 'string' && (MEET_CATEGORIES as readonly string[]).includes(category)) {
+    out.admissionPolicy = CATEGORY_TO_POLICY[category as MeetCategory];
+  }
+  if (conversationId !== undefined && conversationId !== null && conversationId !== '') {
+    if (typeof conversationId !== 'string') return { settings: out, error: { status: 400, message: 'Invalid conversation.' } };
+    const { rows } = await getPool().query(
+      'SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2', [conversationId, actor(req).id]);
+    if (!rows.length) return { settings: out, error: { status: 403, message: 'You are not in that conversation.' } };
+    out.admissionPolicy ??= 'invited';
+  }
+  return { settings: out };
+}
+
 /** Schedule a meeting. */
 router.post('/', denyGuests, authorizePermission('MEET_SCHEDULE', 'MEET_START'), async (req: Request, res: Response) => {
   const parsed = createMeetingSchema.safeParse(req.body ?? {});
@@ -519,15 +558,11 @@ router.post('/', denyGuests, authorizePermission('MEET_SCHEDULE', 'MEET_START'),
   if (input.scheduledStart && !can(req, 'MEET_SCHEDULE')) {
     return res.status(403).json(fail('You do not have permission to schedule meetings.'));
   }
-  if (input.settings?.recordingEnabled && !can(req, 'MEET_RECORD')) {
-    return res.status(403).json(fail('You do not have permission to record meetings.'));
-  }
-  if (input.settings?.aiAssistantEnabled && !can(req, 'MEET_AI_USE')) {
-    return res.status(403).json(fail('You do not have permission to use the AI notetaker.'));
-  }
-  if (input.settings?.transcriptionEnabled && !can(req, 'MEET_TRANSCRIBE')) {
-    return res.status(403).json(fail('You do not have permission to enable transcription.'));
-  }
+  const refused = featureRefusal(req, input.settings);
+  if (refused) return res.status(403).json(fail(refused));
+  const admission = await admissionFor(req, input.settings, input.conversationId);
+  if (admission.error) return res.status(admission.error.status).json(fail(admission.error.message));
+  input.settings = admission.settings;
 
   try {
     const meeting = await meet.createMeeting({
@@ -555,18 +590,25 @@ router.post('/', denyGuests, authorizePermission('MEET_SCHEDULE', 'MEET_START'),
 
 /** Instant meeting — the "Start a call" button. */
 router.post('/instant', denyGuests, authorizePermission('MEET_START'), async (req: Request, res: Response) => {
-  const { title, conversationId, settings } = req.body ?? {};
+  const { title, conversationId } = req.body ?? {};
+  const parsedSettings = meetSettingsSchema.partial().safeParse(req.body?.settings ?? {});
+  if (!parsedSettings.success) return res.status(400).json(fail('Invalid meeting settings.'));
+  const refused = featureRefusal(req, parsedSettings.data);
+  if (refused) return res.status(403).json(fail(refused));
+  const admission = await admissionFor(req, parsedSettings.data, conversationId);
+  if (admission.error) return res.status(admission.error.status).json(fail(admission.error.message));
   const meeting = await meet.createMeeting({
     hostId: actor(req).id,
-    title: String(title ?? '').trim() || defaultMeetingName(new Date(), 'instant'),
-    conversationId,
+    title: String(title ?? '').trim().slice(0, 200) || defaultMeetingName(new Date(), 'instant'),
+    conversationId: typeof conversationId === 'string' && conversationId ? conversationId : undefined,
     settings: {
       // An instant call has no lobby *by default* — whoever you just called is
-      // already someone you are talking to. These are defaults, so they go
-      // first: an explicit `lobbyEnabled: true` from the caller must win.
+      // already someone you are talking to (and, from a conversation, only
+      // its members are eligible at all). Defaults first: an explicit
+      // `lobbyEnabled: true` from the caller must win.
       lobbyEnabled: false,
       waitForHost: false,
-      ...(settings ?? {}),
+      ...admission.settings,
     },
     startNow: true,
   });
@@ -610,8 +652,13 @@ router.patch('/:id', denyGuests, async (req: Request, res: Response) => {
   if (!(await requireHost(req, res, m))) return;
 
   const parsed = updateMeetingSchema.safeParse(req.body ?? {});
-  if (!parsed.success) return res.status(400).json(fail('Invalid update.'));
+  if (!parsed.success) return res.status(400).json(fail(parsed.error.issues[0]?.message ?? 'Invalid update.'));
   const p = parsed.data;
+  const refused = featureRefusal(req, p.settings);
+  if (refused) return res.status(403).json(fail(refused));
+  if (p.status && (m.status === 'live' || m.status === 'ended')) {
+    return res.status(409).json(fail('A meeting that has started is ended from the call, not edited.'));
+  }
 
   const { rows } = await getPool().query<meet.MeetingRow>(
     `UPDATE meetings SET
@@ -822,7 +869,7 @@ router.post('/:idOrCode/join', async (req: Request, res: Response) => {
     role: participant.role,
     state: participant.state,
     transport,
-    iceServers: await getIceServers(),
+    iceServers: await getIceServers(participant.user_id ?? `guest:${participant.id}`),
     // The media token is issued only once the participant is actually admitted.
     // Handing it to someone still knocking would let them open media into a
     // room the host has not let them into.
@@ -869,7 +916,7 @@ router.post('/:id/token', authorizePermission('MEET_JOIN'), async (req: Request,
   const transport = (m.transport ?? 'mesh') as MeetTransport;
   res.json(ok({
     transport,
-    iceServers: await getIceServers(),
+    iceServers: await getIceServers(participant.user_id ?? `guest:${participant.id}`),
     ...(transport === 'cloudflare' ? { sfuEndpoint: `/api/meet/${m.id}/sfu` } : {}),
   }));
 });
@@ -933,15 +980,8 @@ router.put('/:id/settings', authorizePermission('MEET_HOST_CONTROLS'), async (re
 
   // Settings are the back door into the permission-gated features, so each one
   // re-checks the permission its REST equivalent would have required.
-  if (parsed.data.recordingEnabled && !can(req, 'MEET_RECORD')) {
-    return res.status(403).json(fail('You do not have permission to record meetings.'));
-  }
-  if (parsed.data.aiAssistantEnabled && !can(req, 'MEET_AI_USE')) {
-    return res.status(403).json(fail('You do not have permission to use the AI notetaker.'));
-  }
-  if (parsed.data.transcriptionEnabled && !can(req, 'MEET_TRANSCRIBE')) {
-    return res.status(403).json(fail('You do not have permission to enable transcription.'));
-  }
+  const refused = featureRefusal(req, parsed.data);
+  if (refused) return res.status(403).json(fail(refused));
 
   res.json(ok(await meet.updateSettings(m.id, parsed.data)));
 });
@@ -1864,10 +1904,13 @@ router.get('/:id/ics', async (req: Request, res: Response) => {
     `DTSTAMP:${stamp(new Date())}`,
     `DTSTART:${stamp(start)}`,
     `DTEND:${stamp(end)}`,
-    fold(`SUMMARY:${m.title.replace(/[\n,;]/g, ' ')}`),
+    fold(`SUMMARY:${m.title.replace(/[\r\n,;\\]/g, ' ')}`),
     fold(`DESCRIPTION:Join the meeting: ${url}\\nCode: ${m.join_code}`),
     fold(`LOCATION:${url}`),
-    ...(m.recurrence_rule ? [`RRULE:${m.recurrence_rule}`] : []),
+    // Stored rules are validated on write; older rows are re-checked here so
+    // a CR/LF can never inject extra calendar properties.
+    ...(m.recurrence_rule && /^[A-Z]+=[A-Za-z0-9,:+;=-]+$/.test(m.recurrence_rule.replace(/^RRULE:/, ''))
+      ? [`RRULE:${m.recurrence_rule.replace(/^RRULE:/, '')}`] : []),
     'END:VEVENT', 'END:VCALENDAR',
   ].join('\r\n');
 

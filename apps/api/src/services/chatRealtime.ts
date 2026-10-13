@@ -49,19 +49,23 @@ function getPublisher(): Redis | null {
 }
 
 /**
- * Publish once the connection is up. The publisher is lazy and has no offline
- * queue (so an outage never stalls a request), which meant the first publishes
- * after a restart — sent while it was still connecting — were silently lost
- * (RT-02). Wait briefly for `ready`; give up after two seconds.
+ * Publish, giving a just-created connection a moment to come up. The
+ * publisher is lazy and has no offline queue (so an outage never stalls a
+ * request), which meant the first publishes after a restart — sent while it
+ * was still connecting — were silently lost (RT-02). Only that start-up window
+ * waits, and for at most a second; once a connection has been up, a publish
+ * while Redis is down fails fast exactly as before.
  */
+const everReady = new WeakSet<Redis>();
 async function publishWhenReady(client: Redis, channel: string, message: string): Promise<void> {
-  if (client.status !== 'ready') {
-    if (client.status === 'end' || client.status === 'close') void client.connect().catch(() => {});
+  if (client.status === 'ready') everReady.add(client);
+  else if (!everReady.has(client) && (client.status === 'connecting' || client.status === 'connect' || client.status === 'wait')) {
     await new Promise<void>((resolve) => {
       const done = () => { clearTimeout(t); client.off('ready', done); resolve(); };
-      const t = setTimeout(done, 2000);
+      const t = setTimeout(done, 1000);
       client.once('ready', done);
     });
+    if ((client.status as string) === 'ready') everReady.add(client);
   }
   await client.publish(channel, message);
 }

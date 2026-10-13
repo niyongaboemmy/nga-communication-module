@@ -12,6 +12,7 @@ import type {
 } from '@tupo/shared';
 import { config } from '../config.js';
 import * as db from './db.js';
+import { getPool as getDbPool, resolveUserPermissions } from '@tupo/db';
 import { MeetRoom, canHost, getRoom, dropRoomIfEmpty, roomKey, rooms } from './state.js';
 import type { LiveParticipant } from './state.js';
 
@@ -724,13 +725,29 @@ export function registerMeetNamespace(io: Server): Namespace {
 
     /* -------- settings -------- */
 
-    socket.on('meet:settings', (patch: Partial<MeetSettings>, ack) => {
+    socket.on('meet:settings', async (patch: Partial<MeetSettings>, ack) => {
       const ctx = context(socket);
       if (!ctx) return;
       const { room, participant, meetingId } = ctx;
       if (!canHost(participant.role)) {
         if (typeof ack === 'function') ack({ ok: false, message: 'Only the host can change settings.' });
         return;
+      }
+      // Same rule as the REST settings endpoint (MEET-SEC8): a co-host may run
+      // the room, but switching on recording, transcription or the AI
+      // notetaker needs the permission for it.
+      const wants = [
+        (patch?.recordingEnabled || patch?.autoRecord) && 'MEET_RECORD',
+        patch?.transcriptionEnabled && 'MEET_TRANSCRIBE',
+        patch?.aiAssistantEnabled && 'MEET_AI_USE',
+      ].filter(Boolean) as string[];
+      if (wants.length) {
+        const access = socket.data.guest ? null : await resolveUserPermissions(getDbPool(), user.id).catch(() => null);
+        const missing = wants.filter((k) => !access?.permissions.has(k));
+        if (missing.length) {
+          if (typeof ack === 'function') ack({ ok: false, message: 'You do not have permission to switch that on.' });
+          return;
+        }
       }
 
       const before = room.settings;
@@ -1058,18 +1075,19 @@ export function registerMeetNamespace(io: Server): Namespace {
      * Only shared notes ever cross the wire — a private note is never sent to
      * anyone, which is why the API filters in SQL rather than trusting this.
      */
-    socket.on('meet:note_share', (p: { note?: unknown; shared?: boolean }) => {
+    socket.on('meet:note_share', async (p: { note?: unknown; shared?: boolean }) => {
       const ctx = context(socket);
       if (!ctx) return;
       const { participant, meetingId } = ctx;
-      const note = p?.note as { id?: string; participantId?: string } | undefined;
-      if (!note?.id) return;
-      // Only the author may share their own note.
-      if (note.participantId !== participant.id) return;
-
-      if (p?.shared) {
+      const noteId = (p?.note as { id?: unknown } | undefined)?.id;
+      if (typeof noteId !== 'string' || !noteId) return;
+      // What goes out is the stored note, and only the author's own: the
+      // client names a note, it never supplies its text or author.
+      const note = await db.noteForShare(meetingId, participant.id, noteId);
+      if (!note) return;
+      if (p?.shared && note.isShared) {
         socket.to(roomKey(meetingId)).emit('meet:note_shared', { note });
-      } else {
+      } else if (!p?.shared && !note.isShared) {
         socket.to(roomKey(meetingId)).emit('meet:note_unshared', { noteId: note.id });
       }
     });

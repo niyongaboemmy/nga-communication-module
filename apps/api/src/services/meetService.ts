@@ -556,6 +556,22 @@ export async function audienceFor(
 ): Promise<{ userIds: string[]; truncated: boolean }> {
   const pool = getPool();
 
+  // A call started from a conversation is for that conversation: its members
+  // and anyone invited — never the whole institution (MEET-SEC4).
+  const { rows: conv } = await pool.query<{ conversation_id: string | null }>(
+    'SELECT conversation_id FROM meetings WHERE id = $1', [meetingId]);
+  if (conv[0]?.conversation_id) {
+    const { rows } = await pool.query<{ user_id: string }>(
+      `SELECT i.user_id FROM meeting_invites i JOIN users u ON u.id = i.user_id AND u.status = 'active'
+        WHERE i.meeting_id = $1
+       UNION
+       SELECT cm.user_id FROM conversation_members cm JOIN users u ON u.id = cm.user_id AND u.status = 'active'
+        WHERE cm.conversation_id = $2`,
+      [meetingId, conv[0].conversation_id],
+    );
+    return { userIds: rows.map((r) => r.user_id).slice(0, NOTIFY_BROADCAST_CAP), truncated: false };
+  }
+
   if (settings.admissionPolicy === 'invited') {
     const { rows } = await pool.query<{ user_id: string }>(
       `SELECT i.user_id

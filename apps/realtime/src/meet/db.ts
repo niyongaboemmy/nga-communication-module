@@ -520,3 +520,27 @@ export async function countFinalSegments(meetingId: string): Promise<number> {
       WHERE meeting_id = $1 AND is_final = true`, [meetingId]);
   return Number(rows[0]?.count ?? 0);
 }
+
+/**
+ * A note as stored, for the share broadcast — only the author's own, from
+ * this meeting, and only once it is actually marked shared. The client used to
+ * send the whole note, so its text and author name were whatever it claimed
+ * (MEET-SEC11).
+ */
+export async function noteForShare(meetingId: string, participantId: string, noteId: string) {
+  const { rows } = await getPool().query(
+    `SELECT id, meeting_id, participant_id, author_name, body, source, original_body, provider_used,
+            offset_seconds, is_shared, pinned, created_at, updated_at
+       FROM meeting_notes
+      WHERE id = $1 AND meeting_id = $2 AND participant_id = $3 AND deleted_at IS NULL`,
+    [noteId, meetingId, participantId],
+  );
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    id: r.id, meetingId: r.meeting_id, participantId: r.participant_id, authorName: r.author_name,
+    body: r.body, source: r.source, originalBody: r.original_body, providerUsed: r.provider_used,
+    offsetSeconds: r.offset_seconds, isShared: r.is_shared, pinned: r.pinned,
+    createdAt: new Date(r.created_at).toISOString(), updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}

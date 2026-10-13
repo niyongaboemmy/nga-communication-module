@@ -530,8 +530,11 @@ export const createMeetingSchema = z.object({
   conversationId: z.string().optional(),
   scheduledStart: z.string().datetime().optional(),
   scheduledEnd: z.string().datetime().optional(),
-  /** RFC 5545 RRULE, stored verbatim and expanded by the client. */
-  recurrenceRule: z.string().max(500).optional(),
+  /** RFC 5545 RRULE, stored verbatim and expanded by the client. One line of
+   *  NAME=VALUE parts only — it is written into .ics files, so no CR/LF. */
+  recurrenceRule: z.string().max(500)
+    .regex(/^(RRULE:)?[A-Z]+=[A-Za-z0-9,:+-]+(;[A-Z]+=[A-Za-z0-9,:+-]+)*$/, 'That repeat rule is not valid.')
+    .optional(),
   mediaMode: z.enum(MEET_MEDIA_MODES).default('auto'),
   settings: meetSettingsSchema.partial().optional(),
   inviteeIds: z.array(z.string()).max(500).optional(),
@@ -539,7 +542,9 @@ export const createMeetingSchema = z.object({
 export type CreateMeetingInput = z.infer<typeof createMeetingSchema>;
 
 export const updateMeetingSchema = createMeetingSchema.partial().extend({
-  status: z.enum(MEETING_STATUSES).optional(),
+  /** Only cancelling (or restoring a cancelled meeting) is an edit; going live
+   *  and ending happen through join/end, which do the bookkeeping. */
+  status: z.enum(['scheduled', 'cancelled']).optional(),
 });
 
 export const joinMeetingSchema = z.object({
