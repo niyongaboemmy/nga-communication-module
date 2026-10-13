@@ -108,6 +108,29 @@ try {
   await page.keyboard.press('Escape');
   check('Escape closes the panel', await page.getByRole('dialog', { name: 'Notifications' }).waitFor({ state: 'hidden', timeout: 3000 }).then(() => true).catch(() => false));
 
+  console.log('\nInterruptions (F-02)');
+  const toasts = (p) => p.locator('[role="status"][aria-live="polite"]');
+  await page.goto(`${BASE}/app/feed`);
+  await bell(page).waitFor({ timeout: 15000 });
+  await call(ann, 'POST', '/api/mail/compose', { to: [bob.email], subject: 'Fees reminder', bodyHtml: '<p>Due Friday.</p>' });
+  check('a mail arriving elsewhere shows a toast', await wait(toasts(page).getByText(/Fees reminder|Ann Sender/).first()));
+  await page.waitForTimeout(500);
+  await bell(page).click();
+  await page.getByRole('dialog', { name: 'Notifications' }).waitFor();
+  await call(ann, 'POST', `/api/chat/conversations/${dm}/messages`, { body: 'PANEL OPEN MESSAGE', nonce: nonce() });
+  await page.waitForTimeout(2000);
+  const inList = await page.getByRole('dialog', { name: 'Notifications' }).getByText('PANEL OPEN MESSAGE').first().isVisible().catch(() => false);
+  const asToast = await toasts(page).getByText('PANEL OPEN MESSAGE').first().isVisible().catch(() => false);
+  check('with the panel open, it lands in the list, not as a toast', inList && !asToast, `inList=${inList} toast=${asToast}`);
+  await page.keyboard.press('Escape');
+  await page.goto(`${BASE}/app/chat?c=${dm}`);
+  await page.locator('#composer').waitFor({ timeout: 15000 });
+  await page.waitForTimeout(800);
+  await call(ann, 'POST', `/api/chat/conversations/${dm}/messages`, { body: 'ALREADY LOOKING', nonce: nonce() });
+  await page.getByText('ALREADY LOOKING').first().waitFor({ timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(800);
+  check('no toast for the conversation already open', !(await toasts(page).getByText('ALREADY LOOKING').isVisible().catch(() => false)));
+
   console.log('\nPhone');
   const phone = await pageFor(browser, bob, { width: 390, height: 800 });
   await phone.goto(`${BASE}/app/feed`);

@@ -12,7 +12,6 @@ import { AppsSwitcher } from '../components/shell/AppsSwitcher';
 import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
 import { NotificationBell } from '../components/shell/NotificationCenter';
-import { NotificationCenterProvider } from '../context/NotificationCenterContext';
 import { GlobalSearch } from '../components/GlobalSearch';
 import { usePresenceReporter } from '../hooks/usePresenceReporter';
 import { useModuleBadges } from '../hooks/useModuleBadges';
@@ -385,7 +384,6 @@ export const AppShell: React.FC = () => {
   const badges = useModuleBadges();
 
   return (
-    <NotificationCenterProvider>
     <div className="h-app flex flex-col overflow-hidden bg-background-light text-text-primary-light dark:bg-background-dark dark:text-text-primary-dark">
       <TopBar onOpenSearch={() => setSearchOpen(true)} myPresence={toPresence(myPresence)} />
       <ConnectionBanner status={connection} />
@@ -404,7 +402,6 @@ export const AppShell: React.FC = () => {
 
       <BottomTabs modules={modules} admin={admin} badges={badges} />
     </div>
-    </NotificationCenterProvider>
   );
 };
 

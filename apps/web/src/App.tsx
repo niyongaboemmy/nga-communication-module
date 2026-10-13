@@ -8,7 +8,8 @@ import { MiniCall } from './components/meet/MiniCall';
 import { ChatProvider } from './pages/chat/ChatProvider';
 import { ChatDock } from './pages/chat/ChatDock';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { ChatNotificationBridge } from './context/ChatNotificationBridge';
+import { NotificationBridge } from './context/NotificationBridge';
+import { NotificationCenterProvider } from './context/NotificationCenterContext';
 import { usePermissions } from './hooks/usePermissions';
 import { SignIn } from './pages/SignIn';
 import { SsoCallback } from './pages/SsoCallback';
@@ -83,6 +84,7 @@ export const App: React.FC = () => (
       {/* Notifications wrap the call, not the other way round: the call raises
           them, and the toast stack must outlive any route that triggered it. */}
       <NotificationProvider>
+      <NotificationCenterProvider>
       {/*
         The active call lives ABOVE <Routes>. React Router unmounts a route
         component when you leave it, and unmounting the meeting would close the
@@ -183,7 +185,7 @@ export const App: React.FC = () => (
             or anywhere else — a notification that only fires on the page it
             came from is not a notification. */}
         <ErrorBoundary fallback={null}>
-          <ChatNotificationBridge />
+          <NotificationBridge />
         </ErrorBoundary>
 
         {/* The launcher, on every page but chat itself and Meet. Inside the
@@ -192,6 +194,7 @@ export const App: React.FC = () => (
         <ChatDock />
       </ChatProvider>
       </MeetCallProvider>
+      </NotificationCenterProvider>
       </NotificationProvider>
     </BrowserRouter>
   </AuthProvider>

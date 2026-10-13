@@ -93,6 +93,14 @@ describe('reading the thing clears its notifications', () => {
     const after = (await as(bob.token).get('/api/notifications?unread=true&module=chat')).body.data.notifications
       .filter((n: { subjectId: string }) => n.subjectId === dm);
     expect(after).toHaveLength(0);
+
+    // A new message in the same conversation re-opens it — once, however
+    // many arrive before it is read.
+    await as(ann.token).post(`/api/chat/conversations/${dm}/messages`, { body: 'one more', nonce: nonce() });
+    await as(ann.token).post(`/api/chat/conversations/${dm}/messages`, { body: 'and another', nonce: nonce() });
+    await sleep(200);
+    const reopened = (await as(bob.token).get('/api/notifications?unread=true&module=chat')).body.data;
+    expect(reopened.notifications.filter((n: { subjectId: string }) => n.subjectId === dm)).toHaveLength(1);
   });
 
   it('opening a mail thread clears the mail notification', async () => {

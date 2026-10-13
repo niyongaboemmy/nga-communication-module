@@ -59,6 +59,8 @@ export interface NotificationRow {
   subject_id: string | null;
   read_at: string | null;
   created_at: string;
+  /** Not a column: whether this write added one to the person's unread count. */
+  fresh?: boolean;
 }
 
 export interface NewNotification {
@@ -68,6 +70,13 @@ export interface NewNotification {
   link?: string | null;
   subjectType?: string | null;
   subjectId?: string | null;
+  /**
+   * A new event about the same subject makes it unread again (the default):
+   * a fresh DM in a conversation whose last notification was read must show.
+   * False for things that can flap — a meeting going live twice must not nag
+   * someone who already dismissed it.
+   */
+  reopen?: boolean;
 }
 
 /**
@@ -88,6 +97,15 @@ export async function notify(
 
   const rows: NotificationRow[] = [];
   for (const userId of recipients) {
+    // Was it already there, and unread? Then this refresh adds nothing to the
+    // unread count — the bell must not count the same thing twice.
+    const { rows: prior } = n.subjectId
+      ? await getPool().query<{ read_at: string | null }>(
+          `SELECT read_at FROM notifications WHERE user_id = $1 AND kind = $2
+             AND subject_type IS NOT DISTINCT FROM $3 AND subject_id = $4`,
+          [userId, n.kind, n.subjectType ?? null, n.subjectId])
+      : { rows: [] as Array<{ read_at: string | null }> };
+    const fresh = !prior[0] || (prior[0].read_at !== null && n.reopen !== false);
     const { rows: written } = await getPool().query<NotificationRow>(
       `INSERT INTO notifications
          (id, user_id, kind, title, body, link, subject_type, subject_id)
@@ -98,15 +116,14 @@ export async function notify(
                        body = EXCLUDED.body,
                        link = EXCLUDED.link,
                        created_at = now(),
-                       -- Refreshing an unread notification leaves it unread;
-                       -- one already dismissed stays dismissed, so a meeting
-                       -- that flaps cannot nag.
-                       read_at = notifications.read_at
+                       -- A new event re-opens it, unless the kind can flap
+                       -- (reopen: false), where a dismissal sticks.
+                       read_at = CASE WHEN $9 THEN NULL ELSE notifications.read_at END
        RETURNING *`,
       [snowflake(), userId, n.kind, n.title, n.body ?? null, n.link ?? null,
-       n.subjectType ?? null, n.subjectId ?? null],
+       n.subjectType ?? null, n.subjectId ?? null, n.reopen !== false],
     );
-    if (written[0]) rows.push(written[0]);
+    if (written[0]) rows.push({ ...written[0], fresh });
   }
   return rows;
 }
@@ -290,6 +307,7 @@ export function toWire(row: NotificationRow): AppNotification {
     subjectId: row.subject_id,
     readAt: row.read_at,
     createdAt: row.created_at,
+    fresh: row.fresh,
   };
 }
 
@@ -303,7 +321,9 @@ export async function push(rows: NotificationRow[]): Promise<void> {
   // would be 500 round trips to Redis.
   const byKey = new Map<string, { userIds: string[]; row: NotificationRow }>();
   for (const row of rows) {
-    const key = `${row.kind}:${row.subject_type}:${row.subject_id}:${row.title}`;
+    // `fresh` differs per person (new to one, a refresh to another), so it
+    // is part of the grouping.
+    const key = `${row.kind}:${row.subject_type}:${row.subject_id}:${row.title}:${row.fresh ? 1 : 0}`;
     const entry = byKey.get(key);
     if (entry) entry.userIds.push(row.user_id);
     else byKey.set(key, { userIds: [row.user_id], row });

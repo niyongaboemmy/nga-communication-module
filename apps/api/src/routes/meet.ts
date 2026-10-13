@@ -1946,6 +1946,8 @@ async function announceLive(meetingId: string): Promise<void> {
     link: `/app/meet/${m.id}`,
     subjectType: 'meeting',
     subjectId: m.id,
+    // A meeting that flaps live → ended → live must not nag someone who dismissed it.
+    reopen: false,
   }, {
     // The host does not need to be told about their own meeting.
     exclude: [m.host_id],

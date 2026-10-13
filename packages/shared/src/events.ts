@@ -60,6 +60,8 @@ export interface AppNotification {
   subjectId: string | null;
   readAt: string | null;
   createdAt: string;
+  /** On a live push: this delivery added one to the unread count (new, or re-opened). */
+  fresh?: boolean;
 }
 
 export interface ClientToServerEvents extends ChatClientToServerEvents, FeedClientToServerEvents {

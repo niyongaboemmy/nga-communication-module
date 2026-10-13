@@ -116,6 +116,8 @@ export const NotificationBell: React.FC = () => {
 
   // Fresh when opened: cheap, and it covers anything missed while offline.
   useEffect(() => { if (open) void center.refresh(); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Tell the bridge: while the panel is open, arrivals show here, not as toasts.
+  useEffect(() => { center.setPanelOpen(open); return () => center.setPanelOpen(false); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!open) return;

@@ -31,6 +31,9 @@ interface NotificationCenterValue {
   refresh: () => Promise<void>;
   markRead: (id: string) => Promise<void>;
   markAllRead: () => Promise<void>;
+  /** The panel is on screen: new arrivals are visible there, so they need no toast. */
+  panelOpen: boolean;
+  setPanelOpen: (open: boolean) => void;
 }
 
 const Ctx = createContext<NotificationCenterValue | null>(null);
@@ -48,6 +51,7 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [filter, setFilter] = useState<NotificationFilter>('all');
   const [unreadOnly, setUnreadOnly] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
   // The request a response belongs to: a filter change mid-flight must not
   // let the older answer overwrite the newer one.
   const generation = useRef(0);
@@ -101,9 +105,12 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
   useEffect(() => {
     if (!user) return;
     const offNew = onSocket('notification:new', (n) => {
-      setUnread((u) => u + 1);
+      // A refresh of one already dismissed (a kind that does not re-open)
+      // arrives read: it updates the list, never the count.
+      if (!n.readAt && n.fresh !== false) setUnread((u) => u + 1);
       if (filter !== 'all' && moduleOf(n.kind) !== filter) return;
-      setItems((cur) => (cur.some((x) => x.id === n.id) ? cur : [n, ...cur]));
+      // Coalesced per subject: the same id moves to the top with its new text.
+      setItems((cur) => [n, ...cur.filter((x) => x.id !== n.id)]);
     });
     const offRead = onSocket('notification:read', ({ ids, unread: total }) => {
       setUnread(total);
@@ -140,8 +147,8 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
 
   const value = useMemo<NotificationCenterValue>(() => ({
     items, unread, loading, hasMore: nextBefore !== null, filter, unreadOnly,
-    setFilter, setUnreadOnly, loadMore, refresh, markRead, markAllRead,
-  }), [items, unread, loading, nextBefore, filter, unreadOnly, loadMore, refresh, markRead, markAllRead]);
+    setFilter, setUnreadOnly, loadMore, refresh, markRead, markAllRead, panelOpen, setPanelOpen,
+  }), [items, unread, loading, nextBefore, filter, unreadOnly, loadMore, refresh, markRead, markAllRead, panelOpen]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 };
