@@ -29,10 +29,10 @@ const check = (n, ok, d = '') => { results.push({ n, ok, d }); console.log(`  ${
 const nonce = () => randomBytes(8).toString('hex');
 const wait = (loc, ms = 8000) => loc.waitFor({ state: 'visible', timeout: ms }).then(() => true).catch(() => false);
 
-async function makeUser(name) {
+async function makeUser(name, roleName = 'Staff') {
   const id = `vnc-${randomBytes(5).toString('hex')}`;
-  const { rows } = await pool.query(`SELECT id FROM roles WHERE name = 'Staff'`);
-  await pool.query(`INSERT INTO users (id, mis_user_id, name, email, role, role_id) VALUES ($1,$1,$2,$3,'staff',$4)`, [id, name, `${id}@amashuri.com`, rows[0].id]);
+  const { rows } = await pool.query(`SELECT id FROM roles WHERE name = $1`, [roleName]);
+  await pool.query(`INSERT INTO users (id, mis_user_id, name, email, role, role_id) VALUES ($1,$1,$2,$3,$4,$5)`, [id, name, `${id}@amashuri.com`, roleName.toLowerCase(), rows[0].id]);
   ids.push(id);
   const perms = (await pool.query(`SELECT p.key FROM permissions p JOIN role_permissions rp ON rp.permission_id = p.id WHERE rp.role_id = $1`, [rows[0].id])).rows.map((r) => r.key);
   const user = { id, misUserId: id, name, email: `${id}@amashuri.com`, role: 'staff' };
@@ -130,6 +130,32 @@ try {
   await page.getByText('ALREADY LOOKING').first().waitFor({ timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(800);
   check('no toast for the conversation already open', !(await toasts(page).getByText('ALREADY LOOKING').isVisible().catch(() => false)));
+
+  console.log('\nModule badges (F-03)');
+  const admin = await makeUser('Ada Admin', 'Admin');
+  const page2 = (await call(admin, 'POST', '/api/feed/pages', { name: `Badge Page ${nonce().slice(0, 4)}`, audience: 'everyone' })).body.data.page.id;
+  await call(bob, 'POST', `/api/feed/pages/${page2}/follow`);
+  await page.goto(`${BASE}/app/mail`);
+  await bell(page).waitFor({ timeout: 15000 });
+  await page.waitForTimeout(1000);
+  const railBadge = (href) => page.evaluate((href) => {
+    const a = [...document.querySelectorAll(`a[href="${href}"]`)].find((x) => x.offsetParent !== null);
+    return (a?.querySelector('[aria-label*="unread"]')?.textContent ?? '').trim();
+  }, href);
+  const post = (await call(admin, 'POST', `/api/feed/pages/${page2}/posts`, { body: 'Sports day moved to Friday' })).body.data.postId;
+  const feedBadge = await page.waitForFunction(() => {
+    const a = [...document.querySelectorAll('a[href="/app/feed"]')].find((x) => x.offsetParent !== null);
+    return (a?.querySelector('[aria-label*="unread"]')?.textContent ?? '').trim() === '1';
+  }, undefined, { timeout: 10000 }).then(() => true).catch(() => false);
+  check('a followed page’s new post badges Feed on the rail, live', feedBadge, await railBadge('/app/feed'));
+  await page.goto(`${BASE}/app/feed/post/${post}`);
+  await page.getByText('Sports day moved to Friday').first().waitFor({ timeout: 10000 }).catch(() => {});
+  const gone = await page.waitForFunction(() => {
+    const a = [...document.querySelectorAll('a[href="/app/feed"]')].find((x) => x.offsetParent !== null);
+    return !a?.querySelector('[aria-label*="unread"]');
+  }, undefined, { timeout: 8000 }).then(() => true).catch(() => false);
+  check('opening the post clears the badge', gone, await railBadge('/app/feed'));
+  await pool.query('DELETE FROM feed_timeline WHERE page_id = $1', [page2]).catch(() => {});
 
   console.log('\nPhone');
   const phone = await pageFor(browser, bob, { width: 390, height: 800 });

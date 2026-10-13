@@ -170,6 +170,19 @@ export async function markSubjectRead(
   return rows.map((r) => r.id);
 }
 
+/** Unread notifications per module (by kind prefix), for the shell's badges (F-03). */
+export async function unreadByModule(userId: string): Promise<Record<NotificationModule, number>> {
+  const { rows } = await getPool().query<{ module: string; n: number }>(
+    `SELECT split_part(kind, '.', 1) AS module, count(*)::int AS n
+       FROM notifications WHERE user_id = $1 AND read_at IS NULL GROUP BY 1`, [userId]);
+  const out: Record<NotificationModule, number> = { chat: 0, mail: 0, feed: 0, meet: 0, other: 0 };
+  for (const r of rows) {
+    const key = (NOTIFICATION_MODULES as readonly string[]).includes(r.module) ? r.module as NotificationModule : 'other';
+    out[key] += r.n;
+  }
+  return out;
+}
+
 export async function unreadCount(userId: string): Promise<number> {
   const { rows } = await getPool().query<{ count: string }>(
     `SELECT count(*)::text AS count FROM notifications

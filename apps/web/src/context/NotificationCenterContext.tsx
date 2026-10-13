@@ -31,6 +31,8 @@ interface NotificationCenterValue {
   refresh: () => Promise<void>;
   markRead: (id: string) => Promise<void>;
   markAllRead: () => Promise<void>;
+  /** Unread per module — the Feed and Meet badges in the shell (F-03). */
+  unreadByModule: Record<'chat' | 'mail' | 'feed' | 'meet' | 'other', number>;
   /** The panel is on screen: new arrivals are visible there, so they need no toast. */
   panelOpen: boolean;
   setPanelOpen: (open: boolean) => void;
@@ -38,7 +40,7 @@ interface NotificationCenterValue {
 
 const Ctx = createContext<NotificationCenterValue | null>(null);
 
-const moduleOf = (kind: string): NotificationFilter | 'other' => {
+const moduleOf = (kind: string): 'chat' | 'mail' | 'feed' | 'meet' | 'other' => {
   const m = kind.split('.')[0];
   return m === 'chat' || m === 'mail' || m === 'feed' || m === 'meet' ? m : 'other';
 };
@@ -52,6 +54,19 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
   const [filter, setFilter] = useState<NotificationFilter>('all');
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [unreadByModule, setUnreadByModule] = useState<NotificationCenterValue['unreadByModule']>(
+    { chat: 0, mail: 0, feed: 0, meet: 0, other: 0 });
+  const countsTimer = useRef<number | null>(null);
+  /** Re-read the per-module counts — debounced, since reads arrive in bursts. */
+  const refreshCounts = useCallback(() => {
+    if (countsTimer.current) window.clearTimeout(countsTimer.current);
+    countsTimer.current = window.setTimeout(() => {
+      apiGet<{ byModule: NotificationCenterValue['unreadByModule'] }>('/api/notifications/counts')
+        .then((r) => { if (r.data) setUnreadByModule(r.data.byModule); })
+        .catch(() => {});
+    }, 250);
+  }, []);
+  useEffect(() => { if (user) refreshCounts(); }, [user, refreshCounts]);
   // The request a response belongs to: a filter change mid-flight must not
   // let the older answer overwrite the newer one.
   const generation = useRef(0);
@@ -107,13 +122,18 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
     const offNew = onSocket('notification:new', (n) => {
       // A refresh of one already dismissed (a kind that does not re-open)
       // arrives read: it updates the list, never the count.
-      if (!n.readAt && n.fresh !== false) setUnread((u) => u + 1);
+      if (!n.readAt && n.fresh !== false) {
+        setUnread((u) => u + 1);
+        const m = moduleOf(n.kind);
+        setUnreadByModule((c) => ({ ...c, [m]: c[m] + 1 }));
+      }
       if (filter !== 'all' && moduleOf(n.kind) !== filter) return;
       // Coalesced per subject: the same id moves to the top with its new text.
       setItems((cur) => [n, ...cur.filter((x) => x.id !== n.id)]);
     });
     const offRead = onSocket('notification:read', ({ ids, unread: total }) => {
       setUnread(total);
+      refreshCounts();
       const now = new Date().toISOString();
       setItems((cur) => {
         const next = cur.map((n) => (!n.readAt && (ids === 'all' || ids.includes(n.id)) ? { ...n, readAt: now } : n));
@@ -121,7 +141,7 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
       });
     });
     return () => { offNew(); offRead(); };
-  }, [user, filter, unreadOnly]);
+  }, [user, filter, unreadOnly, refreshCounts]);
 
   const markRead = useCallback(async (id: string) => {
     const now = new Date().toISOString();
@@ -131,7 +151,7 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
       wasUnread = true;
       return { ...n, readAt: now };
     }));
-    if (wasUnread) setUnread((u) => Math.max(0, u - 1));
+    if (wasUnread) { setUnread((u) => Math.max(0, u - 1)); refreshCounts(); }
     try {
       const r = await apiPost<{ unread: number }>(`/api/notifications/${id}/read`);
       if (typeof r.data?.unread === 'number') setUnread(r.data.unread);
@@ -142,13 +162,14 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
     const now = new Date().toISOString();
     setItems((cur) => (unreadOnly ? [] : cur.map((n) => (n.readAt ? n : { ...n, readAt: now }))));
     setUnread(0);
+    setUnreadByModule({ chat: 0, mail: 0, feed: 0, meet: 0, other: 0 });
     try { await apiPost('/api/notifications/read-all'); } catch { void refresh(); }
   }, [unreadOnly, refresh]);
 
   const value = useMemo<NotificationCenterValue>(() => ({
     items, unread, loading, hasMore: nextBefore !== null, filter, unreadOnly,
-    setFilter, setUnreadOnly, loadMore, refresh, markRead, markAllRead, panelOpen, setPanelOpen,
-  }), [items, unread, loading, nextBefore, filter, unreadOnly, loadMore, refresh, markRead, markAllRead, panelOpen]);
+    setFilter, setUnreadOnly, loadMore, refresh, markRead, markAllRead, panelOpen, setPanelOpen, unreadByModule,
+  }), [items, unread, loading, nextBefore, filter, unreadOnly, loadMore, refresh, markRead, markAllRead, panelOpen, unreadByModule]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 };

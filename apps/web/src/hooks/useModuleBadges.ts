@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { useChat } from '../pages/chat/ChatProvider';
 import { onSocket } from '../lib/socket';
 import { apiGet } from '../lib/api';
+import { useNotificationCenter } from '../context/NotificationCenterContext';
 
 /**
  * Unread counts for every module, in one place.
@@ -15,7 +16,10 @@ import { apiGet } from '../lib/api';
  *   chat — unread in conversations the person has not muted, plus new
  *          replies in threads they follow (thread replies never move a
  *          conversation's own count, so they are added here instead);
- *   mail — unread inbox conversations.
+ *   mail — unread inbox conversations;
+ *   feed, meet — unread notifications for that module (new posts from pages
+ *          you follow, announcements, meetings starting), since neither has
+ *          an unread model of its own.
  *
  * The same total drives the browser tab title and, where supported, the
  * installed app's icon badge.
@@ -27,6 +31,9 @@ export const MAIL_CHANGED_EVENT = 'tupo:mail-changed';
 export function useModuleBadges(): Record<string, number> {
   const { user } = useAuth();
   const { totalUnread, threadsUnreadTotal } = useChat();
+  // Feed and Meet have no unread model of their own: their badge is what the
+  // bell holds for them — new posts from pages you follow, meetings starting.
+  const { unreadByModule } = useNotificationCenter();
   const [mailUnread, setMailUnread] = useState(0);
 
   const refreshMail = useCallback(() => {
@@ -60,13 +67,16 @@ export function useModuleBadges(): Record<string, number> {
   }, [user, refreshMail]);
 
   const chat = totalUnread + threadsUnreadTotal;
-  const total = chat + mailUnread;
+  const feed = unreadByModule.feed;
+  const meet = unreadByModule.meet;
+  const total = chat + mailUnread + feed + meet;
 
   useEffect(() => { setTitleBadge(total); }, [total]);
   useEffect(() => { setAppBadge(total); }, [total]);
   useEffect(() => () => { setTitleBadge(0); setAppBadge(0); }, []);
 
-  return useMemo(() => ({ '/app/chat': chat, '/app/mail': mailUnread }), [chat, mailUnread]);
+  return useMemo(() => ({ '/app/chat': chat, '/app/mail': mailUnread, '/app/feed': feed, '/app/meet': meet }),
+    [chat, mailUnread, feed, meet]);
 }
 
 /**

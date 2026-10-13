@@ -39,6 +39,11 @@ router.get('/', async (req: Request, res: Response) => {
   }));
 });
 
+/** Unread per module — the Feed and Meet badges in the shell read these (F-03). */
+router.get('/counts', async (req: Request, res: Response) => {
+  res.json(ok({ byModule: await notifications.unreadByModule(actor(req).id) }));
+});
+
 /** Tell the person's other devices, so every bell agrees. */
 async function announceRead(userId: string, ids: string[] | 'all'): Promise<number> {
   const unread = await notifications.unreadCount(userId);
