@@ -64,8 +64,8 @@ export function useChatUrl(opts: {
     }
     if (params.get('browse')) {
       onBrowse();
-      const next = new URLSearchParams(params); next.delete('browse');
-      setParams(next, { replace: true });
+      // Functional: another hook (the panel sync) may write in the same tick.
+      setParams((prev) => { const next = new URLSearchParams(prev); next.delete('browse'); return next; }, { replace: true });
       return;
     }
 
@@ -86,8 +86,7 @@ export function useChatUrl(opts: {
     pending.current = { m: null, thread: null };
     if (thread) openThread(thread);
     if (m) void jumpTo(m);
-    const next = new URLSearchParams(params); next.delete('m'); next.delete('thread');
-    setParams(next, { replace: true });
+    setParams((prev) => { const next = new URLSearchParams(prev); next.delete('m'); next.delete('thread'); return next; }, { replace: true });
   }, [activeId, urlC, messagesLoading, messagesConversationId, openThread, jumpTo, params, setParams]);
 
   // state → URL
@@ -100,15 +99,17 @@ export function useChatUrl(opts: {
     }
     if ((activeId ?? null) === (urlC ?? null)) return;
     expected.current = activeId ?? null;
-    const next = new URLSearchParams(params);
-    if (activeId) next.set('c', activeId); else next.delete('c');
-    next.delete('m'); next.delete('thread');
     // Closing is a step back, not a new step: replace, so Back never returns
     // to a conversation the person just closed.
     const replace = replaceNextRef.current || !activeId;
     replaceNextRef.current = false;
     pushedOverList.current = Boolean(activeId) && !replace && !urlC;
-    setParams(next, { replace });
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (activeId) next.set('c', activeId); else next.delete('c');
+      next.delete('m'); next.delete('thread');
+      return next;
+    }, { replace });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- state-driven only
   }, [activeId]);
 

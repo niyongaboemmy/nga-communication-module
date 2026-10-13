@@ -60,7 +60,8 @@
     "verify:security": "node scripts/verify-security.mjs",
     "verify:realtime:journeys": "node scripts/verify-realtime-journeys.mjs",
     "verify:ui:journeys": "node scripts/verify-ui-journeys.mjs",
-    "verify:notifications:ui": "node scripts/verify-notification-center.mjs"
+    "verify:notifications:ui": "node scripts/verify-notification-center.mjs",
+    "verify:navigation": "node scripts/verify-navigation.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

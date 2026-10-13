@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MessagesSquare } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import { EmptyState } from '../../components/ui';
 import { ConversationList } from './ConversationList';
 import { MessageThread } from './MessageThread';
@@ -42,6 +43,9 @@ export type Panel =
   | 'none' | 'details' | 'thread' | 'saved' | 'settings' | 'search' | 'scheduled'
   | 'browse' | 'channel' | 'threads';
 
+/** Panels a URL can name (`?panel=`). */
+const PANELS_IN_URL = new Set<Panel>(['details', 'saved', 'settings', 'search', 'scheduled', 'channel', 'threads']);
+
 const SidePanel: React.FC<{
   width: 'wide' | 'narrow';
   onDismiss: () => void;
@@ -56,6 +60,7 @@ const SidePanel: React.FC<{
       aria-hidden="true"
     />
     <div
+      data-side-panel
       className={`animate-panel-in-right fixed inset-y-0 right-0 z-80 max-w-[90vw] xl:static xl:z-auto ${
         width === 'wide' ? 'w-96 xl:w-96' : 'w-80 xl:w-80'
       }`}
@@ -109,6 +114,36 @@ const ChatWorkspace: React.FC = () => {
    * doing, opens itself, and marks itself read. Reading someone's message has
    * to be something the reader did, not something that happened to them.
    */
+  /*
+   * The open side panel lives in the URL too (F-05): a link can open search
+   * or the threads inbox, and Back closes it. The thread panel and "browse"
+   * have their own parameters, so they are not mirrored here.
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlPanel = searchParams.get('panel');
+  // The URL panel that state has caught up with. Until state shows the panel
+  // a link asked for, the URL wins: writing the default panel back would erase
+  // the ?panel= before it took effect (and StrictMode runs mount effects twice,
+  // so "skip the first run" is not enough).
+  const caughtUpPanel = useRef<string | null>(null);
+  useEffect(() => {
+    if (urlPanel && PANELS_IN_URL.has(urlPanel as Panel)) setPanel(urlPanel as Panel);
+    else if (!urlPanel) setPanel((p) => (PANELS_IN_URL.has(p) ? 'none' : p));
+  }, [urlPanel]);
+  useEffect(() => {
+    if (urlPanel && PANELS_IN_URL.has(urlPanel as Panel) && caughtUpPanel.current !== urlPanel) {
+      if (panel === urlPanel) caughtUpPanel.current = urlPanel;
+      return;
+    }
+    const want = PANELS_IN_URL.has(panel) ? panel : null;
+    if ((searchParams.get('panel') ?? null) === want) return;
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (want) next.set('panel', want); else next.delete('panel');
+      return next;
+    }, { replace: true });
+  }, [panel]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const autoOpened = useRef(false);
   const replaceNextUrl = useRef(false);
   const { back } = useChatUrl({ onBrowse: () => setPanel('browse'), replaceNextRef: replaceNextUrl });
@@ -183,6 +218,13 @@ const ChatWorkspace: React.FC = () => {
       if (e.key === 'Escape' && e.shiftKey) {
         e.preventDefault();
         void markEverythingRead();
+        return;
+      }
+
+      // Escape inside a side panel (its search box, say) closes that panel.
+      if (e.key === 'Escape' && panel !== 'none'
+        && (document.activeElement as HTMLElement | null)?.closest('[data-side-panel]')) {
+        closePanel();
         return;
       }
 

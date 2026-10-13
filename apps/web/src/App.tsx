@@ -15,6 +15,7 @@ import { SignIn } from './pages/SignIn';
 import { SsoCallback } from './pages/SsoCallback';
 import { PendingAccess } from './pages/PendingAccess';
 import { Suspended } from './pages/Suspended';
+import { NotFound } from './pages/NotFound';
 import { AppShell, ComingSoon } from './pages/AppShell';
 import { ChatLayout } from './pages/chat/ChatLayout';
 import { ChatPermalink, ChatInvite } from './pages/chat/ChatLinks';
@@ -45,6 +46,13 @@ import { SavedPosts, PostPermalink, ModerationQueue } from './pages/feed/Screens
 const FeedProviderLayout: React.FC = () => (
   <FeedProvider><Outlet /></FeedProvider>
 );
+
+/** An unknown address outside /app: the 404 for someone signed in, sign-in otherwise. */
+const OutsideNotFound: React.FC = () => {
+  const { isAuthenticated, loading } = useAuth();
+  if (loading) return null;
+  return isAuthenticated ? <NotFound /> : <Navigate to="/" replace />;
+};
 
 /** Requires a Tupo session, which requires MIS sign-in. */
 const Protected: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -146,7 +154,7 @@ export const App: React.FC = () => (
               <RequirePermission anyOf={['MAIL_READ']}><MailLayout /></RequirePermission>} />
             <Route path="mail/t/:threadId" element={
               <RequirePermission anyOf={['MAIL_READ']}><MailLayout /></RequirePermission>} />
-            <Route path="mail/campaigns" element={
+            <Route path="mail/campaigns/:campaignId?" element={
               <RequirePermission anyOf={['MAIL_BULK_SEND', 'MAIL_APPROVE']}><MailCampaigns /></RequirePermission>} />
             <Route path="mail/lists" element={
               <RequirePermission anyOf={['MAIL_LIST_MANAGE']}><MailLists /></RequirePermission>} />
@@ -167,8 +175,10 @@ export const App: React.FC = () => (
               <RequirePermission anyOf={['DASHBOARD_VIEW']}><Dashboard /></RequirePermission>} />
             <Route path="system" element={
               <RequirePermission anyOf={['SYSTEM_HEALTH_VIEW']}><SystemStatus /></RequirePermission>} />
+            {/* Anything else under /app: a real "not found", inside the shell. */}
+            <Route path="*" element={<NotFound />} />
           </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<OutsideNotFound />} />
         </Routes>
 
         {/* Rendered outside <Routes> on purpose: it must survive every

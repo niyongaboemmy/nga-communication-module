@@ -548,7 +548,7 @@ try {
 
   /* ── Notification settings ────────────────────────────────────────────── */
 
-  await A.page.getByRole('button', { name: 'Notification settings' }).click();
+  await A.page.getByRole('button', { name: 'Notification settings', exact: true }).click();
   const settings = A.page.getByRole('complementary', { name: 'Notification settings' });
   check('notification settings open in their own pane', await visible(settings, 5000));
   check('with the three notification levels',
@@ -557,7 +557,7 @@ try {
   await settings.getByRole('checkbox', { name: /Sound/ }).uncheck();
   await A.page.waitForTimeout(600);
   await A.page.reload({ waitUntil: 'domcontentloaded' });
-  await A.page.getByRole('button', { name: 'Notification settings' }).click();
+  await A.page.getByRole('button', { name: 'Notification settings', exact: true }).click();
   const settings2 = A.page.getByRole('complementary', { name: 'Notification settings' });
   await visible(settings2, 5000);
   check('a preference survives a reload — it is saved on change, not on a Save button',
@@ -589,7 +589,7 @@ try {
    * newline. A test that changes durable state has to restore it, or it is not
    * testing one thing, it is testing everything that comes after it too.
    */
-  await A.page.getByRole('button', { name: 'Notification settings' }).click();
+  await A.page.getByRole('button', { name: 'Notification settings', exact: true }).click();
   const settings3 = A.page.getByRole('complementary', { name: 'Notification settings' });
   await visible(settings3, 5000);
   await settings3.getByRole('checkbox', { name: /Enter sends the message/ }).check();
