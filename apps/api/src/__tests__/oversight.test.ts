@@ -101,7 +101,7 @@ describe('reading a conversation', () => {
     await request(app).post(`/api/chat/conversations/${convId}/messages`).set(auth(a.token))
       .send({ body: 'meet me behind the gym', nonce: nonce() });
 
-    const res = await request(app).get(`/api/oversight/conversations/${convId}/messages`).set(auth(admin.token));
+    const res = await request(app).get(`/api/oversight/conversations/${convId}/messages?reason=Conduct%20review`).set(auth(admin.token));
     expect(res.status).toBe(200);
     expect(res.body.data.messages.some((m: { body: string | null }) => m.body === 'meet me behind the gym')).toBe(true);
 
@@ -111,6 +111,13 @@ describe('reading a conversation', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].actor_id).toBe(admin.id);
+    // F-14: the stated reason is part of the record.
+    expect(rows[0].metadata.reason).toBe('Conduct review');
+
+    // And there is no reading without one.
+    const bare = await request(app).get(`/api/oversight/conversations/${convId}/messages`).set(auth(admin.token));
+    expect(bare.status).toBe(400);
+    expect(bare.body.code).toBe('REASON_REQUIRED');
   });
 
   it('does not audit-log a plain metadata fetch', async () => {
@@ -189,7 +196,7 @@ describe('removing a message', () => {
     await request(app).post(`/api/oversight/conversations/${convId}/messages/${messageId}/remove`)
       .set(auth(admin.token)).send({ reason: 'Bullying or harassment' });
 
-    const page = await request(app).get(`/api/oversight/conversations/${convId}/messages`).set(auth(admin.token));
+    const page = await request(app).get(`/api/oversight/conversations/${convId}/messages?reason=Conduct%20review`).set(auth(admin.token));
     const wire = page.body.data.messages.find((m: { id: string }) => m.id === messageId);
     expect(wire.deletedAt).not.toBeNull();
     expect(wire.deletedBy).toBe(admin.id);
@@ -219,7 +226,7 @@ describe('removing a message', () => {
     expect(chatView.body.data.messages.find((m: { id: string }) => m.id === messageId).body).toBeNull();
 
     // …oversight sees what it said.
-    const oView = await request(app).get(`/api/oversight/conversations/${convId}/messages`).set(auth(admin.token));
+    const oView = await request(app).get(`/api/oversight/conversations/${convId}/messages?reason=Conduct%20review`).set(auth(admin.token));
     expect(oView.body.data.messages.find((m: { id: string }) => m.id === messageId).body)
       .toBe('wish I had not sent this');
   });
@@ -243,7 +250,7 @@ describe('removing a message', () => {
 
     const { convId, messageId } = await seedMessage();
 
-    const read = await request(app).get(`/api/oversight/conversations/${convId}/messages`).set(auth(reviewerToken));
+    const read = await request(app).get(`/api/oversight/conversations/${convId}/messages?reason=Conduct%20review`).set(auth(reviewerToken));
     expect(read.status).toBe(200);
 
     const remove = await request(app)

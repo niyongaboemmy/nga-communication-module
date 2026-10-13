@@ -95,13 +95,19 @@ router.get('/conversations/:id', ...VIEW, wrap(async (req, res) => {
  * The messages themselves.
  *
  * This is the read that matters, so every page of it lands in the audit log
- * against the reviewer's name. Pagination uses the same `before`/`after` seq
- * cursor as the ordinary message endpoint.
+ * against the reviewer's name — and, since F-14, with the reason they gave
+ * for reading it: reading people's private messages with no stated cause is
+ * exactly what the log exists to make visible. Pagination uses the same
+ * `before`/`after` seq cursor as the ordinary message endpoint.
  */
 router.get('/conversations/:id/messages',
   ...VIEW, wrap(async (req, res) => {
     const me = actor(req);
     const id = req.params.id!;
+    const reason = String(req.query.reason ?? '').trim().slice(0, 300);
+    if (reason.length < 3) {
+      return res.status(400).json({ ...fail('Say why you are opening this conversation.'), code: 'REASON_REQUIRED' });
+    }
 
     // 404s here if the conversation does not exist, before we log anything.
     const conversation = await chat.oversightGetConversation(id);
@@ -128,6 +134,7 @@ router.get('/conversations/:id/messages',
         messagesReturned: page.messages.length,
         deletedMessagesRevealed: page.messages.filter((m) => m.deletedAt).length,
         before: num(req.query.before) ?? null,
+        reason,
       },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
@@ -138,6 +145,7 @@ router.get('/conversations/:id/messages',
         conversationId: id, conversationType: conversation.type,
         messagesReturned: page.messages.length,
         deletedMessagesRevealed: page.messages.filter((m) => m.deletedAt).length,
+        reason,
       },
     });
 

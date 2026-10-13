@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { apiGet, ApiError } from '../../lib/api';
 import { getSocket } from '../../lib/socket';
+import { useAuth } from '../../context/AuthContext';
 import { Card, PageHeader, Spinner, EmptyState, Avatar } from '../../components/ui';
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -87,20 +88,24 @@ function agoShort(iso: string | null): string {
   return `${Math.floor(s / 86400)}d`;
 }
 
+/**
+ * Charts follow the app's theme (F-14). This used to watch a `data-theme`
+ * attribute nothing sets — the app switches with the `.dark` class — so the
+ * charts stayed in the device's colours whatever the person chose.
+ */
 function useIsDark(): boolean {
-  const [dark, setDark] = useState(() =>
-    document.documentElement.dataset.theme === 'dark'
-    || (document.documentElement.dataset.theme !== 'light'
-        && window.matchMedia?.('(prefers-color-scheme: dark)').matches));
+  return useAuth().theme === 'dark';
+}
+
+/** Is this tab on screen? A dashboard nobody is looking at has no reason to poll. */
+function useTabVisible(): boolean {
+  const [visible, setVisible] = useState(() => !document.hidden);
   useEffect(() => {
-    const obs = new MutationObserver(() => setDark(
-      document.documentElement.dataset.theme === 'dark'
-      || (document.documentElement.dataset.theme !== 'light'
-          && window.matchMedia?.('(prefers-color-scheme: dark)').matches)));
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    return () => obs.disconnect();
+    const on = () => setVisible(!document.hidden);
+    document.addEventListener('visibilitychange', on);
+    return () => document.removeEventListener('visibilitychange', on);
   }, []);
-  return dark;
+  return visible;
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -155,12 +160,18 @@ export const Dashboard: React.FC = () => {
 
   useEffect(() => { void load(false); }, [load]);
 
-  // Poll, and re-render the "updated" label every second.
+  // Poll, and re-render the "updated" label every second — only while the
+  // tab is on screen (F-14). Coming back catches up at once.
+  const visible = useTabVisible();
+  const lastLoad = useRef(Date.now());
+  useEffect(() => { if (!loading && !refreshing) lastLoad.current = Date.now(); }, [loading, refreshing]);
   useEffect(() => {
+    if (!visible) return;
+    if (Date.now() - lastLoad.current > POLL_MS) void load(true);
     const poll = setInterval(() => void load(true), POLL_MS);
     const label = setInterval(() => setTick((t) => t + 1), 1000);
     return () => { clearInterval(poll); clearInterval(label); };
-  }, [load]);
+  }, [load, visible]);
 
   // Between polls: a presence change is the cheapest live signal there is.
   const nudge = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -168,8 +179,8 @@ export const Dashboard: React.FC = () => {
     const s = getSocket();
     if (!s) return;
     const onPresence = () => {
-      if (nudge.current) return;
-      nudge.current = setTimeout(() => { nudge.current = null; void load(true); }, 3000);
+      if (nudge.current || document.hidden) return;
+      nudge.current = setTimeout(() => { nudge.current = null; if (!document.hidden) void load(true); }, 3000);
     };
     s.on('presence:update', onPresence);
     return () => { s.off('presence:update', onPresence); if (nudge.current) clearTimeout(nudge.current); };

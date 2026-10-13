@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   ShieldCheck, Search, Lock, Hash, Users as UsersIcon, MessageSquare, Megaphone,
   AlertTriangle, ChevronDown, ChevronUp, Archive, RefreshCw, X, Download, FileText, Play,
@@ -14,6 +15,7 @@ import {
 import { Lightbox, VoiceNote } from '../chat/Attachments';
 import { useMediaUrl, downloadFile } from '../chat/uploads';
 import { formatBytes } from '../chat/data';
+import { LoadError } from '../../components/LoadError';
 
 /* ────────────────────────────────────────────────────────────────────────── *
  * Types — the slices of the API payloads this page reads
@@ -169,24 +171,44 @@ function buildRows(messages: WireMessage[]): Row[] {
 export const Oversight: React.FC = () => {
   const { can } = usePermissions();
   const mayRedact = can('OVERSIGHT_MESSAGE_DELETE');
+  // Re-render once a reason is given (the reasons live outside React state).
+  const [, setReasonTick] = useState(0);
 
   const [stats, setStats] = useState<Stats | null>(null);
-  const [filter, setFilter] = useState<'all' | ConvType>('all');
-  const [query, setQuery] = useState('');
-  const [debounced, setDebounced] = useState('');
-  const [includeArchived, setIncludeArchived] = useState(false);
+  // Filters and the open conversation live in the address (F-14): a reload,
+  // a shared link or the back button returns to the same place.
+  const [params, setParams] = useSearchParams();
+  const filter = (FILTERS.find((f) => f.key === params.get('type'))?.key ?? 'all') as 'all' | ConvType;
+  const includeArchived = params.get('archived') === '1';
+  const debounced = params.get('q') ?? '';
+  const selectedId = params.get('c');
+  const setParam = useCallback((patch: Record<string, string | null>) => {
+    setParams((cur) => {
+      const next = new URLSearchParams(cur);
+      for (const [k, v] of Object.entries(patch)) { if (v) next.set(k, v); else next.delete(k); }
+      return next;
+    }, { replace: !('c' in patch) });
+  }, [setParams]);
+  const setFilter = (f: 'all' | ConvType) => setParam({ type: f === 'all' ? null : f });
+  const setIncludeArchived = (v: boolean) => setParam({ archived: v ? '1' : null });
+  const setSelectedId = (id: string | null) => setParam({ c: id });
+  const [query, setQuery] = useState(debounced);
 
   const [conversations, setConversations] = useState<OversightConversation[]>([]);
   const [total, setTotal] = useState(0);
   const [listLoading, setListLoading] = useState(true);
+  const [listFailed, setListFailed] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [listAttempt, setListAttempt] = useState(0);
+  /** A conversation opened from a link that is not in the loaded page of the list. */
+  const [linked, setLinked] = useState<OversightConversation | null>(null);
+  const [linkedFailed, setLinkedFailed] = useState(false);
 
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(query.trim()), 250);
+    if (query.trim() === debounced) return;
+    const t = setTimeout(() => setParam({ q: query.trim() || null }), 250);
     return () => clearTimeout(t);
-  }, [query]);
+  }, [query, debounced, setParam]);
 
   const refreshStats = useCallback(() => {
     apiGet<{ stats: Stats }>('/api/oversight/stats')
@@ -211,31 +233,49 @@ export const Oversight: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     setListLoading(true);
+    setListFailed(false);
     loadList(0)
       .then((d) => {
         if (cancelled) return;
         setConversations(d.conversations);
         setTotal(d.total);
       })
+      // A failed load says so (F-14) rather than "No conversations match".
+      .catch(() => { if (!cancelled) setListFailed(true); })
       .finally(() => { if (!cancelled) setListLoading(false); });
     return () => { cancelled = true; };
-  }, [loadList]);
+  }, [loadList, listAttempt]);
 
+  const [moreFailed, setMoreFailed] = useState(false);
   const loadMore = async () => {
     setLoadingMore(true);
+    setMoreFailed(false);
     try {
       const d = await loadList(conversations.length);
-      setConversations((prev) => [...prev, ...d.conversations]);
+      setConversations((prev) => [...prev, ...d.conversations.filter((c) => !prev.some((p) => p.id === c.id))]);
       setTotal(d.total);
+    } catch {
+      setMoreFailed(true);
     } finally {
       setLoadingMore(false);
     }
   };
 
-  const selected = useMemo(
+  const fromList = useMemo(
     () => conversations.find((c) => c.id === selectedId) ?? null,
     [conversations, selectedId],
   );
+  // Opened from a link: fetch just that conversation's summary.
+  useEffect(() => {
+    setLinkedFailed(false);
+    if (!selectedId || fromList || listLoading) { setLinked(null); return; }
+    let cancelled = false;
+    apiGet<{ conversation: OversightConversation }>(`/api/oversight/conversations/${selectedId}`)
+      .then((r) => { if (!cancelled) setLinked(r.data?.conversation ?? null); })
+      .catch(() => { if (!cancelled) setLinkedFailed(true); });
+    return () => { cancelled = true; };
+  }, [selectedId, fromList, listLoading]);
+  const selected = fromList ?? (linked?.id === selectedId ? linked : null);
 
   return (
     // Below lg the page scrolls as a whole and the panes are master/detail:
@@ -289,6 +329,8 @@ export const Oversight: React.FC = () => {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {listLoading ? (
               <div className="grid place-items-center py-16"><Spinner /></div>
+            ) : listFailed ? (
+              <LoadError what="conversations" onRetry={() => setListAttempt((n) => n + 1)} />
             ) : conversations.length === 0 ? (
               <EmptyState title="No conversations match" />
             ) : (
@@ -311,7 +353,7 @@ export const Oversight: React.FC = () => {
             </p>
             {conversations.length < total && (
               <Button variant="ghost" size="sm" onClick={loadMore} disabled={loadingMore} className="mt-1">
-                {loadingMore ? <Spinner className="h-4 w-4" /> : <><ChevronDown size={14} /> Load more</>}
+                {loadingMore ? <Spinner className="h-4 w-4" /> : <><ChevronDown size={14} /> {moreFailed ? 'Could not load — try again' : 'Load more'}</>}
               </Button>
             )}
           </div>
@@ -327,13 +369,26 @@ export const Oversight: React.FC = () => {
               <ArrowLeft size={14} /> All conversations
             </button>
           )}
-          {selected ? (
+          {selected && !reasons.get(selected.id) ? (
+            <ReasonGate
+              key={selected.id}
+              summary={selected}
+              onOpen={(reason) => { reasons.set(selected.id, reason); setReasonTick((n) => n + 1); }}
+            />
+          ) : selected ? (
             <ConversationViewer
               key={selected.id}
               summary={selected}
+              reason={reasons.get(selected.id)!}
               mayRedact={mayRedact}
               onRedacted={refreshStats}
             />
+          ) : selectedId && linkedFailed ? (
+            <div className="grid flex-1 place-items-center p-8">
+              <LoadError what="this conversation" onRetry={() => { setLinkedFailed(false); setLinked(null); setListAttempt((n) => n + 1); }} />
+            </div>
+          ) : selectedId ? (
+            <div className="grid flex-1 place-items-center"><Spinner /></div>
           ) : (
             <div className="grid flex-1 place-items-center p-8 text-center">
               <div className="max-w-sm space-y-2">
@@ -436,11 +491,76 @@ const ConversationRow: React.FC<{
  * Conversation viewer
  * ────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * Why this conversation is being opened (F-14). Reading someone's private
+ * messages needs a stated cause, and the cause goes into the audit entry of
+ * every page read. Asked once per conversation per visit to this screen.
+ */
+const reasons = new Map<string, string>();
+const OPEN_REASONS = [
+  'Academic-conduct review',
+  'Safeguarding concern',
+  'Reported content',
+  'Data or legal request',
+] as const;
+
+const ReasonGate: React.FC<{ summary: OversightConversation; onOpen: (reason: string) => void }> = ({ summary, onOpen }) => {
+  const [choice, setChoice] = useState<string>('');
+  const [note, setNote] = useState('');
+  const other = choice === 'Other';
+  const reason = other ? note.trim() : [choice, note.trim()].filter(Boolean).join(' — ');
+  const ready = other ? note.trim().length >= 10 : Boolean(choice);
+  const Icon = TYPE_META[summary.type].icon;
+  return (
+    <form
+      className="flex flex-1 flex-col items-center justify-center overflow-y-auto p-6"
+      onSubmit={(e) => { e.preventDefault(); if (ready) onOpen(reason.slice(0, 300)); }}
+    >
+      <div className="w-full max-w-md">
+        <div className="mb-4 flex items-center gap-2">
+          <span className="grid h-9 w-9 place-items-center rounded-xl bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-300"><Icon size={17} /></span>
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">{summary.name}</h2>
+            <p className="text-xs text-text-secondary-light dark:text-text-secondary-dark">
+              {TYPE_META[summary.type].label} · {summary.memberCount} participants · {summary.messageCount.toLocaleString()} messages
+            </p>
+          </div>
+        </div>
+        <fieldset>
+          <legend className="mb-2 text-sm font-medium text-text-primary-light dark:text-text-primary-dark">Why are you opening this conversation?</legend>
+          <div className="space-y-1.5">
+            {[...OPEN_REASONS, 'Other'].map((r) => (
+              <label key={r} className={`flex cursor-pointer items-center gap-2.5 rounded-xl border px-3 py-2 text-sm transition-colors ${
+                choice === r ? 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-500/10'
+                  : 'border-border-light hover:bg-surface-light dark:border-border-dark/40 dark:hover:bg-surface-dark'}`}>
+                <input type="radio" name="oversight-reason" value={r} checked={choice === r} onChange={() => setChoice(r)} />
+                <span className="text-text-primary-light dark:text-text-primary-dark">{r}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        <label className="mt-3 block text-xs text-text-secondary-light dark:text-text-secondary-dark">
+          {other ? 'Describe the reason (at least 10 characters)' : 'Case reference or note (optional)'}
+          <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} maxLength={250}
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-text-primary-light dark:border-border-dark dark:bg-elevated-dark dark:text-text-primary-dark" />
+        </label>
+        <p className="mt-2 flex items-start gap-1.5 text-xs text-text-secondary-light dark:text-text-secondary-dark">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-500" />
+          Every page you read is recorded in the audit log with your name and this reason.
+        </p>
+        <Button type="submit" disabled={!ready} className="mt-4 w-full">Open conversation</Button>
+      </div>
+    </form>
+  );
+};
+
 const ConversationViewer: React.FC<{
   summary: OversightConversation;
+  /** Why the reviewer opened it; sent with every page read, so each lands in the audit with it. */
+  reason: string;
   mayRedact: boolean;
   onRedacted: () => void;
-}> = ({ summary, mayRedact, onRedacted }) => {
+}> = ({ summary, reason, mayRedact, onRedacted }) => {
   const { user } = useAuth();
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
   const [messages, setMessages] = useState<WireMessage[]>([]);
@@ -465,7 +585,7 @@ const ConversationViewer: React.FC<{
     Promise.all([
       apiGet<{ conversation: ConversationDetail }>(`/api/oversight/conversations/${summary.id}`),
       apiGet<{ messages: WireMessage[]; nextCursor: string | null }>(
-        `/api/oversight/conversations/${summary.id}/messages?limit=40`,
+        `/api/oversight/conversations/${summary.id}/messages?limit=40&reason=${encodeURIComponent(reason)}`,
       ),
     ])
       .then(([d, m]) => {
@@ -479,7 +599,7 @@ const ConversationViewer: React.FC<{
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [summary.id]);
+  }, [summary.id, reason]);
 
   useEffect(() => {
     if (!loading) scrollToBottom();
@@ -492,7 +612,7 @@ const ConversationViewer: React.FC<{
     const before = el ? el.scrollHeight - el.scrollTop : 0;
     try {
       const m = await apiGet<{ messages: WireMessage[]; nextCursor: string | null }>(
-        `/api/oversight/conversations/${summary.id}/messages?limit=40&before=${olderCursor}`,
+        `/api/oversight/conversations/${summary.id}/messages?limit=40&before=${olderCursor}&reason=${encodeURIComponent(reason)}`,
       );
       setMessages((prev) => [...(m.data?.messages ?? []), ...prev]);
       setOlderCursor(m.data?.nextCursor ? Number(m.data.nextCursor) : null);

@@ -127,7 +127,7 @@ try {
   const staffList = await api('/api/oversight/conversations', teacher.token);
   check('a plain staff member cannot list conversations', staffList.status === 403, String(staffList.status));
 
-  const staffRead = await api(`/api/oversight/conversations/${groupId}/messages`, teacher.token);
+  const staffRead = await api(`/api/oversight/conversations/${groupId}/messages?reason=Conduct%20review`, teacher.token);
   check('nor read a conversation they are not in', staffRead.status === 403, String(staffRead.status));
 
   // `reviewer` is a plain staff member here — the custom view-only role is not
@@ -144,13 +144,13 @@ try {
     list.status === 200 && list.data.conversations.some((c) => c.id === dmId),
     String(list.status));
 
-  const groupMsgs = await api(`/api/oversight/conversations/${groupId}/messages`, admin.token);
+  const groupMsgs = await api(`/api/oversight/conversations/${groupId}/messages?reason=Conduct%20review`, admin.token);
   check('the admin can read a private group they never joined',
     groupMsgs.status === 200
       && groupMsgs.data.messages.some((m) => m.body === 'lets copy the answers in the exam'),
     String(groupMsgs.status));
 
-  const dmMsgs = await api(`/api/oversight/conversations/${dmId}/messages`, admin.token);
+  const dmMsgs = await api(`/api/oversight/conversations/${dmId}/messages?reason=Conduct%20review`, admin.token);
   check('and a one-to-one DM between two other people',
     dmMsgs.data.messages.some((m) => m.body === 'come to my office alone after class'));
 
@@ -173,7 +173,7 @@ try {
   });
   await pool.query('UPDATE users SET role_id = $1 WHERE id = $2', [role.data.id, reviewer.id]);
 
-  const revRead = await api(`/api/oversight/conversations/${groupId}/messages`, reviewer.token);
+  const revRead = await api(`/api/oversight/conversations/${groupId}/messages?reason=Conduct%20review`, reviewer.token);
   check('a view-only reviewer can read', revRead.status === 200, String(revRead.status));
 
   const targetMsg = revRead.data.messages.find((m) => m.body === 'lets copy the answers in the exam');
@@ -207,7 +207,7 @@ try {
     memberView.data.messages.find((m) => m.id === targetMsg.id)?.body === null
       && memberView.data.messages.find((m) => m.id === targetMsg.id)?.deletedAt !== null);
 
-  const afterView = await api(`/api/oversight/conversations/${groupId}/messages`, admin.token);
+  const afterView = await api(`/api/oversight/conversations/${groupId}/messages?reason=Conduct%20review`, admin.token);
   const revealed = afterView.data.messages.find((m) => m.id === targetMsg.id);
   check('oversight can still read what a removed message said',
     revealed?.body === 'lets copy the answers in the exam'
@@ -235,7 +235,7 @@ try {
     method: 'POST', body: JSON.stringify({ body: 'delete this quick', nonce: nonce() }) });
   await api(`/api/chat/conversations/${groupId}/messages/${selfDel.data.message.id}`, pupilA.token,
     { method: 'DELETE' });
-  const selfView = await api(`/api/oversight/conversations/${groupId}/messages`, admin.token);
+  const selfView = await api(`/api/oversight/conversations/${groupId}/messages?reason=Conduct%20review`, admin.token);
   check('a message its own sender deleted is still readable to oversight',
     selfView.data.messages.find((m) => m.id === selfDel.data.message.id)?.body === 'delete this quick');
 
@@ -299,7 +299,7 @@ try {
   /* ── No back door to participation ───────────────────────────────────── */
   step('read-and-redact only');
 
-  const post = await api(`/api/oversight/conversations/${groupId}/messages`, admin.token, {
+  const post = await api(`/api/oversight/conversations/${groupId}/messages?reason=Conduct%20review`, admin.token, {
     method: 'POST', body: JSON.stringify({ body: 'hello', nonce: nonce() }) });
   check('there is no oversight endpoint to post a message', post.status === 404, String(post.status));
 

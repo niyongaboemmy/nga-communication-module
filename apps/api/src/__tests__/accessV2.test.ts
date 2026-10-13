@@ -516,7 +516,7 @@ describe('enforce: oversight', () => {
     } });
     const { convId, messageId } = await seedMessage(author.id);
 
-    const read = await request(app).get(`/api/oversight/conversations/${convId}/messages`).set(auth(reviewer.token));
+    const read = await request(app).get(`/api/oversight/conversations/${convId}/messages?reason=Conduct%20review`).set(auth(reviewer.token));
     expect(read.status).toBe(200);
     expect(audits).toContainEqual(expect.objectContaining({
       action: 'tupo.oversight.conversation.read', actor_id: Number(reviewer.misId),
@@ -544,7 +544,7 @@ describe('enforce: oversight', () => {
     const admin = await makeUser('Admin', { role: 'admin' });
     const author = await makeUser('Staff');
     const { convId } = await seedMessage(author.id);
-    expect((await request(app).get(`/api/oversight/conversations/${convId}/messages`).set(auth(admin.token))).status).toBe(200);
+    expect((await request(app).get(`/api/oversight/conversations/${convId}/messages?reason=Conduct%20review`).set(auth(admin.token))).status).toBe(200);
     expect(audits).toHaveLength(0);
   });
 });

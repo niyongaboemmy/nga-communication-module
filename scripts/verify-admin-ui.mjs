@@ -282,6 +282,99 @@ try {
     await ctx.close();
   }
 
+  console.log('── Oversight: reason to open, address, errors');
+  {
+    const API = 'http://localhost:5190';
+    const call = (u, method, path, body) => fetch(`${API}${path}`, { method, headers: { authorization: `Bearer ${u.token}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then((r) => r.json());
+    const a = await makeUser(`Ovi Alpha ${tag}`); const b = await makeUser(`Ovi Beta ${tag}`);
+    const group = (await call(a, 'POST', '/api/chat/conversations', { type: 'group', name: `Ovi Group ${tag}`, memberIds: [b.id] })).data.conversation.id;
+    await call(a, 'POST', `/api/chat/conversations/${group}/messages`, { body: `OVERSIGHT LINE ${tag}`, nonce: randomBytes(6).toString('hex') });
+
+    const { ctx, page } = await pageFor(browser, admin);
+    await page.goto(`${BASE}/app/admin/oversight?q=${encodeURIComponent(`Ovi Group ${tag}`)}`, { waitUntil: 'networkidle' });
+    await page.getByText(`Ovi Group ${tag}`).first().click();
+    await sleep(500);
+    const open = page.getByRole('button', { name: 'Open conversation' });
+    let readBeforeReason = false;
+    const onReq = (r) => { if (r.url().includes(`/api/oversight/conversations/${group}/messages`)) readBeforeReason = true; };
+    page.on('request', onReq);
+    await sleep(600);
+    page.off('request', onReq);
+    check('opening a conversation first asks why (and reads nothing yet)', await page.getByText('Why are you opening this conversation?').isVisible()
+      && await open.isDisabled() && !readBeforeReason);
+    check('the open conversation is in the address', new URL(page.url()).searchParams.get('c') === group);
+    await page.getByLabel('Safeguarding concern').check();
+    await page.getByLabel(/Case reference or note/).fill(`Case ${tag}`);
+    const read = page.waitForResponse((r) => r.url().includes(`/api/oversight/conversations/${group}/messages`), { timeout: 8000 }).catch(() => null);
+    await open.click();
+    const readRes = await read;
+    await sleep(500);
+    check('with a reason the messages open', readRes?.status() === 200 && (await page.getByText(`OVERSIGHT LINE ${tag}`).count()) >= 2, `status=${readRes?.status()}`);
+    const logged = (await pool.query(`SELECT metadata->>'reason' AS r FROM audit_log WHERE action = 'chat.oversight.conversation.read' AND target_id = $1 ORDER BY created_at DESC LIMIT 1`, [group])).rows[0]?.r;
+    check('the reason is written to the audit entry', logged === `Safeguarding concern — Case ${tag}`, String(logged));
+    await page.reload({ waitUntil: 'networkidle' });
+    await sleep(500);
+    check('a reload comes back to the same conversation (and asks again)', await page.getByText('Why are you opening this conversation?').isVisible()
+      && await page.locator('form').getByText(`Ovi Group ${tag}`).isVisible());
+    await page.getByRole('button', { name: 'Groups' }).first().click().catch(() => {});
+    await sleep(400);
+    check('list filters are in the address', /type=group/.test(page.url()), page.url());
+    await ctx.close();
+
+    const failing = await pageFor(browser, admin);
+    await failing.page.route('**/api/oversight/conversations?**', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: '{"success":false}' }));
+    await failing.page.goto(`${BASE}/app/admin/oversight`, { waitUntil: 'networkidle' });
+    check('a failed list says so, with a retry', await failing.page.getByRole('button', { name: /Try again|Retry/ }).first().isVisible().catch(() => false)
+      && !(await failing.page.getByText('No conversations match').isVisible().catch(() => false)));
+    await failing.ctx.close();
+  }
+
+  console.log('── Dashboard and system status');
+  {
+    // The app says dark; the device says light.
+    const { ctx, page } = await pageFor(browser, admin, { colorScheme: 'light' });
+    let polls = 0;
+    page.on('request', (r) => { if (r.url().includes('/api/dashboard/overview')) polls++; });
+    await page.goto(`${BASE}/app/admin/dashboard`, { waitUntil: 'networkidle' });
+    await sleep(800);
+    // Switch the app to dark the way a person would; the device stays light.
+    const toDark = page.getByRole('button', { name: 'Switch to dark theme' });
+    if (await toDark.isVisible().catch(() => false)) await toDark.click();
+    await sleep(500);
+    const html = await page.content();
+    // Inline colours come back from the DOM as rgb(): chat is #3987e5 dark, #2a78d6 light.
+    const darkChat = html.includes('rgb(57, 135, 229)'), lightChat = html.includes('rgb(42, 120, 214)');
+    check('dashboard charts use the app theme, not the device', darkChat && !lightChat, `dark=${darkChat} light=${lightChat}`);
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    const before = polls;
+    await sleep(16_500);
+    check('a hidden dashboard stops polling', polls === before, `${polls - before} polls while hidden`);
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await sleep(1500);
+    check('…and catches up as soon as it is back on screen', polls > before, `${polls - before} after return`);
+    await ctx.close();
+
+    const st = await pageFor(browser, admin);
+    await st.page.route('**/svc/files/health', () => { /* never answers */ });
+    await st.page.goto(`${BASE}/app/system`, { waitUntil: 'domcontentloaded' });
+    await sleep(6500);
+    const files = await st.page.locator('[data-service="files"]').getAttribute('data-state');
+    const api = await st.page.locator('[data-service="api"]').getAttribute('data-state');
+    check('a service that never answers times out instead of spinning', files === 'timeout', `files=${files}`);
+    check('the others still report', api === 'healthy', `api=${api}`);
+    check('system status says when it last checked and can re-check', await st.page.getByText(/Checked \d/).isVisible()
+      && await st.page.getByRole('button', { name: 'Check now' }).isVisible());
+    await st.ctx.close();
+  }
+
   console.log('── Users: phone');
   {
     const { ctx, page } = await pageFor(browser, admin, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
