@@ -1,5 +1,6 @@
 import { getPool, snowflake } from '@tupo/db';
 import { Redis } from 'ioredis';
+import { sendWebPush } from './webPush.js';
 import type { AppNotification } from '@tupo/shared';
 
 /**
@@ -351,6 +352,11 @@ export async function push(rows: NotificationRow[]): Promise<void> {
       // Stored but not pushed: the client picks it up on its next fetch.
     }
   }
+
+  // Closed tabs and the installed app (F-04): web push to whoever is offline.
+  // Not awaited — the request that raised the notification must not wait on
+  // a push service.
+  void sendWebPush(rows.filter((r) => !r.read_at), client).catch(() => {});
 }
 
 /** Store and deliver in one call — what every caller actually wants. */
@@ -382,6 +388,7 @@ export async function relay(rooms: string[], event: string, payload: unknown): P
   }
 }
 
+export * from './webPush.js';
 export * as reminders from './reminders.js';
 
 /** Everyone's NGA profile photo + cover, refreshed from MIS by the worker. */

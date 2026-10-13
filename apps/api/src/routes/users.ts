@@ -5,6 +5,7 @@ import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js
 import { authorizePermission } from '../middleware/authorize.js';
 import { beyond, permissionKeysOfRole } from '../access/roleSafety.js';
 import { publishSessionEnd } from '../services/chatRealtime.js';
+import { removeAllSubscriptions } from '@tupo/notify';
 import {
   audit, getUserTheme, setUserTheme, roleLabelForLevel, academicLevelFromPlacement,
 } from '../services/userService.js';
@@ -191,6 +192,8 @@ router.put('/:id/status', authorizePermission('USERS_MANAGE'), async (req: Reque
       `INSERT INTO session_revocations (user_id, revoked_at) VALUES ($1, now())
        ON CONFLICT (user_id) DO UPDATE SET revoked_at = EXCLUDED.revoked_at`, [req.params.id]);
     publishSessionEnd([String(req.params.id)]);
+    // And no more pushes to their devices.
+    await removeAllSubscriptions(String(req.params.id)).catch(() => {});
   }
 
   await audit({

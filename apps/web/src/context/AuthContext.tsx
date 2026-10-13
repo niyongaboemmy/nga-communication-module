@@ -94,13 +94,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     void endActivity();
     // Nothing queued offline survives a sign-out to be sent as someone else.
     void import('../pages/chat/outbox').then((o) => o.clearAll()).catch(() => {});
-    clearSession();
-    setToken(null);
-    setUser(null);
-    setPermissions([]);
-    setRolePermissions([]);
-    setRoleName(null);
-    window.location.href = '/';
+    const finish = () => {
+      clearSession();
+      setToken(null);
+      setUser(null);
+      setPermissions([]);
+      setRolePermissions([]);
+      setRoleName(null);
+      window.location.href = '/';
+    };
+    // This device stops receiving pushes for this person (F-04) — asked while
+    // the session that may do so still exists, but never holding up sign-out.
+    void Promise.race([
+      import('../lib/push').then((p) => p.disablePush()).catch(() => undefined),
+      new Promise((r) => setTimeout(r, 1500)),
+    ]).finally(finish);
   }, []);
 
   /**

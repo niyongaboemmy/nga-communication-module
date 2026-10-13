@@ -1,6 +1,7 @@
 import express, { Router, type Request, type Response } from 'express';
 import { LogoutTokenError, verifyLogoutToken } from '../utils/ssoLogout.js';
 import { publishSessionEnd } from '../services/chatRealtime.js';
+import { removeAllSubscriptions } from '@tupo/notify';
 import jwt from 'jsonwebtoken';
 import { ok, fail, resolveMisRole, ssoExchangeSchema } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
@@ -277,6 +278,8 @@ router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: 
       [String(misUserId)],
     );
     publishSessionEnd(rows.map((r) => r.id));
+    // Signed out of NGA: stop pushing to their devices too.
+    for (const r of rows) void removeAllSubscriptions(r.id).catch(() => {});
     return res.status(200).json({ success: true });
   } catch (error) {
     if (error instanceof LogoutTokenError) {

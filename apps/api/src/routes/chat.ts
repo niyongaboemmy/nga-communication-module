@@ -968,6 +968,7 @@ router.patch('/prefs', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, 
   if (bool('desktopNotifications') !== undefined) patch.desktopNotifications = bool('desktopNotifications');
   if (bool('sound') !== undefined) patch.sound = bool('sound');
   if (bool('showPresence') !== undefined) patch.showPresence = bool('showPresence');
+  if (bool('emailDigest') !== undefined) patch.emailDigest = bool('emailDigest');
   if (num('quietFromMinute') !== undefined) patch.quietFromMinute = num('quietFromMinute');
   if (num('quietToMinute') !== undefined) patch.quietToMinute = num('quietToMinute');
   if (typeof body.timezone === 'string') patch.timezone = body.timezone.slice(0, 64);

@@ -2416,6 +2416,8 @@ export interface ChatPrefs {
   quietToMinute: number | null;
   timezone: string | null;
   showPresence: boolean;
+  /** Email a digest of unseen mentions and DMs (F-04). */
+  emailDigest: boolean;
 }
 
 const DEFAULT_PREFS: ChatPrefs = {
@@ -2428,6 +2430,7 @@ const DEFAULT_PREFS: ChatPrefs = {
   quietToMinute: null,
   timezone: null,
   showPresence: true,
+  emailDigest: true,
 };
 
 export async function getPrefs(userId: string): Promise<ChatPrefs> {
@@ -2435,7 +2438,7 @@ export async function getPrefs(userId: string): Promise<ChatPrefs> {
     read_receipts: boolean; enter_to_send: boolean; desktop_notifications: boolean;
     sound: boolean; default_level: NotificationLevel;
     quiet_from_minute: number | null; quiet_to_minute: number | null;
-    timezone: string | null; show_presence: boolean;
+    timezone: string | null; show_presence: boolean; email_digest: boolean;
   }>('SELECT * FROM user_chat_prefs WHERE user_id = $1', [userId]);
 
   const r = rows[0];
@@ -2453,6 +2456,7 @@ export async function getPrefs(userId: string): Promise<ChatPrefs> {
     quietToMinute: r.quiet_to_minute,
     timezone: r.timezone,
     showPresence: r.show_presence,
+    emailDigest: r.email_digest ?? true,
   };
 }
 
@@ -2470,8 +2474,8 @@ export async function setPrefs(
   await getPool().query(
     `INSERT INTO user_chat_prefs
        (user_id, read_receipts, enter_to_send, desktop_notifications, sound,
-        default_level, quiet_from_minute, quiet_to_minute, timezone, show_presence, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+        default_level, quiet_from_minute, quiet_to_minute, timezone, show_presence, email_digest, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
      ON CONFLICT (user_id) DO UPDATE SET
        read_receipts = EXCLUDED.read_receipts,
        enter_to_send = EXCLUDED.enter_to_send,
@@ -2482,11 +2486,12 @@ export async function setPrefs(
        quiet_to_minute = EXCLUDED.quiet_to_minute,
        timezone = EXCLUDED.timezone,
        show_presence = EXCLUDED.show_presence,
+       email_digest = EXCLUDED.email_digest,
        updated_at = now()`,
     [userId, next.readReceipts, next.enterToSend, next.desktopNotifications, next.sound,
      NOTIFICATION_LEVELS_SET.has(next.defaultLevel) ? next.defaultLevel : 'all',
      minute(next.quietFromMinute), minute(next.quietToMinute),
-     next.timezone ?? null, next.showPresence],
+     next.timezone ?? null, next.showPresence, next.emailDigest !== false],
   );
 
   /*

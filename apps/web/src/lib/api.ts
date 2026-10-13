@@ -74,7 +74,8 @@ export const apiPut = <T>(path: string, data?: unknown) =>
   request<T>(path, { method: 'PUT', body: data !== undefined ? JSON.stringify(data) : undefined });
 export const apiPatch = <T>(path: string, data?: unknown) =>
   request<T>(path, { method: 'PATCH', body: data !== undefined ? JSON.stringify(data) : undefined });
-export const apiDelete = <T>(path: string) => request<T>(path, { method: 'DELETE' });
+export const apiDelete = <T>(path: string, data?: unknown) =>
+  request<T>(path, { method: 'DELETE', body: data !== undefined ? JSON.stringify(data) : undefined });
 
 /**
  * Download an authenticated endpoint as a file.

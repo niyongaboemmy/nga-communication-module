@@ -13,7 +13,7 @@
  * page, so they switch to the current release at once. Pages where someone
  * could be mid-task (a quiz, an editor, a chat) are never reloaded.
  */
-const VERSION = "app-shell-v2";
+const VERSION = "app-shell-v3"; // v3: web push (F-04)
 
 // Exact paths that are safe to reload without losing anyone's work.
 const SAFE_TO_REFRESH = new Set(["/", "/dashboard", "/home", "/login", "/app", "/welcome", "/reminders", "/apps"]);
@@ -65,5 +65,48 @@ self.addEventListener("fetch", (event) => {
         return res;
       })
       .catch(() => caches.match("/").then((hit) => hit || Response.error())),
+  );
+});
+
+/* ── Web push (F-04) ─────────────────────────────────────────────────────
+ * The server pushes only when the person has no open Tupo tab. Show it, and
+ * on click go to exactly where it happened: focus an existing Tupo window if
+ * there is one (and send it there), otherwise open one.
+ */
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch (e) {
+    data = { title: "Tupo", body: event.data ? event.data.text() : "" };
+  }
+  const title = data.title || "Tupo";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: data.body || "",
+      icon: "/icon-192.png",
+      badge: "/icon-maskable-192.png",
+      tag: data.tag || undefined,
+      renotify: Boolean(data.tag),
+      data: { link: data.link || "/app" },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const link = (event.notification.data && event.notification.data.link) || "/app";
+  const target = new URL(link, self.location.origin).href;
+  event.waitUntil(
+    (async () => {
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      const mine = windows.find((w) => new URL(w.url).origin === self.location.origin);
+      if (mine) {
+        await mine.focus();
+        if ("navigate" in mine) await mine.navigate(target).catch(() => null);
+        return;
+      }
+      await self.clients.openWindow(target);
+    })(),
   );
 });

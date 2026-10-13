@@ -12,6 +12,7 @@ import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
 import { announcePost } from '@tupo/feed';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
 import { runPartitionMaintenance, partitionsAhead } from './jobs/partitions.js';
+import { runEmailDigest } from './jobs/digest.js';
 import { reminders, profileMedia } from '@tupo/notify';
 import * as mailDelivery from '@tupo/mail';
 
@@ -145,6 +146,11 @@ const worker = new Worker(
       }
 
       // Monthly partitions for messages and meeting_events (SRS §7.3).
+      case 'notify:digest': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runEmailDigest();
+      }
       case 'partitions:ensure': {
         processed++;
         lastJobAt = new Date().toISOString();
@@ -277,6 +283,14 @@ if (reminderCfg.clientId && reminderCfg.clientSecret && process.env.NODE_ENV !==
  * would do; six-hourly means a missed run or a long outage is caught the same
  * day, and the work is a no-op when the months already exist.
  */
+/** Hourly: email unseen mentions and DMs to people who are away (F-04). */
+queue.add('notify:digest', {}, {
+  jobId: 'notify-digest',
+  repeat: { every: 60 * 60_000 },
+  removeOnComplete: 10,
+  removeOnFail: 10,
+}).catch((err) => console.error('[worker] could not register the email digest:', err.message));
+
 queue.add('partitions:ensure', {}, {
   jobId: 'partitions-ensure',
   repeat: { every: 6 * 60 * 60_000 },

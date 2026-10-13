@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { X, Bell, Volume2, Moon, Eye, CornerDownLeft, Check, Ban } from 'lucide-react';
+import { X, Bell, Volume2, Moon, Eye, CornerDownLeft, Check, Ban, Smartphone, Mail as MailIcon } from 'lucide-react';
+import { disablePush, enablePush, getPushState, type PushState } from '../../lib/push';
 import { Avatar, IconButton, Spinner } from '../../components/ui';
 import { useChat } from './ChatProvider';
 import * as chatApi from './api';
@@ -26,6 +27,7 @@ interface Prefs {
   quietToMinute: number | null;
   timezone: string | null;
   showPresence: boolean;
+  emailDigest?: boolean;
 }
 
 const toTime = (minutes: number | null) =>
@@ -186,6 +188,14 @@ export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClos
               checked={prefs.sound}
               onChange={(v) => void update({ sound: v })}
             />
+            <PushToggle />
+            <Toggle
+              icon={<MailIcon size={15} />}
+              label="Email me what I missed"
+              hint="An hourly email with mentions and direct messages you have not seen — only when there are some."
+              checked={prefs.emailDigest !== false}
+              onChange={(v) => void update({ emailDigest: v })}
+            />
           </section>
 
           <section>
@@ -259,6 +269,45 @@ export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClos
         </div>
       )}
     </aside>
+  );
+};
+
+/**
+ * Notifications on this device when Tupo is closed (F-04). Honest about what
+ * the browser and the server allow: unsupported, blocked, or not set up.
+ */
+const PushToggle: React.FC = () => {
+  const { notify } = useNotify();
+  const [state, setState] = useState<PushState | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { void getPushState().then(setState); }, []);
+  if (state === null || state === 'unavailable') return null;
+
+  const hint = state === 'unsupported'
+    ? 'This browser cannot receive notifications while closed. On iPhone, add Tupo to the Home Screen first.'
+    : state === 'denied'
+      ? 'Blocked by the browser. Allow notifications for this site, then switch this on.'
+      : 'Mentions, messages, mail and meetings, even when every Tupo tab is closed.';
+  return (
+    <Toggle
+      icon={<Smartphone size={15} />}
+      label="Notifications when Tupo is closed"
+      hint={hint}
+      checked={state === 'on'}
+      onChange={async (v) => {
+        if (busy || state === 'unsupported' || state === 'denied') return;
+        setBusy(true);
+        try {
+          const next = v ? await enablePush() : await disablePush();
+          setState(next);
+          if (v && next !== 'on') notify({ title: 'Notifications were not allowed', tone: 'warning' });
+        } catch (err) {
+          notify({ title: 'Could not change that', body: err instanceof Error ? err.message : undefined, tone: 'error' });
+        } finally {
+          setBusy(false);
+        }
+      }}
+    />
   );
 };
 
