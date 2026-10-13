@@ -39,6 +39,7 @@
     "verify:chat:threads": "node scripts/verify-chat-threads.mjs",
     "verify:chat:unread": "node scripts/verify-chat-unread.mjs",
     "verify:chat:links": "node scripts/verify-chat-links.mjs",
+    "verify:chat:liveness": "node scripts/verify-chat-liveness.mjs",
     "verify:chat:files": "node scripts/verify-chat-files.mjs",
     "verify:chat:notifications": "node scripts/verify-chat-notifications.mjs",
     "verify:chat:power": "node scripts/verify-chat-power.mjs",

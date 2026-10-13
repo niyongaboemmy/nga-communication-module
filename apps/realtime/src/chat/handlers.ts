@@ -289,6 +289,20 @@ export function registerChatHandlers(
     if (!redis) return;
     try {
       const raw = await redis.hgetall(typingKey(conversationId));
+      // Each person's entry expires on its own (B-04). The hash shares one TTL,
+      // refreshed by anyone's typing, so without this a person who stopped
+      // stayed "typing…" for as long as someone else kept going.
+      const now = Date.now();
+      const stale = Object.entries(raw).filter(([, value]) => {
+        try {
+          const at = (JSON.parse(value) as { at?: number }).at;
+          return typeof at === 'number' && now - at > TYPING_TTL_SECONDS * 1000;
+        } catch { return false; }
+      }).map(([userId]) => userId);
+      if (stale.length) {
+        await redis.hdel(typingKey(conversationId), ...stale);
+        for (const id of stale) delete raw[id];
+      }
       const users: TypingUser[] = Object.entries(raw).map(([userId, value]) => {
         // The field used to be a bare name. A hash written by an older gateway
         // during a rolling deploy is still readable — it degrades to a name
@@ -324,6 +338,7 @@ export function registerChatHandlers(
         // socket supply it would let anyone wear anyone else's.
         avatarUrl: user.avatarUrl ?? null,
         kind: ACTIVITY_KINDS.has(kind as ActivityKind) ? kind : 'typing',
+        at: Date.now(),
       }));
       // Refreshed on every keystroke burst, so the key outlives a pause in
       // typing but not a closed tab.

@@ -210,12 +210,36 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeId, setActiveIdRaw] = useState<string | null>(null);
 
   const [messages, setMessages] = useState<WireMessage[]>([]);
+  const messagesRef = useRef<WireMessage[]>([]);
+  messagesRef.current = messages;
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesConversationId, setMessagesConversationId] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
 
   const [typingByConv, setTypingByConv] = useState<Record<string, TypingUser[]>>({});
+  /** When each conversation's typing set last arrived. */
+  const typingSeenAt = useRef<Record<string, number>>({});
+
+  /*
+   * A typing set that has not been refreshed for a few seconds is over, even
+   * if the "stop" never arrived (the sender's network dropped, their tab went
+   * to sleep). Without this the indicator stayed until the next event.
+   */
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const now = Date.now();
+      setTypingByConv((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const [id, users] of Object.entries(prev)) {
+          if (users.length && now - (typingSeenAt.current[id] ?? 0) > 7000) { next[id] = []; changed = true; }
+        }
+        return changed ? next : prev;
+      });
+    }, 1500);
+    return () => window.clearInterval(t);
+  }, []);
   const [convPresence, setConvPresence] = useState<
     Record<string, { online: string[]; viewing: string[] }>
   >({});
@@ -347,7 +371,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // Re-subscribe on every connect, not just the first. After a reconnect
       // the server has no memory of this socket's rooms.
       const id = activeIdRef.current;
-      if (id) socket.emit('conversation:subscribe', { conversationIds: [id] });
+      if (id) {
+        socket.emit('conversation:subscribe', { conversationIds: [id] });
+        void catchUp(id);
+      }
       // Counters may have moved while we were away.
       void refresh();
       void refreshThreadUnread();
@@ -355,6 +382,24 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       void flushOutbox();
     };
     const onDisconnect = () => setConnected(false);
+
+    /*
+     * Whatever arrived while this socket was down (B-04). Re-subscribing only
+     * delivers what is sent from now on; the messages in between come from the
+     * log, newest seq onwards, and merge in place — a dropped connection no
+     * longer means a gap in the open conversation until you switch away.
+     */
+    const catchUp = async (conversationId: string) => {
+      const newest = messagesRef.current.reduce(
+        (max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
+      if (!newest) return;
+      try {
+        const page = await chatApi.listMessages(conversationId, { after: newest, limit: 100 });
+        if (activeIdRef.current !== conversationId || !page.messages.length) return;
+        setMessages((prev) => page.messages.reduce(
+          (list, m) => reconcile(list, m.senderId === meId ? m : personalise(m, meId)), prev));
+      } catch { /* the next message or switch will fill it */ }
+    };
 
     const onNew = ({ conversationId, message }: { conversationId: string; message: WireMessage }) => {
       // Thread replies arrive as `thread:reply`; one reaching here (an older
@@ -436,6 +481,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
 
     const onTyping = ({ conversationId, users }: { conversationId: string; users: TypingUser[] }) => {
+      typingSeenAt.current[conversationId] = Date.now();
       // The server broadcasts the whole set including us; only this client
       // knows which entry is its own, so it drops it here.
       setTypingByConv((prev) => ({
@@ -455,6 +501,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
           void refresh();
           return prev;
         }
+        const before = prev.find((c) => c.id === p.conversationId);
+        // Something new in a conversation this client is not subscribed to:
+        // its preview and time are stale, so fetch its row (debounced).
+        if (before && (p.lastSeq ?? 0) > before.lastSeq && p.conversationId !== activeIdRef.current) {
+          refreshRowSoon(p.conversationId);
+        }
         return prev.map((c) => (c.id === p.conversationId
           ? {
               ...c, unread: p.unread, unreadMentions: p.unreadMentions, lastReadSeq: p.lastReadSeq,
@@ -462,6 +514,17 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
           : c));
       });
+    };
+
+    const rowTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+    const refreshRowSoon = (conversationId: string) => {
+      clearTimeout(rowTimers[conversationId]);
+      rowTimers[conversationId] = setTimeout(() => {
+        void chatApi.getConversation(conversationId).then((row) => {
+          setConversations((prev) => prev.map((c) => (c.id === conversationId
+            ? { ...row, unread: c.unread, unreadMentions: c.unreadMentions, lastReadSeq: c.lastReadSeq } : c)));
+        }).catch(() => {});
+      }, 400);
     };
 
     // Removed from (or left) a conversation on any device: it goes from the
@@ -672,6 +735,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }) => {
     const conversationId = activeIdRef.current;
     if (!conversationId || !user) return;
+    // Sending ends typing now, not when the server's TTL runs out.
+    getSocket()?.emit('typing:stop', { conversationId });
+    lastTypingSentAt.current = 0;
 
     const body = input.body.trim();
     if (!body && !(input.attachments?.length)) return;

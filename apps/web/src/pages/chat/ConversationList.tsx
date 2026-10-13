@@ -281,6 +281,10 @@ export const ConversationList: React.FC<{
       starred: [], channels: [], groups: [], direct: [],
     };
     for (const c of filtered) out[sectionOf(c)].push(c);
+    // Newest activity first within each section, re-sorted as messages land —
+    // a conversation with something new moves up instead of staying put.
+    const at = (c: Conversation) => (c.lastMessage?.at ? Date.parse(c.lastMessage.at) : 0);
+    for (const list of Object.values(out)) list.sort((a, b) => at(b) - at(a));
     return out;
   }, [filtered]);
 
