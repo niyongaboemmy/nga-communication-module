@@ -293,15 +293,25 @@ export async function listThreads(userId: string, opts: ListOpts): Promise<{
     const folderCond =
       opts.folder === 'starred' ? `r.is_starred AND r.folder <> 'trash'`
       : `r.folder = $5`;
+    // Sorted and searched by what this person can see of each thread (C-04),
+    // and limited in SQL rather than after loading the whole mailbox.
     const { rows } = await db.query<{ thread_id: string; sort_at: string }>(
-      `SELECT DISTINCT ON (r.thread_id) r.thread_id, t.last_message_at AS sort_at
-         FROM mail_recipients r
-         JOIN mail_threads t ON t.id = r.thread_id
-        WHERE r.user_id = $1 AND NOT r.is_hidden AND NOT r.pending AND ${folderCond}
-          AND ($2::text IS NULL OR $2 = ANY(SELECT jsonb_array_elements_text(r.labels)))
-          AND ($3::text IS NULL OR t.subject ILIKE $3 OR t.last_snippet ILIKE $3)
-          AND ($4::timestamptz IS NULL OR t.last_message_at < $4::timestamptz)
-        ORDER BY r.thread_id, t.last_message_at DESC`,
+      `SELECT thread_id, sort_at FROM (
+         SELECT r.thread_id,
+                (SELECT max(COALESCE(vm.sent_at, vm.updated_at)) FROM mail_messages vm
+                  WHERE vm.thread_id = r.thread_id AND ${visibleTo('vm', '$1')}) AS sort_at
+           FROM mail_recipients r
+          WHERE r.user_id = $1 AND NOT r.is_hidden AND NOT r.pending AND ${folderCond}
+            AND ($2::text IS NULL OR $2 = ANY(SELECT jsonb_array_elements_text(r.labels)))
+            AND ($3::text IS NULL OR EXISTS (
+                  SELECT 1 FROM mail_messages sm
+                   WHERE sm.thread_id = r.thread_id AND ${visibleTo('sm', '$1')}
+                     AND (sm.subject ILIKE $3 OR sm.body_text ILIKE $3)))
+          GROUP BY r.thread_id
+       ) x
+       WHERE ($4::timestamptz IS NULL OR sort_at < $4::timestamptz)
+       ORDER BY sort_at DESC
+       LIMIT ${limit + 1}`,
       opts.folder === 'starred'
         ? [userId, opts.labelId ?? null, like, opts.cursor ?? null]
         : [userId, opts.labelId ?? null, like, opts.cursor ?? null, opts.folder],
@@ -323,28 +333,39 @@ async function threadSummary(
   userId: string, threadId: string, folder: MailFolder,
 ): Promise<MailThreadSummary | null> {
   const db = getPool();
+  // What this viewer can see of the thread, not the thread's global totals:
+  // the snippet, count and time of a private reply they were not sent must
+  // not show in their list either.
   const { rows: tRows } = await db.query<{
-    subject: string; last_message_at: string; message_count: number; has_attachments: boolean; last_snippet: string;
+    subject: string; last_message_at: string | null; message_count: number; has_attachments: boolean; last_snippet: string | null;
   }>(
-    `SELECT subject, last_message_at, message_count, has_attachments, last_snippet
-       FROM mail_threads WHERE id = $1`, [threadId],
+    `WITH v AS (
+       SELECT m.id, m.snippet, COALESCE(m.sent_at, m.updated_at) AS at
+         FROM mail_messages m WHERE m.thread_id = $1 AND ${visibleTo('m', '$2')}
+     )
+     SELECT t.subject,
+            (SELECT max(at) FROM v) AS last_message_at,
+            (SELECT count(*) FROM v)::int AS message_count,
+            EXISTS (SELECT 1 FROM mail_attachments a WHERE a.message_id IN (SELECT id FROM v)) AS has_attachments,
+            (SELECT snippet FROM v ORDER BY at DESC LIMIT 1) AS last_snippet
+       FROM mail_threads t WHERE t.id = $1`, [threadId, userId],
   );
   const t = tRows[0];
-  if (!t) return null;
+  if (!t || !t.message_count) return null;
 
   const { rows: people } = await db.query<{ user_id: string | null; name: string; address: string; avatar_url: string | null }>(
     `SELECT DISTINCT ON (COALESCE(x.user_id, x.address)) x.user_id, x.name, x.address, u.avatar_url
        FROM (
          SELECT m.from_user_id AS user_id, m.from_name AS name, m.from_address AS address, m.created_at
-           FROM mail_messages m WHERE m.thread_id = $1
+           FROM mail_messages m WHERE m.thread_id = $1 AND ${visibleTo('m', '$2')}
          UNION ALL
          SELECT r.user_id, r.name, r.address, m.created_at
            FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id
-          WHERE r.thread_id = $1 AND r.kind <> 'bcc' AND NOT r.pending
+          WHERE r.thread_id = $1 AND r.kind <> 'bcc' AND NOT r.pending AND ${visibleTo('m', '$2')}
        ) x
        LEFT JOIN users u ON u.id = x.user_id
       ORDER BY COALESCE(x.user_id, x.address), x.created_at DESC`,
-    [threadId],
+    [threadId, userId],
   );
 
   const participants: MailPerson[] = people.map((p) => ({
@@ -372,7 +393,7 @@ async function threadSummary(
     );
     const mm = mine[0];
     return {
-      threadId, subject: t.subject, snippet: t.last_snippet, lastMessageAt: t.last_message_at,
+      threadId, subject: t.subject, snippet: t.last_snippet ?? '', lastMessageAt: t.last_message_at!,
       messageCount: Number(t.message_count), hasAttachments: t.has_attachments,
       participants, unread: false, starred: false, folder, labels: [],
       delivery: (mm?.delivery ?? 'queued') as MailThreadSummary['delivery'],
@@ -391,7 +412,7 @@ async function threadSummary(
   );
   const rr = rRows[0];
   return {
-    threadId, subject: t.subject, snippet: t.last_snippet, lastMessageAt: t.last_message_at,
+    threadId, subject: t.subject, snippet: t.last_snippet ?? '', lastMessageAt: t.last_message_at!,
     messageCount: Number(t.message_count), hasAttachments: t.has_attachments,
     participants,
     unread: rr?.unread ?? false, starred: rr?.starred ?? false,
@@ -403,6 +424,23 @@ async function threadSummary(
 /* ────────────────────────────────────────────────────────────────────────── *
  * Reading a thread
  * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * SQL condition: message `m` is visible to the user in parameter `p` (C-04).
+ *
+ * Mail is addressed per message, not per thread: being on an earlier message
+ * does not entitle anyone to a later private reply, and a BCC'd recipient sees
+ * only the copy they were sent. So a message is visible to its sender, or —
+ * once actually sent — to someone holding a live recipient row on it. Every
+ * reader (thread view, list summaries, AI text, search) uses this one rule.
+ */
+export function visibleTo(m: string, p: string): string {
+  return `(${m}.from_user_id = ${p}
+           OR (NOT ${m}.is_draft AND ${m}.sent_at IS NOT NULL
+               AND EXISTS (SELECT 1 FROM mail_recipients vr
+                            WHERE vr.message_id = ${m}.id AND vr.user_id = ${p}
+                              AND NOT vr.is_hidden AND NOT vr.pending)))`;
+}
 
 async function participates(db: PoolClient | ReturnType<typeof getPool>, userId: string, threadId: string): Promise<boolean> {
   const { rows } = await db.query(
@@ -441,8 +479,9 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
     `SELECT m.*, u.avatar_url AS from_avatar
        FROM mail_messages m LEFT JOIN users u ON u.id = m.from_user_id
       WHERE m.thread_id = $1
-        -- Drafts and not-yet-sent scheduled messages are the sender's alone.
-        AND (m.from_user_id = $2 OR (NOT m.is_draft AND m.sent_at IS NOT NULL))
+        -- Only messages this person sent or was sent; drafts and unsent
+        -- scheduled messages are the sender's alone.
+        AND ${visibleTo('m', '$2')}
       ORDER BY m.created_at`,
     [threadId, userId],
   );
@@ -576,8 +615,9 @@ export async function threadPlainText(
               WHERE r.message_id = m.id AND r.kind <> 'bcc') AS to_names
        FROM mail_messages m
       WHERE m.thread_id = $1 AND NOT m.is_draft AND m.sent_at IS NOT NULL
+        AND ${visibleTo('m', '$2')}
       ORDER BY m.created_at`,
-    [threadId],
+    [threadId, userId],
   );
   let text = '';
   for (const m of msgs) {

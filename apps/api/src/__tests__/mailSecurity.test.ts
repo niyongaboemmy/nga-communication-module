@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
-import { sanitizeMailHtml, sendDueScheduled } from '@tupo/mail';
+import { sanitizeMailHtml, sendDueScheduled, threadPlainText } from '@tupo/mail';
 import { app } from '../app.js';
 import { config } from '../config.js';
 
@@ -159,5 +159,69 @@ describe('mail counts', () => {
     const { rows } = await getPool().query(
       `SELECT count(*)::int AS n FROM notifications WHERE user_id = $1 AND kind = 'mail.received' AND read_at IS NULL`, [ben.id]);
     expect(rows[0].n).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('per-message visibility (C-04)', () => {
+  it('a private reply inside a shared thread reaches only who it was sent to', async () => {
+    const cal = await user('Staff', 'Cal');
+    try {
+      const first = await as(ada.token).post('/api/mail/compose', {
+        to: [ben.email, cal.email], subject: 'Shared plan', bodyHtml: '<p>shared opening line</p>' });
+      const tid = first.body.data.threadId;
+      // Ben replies to Ada only, in the same thread.
+      const reply = await as(ben.token).post('/api/mail/compose', {
+        to: [ada.email], subject: 'Re: Shared plan', bodyHtml: '<p>PRIVATE ZEBRA REPLY</p>', threadId: tid });
+      expect(reply.status).toBeLessThan(300);
+
+      // Cal: still sees the thread and the opening, never the reply.
+      const view = await as(cal.token).get(`/api/mail/threads/${tid}`);
+      expect(view.status).toBe(200);
+      expect(JSON.stringify(view.body)).toContain('shared opening line');
+      expect(JSON.stringify(view.body)).not.toContain('PRIVATE ZEBRA REPLY');
+      expect(view.body.data.thread.messages).toHaveLength(1);
+
+      const list = await as(cal.token).get('/api/mail/threads?folder=inbox');
+      const row = list.body.data.threads.find((t: { threadId: string }) => t.threadId === tid);
+      expect(row.messageCount).toBe(1);
+      expect(row.snippet).not.toContain('ZEBRA');
+      expect(row.participants.map((p: { userId: string }) => p.userId)).not.toContain(undefined);
+
+      const searched = await as(cal.token).get('/api/search?q=ZEBRA&types=mail');
+      expect(JSON.stringify(searched.body)).not.toContain(tid);
+      const listSearch = await as(cal.token).get('/api/mail/threads?folder=inbox&q=ZEBRA');
+      expect(listSearch.body.data.threads).toHaveLength(0);
+
+      const ai = await threadPlainText(cal.id, tid);
+      expect(ai.text).not.toContain('ZEBRA');
+
+      // Ada, who was sent it, sees both — in the view, the list and search.
+      const adaView = await as(ada.token).get(`/api/mail/threads/${tid}`);
+      expect(adaView.body.data.thread.messages).toHaveLength(2);
+      const adaSearch = await as(ada.token).get('/api/search?q=ZEBRA&types=mail');
+      expect(JSON.stringify(adaSearch.body)).toContain(tid);
+    } finally {
+      await getPool().query('DELETE FROM mail_recipients WHERE user_id = $1', [cal.id]);
+      await getPool().query('DELETE FROM notifications WHERE user_id = $1', [cal.id]);
+      await getPool().query('DELETE FROM users WHERE id = $1', [cal.id]);
+    }
+  });
+
+  it('a BCC recipient sees only the message they were blind-copied on', async () => {
+    const dee = await user('Staff', 'Dee');
+    try {
+      const first = await as(ada.token).post('/api/mail/compose', {
+        to: [ben.email], bcc: [dee.email], subject: 'Quiet copy', bodyHtml: '<p>bcc opening</p>' });
+      const tid = first.body.data.threadId;
+      await as(ben.token).post('/api/mail/compose', {
+        to: [ada.email], subject: 'Re: Quiet copy', bodyHtml: '<p>REPLY ALL WALRUS</p>', threadId: tid });
+      const view = await as(dee.token).get(`/api/mail/threads/${tid}`);
+      expect(JSON.stringify(view.body)).toContain('bcc opening');
+      expect(JSON.stringify(view.body)).not.toContain('WALRUS');
+    } finally {
+      await getPool().query('DELETE FROM mail_recipients WHERE user_id = $1', [dee.id]);
+      await getPool().query('DELETE FROM notifications WHERE user_id = $1', [dee.id]);
+      await getPool().query('DELETE FROM users WHERE id = $1', [dee.id]);
+    }
   });
 });

@@ -204,29 +204,26 @@ async function searchMailSection(req: Request, q: string, limit: number): Promis
     thread_id: string; subject: string; last_snippet: string;
     last_message_at: string; last_sender_name: string | null;
   }>(
-    `SELECT t.id AS thread_id, t.subject, t.last_snippet, t.last_message_at, t.last_sender_name
-       FROM mail_threads t
-      WHERE (
-              EXISTS (SELECT 1 FROM mail_recipients r
-                       WHERE r.thread_id = t.id AND r.user_id = $1
-                         AND NOT r.is_hidden AND NOT r.pending AND r.folder <> 'trash')
-           OR EXISTS (SELECT 1 FROM mail_messages sm
-                       WHERE sm.thread_id = t.id AND sm.from_user_id = $1)
-            )
-        AND (
-              t.subject ILIKE '%' || $2 || '%'
-           OR t.last_snippet ILIKE '%' || $2 || '%'
-           OR EXISTS (
-                SELECT 1 FROM mail_messages m
-                 WHERE m.thread_id = t.id
-                   -- A draft belongs to whoever is writing it, and to nobody else.
-                   AND (NOT m.is_draft OR m.from_user_id = $1)
-                   AND to_tsvector('simple',
-                         coalesce(m.subject, '') || ' ' || coalesce(m.body_text, ''))
-                       @@ websearch_to_tsquery('simple', $3))
-            )
-      ORDER BY t.last_message_at DESC
-      LIMIT $4`,
+    // Per message, not per thread (C-04): a match in a reply this person was
+    // not sent must not surface the thread, its snippet or its sender.
+    `SELECT thread_id, subject, last_snippet, last_message_at, last_sender_name FROM (
+       SELECT DISTINCT ON (m.thread_id) m.thread_id, t.subject, m.snippet AS last_snippet,
+              COALESCE(m.sent_at, m.updated_at) AS last_message_at, m.from_name AS last_sender_name
+         FROM mail_messages m
+         JOIN mail_threads t ON t.id = m.thread_id
+        WHERE (m.from_user_id = $1
+               OR (NOT m.is_draft AND m.sent_at IS NOT NULL
+                   AND EXISTS (SELECT 1 FROM mail_recipients r
+                                WHERE r.message_id = m.id AND r.user_id = $1
+                                  AND NOT r.is_hidden AND NOT r.pending AND r.folder <> 'trash')))
+          AND (m.subject ILIKE '%' || $2 || '%'
+               OR m.body_text ILIKE '%' || $2 || '%'
+               OR to_tsvector('simple', coalesce(m.subject, '') || ' ' || coalesce(m.body_text, ''))
+                  @@ websearch_to_tsquery('simple', $3))
+        ORDER BY m.thread_id, last_message_at DESC
+     ) x
+     ORDER BY last_message_at DESC
+     LIMIT $4`,
     [actor(req).id, q, q, limit],
   );
   return rows.map((r) => ({
