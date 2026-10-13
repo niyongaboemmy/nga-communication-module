@@ -98,12 +98,22 @@ export async function resolveMedia(
 
 function validatePoll(input: ComposePostPayload['poll']): PostRow['poll'] {
   if (!input) return null;
-  const question = (input.question ?? '').trim();
-  const options = (input.options ?? []).map((o) => o.trim()).filter(Boolean);
+  if (typeof input !== 'object' || !Array.isArray(input.options)) throw new FeedError('A poll needs a question and options.', 400);
+  const question = String(input.question ?? '').trim();
+  const options = input.options.map((o) => String(o ?? '').trim()).filter(Boolean);
   if (!question) throw new FeedError('A poll needs a question.', 400);
+  if (question.length > 300 || options.some((o) => o.length > 120)) throw new FeedError('That poll text is too long.', 400);
   if (options.length < FEED_LIMITS.MIN_POLL_OPTIONS) throw new FeedError('A poll needs at least two options.', 400);
   if (options.length > FEED_LIMITS.MAX_POLL_OPTIONS) throw new FeedError(`A poll can have at most ${FEED_LIMITS.MAX_POLL_OPTIONS} options.`, 400);
-  return { question, options, multi: Boolean(input.multi), closesAt: input.closesAt ?? null };
+  let closesAt: string | null = null;
+  if (input.closesAt !== undefined && input.closesAt !== null && input.closesAt !== '') {
+    const ms = Date.parse(String(input.closesAt));
+    // An unparseable date would make a poll that silently never closes.
+    if (!Number.isFinite(ms)) throw new FeedError('closesAt is not a valid date.', 400);
+    if (ms <= Date.now()) throw new FeedError('A poll must close in the future.', 400);
+    closesAt = new Date(ms).toISOString();
+  }
+  return { question, options, multi: Boolean(input.multi), closesAt };
 }
 
 function validateEvent(input: ComposePostPayload['event']): PostRow['event'] {

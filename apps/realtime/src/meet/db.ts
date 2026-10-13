@@ -352,13 +352,32 @@ export async function insertPoll(p: {
 }
 
 /** Upsert, so changing your mind replaces your vote instead of adding one. */
-export async function castVote(pollId: string, participantId: string, optionIndexes: number[]) {
+/**
+ * Every poll and question helper takes the meeting id: an id from another
+ * meeting is simply not found, so nobody can vote in, close, or answer
+ * anything outside the call they are in (MEET-SEC9).
+ *
+ * A vote is accepted only while the poll is open, only for options that
+ * exist, and only one option unless the poll allows several. Returns false
+ * when refused.
+ */
+export async function castVote(meetingId: string, pollId: string, participantId: string, optionIndexes: number[]) {
+  const { rows } = await getPool().query<{ options: unknown[]; multiple_choice: boolean; status: string }>(
+    'SELECT options, multiple_choice, status FROM meeting_polls WHERE id = $1 AND meeting_id = $2',
+    [pollId, meetingId]);
+  const poll = rows[0];
+  if (!poll || poll.status !== 'open') return false;
+  const picks = [...new Set(optionIndexes)];
+  if (!picks.length || picks.some((i) => !Number.isInteger(i) || i < 0 || i >= poll.options.length)) return false;
+  if (!poll.multiple_choice && picks.length > 1) return false;
+  optionIndexes = picks;
   await getPool().query(
     `INSERT INTO meeting_poll_votes (poll_id, participant_id, option_indexes)
      VALUES ($1,$2,$3)
      ON CONFLICT (poll_id, participant_id) DO UPDATE SET option_indexes = EXCLUDED.option_indexes`,
     [pollId, participantId, JSON.stringify(optionIndexes)],
   );
+  return true;
 }
 
 export async function pollWithTally(pollId: string, participantId: string) {
@@ -375,9 +394,11 @@ export async function pollWithTally(pollId: string, participantId: string) {
   return rows[0] ?? null;
 }
 
-export async function closePoll(pollId: string) {
-  await getPool().query(
-    `UPDATE meeting_polls SET status = 'closed', closed_at = now() WHERE id = $1`, [pollId]);
+export async function closePoll(meetingId: string, pollId: string) {
+  const { rowCount } = await getPool().query(
+    `UPDATE meeting_polls SET status = 'closed', closed_at = COALESCE(closed_at, now())
+      WHERE id = $1 AND meeting_id = $2`, [pollId, meetingId]);
+  return Boolean(rowCount);
 }
 
 export async function insertQuestion(p: {
@@ -396,11 +417,12 @@ export async function insertQuestion(p: {
  * Upvote once per participant. The junction table is what enforces it — a
  * counter alone would let anyone hold the key down and win the queue.
  */
-export async function upvoteQuestion(questionId: string, participantId: string) {
+export async function upvoteQuestion(meetingId: string, questionId: string, participantId: string) {
   const { rowCount } = await getPool().query(
     `INSERT INTO meeting_question_upvotes (question_id, participant_id)
-     VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-    [questionId, participantId],
+     SELECT id, $2 FROM meeting_questions WHERE id = $1 AND meeting_id = $3
+     ON CONFLICT DO NOTHING`,
+    [questionId, participantId, meetingId],
   );
   if (!rowCount) return null;
   const { rows } = await getPool().query(
@@ -411,11 +433,11 @@ export async function upvoteQuestion(questionId: string, participantId: string) 
   return rows[0] ?? null;
 }
 
-export async function answerQuestion(questionId: string, answerText: string | null) {
+export async function answerQuestion(meetingId: string, questionId: string, answerText: string | null) {
   const { rows } = await getPool().query(
-    `UPDATE meeting_questions SET answered = true, answer_text = $2 WHERE id = $1
+    `UPDATE meeting_questions SET answered = true, answer_text = $2 WHERE id = $1 AND meeting_id = $3
       RETURNING id, meeting_id, participant_id, asked_by, text, upvotes, answered, answer_text, created_at`,
-    [questionId, answerText],
+    [questionId, answerText, meetingId],
   );
   return rows[0] ?? null;
 }

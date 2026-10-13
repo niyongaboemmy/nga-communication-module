@@ -20,9 +20,17 @@ export interface PostReactionResult {
   added: FeedReaction | null;
 }
 
+/** Reactions are a fixed set (FEED_REACTIONS); null clears. */
+function assertReaction(emoji: unknown): asserts emoji is FeedReaction | null {
+  if (emoji !== null && !(FEED_REACTIONS as readonly unknown[]).includes(emoji)) {
+    throw new FeedError(`Reaction must be one of: ${FEED_REACTIONS.join(', ')}.`, 400);
+  }
+}
+
 export async function reactToPost(
   actor: FeedActor, postId: string, emoji: string | null,
 ): Promise<PostReactionResult> {
+  assertReaction(emoji);
   await assertReactable(actor);
   const post = await loadVisiblePost(actor, postId);
   if (post.status !== 'published') throw new FeedError('Post not found.', 404);
@@ -92,6 +100,7 @@ export interface CommentReactionResult { postId: string; reactionCount: number; 
 export async function reactToComment(
   actor: FeedActor, commentId: string, emoji: string | null,
 ): Promise<CommentReactionResult> {
+  assertReaction(emoji);
   await assertReactable(actor);
   const { comment, post: parentPost } = await loadVisibleComment(actor, commentId);
   if (parentPost.status !== 'published') throw new FeedError('Comment not found.', 404);

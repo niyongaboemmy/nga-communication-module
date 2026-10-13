@@ -4,7 +4,7 @@ import { previewsForMessages } from './unfurl.js';
 import type { PoolClient } from 'pg';
 import {
   DEFAULT_PAGE_SIZE, EDIT_WINDOW_MS, MAX_MESSAGE_LENGTH, MAX_PAGE_SIZE,
-  MENTION_PATTERN, BROADCAST_MENTION_PATTERN,
+  MENTION_PATTERN, BROADCAST_MENTION_PATTERN, isEmoji,
 } from '@tupo/shared';
 import type {
   ConversationSummary, ConversationType, DeliveryState, MemberRole, MessagePage,
@@ -514,6 +514,50 @@ export async function normaliseClientMessage(
   return { type: (type ?? undefined) as MessageType | undefined, metadata: meta };
 }
 
+const MAX_ATTACHMENTS = 10;
+
+/**
+ * A client-supplied timestamp: null/undefined pass through, anything else
+ * must be a real date (and in the future, when it schedules something) —
+ * never a string handed to Postgres to fail on with a 500.
+ */
+export function parseClientDate(
+  value: unknown, field: string, opts: { future?: boolean } = {},
+): string | null | undefined {
+  if (value === undefined || value === null) return value as null | undefined;
+  const ms = typeof value === 'string' || typeof value === 'number' ? new Date(value).getTime() : NaN;
+  if (!Number.isFinite(ms) || ms < Date.UTC(2000, 0, 1) || ms > Date.UTC(2100, 0, 1)) {
+    throw new ChatError(`${field} is not a valid date.`, 400);
+  }
+  if (opts.future && ms <= Date.now()) throw new ChatError(`${field} must be in the future.`, 400);
+  return new Date(ms).toISOString();
+}
+const ID_RE = /^\d{1,20}$/;
+
+/**
+ * A reply or thread reply must point at a message in *this* conversation —
+ * otherwise a reply lands in a thread nobody can open, or quotes a message
+ * from a conversation the sender cannot see. Threads are one level deep, so
+ * the root must itself be a main-flow message.
+ */
+async function assertReferences(conversationId: string, threadRootId: string | null, replyToId: string | null) {
+  for (const id of [threadRootId, replyToId]) {
+    if (id !== null && (typeof id !== 'string' || !ID_RE.test(id))) throw new ChatError('That message id is not valid.', 400);
+  }
+  const ids = [threadRootId, replyToId].filter((x): x is string => Boolean(x));
+  if (!ids.length) return;
+  const { rows } = await getPool().query<{ id: string; thread_root_id: string | null }>(
+    'SELECT id, thread_root_id FROM messages WHERE conversation_id = $1 AND id = ANY($2::text[])',
+    [conversationId, ids]);
+  const found = new Map(rows.map((r) => [r.id, r]));
+  if (threadRootId) {
+    const root = found.get(threadRootId);
+    if (!root) throw new ChatError('That thread is not in this conversation.', 404);
+    if (root.thread_root_id) throw new ChatError('Threads are one level deep — reply to the thread instead.', 400);
+  }
+  if (replyToId && !found.get(replyToId)) throw new ChatError('The message you replied to is not in this conversation.', 404);
+}
+
 /**
  * The transactional half of a send: everything that must be atomic, and
  * nothing that is not.
@@ -532,6 +576,11 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
       throw new ChatError(`A message may not exceed ${MAX_MESSAGE_LENGTH} characters.`, 400);
     }
     if (!input.nonce) throw new ChatError('A nonce is required.', 400);
+    if (input.nonce.length > 100) throw new ChatError('That nonce is too long.', 400);
+    if (attachments.length > MAX_ATTACHMENTS) {
+      throw new ChatError(`A message may carry at most ${MAX_ATTACHMENTS} attachments.`, 400);
+    }
+    await assertReferences(input.conversationId, input.threadRootId ?? null, input.replyToId ?? null);
   }
 
   const client = await getPool().connect();
@@ -1300,7 +1349,7 @@ export async function setMemberPrefs(
   const params: unknown[] = [conversationId, userId];
   if (prefs.isStarred !== undefined) { params.push(prefs.isStarred); sets.push(`is_starred = $${params.length}`); }
   if (prefs.notification !== undefined) { params.push(prefs.notification); sets.push(`notification = $${params.length}`); }
-  if (prefs.mutedUntil !== undefined) { params.push(prefs.mutedUntil); sets.push(`muted_until = $${params.length}`); }
+  if (prefs.mutedUntil !== undefined) { params.push(parseClientDate(prefs.mutedUntil, 'mutedUntil')); sets.push(`muted_until = $${params.length}`); }
   if (!sets.length) return;
 
   await getPool().query(
@@ -1313,6 +1362,7 @@ export async function setMemberPrefs(
 export async function saveDraft(
   userId: string, conversationId: string, draft: string | null,
 ): Promise<void> {
+  if (draft && draft.length > MAX_MESSAGE_LENGTH * 2) throw new ChatError('That draft is too long to save.', 400);
   await getPool().query(
     `UPDATE conversation_members
         SET draft = $3, draft_updated_at = now()
@@ -1492,7 +1542,7 @@ export async function toggleReaction(
 ): Promise<ReactionResult> {
   const clean = (emoji ?? '').trim();
   if (!clean) throw new ChatError('An emoji is required.', 400);
-  if (clean.length > MAX_EMOJI_LENGTH) throw new ChatError('That is not an emoji.', 400);
+  if (clean.length > MAX_EMOJI_LENGTH || !isEmoji(clean)) throw new ChatError('That is not an emoji.', 400);
 
   // Reacting to a tombstone is meaningless, and letting it through would leave
   // reactions hanging off a message with nothing to hang from.
@@ -2781,6 +2831,9 @@ export async function createPoll(
   const options = (input.options ?? []).map((o) => String(o ?? '').trim()).filter(Boolean);
 
   if (!question) throw new ChatError('A poll needs a question.', 400);
+  if (question.length > 500) throw new ChatError('A poll question may be at most 500 characters.', 400);
+  if (options.some((o) => o.length > 200)) throw new ChatError('A poll option may be at most 200 characters.', 400);
+  input.closesAt = parseClientDate(input.closesAt, 'closesAt', { future: true }) ?? null;
   if (options.length < 2) throw new ChatError('A poll needs at least two options.', 400);
   if (options.length > MAX_POLL_OPTIONS) {
     throw new ChatError(`A poll may have at most ${MAX_POLL_OPTIONS} options.`, 400);
@@ -3522,14 +3575,16 @@ export async function setStatus(
   userId: string,
   status: { emoji?: string | null; text?: string | null; expiresAt?: string | null },
 ): Promise<UserProfile> {
+  const emoji = status.emoji?.trim() || null;
+  if (emoji && !isEmoji(emoji)) throw new ChatError('A status emoji must be a single emoji.', 400);
   await getPool().query(
     `UPDATE users
         SET status_emoji = $2, status_text = $3, status_expires_at = $4, updated_at = now()
       WHERE id = $1`,
     [userId,
-     status.emoji?.slice(0, 16) || null,
+     emoji,
      status.text?.slice(0, 100) || null,
-     status.expiresAt ?? null],
+     parseClientDate(status.expiresAt, 'expiresAt', { future: true }) ?? null],
   );
   return getProfile(userId, userId);
 }

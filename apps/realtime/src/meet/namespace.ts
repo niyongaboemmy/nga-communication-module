@@ -793,8 +793,8 @@ export function registerMeetNamespace(io: Server): Namespace {
         return;
       }
       const question = String(p?.question ?? '').trim().slice(0, 500);
-      const options = (p?.options ?? []).map((o) => String(o).trim().slice(0, 200)).filter(Boolean);
-      if (!question || options.length < 2) {
+      const options = (Array.isArray(p?.options) ? p!.options : []).map((o) => String(o).trim().slice(0, 200)).filter(Boolean);
+      if (!question || options.length < 2 || options.length > 10) {
         if (typeof ack === 'function') ack({ ok: false });
         return;
       }
@@ -803,7 +803,9 @@ export function registerMeetNamespace(io: Server): Namespace {
         meetingId, participantId: participant.id,
         kind: p?.kind === 'quiz' ? 'quiz' : 'poll',
         question, options,
-        correctOptionIndex: p?.correctOptionIndex ?? null,
+        correctOptionIndex: Number.isInteger(p?.correctOptionIndex)
+          && (p!.correctOptionIndex as number) >= 0 && (p!.correctOptionIndex as number) < options.length
+          ? p!.correctOptionIndex as number : null,
         anonymous: !!p?.anonymous,
         multipleChoice: !!p?.multipleChoice,
       });
@@ -835,7 +837,10 @@ export function registerMeetNamespace(io: Server): Namespace {
         return;
       }
       try {
-        await db.castVote(pollId, participant.id, indexes);
+        if (!(await db.castVote(meetingId, pollId, participant.id, indexes))) {
+          if (typeof ack === 'function') ack({ ok: false });
+          return;
+        }
         const row = await db.pollWithTally(pollId, participant.id);
         if (row) {
           const mine = toWirePoll(row);
@@ -859,7 +864,7 @@ export function registerMeetNamespace(io: Server): Namespace {
       const pollId = String(p?.pollId ?? '');
       if (!pollId) return;
 
-      await db.closePoll(pollId);
+      if (!(await db.closePoll(meetingId, pollId))) return;
       const row = await db.pollWithTally(pollId, participant.id);
       if (row) {
         const poll = toWirePoll(row);
@@ -900,7 +905,7 @@ export function registerMeetNamespace(io: Server): Namespace {
       const ctx = context(socket);
       if (!ctx) return;
       const { participant, meetingId } = ctx;
-      const row = await db.upvoteQuestion(String(p?.questionId ?? ''), participant.id);
+      const row = await db.upvoteQuestion(meetingId, String(p?.questionId ?? ''), participant.id);
       // null means this participant had already upvoted — silently ignored, so
       // a double click is not an error the user has to see.
       if (row) emitToRoom(meetingId, 'meet:question_updated', { question: toWireQuestion(row) });
@@ -912,7 +917,7 @@ export function registerMeetNamespace(io: Server): Namespace {
       const { participant, meetingId } = ctx;
       if (!canHost(participant.role)) return;
       const row = await db.answerQuestion(
-        String(p?.questionId ?? ''), p?.answerText ? String(p.answerText).slice(0, 2000) : null);
+        meetingId, String(p?.questionId ?? ''), p?.answerText ? String(p.answerText).slice(0, 2000) : null);
       if (row) emitToRoom(meetingId, 'meet:question_updated', { question: toWireQuestion(row) });
     });
 
