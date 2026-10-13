@@ -192,6 +192,14 @@ router.post('/exchange', async (req: Request, res: Response) => {
       academic,
     });
 
+    // A suspended account does not get a session (A-11). Before this it got
+    // one, and then every request failed quietly behind a working-looking app.
+    const { rows: statusRows } = await getPool().query<{ status: string }>(
+      'SELECT status FROM users WHERE id = $1', [user.id]);
+    if (statusRows[0] && statusRows[0].status !== 'active') {
+      return res.status(403).json({ ...fail('This account has been suspended. Contact the school office.'), code: 'ACCOUNT_SUSPENDED' });
+    }
+
     if (coverUrl !== undefined) {
       await setUserCover(user.id, coverUrl).catch((err) => console.error('[sso] cover sync failed:', err));
     }

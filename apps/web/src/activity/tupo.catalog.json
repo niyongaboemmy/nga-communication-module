@@ -7,6 +7,7 @@
     { "key": "tupo.meet.guest", "label": "Guest meeting (public link)", "module": "Public", "patterns": ["/meet/:idOrCode"], "public": true },
 
     { "key": "tupo.launch", "label": "Opening the app", "module": "Home", "patterns": ["/app"] },
+    { "key": "tupo.suspended", "label": "Account suspended", "module": "Home", "patterns": ["/suspended"] },
 
     { "key": "tupo.chat", "label": "Chat", "module": "Chat", "patterns": ["/app/chat", "/app/chat/invite/:code", "/app/chat/:conversationId/:messageId?"] },
 

@@ -50,6 +50,8 @@ export const SsoCallback: React.FC = () => {
           const { token, user, permissions, rolePermissions, roleName } = body.data as SsoExchangeResult;
           setSession(token, user, permissions, rolePermissions ?? [], roleName ?? null);
           navigate('/app', { replace: true });
+        } else if (body.code === 'ACCOUNT_SUSPENDED') {
+          navigate('/suspended', { replace: true });
         } else {
           setError(body.message ?? 'Sign-in failed. The code may have expired or already been used.');
         }

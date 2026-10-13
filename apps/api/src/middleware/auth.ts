@@ -58,7 +58,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     return res.status(401).json(fail('Your session is no longer valid. Please sign in again.'));
   }
   if (user.status !== 'active') {
-    return res.status(403).json(fail('This account has been suspended.'));
+    return res.status(403).json({ ...fail('This account has been suspended.'), code: 'ACCOUNT_SUSPENDED' });
   }
   // Single sign-out: this person signed out of NGA MIS after this token was
   // issued (back-channel logout) -- the session is over everywhere.

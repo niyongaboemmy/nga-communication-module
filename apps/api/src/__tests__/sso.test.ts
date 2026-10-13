@@ -87,6 +87,17 @@ describe('POST /api/sso/exchange', () => {
     expect(rows[0].n).toBe(1);
   });
 
+  it('refuses a session to a suspended account, with a code the app can act on', async () => {
+    mockMis();
+    await request(app).post('/api/sso/exchange').send({ code: 'first' });
+    await getPool().query(`UPDATE users SET status = 'suspended'`);
+    mockMis();
+    const res = await request(app).post('/api/sso/exchange').send({ code: 'second' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ACCOUNT_SUSPENDED');
+    expect(res.body.data?.token).toBeUndefined();
+  });
+
   it('writes an audit entry for the login', async () => {
     mockMis();
     await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });

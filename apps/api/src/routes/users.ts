@@ -3,6 +3,8 @@ import { getPool } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
+import { beyond, permissionKeysOfRole } from '../access/roleSafety.js';
+import { publishSessionEnd } from '../services/chatRealtime.js';
 import {
   audit, getUserTheme, setUserTheme, roleLabelForLevel, academicLevelFromPlacement,
 } from '../services/userService.js';
@@ -108,6 +110,16 @@ router.put('/:id/role', authorizePermission('USERS_MANAGE'), async (req: Request
     }
   }
 
+  // Not more power than you hold, in either direction (A-10).
+  const targetBeyond = beyond(actor.permissions, await permissionKeysOfRole(userRows[0]!.role_id));
+  if (targetBeyond.length) {
+    return res.status(403).json(fail('That person holds permissions you do not, so you cannot change their role.'));
+  }
+  const newBeyond = beyond(actor.permissions, await permissionKeysOfRole(roleId ?? null));
+  if (newBeyond.length) {
+    return res.status(403).json(fail('That role grants permissions you do not hold, so you cannot assign it.'));
+  }
+
   let roleLevel: string | null = null;
   if (roleId !== null && roleId !== undefined) {
     const { rows: roleRows } = await pool.query<{ id: number; level: string }>(
@@ -162,11 +174,24 @@ router.put('/:id/status', authorizePermission('USERS_MANAGE'), async (req: Reque
   if (req.params.id === actor.id && status === 'suspended') {
     return res.status(400).json(fail('You cannot suspend your own account.'));
   }
+  const { rows: who } = await getPool().query<{ role_id: number | null }>(
+    'SELECT role_id FROM users WHERE id = $1', [req.params.id]);
+  if (!who[0]) return res.status(404).json(fail('User not found.'));
+  if (beyond(actor.permissions, await permissionKeysOfRole(who[0].role_id)).length) {
+    return res.status(403).json(fail('That person holds permissions you do not, so you cannot change their status.'));
+  }
 
-  const { rowCount } = await getPool().query(
+  await getPool().query(
     'UPDATE users SET status = $2, updated_at = now() WHERE id = $1', [req.params.id, status]
   );
-  if (!rowCount) return res.status(404).json(fail('User not found.'));
+  if (status === 'suspended') {
+    // Suspension takes effect now, everywhere: every token issued before this
+    // moment is refused (API, files, gateway) and live connections are dropped.
+    await getPool().query(
+      `INSERT INTO session_revocations (user_id, revoked_at) VALUES ($1, now())
+       ON CONFLICT (user_id) DO UPDATE SET revoked_at = EXCLUDED.revoked_at`, [req.params.id]);
+    publishSessionEnd([String(req.params.id)]);
+  }
 
   await audit({
     actorId: actor.id, action: `user.${status}`, targetType: 'user', targetId: req.params.id,

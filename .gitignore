@@ -149,3 +149,6 @@ brand/src/baked*.json
 brand/src/baked-path.txt
 brand/src/_render.html
 brand/src/icon-transparent-full.png
+
+# Local test artefacts
+.feed-ui-shots/media-*.png

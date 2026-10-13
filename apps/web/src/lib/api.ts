@@ -54,6 +54,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<Envelop
   try { body = await res.json(); }
   catch { throw new ApiError(`Unexpected response (${res.status})`, res.status); }
 
+  // Suspended mid-session: one clear screen, not an app where every request
+  // quietly fails and every page shows an empty state (A-11).
+  if (res.status === 403 && (body as { code?: string }).code === 'ACCOUNT_SUSPENDED' && token) {
+    clearSession();
+    window.location.href = '/suspended';
+  }
+
   if (!res.ok || body.success === false) {
     throw new ApiError(body.message ?? `Request failed (${res.status})`, res.status);
   }

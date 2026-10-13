@@ -13,6 +13,7 @@ import { usePermissions } from './hooks/usePermissions';
 import { SignIn } from './pages/SignIn';
 import { SsoCallback } from './pages/SsoCallback';
 import { PendingAccess } from './pages/PendingAccess';
+import { Suspended } from './pages/Suspended';
 import { AppShell, ComingSoon } from './pages/AppShell';
 import { ChatLayout } from './pages/chat/ChatLayout';
 import { ChatPermalink, ChatInvite } from './pages/chat/ChatLinks';
@@ -101,6 +102,7 @@ export const App: React.FC = () => (
         <Routes>
           <Route path="/" element={<SignIn />} />
           <Route path="/sso/callback" element={<SsoCallback />} />
+          <Route path="/suspended" element={<Suspended />} />
           {/* The one route a person with no NGA account can reach. */}
           <Route path="/meet/:idOrCode" element={<GuestMeeting />} />
           <Route path="/app" element={<Protected><AppShell /></Protected>}>
