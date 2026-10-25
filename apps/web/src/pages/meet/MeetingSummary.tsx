@@ -7,6 +7,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useNotify } from '../../context/NotificationContext';
 import { usePermissions } from '../../hooks/usePermissions';
+import { useAiPolicy, aiOffMessage } from '../../hooks/useAiPolicy';
 import { Avatar, Button, Card, EmptyState } from '../../components/ui';
 import { ShareMeeting } from './ShareMeeting';
 import * as meetApi from './api';
@@ -63,7 +64,9 @@ export const MeetingSummary: React.FC = () => {
   const [generating, setGenerating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const canUseAi = can('MEET_AI_USE');
+  // The school's AI switch (MIS ai_policy) sits in front of MEET_AI_USE.
+  const aiOff = aiOffMessage(useAiPolicy());
+  const canUseAi = can('MEET_AI_USE') && !aiOff;
   const canViewAttendance = can('MEET_ATTENDANCE_VIEW');
   const isHost = meeting?.yourRole === 'host' || meeting?.yourRole === 'cohost';
 
@@ -377,7 +380,9 @@ export const MeetingSummary: React.FC = () => {
         ) : (
           <GenerateCard
             title="No minutes yet"
-            body={transcript.length < 5
+            body={aiOff
+              ? aiOff
+              : transcript.length < 5
               ? 'There is not enough transcript. Minutes need live captions to have been on during the meeting.'
               : 'Generate a full record of the meeting from its transcript.'}
             disabled={!canUseAi || transcript.length < 5}
@@ -693,7 +698,7 @@ export const MeetingSummary: React.FC = () => {
           ) : (
             <GenerateCard
               title="Lesson follow-up"
-              body="Revision points and practice questions from what was actually taught."
+              body={aiOff ?? 'Revision points and practice questions from what was actually taught.'}
               disabled={!canUseAi || transcript.length < 5}
               busy={generating === 'lesson_followup'}
               onGenerate={() => void generate('lesson_followup', () => meetApi.aiLessonFollowUp(id))}

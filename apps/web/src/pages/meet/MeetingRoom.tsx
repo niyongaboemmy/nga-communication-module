@@ -301,6 +301,11 @@ export const MeetingRoom: React.FC = () => {
     );
   }
 
+  // The school's AI switch: the AI panel says so, and the AI extras go quiet.
+  const aiOff = capabilities?.aiPolicy && !capabilities.aiPolicy.enabled
+    ? capabilities.aiPolicy.message || 'AI is turned off for the school.'
+    : null;
+
   if (!meeting || !capabilities) {
     return (
       <div className="grid min-h-full place-items-center bg-slate-950">
@@ -453,7 +458,7 @@ export const MeetingRoom: React.FC = () => {
             <CaptionsOverlay
               meetingId={meeting.id}
               segments={room.captions}
-              aiAvailable={capabilities.ai && room.settings.translationEnabled}
+              aiAvailable={capabilities.ai && !aiOff && room.settings.translationEnabled}
             />
           )}
         </main>
@@ -486,6 +491,7 @@ export const MeetingRoom: React.FC = () => {
               <AiPanel
                 meetingId={meeting.id}
                 aiEnabled={capabilities.ai}
+                aiOff={aiOff}
                 aiPresent={room.aiPresent}
                 transcribing={room.transcribing}
                 captionsSupported={speech.supported}
@@ -540,7 +546,7 @@ export const MeetingRoom: React.FC = () => {
               <NotesPanel
                 meetingId={meeting.id}
                 notes={room.notes}
-                aiAvailable={capabilities.ai}
+                aiAvailable={capabilities.ai && !aiOff}
                 transcribing={room.transcribing}
                 offsetSeconds={
                   room.startedAt ? Math.round((Date.now() - Date.parse(room.startedAt)) / 1000) : null
@@ -555,7 +561,7 @@ export const MeetingRoom: React.FC = () => {
                 meetingId={meeting.id}
                 settings={room.settings}
                 canRecord={canRecord}
-                canUseAi={canUseAi && capabilities.ai}
+                canUseAi={canUseAi && capabilities.ai && !aiOff}
                 canTranscribe={canTranscribe}
                 onClose={() => setPanel(null)}
                 onCommand={(c) => void room.hostCommand(c)}

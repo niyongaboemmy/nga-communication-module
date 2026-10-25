@@ -12,8 +12,15 @@ import { meetingFolder } from '@tupo/shared';
 export interface MeetCapabilities {
   sfu: boolean;
   turn: boolean;
+  /** A provider is configured on this server (a deployment fact). */
   ai: boolean;
   aiProviders: Record<string, boolean>;
+  /**
+   * The school's AI switch (MIS ai_policy). When `enabled` is false every AI
+   * route answers 403 AI_DISABLED and the panels show `message` instead.
+   * Optional: an older API does not send it.
+   */
+  aiPolicy?: { enabled: boolean; reason: string; message: string };
   meshMaxParticipants: number;
   maxVideoTiles: number;
   aiSummaryIntervalMs: number;
