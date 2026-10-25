@@ -26,6 +26,8 @@ async function addUser(misUserId: string, avatarUrl: string | null = null) {
 }
 const row = async (id: string) =>
   (await getPool().query('SELECT avatar_url, cover_url FROM users WHERE id = $1', [id])).rows[0];
+const misStatus = async (id: string) =>
+  (await getPool().query('SELECT mis_status FROM users WHERE id = $1', [id])).rows[0].mis_status as string | null;
 
 beforeEach(async () => {
   await getPool().query('DELETE FROM audit_log');
@@ -106,5 +108,66 @@ describe('profile media sync from MIS', () => {
       transport: async (_url, init) => { sizes.push(JSON.parse(init.body).user_ids.length); return { status: 200, body: { data: { users: [] } } }; },
     });
     expect(sizes).toEqual([500, 1]);
+  });
+
+  it('records each MIS status, and an id MIS no longer returns becomes REMOVED', async () => {
+    const active = await addUser('501');
+    const disabled = await addUser('502');
+    const gone = await addUser('503');
+    const suspended = await addUser('504');
+    await getPool().query(`UPDATE users SET mis_status = 'ACTIVE' WHERE id = $1`, [gone]);
+    const r = await profileMedia.runProfileMediaSync({
+      config: CFG,
+      transport: async () => ({ status: 200, body: { data: { users: [
+        { user_id: 501, avatar: null, cover: null, status: 'ACTIVE' },
+        { user_id: 502, avatar: null, cover: null, status: 'INACTIVE' },
+        { user_id: 504, avatar: null, cover: null, status: 'suspended' },
+        // 503 is absent: deleted in MIS.
+      ] } } }),
+    });
+    expect(await misStatus(active)).toBe('ACTIVE');
+    expect(await misStatus(disabled)).toBe('INACTIVE');
+    expect(await misStatus(gone)).toBe('REMOVED');
+    expect(await misStatus(suspended)).toBe('SUSPENDED');
+    expect(r.statusesUpdated).toBe(4);
+
+    // Re-activated in MIS: back to ACTIVE on the next sweep.
+    await profileMedia.runProfileMediaSync({
+      config: CFG,
+      transport: async () => ({ status: 200, body: { data: { users: [
+        { user_id: 501, status: 'ACTIVE' }, { user_id: 502, status: 'ACTIVE' },
+        { user_id: 503, status: 'ACTIVE' }, { user_id: 504, status: 'ACTIVE' },
+      ] } } }),
+    });
+    for (const id of [active, disabled, gone, suspended]) expect(await misStatus(id)).toBe('ACTIVE');
+  });
+
+  it('an older MIS that sends no status leaves mis_status alone, even for absent ids', async () => {
+    const answered = await addUser('601');
+    const absent = await addUser('602');
+    await getPool().query(`UPDATE users SET mis_status = 'INACTIVE' WHERE id = $1`, [answered]);
+    const r = await profileMedia.runProfileMediaSync({
+      config: CFG,
+      transport: async () => ({ status: 200, body: { data: { users: [{ user_id: 601, avatar: null, cover: null }] } } }),
+    });
+    expect(await misStatus(answered)).toBe('INACTIVE');
+    expect(await misStatus(absent)).toBeNull();
+    expect(r.statusesUpdated).toBe(0);
+  });
+
+  it('can re-check just the given MIS ids', async () => {
+    await addUser('701');
+    const target = await addUser('702');
+    const asked: number[][] = [];
+    await profileMedia.runProfileMediaSync({
+      config: CFG,
+      misUserIds: ['702'],
+      transport: async (_u, init) => {
+        asked.push(JSON.parse(init.body).user_ids);
+        return { status: 200, body: { data: { users: [{ user_id: 702, status: 'INACTIVE' }] } } };
+      },
+    });
+    expect(asked).toEqual([[702]]);
+    expect(await misStatus(target)).toBe('INACTIVE');
   });
 });

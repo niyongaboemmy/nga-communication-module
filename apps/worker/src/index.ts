@@ -45,7 +45,9 @@ const worker = new Worker(
       // Slow (four model calls) and not worth making anyone wait for, which is
       // exactly what the queue is for.
       // Everyone's NGA photo + cover from MIS, so lists show people as they are now
-      // rather than as they were the last time they signed in to Tupo.
+      // rather than as they were the last time they signed in to Tupo. The same
+      // lookup carries each person's MIS account status (users.mis_status), which
+      // is what drops deactivated people from every picker and recipient list.
       case 'avatars:sync': {
         processed++;
         lastJobAt = new Date().toISOString();

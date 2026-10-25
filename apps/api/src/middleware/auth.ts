@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { getPool, resolveUserPermissions } from '@tupo/db';
+import { getPool, resolveUserPermissions, isActiveUser } from '@tupo/db';
 import { fail } from '@tupo/shared';
 import type { Role, RoleLevel, SessionClaims } from '@tupo/shared';
 import { config } from '../config.js';
@@ -39,9 +39,9 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
 
   const pool = getPool();
   const { rows } = await pool.query<{
-    role: Role; status: string; mis_user_id: string; avatar_url: string | null; revoked_at: Date | null;
+    role: Role; status: string; mis_status: string | null; mis_user_id: string; avatar_url: string | null; revoked_at: Date | null;
   }>(
-    `SELECT u.role, u.status, u.mis_user_id, u.avatar_url, r.revoked_at
+    `SELECT u.role, u.status, u.mis_status, u.mis_user_id, u.avatar_url, r.revoked_at
        FROM users u LEFT JOIN session_revocations r ON r.user_id = u.id
       WHERE u.id = $1`,
     [decoded.id]
@@ -56,6 +56,11 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
   if (user.status !== 'active') {
     return res.status(403).json(fail('This account has been suspended.'));
+  }
+  // Deactivated (or deleted) in NGA MIS, the source of truth for who is active:
+  // the session is over, as MIS's own /auth/verify now says.
+  if (!isActiveUser({ status: 'active', mis_status: user.mis_status })) {
+    return res.status(401).json({ ...fail('This NGA account is no longer active.'), code: 'ACCOUNT_INACTIVE' });
   }
   // Single sign-out: this person signed out of NGA MIS after this token was
   // issued (back-channel logout) -- the session is over everywhere.

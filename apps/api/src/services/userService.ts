@@ -105,6 +105,8 @@ export async function upsertMisUser(params: {
   preferredTheme?: 'light' | 'dark';
   forceAdmin: boolean;
   academic?: MisAcademic;
+  /** NGA MIS account status from the sign-in payload; undefined = MIS sent none, keep the stored one. */
+  misStatus?: string;
 }): Promise<SessionUser> {
   const pool = getPool();
   const { rows: existingRows } = await pool.query<{
@@ -167,13 +169,15 @@ export async function upsertMisUser(params: {
               mis_program_ids = $10, mis_grade_ids = $11, mis_class_group_ids = $12,
               mis_program_names = $13, mis_grade_names = $14, mis_class_group_names = $15,
               academic_level = $16, mis_lead_program_ids = $17, academic_synced_at = now(),
+              mis_status = COALESCE($19::text, mis_status),
+              mis_status_synced_at = CASE WHEN $19::text IS NULL THEN mis_status_synced_at ELSE now() END,
               last_login_at = now(),
               updated_at = now()
         WHERE id = $1
       RETURNING preferred_theme, avatar_url`,
       [existing.id, params.name, params.email, params.avatarUrl ?? null,
        finalRole, params.forceAdmin, params.preferredTheme ?? null,
-       params.forceAdmin, derivedRoleId, ...acParams, params.avatarUrl === null]
+       params.forceAdmin, derivedRoleId, ...acParams, params.avatarUrl === null, params.misStatus ?? null]
     );
     return {
       id: existing.id, misUserId: params.misUserId, name: params.name, email: params.email,
@@ -191,11 +195,14 @@ export async function upsertMisUser(params: {
                         role_assigned_by_admin, preferred_theme, role_id, last_login_at,
                         mis_program_ids, mis_grade_ids, mis_class_group_ids,
                         mis_program_names, mis_grade_names, mis_class_group_names,
-                        academic_level, mis_lead_program_ids, academic_synced_at)
+                        academic_level, mis_lead_program_ids, academic_synced_at,
+                        mis_status, mis_status_synced_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(),
-             $10, $11, $12, $13, $14, $15, $16, $17, now())`,
+             $10, $11, $12, $13, $14, $15, $16, $17, now(),
+             $18::text, CASE WHEN $18::text IS NULL THEN NULL ELSE now() END)`,
     [id, params.misUserId, params.name, params.email, params.avatarUrl ?? null,
-     finalRole, params.forceAdmin, params.preferredTheme ?? null, derivedRoleId, ...acParams]
+     finalRole, params.forceAdmin, params.preferredTheme ?? null, derivedRoleId, ...acParams,
+     params.misStatus ?? null]
   );
   return {
     id, misUserId: params.misUserId, name: params.name, email: params.email,

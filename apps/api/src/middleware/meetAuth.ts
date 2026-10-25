@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { getPool, resolveUserPermissions, snowflake } from '@tupo/db';
+import { getPool, resolveUserPermissions, snowflake, isActiveUser } from '@tupo/db';
 import { fail, GUEST_PERMISSIONS } from '@tupo/shared';
 import type { Role, RoleLevel, SessionClaims } from '@tupo/shared';
 import { config } from '../config.js';
@@ -124,8 +124,8 @@ export async function meetAuth(req: Request, res: Response, next: NextFunction) 
   /* ---- ordinary session ---- */
   const claims = decoded as SessionClaims;
   const pool = getPool();
-  const { rows } = await pool.query<{ role: Role; status: string }>(
-    'SELECT role, status FROM users WHERE id = $1', [claims.id],
+  const { rows } = await pool.query<{ role: Role; status: string; mis_status: string | null }>(
+    'SELECT role, status, mis_status FROM users WHERE id = $1', [claims.id],
   );
   const user = rows[0];
 
@@ -134,6 +134,11 @@ export async function meetAuth(req: Request, res: Response, next: NextFunction) 
   }
   if (user.status !== 'active') {
     return res.status(403).json(fail('This account has been suspended.'));
+  }
+  // Deactivated (or deleted) in NGA MIS, the source of truth for who is active:
+  // the session is over, as MIS's own /auth/verify now says.
+  if (!isActiveUser({ status: 'active', mis_status: user.mis_status })) {
+    return res.status(401).json({ ...fail('This NGA account is no longer active.'), code: 'ACCOUNT_INACTIVE' });
   }
 
   const resolved = await resolveUserPermissions(pool, claims.id);
