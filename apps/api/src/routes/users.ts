@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
@@ -54,18 +54,35 @@ router.patch('/me/theme', async (req: Request, res: Response) => {
   return res.json(ok({ theme, misSynced }));
 });
 
-/** The roster, with each user's current role. */
+/**
+ * ?status= for the roster. Default `active` (the shared active-user rule);
+ * `inactive` = everyone else (suspended here or not active in NGA MIS);
+ * `suspended` = suspended by a Tupo administrator; `all` = everyone.
+ */
+const ROSTER_STATUS: Record<string, string> = {
+  active: activeUserSql('u'),
+  inactive: `NOT ${activeUserSql('u')}`,
+  suspended: `u.status = 'suspended'`,
+  all: 'true',
+};
+
+/** The roster, with each user's current role and MIS status. */
 router.get('/', authorizePermission('USERS_VIEW', 'USERS_MANAGE'), async (req: Request, res: Response) => {
   const search = String(req.query.q ?? '').trim();
   const limit = Math.min(Number(req.query.limit ?? 50), 200);
+  const statusKey = String(req.query.status ?? 'active').toLowerCase();
+  const statusSql = ROSTER_STATUS[statusKey];
+  if (!statusSql) return res.status(400).json(fail("status must be 'active', 'inactive', 'suspended' or 'all'."));
 
   const { rows } = await getPool().query(
     `SELECT u.id, u.mis_user_id, u.name, u.email, u.avatar_url, u.role, u.status,
+            u.mis_status, ${activeUserSql('u')} AS active,
             u.role_assigned_by_admin, u.last_login_at,
             r.id AS role_id, r.name AS role_name, r.level AS role_level
        FROM users u
        LEFT JOIN roles r ON r.id = u.role_id
       WHERE ($1 = '' OR u.name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%')
+        AND ${statusSql}
       ORDER BY (u.role_id IS NULL) DESC, u.name
       LIMIT $2`,
     [search, limit]
@@ -98,7 +115,7 @@ router.put('/:id/role', authorizePermission('USERS_MANAGE'), async (req: Request
   if (req.params.id === actor.id && roleId !== actor.roleId) {
     const { rows: admins } = await pool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM users u JOIN roles r ON r.id = u.role_id
-        WHERE r.level = 'ADMIN' AND u.status = 'active' AND u.id <> $1`,
+        WHERE r.level = 'ADMIN' AND ${activeUserSql('u')} AND u.id <> $1`,
       [actor.id]
     );
     if (Number(admins[0]?.count ?? 0) === 0) {

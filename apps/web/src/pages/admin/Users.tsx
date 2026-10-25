@@ -6,10 +6,19 @@ import { Avatar, Button, Card, Badge, PageHeader, Spinner, EmptyState } from '..
 
 interface RosterUser {
   id: string; mis_user_id: string; name: string; email: string; avatar_url: string | null; role: string; status: string;
+  /** NGA MIS account status; null = not synced yet (counts as active). */
+  mis_status: string | null; active: boolean;
   role_id: number | null; role_name: string | null; role_level: string | null;
   role_assigned_by_admin: boolean; last_login_at: string | null;
 }
 interface Role { id: number; name: string; level: string }
+type StatusFilter = 'active' | 'inactive' | 'suspended' | 'all';
+const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
+  { value: 'active', label: 'Active' },
+  { value: 'inactive', label: 'Inactive' },
+  { value: 'suspended', label: 'Suspended in Tupo' },
+  { value: 'all', label: 'Everyone' },
+];
 
 export const Users: React.FC = () => {
   const { can } = usePermissions();
@@ -18,13 +27,14 @@ export const Users: React.FC = () => {
   const [users, setUsers] = useState<RosterUser[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('active');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = async (q = '') => {
+  const load = async (q = '', status: StatusFilter = statusFilter) => {
     setLoading(true);
     try {
-      const res = await apiGet<RosterUser[]>(`/api/users?q=${encodeURIComponent(q)}`);
+      const res = await apiGet<RosterUser[]>(`/api/users?q=${encodeURIComponent(q)}&status=${status}`);
       setUsers(res.data ?? []);
       // Role list is only needed to populate the assignment dropdown, and
       // requires its own permission — a USERS_VIEW-only admin still sees the
@@ -87,6 +97,14 @@ export const Users: React.FC = () => {
             className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm dark:border-border-dark dark:bg-elevated-dark dark:text-slate-100"
           />
         </div>
+        <select
+          aria-label="Status"
+          value={statusFilter}
+          onChange={(e) => { const v = e.target.value as StatusFilter; setStatusFilter(v); void load(query, v); }}
+          className="rounded-lg border border-slate-300 px-2 py-2 text-sm dark:border-border-dark dark:bg-elevated-dark dark:text-slate-100"
+        >
+          {STATUS_FILTERS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+        </select>
         <Button variant="secondary" onClick={() => load(query)}>Search</Button>
       </div>
 
@@ -94,7 +112,9 @@ export const Users: React.FC = () => {
         {loading ? (
           <div className="grid place-items-center py-16"><Spinner /></div>
         ) : users.length === 0 ? (
-          <EmptyState title="No users yet" hint="Users appear here the first time they sign in through the MIS." />
+          query || statusFilter !== 'active'
+            ? <EmptyState title="No users match" hint="Try another name or status." />
+            : <EmptyState title="No users yet" hint="Users appear here the first time they sign in through the MIS." />
         ) : (
           <div className="overflow-x-auto">
             <table className="table-stack w-full text-sm">
@@ -143,6 +163,12 @@ export const Users: React.FC = () => {
                     </td>
                     <td data-label="Status" className="px-4 py-3">
                       <Badge tone={u.status === 'active' ? 'green' : 'red'}>{u.status}</Badge>
+                      {u.mis_status && u.mis_status !== 'ACTIVE' && (
+                        <span title="The account is not active in NGA MIS, so Tupo hides it from pickers and recipient lists"
+                          className="ml-2 inline-flex align-middle">
+                          <Badge tone="amber">{u.mis_status === 'REMOVED' ? 'removed in MIS' : `MIS: ${u.mis_status.toLowerCase()}`}</Badge>
+                        </span>
+                      )}
                     </td>
                     <td data-label="Last sign-in" className="px-4 py-3 text-xs text-slate-400 tabular-nums">
                       <span>{u.last_login_at ? new Date(u.last_login_at).toLocaleString() : '—'}</span>
