@@ -12,7 +12,7 @@
  *   · a `mail_threads` row groups them by normalised subject (FR-MAIL-2)
  */
 import type { PoolClient } from 'pg';
-import { getPool, snowflake } from '@tupo/db';
+import { getPool, snowflake, activeUserSql } from '@tupo/db';
 import {
   MAIL_MAX_BODY_HTML, MAIL_MAX_RECIPIENTS, MAIL_MAX_SUBJECT, MAIL_MAX_PAGE_SIZE, MAIL_PAGE_SIZE,
   normalizeSubject,
@@ -75,7 +75,7 @@ async function resolveRecipients(
       const { rows } = await db.query<{ id: string; name: string; email: string; copies: boolean | null }>(
         `SELECT u.id, u.name, u.email, p.email_copies AS copies
            FROM users u LEFT JOIN mail_prefs p ON p.user_id = u.id
-          WHERE u.id = $1 AND u.status = 'active'`, [id],
+          WHERE u.id = $1 AND ${activeUserSql('u')}`, [id],
       );
       const u = rows[0];
       if (!u) throw new MailError(`Recipient not found: ${id}`, 400);
@@ -93,11 +93,19 @@ async function resolveRecipients(
     const addr = value.toLowerCase();
     // An address that belongs to a Tupo user routes in-app; it also gets a real
     // email when the instance default (or that user's preference) calls for it.
-    const { rows } = await db.query<{ id: string; name: string; copies: boolean | null }>(
-      `SELECT u.id, u.name, p.email_copies AS copies
+    // Active accounts first: two rows can share an address.
+    const { rows } = await db.query<{ id: string; name: string; copies: boolean | null; active: boolean }>(
+      `SELECT u.id, u.name, p.email_copies AS copies, ${activeUserSql('u')} AS active
          FROM users u LEFT JOIN mail_prefs p ON p.user_id = u.id
-        WHERE lower(u.email) = $1 AND u.status = 'active' LIMIT 1`, [addr],
+        WHERE lower(u.email) = $1
+        ORDER BY ${activeUserSql('u')} DESC LIMIT 1`, [addr],
     );
+    // The address of a person who is no longer active (suspended here, or
+    // deactivated / removed in NGA MIS) is still an internal address: it must
+    // not fall through to an outside SMTP send.
+    if (rows[0] && !rows[0].active) {
+      throw new MailError(`${value} belongs to an account that is no longer active.`, 422);
+    }
     const key = `a:${addr}`;
     if (seen.has(key)) continue;
     seen.add(key);

@@ -8,7 +8,7 @@
  * than joining at send time means a campaign's recipient count is a real
  * number you can preview and approve against.
  */
-import { getPool, snowflake } from '@tupo/db';
+import { getPool, snowflake, activeUserSql } from '@tupo/db';
 import type { MailDistributionList } from '@tupo/shared';
 import { MailError } from './errors.js';
 
@@ -82,17 +82,24 @@ export interface ListMember {
   name: string;
   mergeVars: Record<string, string>;
   source: string;
+  /** The member's Tupo account is no longer active; campaigns skip them. */
+  inactive: boolean;
 }
 
 export async function listMembers(listId: string, limit = 500): Promise<ListMember[]> {
   const { rows } = await getPool().query<{
     address: string; user_id: string | null; name: string; merge_vars: Record<string, string>; source: string;
+    inactive: boolean;
   }>(
-    `SELECT address, user_id, name, merge_vars, source FROM mail_list_members
-      WHERE list_id = $1 ORDER BY name LIMIT $2`, [listId, Math.min(limit, 5000)],
+    `SELECT m.address, m.user_id, m.name, m.merge_vars, m.source,
+            (u.id IS NOT NULL AND NOT ${activeUserSql('u')}) AS inactive
+       FROM mail_list_members m
+       LEFT JOIN users u ON u.id = m.user_id
+      WHERE m.list_id = $1 ORDER BY m.name LIMIT $2`, [listId, Math.min(limit, 5000)],
   );
   return rows.map((r) => ({
     address: r.address, userId: r.user_id, name: r.name, mergeVars: r.merge_vars ?? {}, source: r.source,
+    inactive: r.inactive,
   }));
 }
 
@@ -140,13 +147,13 @@ export async function syncList(listId: string): Promise<{ members: number }> {
   let params: unknown[];
 
   if (list.origin === 'mis:all') {
-    sql = `SELECT id, name, email, role FROM users WHERE status = 'active' AND email <> ''`;
+    sql = `SELECT id, name, email, role FROM users WHERE ${activeUserSql('users')} AND email <> ''`;
     params = [];
   } else if (list.origin.startsWith('mis:role:')) {
     const roleName = list.origin.slice('mis:role:'.length);
     sql = `SELECT u.id, u.name, u.email, u.role
              FROM users u JOIN roles r ON r.id = u.role_id
-            WHERE u.status = 'active' AND u.email <> '' AND r.name = $1`;
+            WHERE ${activeUserSql('u')} AND u.email <> '' AND r.name = $1`;
     params = [roleName];
   } else if (list.origin.startsWith('mis:space:')) {
     const slug = list.origin.slice('mis:space:'.length);
@@ -154,7 +161,7 @@ export async function syncList(listId: string): Promise<{ members: number }> {
              FROM users u
              JOIN space_members sm ON sm.user_id = u.id
              JOIN spaces s ON s.id = sm.space_id
-            WHERE u.status = 'active' AND u.email <> '' AND s.slug = $1`;
+            WHERE ${activeUserSql('u')} AND u.email <> '' AND s.slug = $1`;
     params = [slug];
   } else {
     throw new MailError(`Unknown list origin: ${list.origin}`);
