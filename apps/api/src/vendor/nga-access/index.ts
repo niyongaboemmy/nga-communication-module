@@ -1,6 +1,6 @@
 // VENDORED from nga_central_mis/packages/access/src/index.ts -- do not edit.
 // Re-sync with: node nga_central_mis/packages/access/sync.mjs <this dir>
-// sha256:a5b3d717fd447d32a7040f6a4c427bd2aa5cbab6ab13af9ae99d2be356ff5d69
+// sha256:204e07f556b0be9d44db2b7db0240e5bdaae5807198ee2283da7b7924011fa3b
 /**
  * @nga/access -- the shared access-decision core.
  *
@@ -12,7 +12,7 @@
  * vendor an exact copy (see packages/access/README.md) -- never edit a copy.
  */
 
-export const ACCESS_CORE_VERSION = "1.2.0";
+export const ACCESS_CORE_VERSION = "1.3.0";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -487,3 +487,149 @@ export function validateManifest(m: Manifest): string[] {
 /** Is a depth restricted for this capability? */
 export const isRestricted = (def: Pick<CapabilityDef, "restricted">, depth: Depth | null) =>
   def.restricted === true || (!!depth && Array.isArray(def.restricted) && def.restricted.includes(depth));
+
+// ---------------------------------------------------------------------------
+// AI usage control (AI_USAGE_CONTROL_PLAN.md §2)
+// ---------------------------------------------------------------------------
+//
+// One rule for every app, in this order:
+//   1. the super admin's school-wide policy (MIS PlatformSetting 'ai_policy');
+//   2. inside a quiz / assignment / project, the item's ai_mode as set by the
+//      teacher who prepared it (only for a LEARNER working in it);
+//   3. otherwise the role capability AI_USE.
+// Everything fails closed: no policy means no AI.
+
+export type AiMode = "off" | "hints" | "full";
+export const AI_MODES: readonly AiMode[] = ["off", "hints", "full"];
+
+export type AiApp = "mis" | "tm" | "tmcode" | "desktop" | "tupo" | "da";
+export const AI_APPS: readonly AiApp[] = ["mis", "tm", "tmcode", "desktop", "tupo", "da"];
+
+/**
+ * assist   chat / tutor / ask-AI / TMCode chat and agent modes
+ * complete inline code completion
+ * hint     Socratic hints that never give the answer
+ * author   staff content tools (generators, rubrics, lesson studio, drafts)
+ * grading  background AI grading on submit -- a system action, no user
+ */
+export type AiFeature = "assist" | "complete" | "hint" | "author" | "grading";
+
+export interface AiPolicy {
+  v: number;
+  /** Master switch. Off means no AI anywhere, for anyone. */
+  enabled: boolean;
+  /** Per-app switches; a missing app counts as on (the master switch rules). */
+  apps: Partial<Record<AiApp, boolean>>;
+  features: { grading: boolean };
+  /** "always_off" locks every quiz/assignment to off whatever the teacher chose. */
+  assessments: "teacher" | "always_off";
+  /** TMCode third-party AI extensions (Claude Code, Copilot...). Client-enforced. */
+  thirdPartyExtensions: boolean;
+  updated_at?: string | null;
+  updated_by?: number | null;
+}
+
+export const AI_POLICY_DEFAULT: AiPolicy = {
+  v: 0,
+  enabled: false,
+  apps: { mis: true, tm: true, tmcode: true, desktop: true, tupo: true, da: true },
+  features: { grading: false },
+  assessments: "teacher",
+  thirdPartyExtensions: false,
+};
+
+/** Coerce stored/remote JSON into a policy. Anything unreadable stays off. */
+export function normalizeAiPolicy(raw: unknown): AiPolicy {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
+  const apps: Partial<Record<AiApp, boolean>> = { ...AI_POLICY_DEFAULT.apps };
+  if (r.apps && typeof r.apps === "object") {
+    for (const a of AI_APPS) if (typeof r.apps[a] === "boolean") apps[a] = r.apps[a];
+  }
+  return {
+    v: Number.isFinite(Number(r.v)) ? Number(r.v) : 0,
+    enabled: r.enabled === true,
+    apps,
+    features: { grading: r.features?.grading === true },
+    assessments: r.assessments === "always_off" ? "always_off" : "teacher",
+    thirdPartyExtensions: r.thirdPartyExtensions === true,
+    updated_at: typeof r.updated_at === "string" ? r.updated_at : null,
+    updated_by: Number.isFinite(Number(r.updated_by)) && r.updated_by != null ? Number(r.updated_by) : null,
+  };
+}
+
+export const normalizeAiMode = (m: unknown): AiMode =>
+  AI_MODES.includes(m as AiMode) ? (m as AiMode) : "off";
+
+export interface AiAssessmentContext {
+  kind: "quiz" | "assignment" | "project";
+  id: number;
+  aiMode: AiMode;
+  /** A secure/monitored TMCode exam session is running for this item. */
+  examActive?: boolean;
+}
+
+export interface AiContext {
+  app: AiApp;
+  feature: AiFeature;
+  /** The caller holds the AI_USE capability (role default). */
+  hasAiUse: boolean;
+  /** Set only when the caller is a learner working inside the item. */
+  assessment?: AiAssessmentContext | null;
+}
+
+export type AiReason =
+  | "GLOBAL_OFF"
+  | "APP_OFF"
+  | "FEATURE_OFF"
+  | "ASSESSMENT_LOCKED"
+  | "TEACHER_OFF"
+  | "EXAM_ACTIVE"
+  | "HINTS_ONLY"
+  | "ROLE_OFF"
+  | "ALLOWED_BY_TEACHER"
+  | "ALLOWED_BY_ROLE"
+  | "ALLOWED_BY_POLICY";
+
+export interface AiDecision {
+  allowed: boolean;
+  reason: AiReason;
+}
+
+/** Short, user-facing explanation for each reason. */
+export const AI_REASON_MESSAGES: Record<AiReason, string> = {
+  GLOBAL_OFF: "AI is turned off for the school.",
+  APP_OFF: "AI is turned off in this app.",
+  FEATURE_OFF: "This AI feature is turned off for the school.",
+  ASSESSMENT_LOCKED: "AI is off for all quizzes and assignments.",
+  TEACHER_OFF: "Your teacher turned AI off for this activity.",
+  EXAM_ACTIVE: "AI is off during this exam.",
+  HINTS_ONLY: "Only AI hints are allowed for this activity.",
+  ROLE_OFF: "Your role does not include AI tools.",
+  ALLOWED_BY_TEACHER: "Your teacher allows AI for this activity.",
+  ALLOWED_BY_ROLE: "AI is available.",
+  ALLOWED_BY_POLICY: "AI is available.",
+};
+
+const aiDeny = (reason: AiReason): AiDecision => ({ allowed: false, reason });
+const aiAllow = (reason: AiReason): AiDecision => ({ allowed: true, reason });
+
+export function decideAi(policy: AiPolicy | null | undefined, ctx: AiContext): AiDecision {
+  if (!policy || !policy.enabled) return aiDeny("GLOBAL_OFF");
+  if (policy.apps[ctx.app] === false) return aiDeny("APP_OFF");
+  if (ctx.feature === "grading") {
+    return policy.features.grading ? aiAllow("ALLOWED_BY_POLICY") : aiDeny("FEATURE_OFF");
+  }
+  const a = ctx.assessment;
+  if (a) {
+    if (policy.assessments === "always_off") return aiDeny("ASSESSMENT_LOCKED");
+    const mode = normalizeAiMode(a.aiMode);
+    if (mode === "off") return aiDeny(a.examActive ? "EXAM_ACTIVE" : "TEACHER_OFF");
+    if (mode === "hints" && ctx.feature !== "hint") return aiDeny("HINTS_ONLY");
+    return aiAllow("ALLOWED_BY_TEACHER");
+  }
+  return ctx.hasAiUse ? aiAllow("ALLOWED_BY_ROLE") : aiDeny("ROLE_OFF");
+}
+
+/** Is the school-wide policy on for this app at all (no user involved)? */
+export const aiAppEnabled = (policy: AiPolicy | null | undefined, app: AiApp) =>
+  !!policy && policy.enabled && policy.apps[app] !== false;
