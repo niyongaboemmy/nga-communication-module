@@ -11,6 +11,7 @@ import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './
 import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
 import { reminders, profileMedia } from '@tupo/notify';
+import * as chat from '@tupo/chat';
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -53,6 +54,12 @@ const worker = new Worker(
         lastJobAt = new Date().toISOString();
         const result = await profileMedia.runProfileMediaSync();
         if (result.errors.length) console.warn('[worker] avatars:sync —', result.errors.slice(0, 3).join(' | '));
+        // Someone just became inactive: out of their subject channels now
+        // rather than at the next chat sweep.
+        if (result.statusesUpdated > 0) {
+          await chat.leaveSubjectChannelsForInactive()
+            .catch((err) => console.warn('[worker] subject-channel cleanup failed:', err instanceof Error ? err.message : err));
+        }
         return result;
       }
 

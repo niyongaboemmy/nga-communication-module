@@ -1,4 +1,4 @@
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import { notifyAndPush } from '@tupo/notify';
 import type { WireMessage } from '@tupo/shared';
 
@@ -64,9 +64,12 @@ export async function notifyNewMessage(
   const mentioned = new Set(opts.mentionedUserIds);
 
   const { rows } = await getPool().query<Recipient>(
-    `SELECT user_id, notification, muted_until
-       FROM conversation_members
-      WHERE conversation_id = $1 AND user_id <> $2 AND left_at IS NULL`,
+    `SELECT m.user_id, m.notification, m.muted_until
+       FROM conversation_members m
+       JOIN users u ON u.id = m.user_id
+      WHERE m.conversation_id = $1 AND m.user_id <> $2 AND m.left_at IS NULL
+        -- Nobody notifies a person who is no longer active.
+        AND ${activeUserSql('u')}`,
     [message.conversationId, message.senderId],
   );
 

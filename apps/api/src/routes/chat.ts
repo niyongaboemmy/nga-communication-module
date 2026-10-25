@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { Redis } from 'ioredis';
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import type { NotificationLevel } from '@tupo/shared';
 import { NOTIFICATION_LEVELS, CONVERSATION_TYPES, MEMBER_ROLES } from '@tupo/shared';
@@ -228,7 +228,7 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
      */
     `SELECT id, name, avatar_url, role, email
        FROM users
-      WHERE id <> $1 AND status = 'active'
+      WHERE id <> $1 AND ${activeUserSql('users')}
         AND ($2 = '' OR name ILIKE '%' || $2 || '%' OR email ILIKE '%' || $2 || '%')
         -- Someone who blocked you, or whom you blocked, is not in your picker.
         AND NOT EXISTS (

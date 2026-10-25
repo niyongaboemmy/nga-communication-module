@@ -200,6 +200,9 @@ export interface WireMember {
   lastSeenAt?: string | null;
   joinedAt: string;
   lastReadSeq: number;
+  /** Their account is no longer active (suspended, or deactivated in NGA MIS).
+   *  They stay listed so the conversation's history still makes sense. */
+  inactive?: boolean;
 }
 
 /**
