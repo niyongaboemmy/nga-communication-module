@@ -56,6 +56,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Leave nothing behind: suites that empty the users table (meet) would
+  // otherwise trip over these channels' created_by foreign key.
+  const mine = [teacher?.id, student?.id, outsider?.id].filter(Boolean);
+  await getPool().query('DELETE FROM conversations WHERE subject_id = ANY($1::text[])', [[SUBJECT, OTHER]]);
+  await getPool().query('DELETE FROM conversations WHERE created_by = ANY($1::text[])', [mine]);
+  await getPool().query('DELETE FROM audit_log WHERE actor_id = ANY($1::text[])', [mine]).catch(() => {});
+  await getPool().query('DELETE FROM users WHERE id = ANY($1::text[])', [mine]).catch(() => {});
   await closeDb();
 });
 

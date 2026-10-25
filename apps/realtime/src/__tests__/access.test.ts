@@ -16,6 +16,12 @@ describe('decideAccess — the handshake rule', () => {
     if (!d.ok) expect(d.message).toMatch(/suspended/);
   });
 
+  it('rejects someone NGA MIS says is no longer active', () => {
+    const d = decideAccess({ status: 'inactive', permissions: new Set(['MESSAGE_SEND']) });
+    expect(d).toMatchObject({ ok: false, reason: 'suspended' });
+    if (!d.ok) expect(d.message).toMatch(/no longer active/);
+  });
+
   it('rejects a token whose user row no longer exists', () => {
     expect(decideAccess(null)).toMatchObject({ ok: false, reason: 'unknown_user' });
   });
