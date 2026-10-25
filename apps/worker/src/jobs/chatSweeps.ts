@@ -18,10 +18,12 @@ import * as chat from '@tupo/chat';
 export interface ChatSweepResult {
   messagesDeleted: number;
   statusesCleared: number;
+  inactiveRemovedFromSubjects: number;
 }
 
 export async function runChatSweeps(): Promise<ChatSweepResult> {
   const messagesDeleted = await chat.sweepExpiredMessages(500);
   const statusesCleared = await chat.sweepExpiredStatuses();
-  return { messagesDeleted, statusesCleared };
+  const inactiveRemovedFromSubjects = await chat.leaveSubjectChannelsForInactive();
+  return { messagesDeleted, statusesCleared, inactiveRemovedFromSubjects };
 }

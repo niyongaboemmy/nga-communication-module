@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { createHash } from 'node:crypto';
-import { getPool, resolveUserPermissions } from '@tupo/db';
+import { getPool, resolveUserPermissions, isActiveUser } from '@tupo/db';
 import { fail } from '@tupo/shared';
 import type { Role, RoleLevel } from '@tupo/shared';
 import { verifyMisToken } from '../services/misClient.js';
@@ -117,9 +117,9 @@ export async function misBearerAuth(req: Request, res: Response, next: NextFunct
     const pool = getPool();
     const { rows } = await pool.query<{
       id: string; mis_user_id: string; name: string; email: string; role: Role; status: string;
-      avatar_url: string | null; preferred_theme: 'light' | 'dark' | null;
+      mis_status: string | null; avatar_url: string | null; preferred_theme: 'light' | 'dark' | null;
     }>(
-      `SELECT id, mis_user_id, name, email, role, status, avatar_url, preferred_theme
+      `SELECT id, mis_user_id, name, email, role, status, mis_status, avatar_url, preferred_theme
          FROM users WHERE mis_user_id = $1`,
       [misUserId],
     );
@@ -128,6 +128,9 @@ export async function misBearerAuth(req: Request, res: Response, next: NextFunct
     if (!user) return next();
     if (user.status !== 'active') {
       return res.status(403).json({ ...fail('This account has been suspended.'), code: 'ACCOUNT_SUSPENDED' });
+    }
+    if (!isActiveUser({ status: 'active', mis_status: user.mis_status })) {
+      return res.status(401).json({ ...fail('This NGA account is no longer active.'), code: 'ACCOUNT_INACTIVE' });
     }
 
     const resolved = await resolveUserPermissions(pool, user.id);

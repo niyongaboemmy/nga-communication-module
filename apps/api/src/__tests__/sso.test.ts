@@ -87,6 +87,32 @@ describe('POST /api/sso/exchange', () => {
     expect(rows[0].n).toBe(1);
   });
 
+  it('records the MIS account status at sign-in, and keeps it when MIS sends none', async () => {
+    const tokenBody = (status?: string) => ({
+      success: true,
+      data: {
+        token: 'mis-token-abc',
+        user: { user_id: 991, name: 'Aline Uwase', email: 'aline@amashuri.com', username: 'aline', ...(status ? { status } : {}) },
+        permissions: ['MARK_ATTENDANCE'],
+      },
+    });
+    const misStatus = async () => (await getPool().query("SELECT mis_status FROM users WHERE mis_user_id = '991'")).rows[0].mis_status;
+
+    mockMis({ tokenBody: tokenBody() });
+    await request(app).post('/api/sso/exchange').send({ code: 'c1' });
+    expect(await misStatus()).toBeNull();
+
+    await getPool().query("UPDATE users SET mis_status = 'REMOVED' WHERE mis_user_id = '991'");
+    mockMis({ tokenBody: tokenBody('ACTIVE') });
+    const res = await request(app).post('/api/sso/exchange').send({ code: 'c2' });
+    expect(res.status).toBe(200);
+    expect(await misStatus()).toBe('ACTIVE');
+
+    mockMis({ tokenBody: tokenBody() });
+    await request(app).post('/api/sso/exchange').send({ code: 'c3' });
+    expect(await misStatus()).toBe('ACTIVE');
+  });
+
   it('writes an audit entry for the login', async () => {
     mockMis();
     await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });

@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import * as mail from '@tupo/mail';
 import { MailError } from '@tupo/mail';
@@ -189,7 +189,7 @@ router.get('/directory', authorizePermission('MAIL_READ'), wrap(async (req, res)
     id: string; name: string; email: string; avatar_url: string | null;
   }>(
     `SELECT id, name, email, avatar_url FROM users
-      WHERE status = 'active'
+      WHERE ${activeUserSql('users')}
         AND ($1 = '' OR name ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%')
       ORDER BY name, email LIMIT 20`,
     [q],

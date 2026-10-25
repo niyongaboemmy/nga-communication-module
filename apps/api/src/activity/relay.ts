@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
-import { getPool } from '@tupo/db';
+import { getPool, isActiveUser } from '@tupo/db';
 import {
   createActivityRelay, type ActivityRelay, type RelayOptions,
 } from '../vendor/nga-activity-relay/relay.js';
@@ -58,14 +58,14 @@ export async function misUserIdFromSession(req: Request): Promise<number | null>
       id?: string; misUserId?: string; iat?: number; guest?: boolean;
     };
     if (decoded.guest === true || !decoded.id) return null;
-    const { rows } = await getPool().query<{ status: string; mis_user_id: string | null; revoked_at: Date | null }>(
-      `SELECT u.status, u.mis_user_id, r.revoked_at
+    const { rows } = await getPool().query<{ status: string; mis_status: string | null; mis_user_id: string | null; revoked_at: Date | null }>(
+      `SELECT u.status, u.mis_status, u.mis_user_id, r.revoked_at
          FROM users u LEFT JOIN session_revocations r ON r.user_id = u.id
         WHERE u.id = $1`,
       [decoded.id],
     );
     const user = rows[0];
-    if (!user || user.status !== 'active') return null;
+    if (!user || !isActiveUser(user)) return null;
     if (issuedBeforeRevocation(decoded.iat, user.revoked_at)) return null;
     return toMisUserId(user.mis_user_id ?? decoded.misUserId);
   } catch {

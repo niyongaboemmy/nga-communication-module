@@ -27,7 +27,7 @@ interface Overview {
   scopedUsers: number | null;
   people: {
     total: number; onlineNow: number; activeToday: number; active7d: number;
-    suspended: number; neverActive: number; byStatus: Record<string, number>;
+    suspended: number; inactive?: number; neverActive: number; byStatus: Record<string, number>;
   };
   chat: { messages: number; activeSenders: number; activeConversations: number; dms: number };
   mail: { sent: number; senders: number; unreadBacklog: number; bulk: number };
@@ -517,7 +517,7 @@ const AttentionPanel: React.FC<{ data: Overview }> = ({ data }) => (
       <AlertTriangle size={14} className="text-amber-500" /> Needs attention
     </h3>
     <dl className="mt-3 space-y-1.5 text-xs">
-      <Row label="Suspended accounts" value={data.people.suspended} />
+      <Row label="Inactive accounts" value={data.people.inactive ?? data.people.suspended} />
       <Row label="Never signed in" value={data.people.neverActive} />
       <Row label="Unread mail piling up" value={data.mail.unreadBacklog} warn={data.mail.unreadBacklog > 50} />
       <Row label="Bulk / campaign mail" value={data.mail.bulk} />

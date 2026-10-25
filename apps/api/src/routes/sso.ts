@@ -4,7 +4,8 @@ import { publishSessionEnd } from '../services/chatRealtime.js';
 import jwt from 'jsonwebtoken';
 import { ok, fail, resolveMisRole, ssoExchangeSchema } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
-import { getPool, resolveUserPermissions } from '@tupo/db';
+import { getPool, normaliseMisStatus, resolveUserPermissions } from '@tupo/db';
+import { recheckMisStatus } from '../services/misStatus.js';
 import { config } from '../config.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { noteAiPolicyVersion } from '../services/aiPolicy.js';
@@ -186,12 +187,18 @@ router.post('/exchange', async (req: Request, res: Response) => {
     const snapAcademic = snapshot ? academicFromSnapshot(snapshot, legacyAcademic, forceAdmin) : null;
     const academic = mode === 'enforce' && snapAcademic ? snapAcademic : legacyAcademic;
 
+    // MIS account status (users.mis_status): the live /users/me copy wins over
+    // the exchange payload; an older MIS that sends none leaves ours alone.
+    const misStatus = normaliseMisStatus((me?.user as Record<string, unknown> | undefined)?.status)
+      ?? normaliseMisStatus(misUser.status);
+
     const user = await upsertMisUser({
       misUserId, name, email, avatarUrl,
       derivedRole: resolveMisRole(misUser, effectivePermissions),
       preferredTheme,
       forceAdmin,
       academic,
+      misStatus,
     });
 
     // Subjects for the Channels page. Awaited so the first page load already
@@ -259,6 +266,10 @@ router.post('/exchange', async (req: Request, res: Response) => {
  * that user's Tupo sessions and drop their open sockets
  * (nga_central_mis/docs/SINGLE_SIGN_OUT.md).
  */
+/** Tests only: the status re-check the last back-channel logout started. */
+let lastStatusRecheck: Promise<unknown> = Promise.resolve();
+export const __lastStatusRecheck = (): Promise<unknown> => lastStatusRecheck;
+
 router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: '20kb' }), async (req: Request, res: Response) => {
   res.set('Cache-Control', 'no-store');
   try {
@@ -274,6 +285,15 @@ router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: 
       [String(misUserId)],
     );
     publishSessionEnd(rows.map((r) => r.id));
+    // MIS also signs people out when an administrator disables them: re-check
+    // this person's MIS status now rather than at the next sweep, so they drop
+    // out of every picker straight away. In the background -- MIS is waiting on
+    // this answer, and a slow lookup must not hold up its logout.
+    if (rows.length > 0) {
+      lastStatusRecheck = recheckMisStatus(String(misUserId)).catch((err) => {
+        console.error('[sso] status re-check after back-channel logout failed:', err instanceof Error ? err.message : err);
+      });
+    }
     return res.status(200).json({ success: true });
   } catch (error) {
     if (error instanceof LogoutTokenError) {

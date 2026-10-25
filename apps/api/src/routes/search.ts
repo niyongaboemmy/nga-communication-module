@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import * as chat from '@tupo/chat';
 import { pages as feedPages, visibleAudiences, type FeedActor } from '@tupo/feed';
 import { ok, fail } from '@tupo/shared';
@@ -165,7 +165,7 @@ async function searchPeopleSection(req: Request, q: string, limit: number): Prom
   }>(
     `SELECT id, name, email, avatar_url, role, title
        FROM users
-      WHERE id <> $1 AND status = 'active'
+      WHERE id <> $1 AND ${activeUserSql('users')}
         AND (name ILIKE '%' || $2 || '%' OR email ILIKE '%' || $2 || '%')
         AND NOT EXISTS (
           SELECT 1 FROM user_blocks b

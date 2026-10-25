@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { getPool, snowflake } from '@tupo/db';
+import { getPool, snowflake, activeUserSql, filterActiveUserIds } from '@tupo/db';
 import {
   ok, fail, parseMeetSettings, meetRoleAtLeast, normalizeJoinCode,
   createMeetingSchema, updateMeetingSchema, joinMeetingSchema, askMeetingSchema,
@@ -366,7 +366,7 @@ router.get('/directory', denyGuests,
       `SELECT u.id, u.name, u.email, u.avatar_url, r.name AS role_name
          FROM users u
          LEFT JOIN roles r ON r.id = u.role_id
-        WHERE u.status = 'active' AND u.id <> $2
+        WHERE ${activeUserSql('u')} AND u.id <> $2
           AND (u.name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%')
         ORDER BY u.name
         LIMIT 20`,
@@ -1779,13 +1779,19 @@ router.post('/:id/invites', authorizePermission('MEET_SCHEDULE'), async (req: Re
   const userIds: string[] = Array.isArray(req.body?.userIds) ? req.body.userIds.slice(0, 500) : [];
   if (!userIds.length) return res.status(400).json(fail('No invitees given.'));
 
-  await getPool().query(
-    `INSERT INTO meeting_invites (meeting_id, user_id)
-     SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
-    [m.id, userIds],
-  );
-  reminders.queueMeetingReminderSync(m.id);
-  res.json(ok({ invited: userIds.length }));
+  // Only active people are invited; anyone suspended, or deactivated in NGA
+  // MIS, is left out and reported back so the host knows.
+  const active = await filterActiveUserIds(getPool(), userIds.map(String));
+  if (active.length) {
+    await getPool().query(
+      `INSERT INTO meeting_invites (meeting_id, user_id)
+       SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
+      [m.id, active],
+    );
+    reminders.queueMeetingReminderSync(m.id);
+  }
+  const skipped = [...new Set(userIds.map(String))].filter((id) => !active.includes(id));
+  res.json(ok({ invited: active.length, skipped }));
 });
 
 router.put('/:id/invites/me', async (req: Request, res: Response) => {

@@ -1,4 +1,4 @@
-import { getPool, snowflake } from '@tupo/db';
+import { getPool, snowflake, activeUserSql } from '@tupo/db';
 import type { PoolClient } from 'pg';
 import type { ConversationSummary, MemberRole, SubjectSummary } from '@tupo/shared';
 import { ChatError, getConversation } from './service.js';
@@ -70,6 +70,36 @@ async function ensureGeneral(client: PoolClient, subjectId: string, createdBy: s
  * channels of subjects they no longer have. One transaction, so a half-synced
  * person never exists.
  */
+/**
+ * Take people who are no longer active (suspended here, or deactivated /
+ * removed in NGA MIS) out of every subject channel. Reversible: their
+ * user_subjects rows stay, so the next sign-in after reactivation puts them
+ * back (syncUserSubjects). Their messages stay where they are.
+ */
+export async function leaveSubjectChannelsForInactive(): Promise<number> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ id: string }>(
+      `UPDATE conversation_members m SET left_at = now()
+         FROM conversations c, users u
+        WHERE m.conversation_id = c.id AND u.id = m.user_id
+          AND c.subject_id IS NOT NULL AND m.left_at IS NULL
+          AND NOT ${activeUserSql('u')}
+       RETURNING c.id`,
+    );
+    const touched = [...new Set(rows.map((r) => r.id))];
+    for (const id of touched) await refreshMemberCount(client, id);
+    await client.query('COMMIT');
+    return rows.length;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export async function syncUserSubjects(userId: string, subjects: MisSubject[]): Promise<void> {
   // A subject someone both teaches and takes counts as teaching.
   const byId = new Map<string, MisSubject>();
@@ -184,7 +214,9 @@ export async function createSubjectChannel(
       [id, SUBJECT_SPACE, slug, name.toLowerCase().replace(/\s+/g, '-'), input.topic?.trim() || null, actorId, subjectId],
     );
     const { rows: people } = await client.query<{ user_id: string; role: 'teacher' | 'student' }>(
-      'SELECT user_id, role FROM user_subjects WHERE subject_id = $1', [subjectId],
+      `SELECT us.user_id, us.role FROM user_subjects us
+         JOIN users u ON u.id = us.user_id
+        WHERE us.subject_id = $1 AND ${activeUserSql('u')}`, [subjectId],
     );
     for (const p of people) await upsertMember(client, id, p.user_id, memberRoleFor(p.role));
     await upsertMember(client, id, actorId, 'owner');

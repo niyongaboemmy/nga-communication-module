@@ -11,7 +11,7 @@
  * sender's mailbox shows one campaign, not five hundred messages.
  */
 import type { PoolClient } from 'pg';
-import { getPool, snowflake } from '@tupo/db';
+import { getPool, snowflake, activeUserSql } from '@tupo/db';
 import { notify, push } from '@tupo/notify';
 import {
   MAIL_APPROVAL_THRESHOLD, normalizeSubject,
@@ -144,8 +144,12 @@ export async function resolveCampaignRecipients(campaign: MailCampaignView): Pro
       `SELECT DISTINCT ON (lower(m.address)) m.address, m.user_id, m.name, m.merge_vars,
               p.email_copies AS copies
          FROM mail_list_members m
+         LEFT JOIN users u ON u.id = m.user_id
          LEFT JOIN mail_prefs p ON p.user_id = m.user_id
-        WHERE m.list_id = ANY($1::text[])`,
+        WHERE m.list_id = ANY($1::text[])
+          -- A member whose account is no longer active (suspended here, or
+          -- deactivated in NGA MIS) is skipped until the next list sync drops them.
+          AND (u.id IS NULL OR ${activeUserSql('u')})`,
       [campaign.listIds],
     );
     for (const r of rows) {
@@ -160,6 +164,19 @@ export async function resolveCampaignRecipients(campaign: MailCampaignView): Pro
     byAddress.set(e.address.toLowerCase(), {
       userId: null, address: e.address.toLowerCase(), name: e.name, mergeVars: e.mergeVars ?? {},
     });
+  }
+
+  // An address that belongs only to inactive Tupo accounts is an internal
+  // address of someone who has left: never email it from outside.
+  if (byAddress.size) {
+    const { rows: gone } = await getPool().query<{ address: string }>(
+      `SELECT lower(u.email) AS address FROM users u
+        WHERE lower(u.email) = ANY($1::text[])
+        GROUP BY lower(u.email)
+       HAVING bool_and(NOT ${activeUserSql('u')})`,
+      [[...byAddress.keys()]],
+    );
+    for (const g of gone) byAddress.delete(g.address);
   }
 
   // Drop suppressed addresses up front so the preview count is honest.
