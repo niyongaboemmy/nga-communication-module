@@ -1,4 +1,4 @@
-import { getPool, snowflake } from '@tupo/db';
+import { getPool, snowflake, activeUserSql, filterActiveUserIds } from '@tupo/db';
 import {
   DEFAULT_MEET_SETTINGS, MESH_MAX_PARTICIPANTS, capacityFor,
   generateJoinCode, parseMeetSettings, severityFor,
@@ -153,13 +153,16 @@ export async function createMeeting(params: CreateMeetingParams): Promise<Meetin
 
   const meeting = rows[0]!;
 
-  if (params.inviteeIds?.length) {
+  // Only active people are invited (suspended here or deactivated in NGA MIS
+  // are dropped).
+  const invitees = params.inviteeIds?.length ? await filterActiveUserIds(pool, params.inviteeIds) : [];
+  if (invitees.length) {
     // ON CONFLICT because an invitee list is often re-submitted wholesale when
     // a scheduled meeting is edited.
     await pool.query(
       `INSERT INTO meeting_invites (meeting_id, user_id)
        SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
-      [id, params.inviteeIds],
+      [id, invitees],
     );
   }
 
@@ -560,7 +563,7 @@ export async function audienceFor(
     const { rows } = await pool.query<{ user_id: string }>(
       `SELECT i.user_id
          FROM meeting_invites i
-         JOIN users u ON u.id = i.user_id AND u.status = 'active'
+         JOIN users u ON u.id = i.user_id AND ${activeUserSql('u')}
         WHERE i.meeting_id = $1`,
       [meetingId],
     );
@@ -568,7 +571,7 @@ export async function audienceFor(
   }
 
   const { rows } = await pool.query<{ id: string }>(
-    `SELECT id FROM users WHERE status = 'active' LIMIT $1`,
+    `SELECT id FROM users WHERE ${activeUserSql('users')} LIMIT $1`,
     [NOTIFY_BROADCAST_CAP + 1],
   );
   if (rows.length > NOTIFY_BROADCAST_CAP) return { userIds: [], truncated: true };
