@@ -19,6 +19,7 @@ import { activity } from '../activity/relay.js';
 import {
   translateMessage, isSupportedLanguage, SUPPORTED_LANGUAGES,
 } from '../services/translateService.js';
+import { isAiDisabledError, aiDisabledBody } from '../services/aiPolicy.js';
 
 /**
  * Chat REST.
@@ -880,6 +881,7 @@ router.post('/conversations/:id/messages/:messageId/translate',
     try {
       res.json(ok(await translateMessage(messageId, message.body, language)));
     } catch (err) {
+      if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
       // A model being unavailable is a 503, not a 500: nothing is wrong with
       // the request and retrying later is the right advice.
       res.status(503).json(fail(

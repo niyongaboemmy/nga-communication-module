@@ -28,7 +28,31 @@ export interface MeetWrapUpData {
 
 const API_BASE = process.env.API_INTERNAL_URL ?? 'http://127.0.0.1:5190';
 
-interface ArtifactOutcome { kind: string; ok: boolean; providerUsed?: string; error?: string }
+interface ArtifactOutcome {
+  kind: string; ok: boolean; providerUsed?: string; error?: string;
+  /** The API refused because the school turned AI off (403 AI_DISABLED). */
+  aiDisabled?: boolean;
+}
+
+/**
+ * Is AI on for Tupo (the MIS master switch)? Asked of the API, which owns the
+ * policy client. Only an explicit "off" skips the wrap-up: if the question
+ * itself fails, the generators are still refused by the API's chokepoint, and
+ * the loop below stops at the first such refusal.
+ */
+async function aiTurnedOff(base: string, token: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${base}/api/ai/policy`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = await res.json().catch(() => ({})) as {
+      data?: { enabled?: boolean; message?: string };
+    };
+    if (res.ok && body.data?.enabled === false) return body.data.message ?? 'AI is turned off for the school.';
+  } catch { /* fall through: the API refuses on its own */ }
+  return null;
+}
 
 async function generate(
   base: string, token: string, meetingId: string, kind: string, path: string,
@@ -40,10 +64,13 @@ async function generate(
       body: '{}',
     });
     const body = await res.json().catch(() => ({})) as {
-      success?: boolean; message?: string; data?: { providerUsed?: string };
+      success?: boolean; message?: string; code?: string; data?: { providerUsed?: string };
     };
     if (!res.ok || body.success === false) {
-      return { kind, ok: false, error: body.message ?? `HTTP ${res.status}` };
+      return {
+        kind, ok: false, error: body.message ?? `HTTP ${res.status}`,
+        aiDisabled: res.status === 403 && body.code === 'AI_DISABLED',
+      };
     }
     return { kind, ok: true, providerUsed: body.data?.providerUsed };
   } catch (err) {
@@ -87,24 +114,25 @@ export async function runMeetWrapUp(data: MeetWrapUpData) {
   // worse than no summary — it reads as authoritative and says nothing true.
   if (Number(seg[0]?.count ?? 0) < 5) return { skipped: 'not enough transcript' };
 
+  // The super admin's switch (MIS ai_policy) outranks the meeting's settings.
+  const off = await aiTurnedOff(base, token);
+  if (off) return { skipped: off };
+
   /* 3. Generate. Sequentially and deliberately: four parallel requests to the
    *    same provider is the fastest way to trip a rate limit and have every one
    *    of them fall through to the slowest provider in the chain. */
-  const outcomes: ArtifactOutcome[] = [];
+  const planned: Array<[kind: string, path: string]> = [];
+  if (settings.aiPostMeetingMinutes) planned.push(['minutes', 'minutes'], ['chapters', 'chapters']);
+  if (settings.aiActionItems) planned.push(['action_items', 'action-items'], ['decisions', 'decisions']);
+  if (settings.aiEngagementReport) planned.push(['engagement', 'engagement']);
+  if (settings.aiLessonFollowUp) planned.push(['lesson_followup', 'lesson-followup']);
 
-  if (settings.aiPostMeetingMinutes) {
-    outcomes.push(await generate(base, token, meetingId, 'minutes', 'minutes'));
-    outcomes.push(await generate(base, token, meetingId, 'chapters', 'chapters'));
-  }
-  if (settings.aiActionItems) {
-    outcomes.push(await generate(base, token, meetingId, 'action_items', 'action-items'));
-    outcomes.push(await generate(base, token, meetingId, 'decisions', 'decisions'));
-  }
-  if (settings.aiEngagementReport) {
-    outcomes.push(await generate(base, token, meetingId, 'engagement', 'engagement'));
-  }
-  if (settings.aiLessonFollowUp) {
-    outcomes.push(await generate(base, token, meetingId, 'lesson_followup', 'lesson-followup'));
+  const outcomes: ArtifactOutcome[] = [];
+  for (const [kind, path] of planned) {
+    const outcome = await generate(base, token, meetingId, kind, path);
+    // AI was switched off mid-run: the rest would be refused the same way.
+    if (outcome.aiDisabled) return { meetingId, skipped: outcome.error ?? 'AI is turned off for the school.' };
+    outcomes.push(outcome);
   }
 
   const failed = outcomes.filter((o) => !o.ok);

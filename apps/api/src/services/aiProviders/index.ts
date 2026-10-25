@@ -5,3 +5,4 @@ export type {
 export { isAnyProviderConfigured, getProviderStatus, orderedProviders } from './registry.js';
 export { friendlyAIErrorMessage, isQuotaError } from './errors.js';
 export type { JSONSchema, AIProvider, GenerateJSONParams } from './types.js';
+export { AiDisabledError, isAiDisabledError, aiDisabledBody } from '../aiPolicy.js';

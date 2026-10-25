@@ -1,6 +1,7 @@
 import type { GenerateJSONParams } from './types.js';
 import { orderedProviders, isCoolingDown, markCoolingDown } from './registry.js';
 import { isQuotaError, friendlyAIErrorMessage } from './errors.js';
+import { assertTupoAiEnabled } from '../aiPolicy.js';
 
 export interface GenerateStructuredContentResult<T> {
   data: T;
@@ -20,6 +21,9 @@ export async function generateStructuredContent<T = unknown>(
   params: GenerateJSONParams,
   options?: GenerateStructuredContentOptions,
 ): Promise<GenerateStructuredContentResult<T>> {
+  // The school's master switch (MIS ai_policy) comes before any provider.
+  // Throws AiDisabledError, which the routes answer as 403 AI_DISABLED.
+  await assertTupoAiEnabled();
   const providers = orderedProviders(options?.providerOrder);
   let lastErr: unknown = null;
   let attempted = 0;
@@ -68,6 +72,9 @@ export async function generateFreeformJSON<T = unknown>(
   maxOutputTokens?: number,
   options?: GenerateStructuredContentOptions,
 ): Promise<GenerateStructuredContentResult<T>> {
+  // The school's master switch (MIS ai_policy) comes before any provider.
+  // Throws AiDisabledError, which the routes answer as 403 AI_DISABLED.
+  await assertTupoAiEnabled();
   const providers = orderedProviders(options?.providerOrder);
   let lastErr: unknown = null;
   let attempted = 0;
@@ -96,6 +103,9 @@ export async function generatePlainText(
   maxOutputTokens?: number,
   options?: GenerateStructuredContentOptions,
 ): Promise<GenerateStructuredContentResult<string>> {
+  // The school's master switch (MIS ai_policy) comes before any provider.
+  // Throws AiDisabledError, which the routes answer as 403 AI_DISABLED.
+  await assertTupoAiEnabled();
   const providers = orderedProviders(options?.providerOrder);
   let lastErr: unknown = null;
   let attempted = 0;
