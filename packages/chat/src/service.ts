@@ -115,6 +115,7 @@ interface ConversationRow {
   muted_until: string | null; draft: string | null;
   peer_id: string | null; peer_name: string | null;
   peer_avatar: string | null; peer_role: string | null;
+  subject_id: string | null; subject_name: string | null; subject_code: string | null;
 }
 
 /**
@@ -134,9 +135,11 @@ const CONVERSATION_SELECT = `
          m.role AS my_role, m.unread_count, m.unread_mentions, m.last_read_seq,
          m.is_starred, m.notification, m.muted_until, m.draft,
          peer.id AS peer_id, peer.name AS peer_name,
-         peer.avatar_url AS peer_avatar, peer.role AS peer_role
+         peer.avatar_url AS peer_avatar, peer.role AS peer_role,
+         c.subject_id, sub.name AS subject_name, sub.code AS subject_code
     FROM conversation_members m
     JOIN conversations c ON c.id = m.conversation_id
+    LEFT JOIN subjects sub ON sub.id = c.subject_id
     LEFT JOIN users ls ON ls.id = c.last_message_sender
     LEFT JOIN LATERAL (
       SELECT u.id, u.name, u.avatar_url, u.role
@@ -168,6 +171,9 @@ function toConversation(r: ConversationRow): ConversationSummary {
     avatarFileId: isDm ? null : r.avatar_file_id,
     memberCount: r.member_count,
     lastSeq: Number(r.last_seq),
+    subjectId: r.subject_id ?? null,
+    subjectName: r.subject_name ?? null,
+    subjectCode: r.subject_code ?? null,
     myRole: r.my_role,
     unread: r.unread_count,
     unreadMentions: r.unread_mentions,

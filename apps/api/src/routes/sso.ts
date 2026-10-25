@@ -12,6 +12,7 @@ import { exchangeCode, fetchMe, misAvatarUrl, misCoverUrl, verifyMisSessionDetai
 import { accessMode } from '../access/mode.js';
 import { getAccessSnapshot, noteAccessVersion } from '../access/snapshot.js';
 import { academicFromSnapshot, placementDiffers, syncAccessProfile } from '../access/profileSync.js';
+import { syncSubjectsFromMis } from '../services/subjectSync.js';
 import { recordShadowDiff } from '../access/shadow.js';
 import { upsertMisUser, audit, setUserAvatar, setUserCover, type MisAcademic } from '../services/userService.js';
 
@@ -193,6 +194,9 @@ router.post('/exchange', async (req: Request, res: Response) => {
       academic,
     });
 
+    // Subjects for the Channels page. Awaited so the first page load already
+    // shows them, but bounded (5 s per MIS call) and it never throws.
+    await syncSubjectsFromMis(user.id, misUserId, misToken);
     if (coverUrl !== undefined) {
       await setUserCover(user.id, coverUrl).catch((err) => console.error('[sso] cover sync failed:', err));
     }

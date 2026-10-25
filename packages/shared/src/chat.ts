@@ -21,6 +21,16 @@ export type MemberRole = (typeof MEMBER_ROLES)[number];
 export const NOTIFICATION_LEVELS = ['all', 'mentions', 'none'] as const;
 export type NotificationLevel = (typeof NOTIFICATION_LEVELS)[number];
 
+/** A subject the viewer teaches or takes, as the Channels page lists it. */
+export interface SubjectSummary {
+  id: string;
+  name: string;
+  code: string | null;
+  myRole: 'teacher' | 'student';
+  /** Teachers of the subject (and admins) may add channels to it. */
+  canCreateChannels: boolean;
+}
+
 export interface ConversationSummary {
   id: string;
   type: ConversationType;
@@ -40,6 +50,10 @@ export interface ConversationSummary {
   avatarFileId: string | null;
   memberCount: number;
   lastSeq: number;
+  /** Set for a subject channel (the Channels page); null for everything in Chat. */
+  subjectId: string | null;
+  subjectName: string | null;
+  subjectCode: string | null;
 
   /* Viewer-scoped state — the same conversation looks different to each member. */
   myRole: MemberRole;

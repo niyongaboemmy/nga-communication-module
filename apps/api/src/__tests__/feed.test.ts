@@ -438,3 +438,56 @@ describe('engagement', () => {
     expect(rows[0].view_count).toBe(3);
   });
 });
+
+describe('page followers list', () => {
+  it('is for the page owner only — not editors, followers, or admins who do not own it', async () => {
+    const page = await makePage(admin.token, { name: `Followers ${snowflake()}`, audience: 'everyone' });
+    await api(student.token).post(`/api/feed/pages/${page}/follow`);
+    await api(admin.token).post(`/api/feed/pages/${page}/editors`, { userId: staff.id, role: 'editor' });
+    const otherAdmin = await user('Admin', 'Otto');
+
+    const own = await api(admin.token).get(`/api/feed/pages/${page}/followers`);
+    expect(own.status).toBe(200);
+    expect(own.body.data.followers.map((f: { id: string }) => f.id)).toContain(student.id);
+    expect(own.body.data.followers.find((f: { id: string }) => f.id === student.id)).toMatchObject({ name: 'Stu', followedAt: expect.any(String) });
+
+    expect((await api(staff.token).get(`/api/feed/pages/${page}/followers`)).status).toBe(403);
+    expect((await api(student.token).get(`/api/feed/pages/${page}/followers`)).status).toBe(403);
+    expect((await api(otherAdmin.token).get(`/api/feed/pages/${page}/followers`)).status).toBe(403);
+    expect((await api(noPerms.token).get(`/api/feed/pages/${page}/followers`)).status).toBe(403);
+  });
+
+  it('searches by name', async () => {
+    const page = await makePage(admin.token, { name: `Search ${snowflake()}`, audience: 'everyone' });
+    await api(student.token).post(`/api/feed/pages/${page}/follow`);
+    await api(staff.token).post(`/api/feed/pages/${page}/follow`);
+    const res = await api(admin.token).get(`/api/feed/pages/${page}/followers?q=stu`);
+    expect(res.body.data.followers.map((f: { id: string }) => f.id)).toEqual([student.id]);
+  });
+});
+
+describe('who reacted', () => {
+  it('anyone who can see the post sees who reacted, with per-reaction counts and a filter', async () => {
+    const id = await publish(admin.token, pageId, { body: `reactors ${snowflake()}` });
+    await api(student.token).post(`/api/feed/posts/${id}/reactions`, { emoji: 'like' });
+    await api(staff.token).post(`/api/feed/posts/${id}/reactions`, { emoji: 'love' });
+
+    const all = await api(parent.token).get(`/api/feed/posts/${id}/reactions`);
+    expect(all.status).toBe(200);
+    expect(all.body.data.counts).toEqual({ like: 1, love: 1 });
+    expect(all.body.data.reactors.map((r: { id: string }) => r.id).sort()).toEqual([student.id, staff.id].sort());
+    expect(all.body.data.reactors.find((r: { id: string }) => r.id === student.id)).toMatchObject({ name: 'Stu', reaction: 'like' });
+
+    const loves = await api(parent.token).get(`/api/feed/posts/${id}/reactions?reaction=love`);
+    expect(loves.body.data.reactors.map((r: { id: string }) => r.id)).toEqual([staff.id]);
+  });
+
+  it('is hidden from someone who cannot see the post', async () => {
+    const studentsPage = await makePage(admin.token, { name: `Students ${snowflake()}`, audience: 'students' });
+    const id = await publish(admin.token, studentsPage, { audience: 'students' });
+    await api(student.token).post(`/api/feed/posts/${id}/reactions`, { emoji: 'like' });
+    expect((await api(student.token).get(`/api/feed/posts/${id}/reactions`)).status).toBe(200);
+    expect([403, 404]).toContain((await api(parent.token).get(`/api/feed/posts/${id}/reactions`)).status);
+    expect((await api(noPerms.token).get(`/api/feed/posts/${id}/reactions`)).status).toBe(403);
+  });
+});

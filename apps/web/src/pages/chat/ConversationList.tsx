@@ -185,6 +185,8 @@ export const ConversationList: React.FC<{
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return conversations.filter((c) => {
+      // Subject channels live on the Channels page, not in Chat.
+      if (c.subjectId) return false;
       if (unreadOnly && c.unread === 0 && c.unreadMentions === 0) return false;
       if (!q) return true;
       return c.name.toLowerCase().includes(q)

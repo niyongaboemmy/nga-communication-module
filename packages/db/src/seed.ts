@@ -41,7 +41,7 @@ async function seed(): Promise<void> {
   );
   const ownerId = adminRows[0]?.id ?? null;
   const PAGES = [
-    { slug: 'nga-official', name: 'NGA Official', kind: 'official', audience: 'everyone', verified: true, mandatory: true, accent: '#2563eb', bio: 'Official announcements from Nyanza Green Academy.' },
+    { slug: 'nga-official', name: 'NGA Official', kind: 'official', audience: 'everyone', verified: true, mandatory: true, accent: '#2563eb', bio: 'Official announcements from New Generation Academy.' },
     { slug: 'academics', name: 'Academics & Exams', kind: 'official', audience: 'everyone', verified: true, mandatory: false, accent: '#7c3aed', bio: 'Timetables, exam news, results and study resources.' },
     { slug: 'sports-clubs', name: 'Sports & Clubs', kind: 'club', audience: 'everyone', verified: false, mandatory: false, accent: '#0d9488', bio: 'Fixtures, results, and everything the clubs are up to.' },
   ];

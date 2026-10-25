@@ -5,7 +5,7 @@ import {
   Check, ChevronDown, MoreHorizontal, Mail, ExternalLink, Pencil, Link2, Trash2, UserPlus,
 } from 'lucide-react';
 import type {
-  CreatePagePayload, FeedPageDetail, FeedPageEditor, FeedPageKind, FeedPageLink, FeedPageSummary,
+  CreatePagePayload, FeedPageDetail, FeedPageEditor, FeedPageFollower, FeedPageKind, FeedPageLink, FeedPageSummary,
   FeedPostView, FeedPageAnalytics, UpdatePageEditorPayload, UpdatePagePayload,
 } from '@tupo/shared';
 import { FEED_PAGE_KINDS, FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
@@ -17,7 +17,7 @@ import { uploadFile, validateFile } from '../chat/uploads';
 import { useFeed, useFeedList } from './FeedProvider';
 import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
 import { Composer } from './Composer';
-import { useDismiss, useMediaUrl } from './lib';
+import { useDismiss, useMediaUrl, relativeTime } from './lib';
 import * as api from './api';
 
 /**
@@ -210,6 +210,7 @@ export const PageProfile: React.FC = () => {
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [coverBusy, setCoverBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [followersOpen, setFollowersOpen] = useState(false);
   const cover = useMediaUrl(page?.coverFileId);
   const avatar = useMediaUrl(page?.avatarFileId);
 
@@ -336,7 +337,12 @@ export const PageProfile: React.FC = () => {
 
               <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
                 <Users size={15} className="text-text-secondary-light dark:text-text-secondary-dark" aria-hidden />
-                {stat(page.followerCount, page.followerCount === 1 ? 'follower' : 'followers')}
+                {/* Who follows a page is its owners' business: only they can open the list. */}
+                {canManage ? (
+                  <button type="button" onClick={() => setFollowersOpen(true)} className="rounded hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                    {stat(page.followerCount, page.followerCount === 1 ? 'follower' : 'followers')}
+                  </button>
+                ) : stat(page.followerCount, page.followerCount === 1 ? 'follower' : 'followers')}
                 <span aria-hidden className="text-text-secondary-light/60 dark:text-text-secondary-dark/60">·</span>
                 {stat(page.postCount, page.postCount === 1 ? 'post' : 'posts')}
                 <span aria-hidden className="text-text-secondary-light/60 dark:text-text-secondary-dark/60">·</span>
@@ -385,6 +391,7 @@ export const PageProfile: React.FC = () => {
       </FeedFrame>
       <ReportDialog />
       <EditPostMount pages={allPages} />
+      {followersOpen && canManage && <FollowersDialog page={page} onClose={() => setFollowersOpen(false)} />}
       {editing && <EditPageDialog page={page} onClose={() => setEditing(false)} onSaved={(p) => { setPage(p); setEditing(false); }} />}
     </>
   );
@@ -995,3 +1002,93 @@ const Sparkline: React.FC<{ series: FeedPageAnalytics['series'] }> = ({ series }
 };
 
 export { Users };
+
+/** The page's followers, for its owners: newest first, searchable, 50 at a time. */
+const FollowersDialog: React.FC<{ page: FeedPageDetail; onClose: () => void }> = ({ page, onClose }) => {
+  const [q, setQ] = useState('');
+  const [followers, setFollowers] = useState<FeedPageFollower[] | null>(null);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [more, setMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const seq = useRef(0);
+
+  // Debounced search; every new query starts from the top.
+  useEffect(() => {
+    const mine = ++seq.current;
+    const t = window.setTimeout(() => {
+      setError(null);
+      api.listFollowers(page.id, { q })
+        .then((r) => { if (mine === seq.current) { setFollowers(r.followers); setCursor(r.nextCursor); } })
+        .catch((e) => { if (mine === seq.current) setError(e instanceof Error ? e.message : 'Could not load followers.'); });
+    }, q ? 250 : 0);
+    return () => window.clearTimeout(t);
+  }, [page.id, q]);
+
+  const loadMore = () => {
+    if (!cursor || more) return;
+    setMore(true);
+    api.listFollowers(page.id, { q, before: cursor })
+      .then((r) => { setFollowers((f) => [...(f ?? []), ...r.followers]); setCursor(r.nextCursor); })
+      .catch(() => {})
+      .finally(() => setMore(false));
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[110] grid place-items-center bg-black/50 p-4" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label="Followers"
+        className="flex max-h-[80vh] w-full max-w-md animate-pop flex-col overflow-hidden rounded-2xl border border-border-light bg-white shadow-2xl dark:border-border-dark/50 dark:bg-elevated-dark" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 pt-4">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
+            <Users size={15} /> Followers · {page.followerCount.toLocaleString()}
+          </h2>
+          <button onClick={onClose} aria-label="Close" className="grid h-8 w-8 place-items-center rounded-full text-text-secondary-light hover:bg-surface-light dark:hover:bg-card-dark"><X size={18} /></button>
+        </div>
+        <p className="px-5 pt-1 text-xs text-text-secondary-light dark:text-text-secondary-dark">Only the page's owners can see this list.</p>
+
+        <div className="px-5 pb-2 pt-3">
+          <label className="relative block">
+            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-secondary-light dark:text-text-secondary-dark" />
+            <span className="sr-only">Search followers</span>
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search followers" autoFocus
+              className="w-full rounded-lg border border-border-light bg-surface-light py-2 pl-9 pr-3 text-sm outline-none focus:border-blue-500 dark:border-border-dark/60 dark:bg-card-dark/50" />
+          </label>
+        </div>
+
+        <ul className="min-h-[8rem] flex-1 overflow-y-auto px-2 pb-2" aria-label="Followers" aria-busy={followers === null}>
+          {error && <li className="px-3 py-6 text-center text-sm text-red-600 dark:text-red-400">{error}</li>}
+          {!error && followers === null && <li className="grid place-items-center py-8"><Spinner /></li>}
+          {!error && followers?.length === 0 && (
+            <li className="px-3 py-8 text-center text-sm text-text-secondary-light dark:text-text-secondary-dark">
+              {q ? 'No follower matches that name.' : 'Nobody follows this page yet.'}
+            </li>
+          )}
+          {followers?.map((f) => (
+            <li key={f.id} className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-surface-light dark:hover:bg-card-dark/50">
+              <Avatar name={f.name} src={f.avatarUrl ?? undefined} size={36} />
+              <div className="min-w-0 flex-1 leading-tight">
+                <p className="truncate text-sm font-medium text-text-primary-light dark:text-text-primary-dark">{f.name}</p>
+                {f.roleName && <p className="truncate text-xs capitalize text-text-secondary-light dark:text-text-secondary-dark">{f.roleName}</p>}
+              </div>
+              <span className="shrink-0 text-xs text-text-secondary-light dark:text-text-secondary-dark" title={new Date(f.followedAt).toLocaleString()}>
+                {relativeTime(f.followedAt)}
+              </span>
+            </li>
+          ))}
+          {cursor && (
+            <li className="px-3 py-2">
+              <button onClick={loadMore} disabled={more} className="flex w-full items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-60 dark:text-blue-400 dark:hover:bg-blue-900/20">
+                {more && <Loader2 size={14} className="animate-spin" />} Show more
+              </button>
+            </li>
+          )}
+        </ul>
+      </div>
+    </div>
+  );
+};

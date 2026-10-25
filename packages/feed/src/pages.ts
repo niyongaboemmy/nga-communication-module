@@ -8,7 +8,7 @@
 import type { PoolClient } from 'pg';
 import { getPool, snowflake } from '@tupo/db';
 import type {
-  CreatePagePayload, FeedPageDetail, FeedPageEditor, FeedPageKind, FeedPageLink, FeedPageSummary,
+  CreatePagePayload, FeedPageDetail, FeedPageEditor, FeedPageFollower, FeedPageKind, FeedPageLink, FeedPageSummary,
   UpdatePageEditorPayload, UpdatePagePayload,
 } from '@tupo/shared';
 import { FEED_LIMITS, FEED_PAGE_KINDS, FEED_AUDIENCES } from '@tupo/shared';
@@ -485,6 +485,42 @@ export async function followedPageIds(userId: string): Promise<string[]> {
     'SELECT page_id FROM feed_page_followers WHERE user_id = $1', [userId],
   );
   return rows.map((r) => r.page_id);
+}
+
+const FOLLOWERS_PAGE_SIZE = 50;
+
+/**
+ * Who follows this page, newest first, for its owners only. Editors publish as
+ * the page but do not get its audience list, and neither do platform admins
+ * (assertPageGovernance) -- who reads a page is the owner's business. Paged by
+ * `followed_at` so a 2,000-follower school page loads a screenful at a time;
+ * `q` narrows by name.
+ */
+export async function listFollowers(
+  actor: FeedActor, pageId: string, opts: { q?: string; before?: string | null } = {},
+): Promise<{ followers: FeedPageFollower[]; nextCursor: string | null }> {
+  const row = await assertPageOwner(actor, pageId);
+  const q = (opts.q ?? '').trim().slice(0, 80);
+  const before = opts.before && !Number.isNaN(Date.parse(opts.before)) ? opts.before : null;
+  const { rows } = await getPool().query<{
+    id: string; name: string; avatar_url: string | null; role: string | null; followed_at: Date;
+  }>(
+    `SELECT u.id, u.name, u.avatar_url, u.role, f.followed_at
+       FROM feed_page_followers f JOIN users u ON u.id = f.user_id
+      WHERE f.page_id = $1
+        AND ($2::text = '' OR u.name ILIKE '%' || $2 || '%')
+        AND ($3::timestamptz IS NULL OR f.followed_at < $3)
+      ORDER BY f.followed_at DESC, u.id DESC
+      LIMIT $4`,
+    [row.id, q, before, FOLLOWERS_PAGE_SIZE + 1],
+  );
+  const page = rows.slice(0, FOLLOWERS_PAGE_SIZE);
+  return {
+    followers: page.map((r) => ({
+      id: r.id, name: r.name, avatarUrl: r.avatar_url, roleName: r.role, followedAt: r.followed_at.toISOString(),
+    })),
+    nextCursor: rows.length > FOLLOWERS_PAGE_SIZE ? page[page.length - 1]!.followed_at.toISOString() : null,
+  };
 }
 
 /** For fan-out: the followers of a page who want to be notified. */

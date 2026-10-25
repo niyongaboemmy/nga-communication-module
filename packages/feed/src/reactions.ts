@@ -3,9 +3,10 @@
  * tapping the same emoji again removes it, tapping a different one switches.
  */
 import { getPool } from '@tupo/db';
-import type { FeedReaction, FeedReactionSummary } from '@tupo/shared';
+import type { FeedPostReactor, FeedReaction, FeedReactionSummary } from '@tupo/shared';
 import { FEED_REACTIONS } from '@tupo/shared';
 import { FeedError } from './errors.js';
+import { getPostView } from './posts.js';
 import { type FeedActor, can, normalizeReaction } from './common.js';
 
 async function assertReactable(actor: FeedActor): Promise<void> {
@@ -133,4 +134,50 @@ export async function reactToComment(
     'SELECT reaction_count FROM feed_comments WHERE id = $1', [commentId],
   );
   return { postId: comment.post_id, reactionCount: rows[0]?.reaction_count ?? 0, commentAuthorId: comment.author_id };
+}
+
+const REACTORS_PAGE_SIZE = 50;
+/** A stored reaction as a known kind; anything unexpected reads as a like rather than failing the list. */
+const asReaction = (v: string): FeedReaction => (FEED_REACTIONS as readonly string[]).includes(v) ? (v as FeedReaction) : 'like';
+
+/**
+ * Who reacted to a post, newest first -- open to anyone who can see the post
+ * (getPostView applies the same audience rules as the feed), as on Facebook.
+ * `reaction` narrows to one kind; `counts` feeds the per-reaction tabs.
+ */
+export async function listReactors(
+  actor: FeedActor, postId: string, opts: { reaction?: string | null; before?: string | null } = {},
+): Promise<{ reactors: FeedPostReactor[]; counts: Partial<Record<FeedReaction, number>>; nextCursor: string | null }> {
+  await getPostView(actor, postId);
+  const reaction = FEED_REACTIONS.find((r) => r === opts.reaction) ?? null;
+  const before = opts.before && !Number.isNaN(Date.parse(opts.before)) ? opts.before : null;
+  const pool = getPool();
+  const [{ rows }, { rows: countRows }] = await Promise.all([
+    pool.query<{ id: string; name: string; avatar_url: string | null; role: string | null; emoji: string; created_at: Date }>(
+      `SELECT u.id, u.name, u.avatar_url, u.role, r.emoji, r.created_at
+         FROM feed_reactions r JOIN users u ON u.id = r.user_id
+        WHERE r.post_id = $1
+          AND ($2::text IS NULL OR r.emoji = $2)
+          AND ($3::timestamptz IS NULL OR r.created_at < $3)
+        ORDER BY r.created_at DESC, u.id DESC
+        LIMIT $4`,
+      [postId, reaction, before, REACTORS_PAGE_SIZE + 1],
+    ),
+    pool.query<{ emoji: string; n: string }>(
+      'SELECT emoji, count(*) AS n FROM feed_reactions WHERE post_id = $1 GROUP BY emoji', [postId],
+    ),
+  ]);
+  const page = rows.slice(0, REACTORS_PAGE_SIZE);
+  return {
+    reactors: page.map((r) => ({
+      id: r.id, name: r.name, avatarUrl: r.avatar_url, roleName: r.role,
+      reaction: asReaction(r.emoji), reactedAt: r.created_at.toISOString(),
+    })),
+    counts: countRows.reduce<Partial<Record<FeedReaction, number>>>((acc, c) => {
+      const k = asReaction(c.emoji);
+      acc[k] = (acc[k] ?? 0) + Number(c.n);
+      return acc;
+    }, {}),
+    nextCursor: rows.length > REACTORS_PAGE_SIZE ? page[page.length - 1]!.created_at.toISOString() : null,
+  };
 }
