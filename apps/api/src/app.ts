@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { fail } from '@tupo/shared';
 import { config } from './config.js';
+import { isAiDisabledError, aiDisabledBody } from './services/aiPolicy.js';
 import ssoRoutes from './routes/sso.js';
 import healthRoutes from './routes/health.js';
 import rolesPermissionsRoutes from './routes/rolesPermissions.js';
@@ -18,6 +19,7 @@ import dashboardRoutes from './routes/dashboard.js';
 import accessRoutes from './routes/access.js';
 import integrationRoutes from './routes/integration.js';
 import activityRoutes from './routes/activity.js';
+import aiRoutes from './routes/ai.js';
 
 /**
  * The Express app with no side effects — no database init, no listen — so
@@ -60,6 +62,7 @@ app.use('/api/search', searchRoutes);
 app.use('/api/oversight', oversightRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/access', accessRoutes);
+app.use('/api/ai', aiRoutes);
 // Called by the MIS server with the user's MIS token, not a Tupo session.
 app.use('/api/integration', integrationRoutes);
 
@@ -71,6 +74,8 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   if ((err as { type?: string }).type === 'entity.parse.failed') {
     return res.status(400).json(fail('The request body is not valid JSON.'));
   }
+  // Any AI route that let the chokepoint's refusal through still answers 403.
+  if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
   console.error('[api] unhandled error:', err);
   res.status(500).json(fail('An unexpected error occurred.'));
 });

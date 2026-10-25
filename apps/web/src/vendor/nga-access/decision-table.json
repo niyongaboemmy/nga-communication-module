@@ -485,5 +485,566 @@
       "cap": "UNKNOWN_CAP",
       "expect": null
     }
-  ]
+  ],
+  "ai": {
+    "description": "decideAi cases (AI_USAGE_CONTROL_PLAN.md §2). policy null = no policy available.",
+    "cases": [
+      {
+        "name": "no policy fails closed",
+        "policy": null,
+        "ctx": {
+          "app": "tm",
+          "feature": "author",
+          "hasAiUse": true
+        },
+        "allowed": false,
+        "reason": "GLOBAL_OFF"
+      },
+      {
+        "name": "master switch off beats everything",
+        "policy": {
+          "v": 3,
+          "enabled": false,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tm",
+          "feature": "assist",
+          "hasAiUse": true,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "full",
+            "examActive": false
+          }
+        },
+        "allowed": false,
+        "reason": "GLOBAL_OFF"
+      },
+      {
+        "name": "app switch off",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tupo",
+          "feature": "author",
+          "hasAiUse": true
+        },
+        "allowed": false,
+        "reason": "APP_OFF"
+      },
+      {
+        "name": "teacher with AI_USE outside items",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tm",
+          "feature": "author",
+          "hasAiUse": true
+        },
+        "allowed": true,
+        "reason": "ALLOWED_BY_ROLE"
+      },
+      {
+        "name": "student without AI_USE outside items",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "desktop",
+          "feature": "assist",
+          "hasAiUse": false
+        },
+        "allowed": false,
+        "reason": "ROLE_OFF"
+      },
+      {
+        "name": "item off (default) denies even with AI_USE",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tm",
+          "feature": "hint",
+          "hasAiUse": true,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "off",
+            "examActive": false
+          }
+        },
+        "allowed": false,
+        "reason": "TEACHER_OFF"
+      },
+      {
+        "name": "item off during exam",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tmcode",
+          "feature": "assist",
+          "hasAiUse": false,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "off",
+            "examActive": true
+          }
+        },
+        "allowed": false,
+        "reason": "EXAM_ACTIVE"
+      },
+      {
+        "name": "item hints allows a hint",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tm",
+          "feature": "hint",
+          "hasAiUse": false,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "hints",
+            "examActive": false
+          }
+        },
+        "allowed": true,
+        "reason": "ALLOWED_BY_TEACHER"
+      },
+      {
+        "name": "item hints refuses chat",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tmcode",
+          "feature": "assist",
+          "hasAiUse": false,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "hints",
+            "examActive": false
+          }
+        },
+        "allowed": false,
+        "reason": "HINTS_ONLY"
+      },
+      {
+        "name": "item hints refuses completion",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tmcode",
+          "feature": "complete",
+          "hasAiUse": true,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "hints",
+            "examActive": false
+          }
+        },
+        "allowed": false,
+        "reason": "HINTS_ONLY"
+      },
+      {
+        "name": "item full overrides student role",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tmcode",
+          "feature": "assist",
+          "hasAiUse": false,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "full",
+            "examActive": false
+          }
+        },
+        "allowed": true,
+        "reason": "ALLOWED_BY_TEACHER"
+      },
+      {
+        "name": "item full in an exam",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tmcode",
+          "feature": "complete",
+          "hasAiUse": false,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "full",
+            "examActive": true
+          }
+        },
+        "allowed": true,
+        "reason": "ALLOWED_BY_TEACHER"
+      },
+      {
+        "name": "super admin lock beats teacher full",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "always_off",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tm",
+          "feature": "hint",
+          "hasAiUse": true,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "full",
+            "examActive": false
+          }
+        },
+        "allowed": false,
+        "reason": "ASSESSMENT_LOCKED"
+      },
+      {
+        "name": "lock leaves teachers' own tools alone",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "always_off",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tm",
+          "feature": "author",
+          "hasAiUse": true
+        },
+        "allowed": true,
+        "reason": "ALLOWED_BY_ROLE"
+      },
+      {
+        "name": "grading off by default",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tm",
+          "feature": "grading",
+          "hasAiUse": false
+        },
+        "allowed": false,
+        "reason": "FEATURE_OFF"
+      },
+      {
+        "name": "grading on",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": true
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tm",
+          "feature": "grading",
+          "hasAiUse": false
+        },
+        "allowed": true,
+        "reason": "ALLOWED_BY_POLICY"
+      },
+      {
+        "name": "unknown item mode counts as off",
+        "policy": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "teacher",
+          "thirdPartyExtensions": false
+        },
+        "ctx": {
+          "app": "tm",
+          "feature": "hint",
+          "hasAiUse": true,
+          "assessment": {
+            "kind": "quiz",
+            "id": 7,
+            "aiMode": "bogus",
+            "examActive": false
+          }
+        },
+        "allowed": false,
+        "reason": "TEACHER_OFF"
+      }
+    ],
+    "normalize": [
+      {
+        "name": "garbage is the default (off)",
+        "input": "nope",
+        "expect": {
+          "enabled": false,
+          "assessments": "teacher",
+          "grading": false,
+          "thirdPartyExtensions": false
+        }
+      },
+      {
+        "name": "only literal true enables",
+        "input": {
+          "enabled": "true",
+          "features": {
+            "grading": 1
+          }
+        },
+        "expect": {
+          "enabled": false,
+          "assessments": "teacher",
+          "grading": false,
+          "thirdPartyExtensions": false
+        }
+      },
+      {
+        "name": "valid policy round-trips",
+        "input": {
+          "v": 3,
+          "enabled": true,
+          "apps": {
+            "mis": true,
+            "tm": true,
+            "tmcode": true,
+            "desktop": true,
+            "tupo": false,
+            "da": true
+          },
+          "features": {
+            "grading": false
+          },
+          "assessments": "always_off",
+          "thirdPartyExtensions": false
+        },
+        "expect": {
+          "enabled": true,
+          "assessments": "always_off",
+          "grading": false,
+          "thirdPartyExtensions": false
+        }
+      }
+    ]
+  }
 }

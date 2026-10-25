@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PERMISSIONS } from '@tupo/shared';
 import {
-  decide, scopeFor, validateManifest, type AccessSnapshot,
+  decide, scopeFor, validateManifest, decideAi, normalizeAiPolicy, type AccessSnapshot,
 } from '../vendor/nga-access/index.js';
 import { TUPO_MANIFEST } from '../access/manifest.js';
 import { accessMode } from '../access/mode.js';
@@ -51,6 +51,26 @@ describe('@nga/access decision table (vendored core)', () => {
     expect(src).toMatch(/^\/\/ VENDORED from nga_central_mis\/packages\/access\/src\/index\.ts/);
     expect(src).toMatch(/sha256:[0-9a-f]{64}/);
   });
+});
+
+describe('@nga/access AI usage decisions (vendored core)', () => {
+  for (const c of table.ai.cases) {
+    it(c.name, () => {
+      const policy = c.policy ? normalizeAiPolicy(c.policy) : null;
+      expect(decideAi(policy, c.ctx)).toEqual({ allowed: c.allowed, reason: c.reason });
+    });
+  }
+  for (const c of table.ai.normalize) {
+    it(`normalizeAiPolicy: ${c.name}`, () => {
+      const p = normalizeAiPolicy(c.input);
+      expect({
+        enabled: p.enabled,
+        assessments: p.assessments,
+        grading: p.features.grading,
+        thirdPartyExtensions: p.thirdPartyExtensions,
+      }).toEqual(c.expect);
+    });
+  }
 });
 
 describe('Tupo manifest', () => {

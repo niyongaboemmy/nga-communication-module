@@ -4,6 +4,7 @@ import { getPool, resolveUserPermissions } from '@tupo/db';
 import { fail } from '@tupo/shared';
 import type { Role, RoleLevel } from '@tupo/shared';
 import { verifyMisToken } from '../services/misClient.js';
+import { noteAiPolicyVersion } from '../services/aiPolicy.js';
 import { attachAccess } from '../access/gate.js';
 import { noteAccessVersion } from '../access/snapshot.js';
 import type { AuthenticatedRequest } from './auth.js';
@@ -81,7 +82,7 @@ async function misUserIdFor(token: string): Promise<string | 'invalid' | 'unreac
   if (hit && hit.expiresAt > Date.now()) return hit.misUserId;
   if (hit) verified.delete(key);
 
-  const { state, userId, accessVersion } = await verifyMisToken(token);
+  const { state, userId, accessVersion, aiPolicyVersion } = await verifyMisToken(token);
   if (state !== 'valid' || !userId) return state === 'unreachable' ? 'unreachable' : 'invalid';
 
   // Map order is insertion order, so the first key is the oldest entry.
@@ -89,6 +90,7 @@ async function misUserIdFor(token: string): Promise<string | 'invalid' | 'unreac
   verified.set(key, { misUserId: userId, expiresAt: Date.now() + VERIFY_TTL_MS });
   // Same as the /verify-mis poll: a new access_version drops the cached snapshot.
   if (accessVersion !== null) noteAccessVersion(userId, accessVersion);
+  noteAiPolicyVersion(aiPolicyVersion);
   return userId;
 }
 

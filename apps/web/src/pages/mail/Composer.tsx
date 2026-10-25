@@ -8,6 +8,7 @@ import { RichTextEditor } from './RichTextEditor';
 import { RecipientInput, type RecipientToken } from './RecipientInput';
 import { AiAssistant, htmlToPlain } from './AiAssistant';
 import * as api from './api';
+import { AiOffNote } from '../../components/AiOffNote';
 import type { MailComposePayload, MailMessageKind, MailTemplate } from '@tupo/shared';
 
 export interface ComposerSeed {
@@ -54,6 +55,7 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
   const [showTemplates, setShowTemplates] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiAvailable, setAiAvailable] = useState(false);
+  const [aiOff, setAiOff] = useState<string | null>(null);
   const [undoBody, setUndoBody] = useState<string | null>(null);
   const [subjectIdeas, setSubjectIdeas] = useState<string[] | null>(null);
   const [subjectBusy, setSubjectBusy] = useState(false);
@@ -84,7 +86,11 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [to, cc, bcc, subject, body, attachments]);
 
-  useEffect(() => { api.aiStatus().then(setAiAvailable).catch(() => setAiAvailable(false)); }, []);
+  useEffect(() => {
+    api.aiState()
+      .then((s) => { setAiAvailable(s.available); setAiOff(s.off); })
+      .catch(() => setAiAvailable(false));
+  }, []);
 
   const applyAi = (html: string) => {
     setUndoBody(bodyRef.current);
@@ -311,6 +317,7 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
               )}
             </div>
           )}
+          {aiOff && <AiOffNote message={aiOff} />}
           {undoBody !== null && (
             <IconButton label="Undo AI change" size="sm" onClick={() => { setBody(undoBody); setUndoBody(null); }}>
               <Undo2 size={16} />

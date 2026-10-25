@@ -360,7 +360,8 @@ export const MeetHome: React.FC = () => {
 
       {/* Deployment honesty: what this server can and cannot do. */}
       {capabilities &&
-        (!capabilities.sfu || !capabilities.ai || !capabilities.turn) && (
+        (!capabilities.sfu || !capabilities.ai || !capabilities.turn
+          || capabilities.aiPolicy?.enabled === false) && (
           <div className="rounded-xl border border-border-light bg-surface-light px-3 py-2.5 text-xs leading-relaxed text-text-secondary-light dark:border-border-dark/40 dark:bg-elevated-dark/40 dark:text-text-secondary-dark">
             {!capabilities.sfu && (
               <p>
@@ -379,7 +380,12 @@ export const MeetHome: React.FC = () => {
                 networks.
               </p>
             )}
-            {!capabilities.ai && (
+            {capabilities.aiPolicy?.enabled === false ? (
+              <p>
+                {capabilities.aiPolicy.message} The AI notetaker, summaries and
+                answers are unavailable.
+              </p>
+            ) : !capabilities.ai && (
               <p>
                 No AI provider is configured, so notes and summaries are
                 unavailable.

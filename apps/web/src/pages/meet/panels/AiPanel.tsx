@@ -26,6 +26,8 @@ import type { SummaryContent } from '../api';
 export interface AiPanelProps {
   meetingId: string;
   aiEnabled: boolean;
+  /** The school's "AI is turned off" message (MIS ai_policy), or null when AI is on. */
+  aiOff?: string | null;
   aiPresent: boolean;
   transcribing: boolean;
   captionsSupported: boolean;
@@ -45,7 +47,7 @@ type Tab = 'summary' | 'actions' | 'decisions' | 'ask';
 const MIN_SEGMENTS = 8;
 
 export const AiPanel: React.FC<AiPanelProps> = ({
-  meetingId, aiEnabled, aiPresent, transcribing, captionsSupported, captionCount,
+  meetingId, aiEnabled, aiOff = null, aiPresent, transcribing, captionsSupported, captionCount,
   canUseAi, isHost, thinking, onClose, onEnableAi, onEnableTranscription,
 }) => {
   const [tab, setTab] = useState<Tab>('summary');
@@ -87,8 +89,8 @@ export const AiPanel: React.FC<AiPanelProps> = ({
    * a room that has been silent for five minutes.
    */
   useEffect(() => {
-    if (thinking === 'summary' && aiPresent && enoughTranscript) void run('summary');
-  }, [thinking, aiPresent, enoughTranscript, run]);
+    if (thinking === 'summary' && aiPresent && enoughTranscript && !aiOff) void run('summary');
+  }, [thinking, aiPresent, enoughTranscript, aiOff, run]);
 
   const ask = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -106,6 +108,28 @@ export const AiPanel: React.FC<AiPanelProps> = ({
       setBusy(null);
     }
   };
+
+  /* --- Turned off by the school --- */
+  // Above everything else: the meeting's own setting and the host's choice do
+  // not matter while the super admin has AI switched off.
+  if (aiOff) {
+    return (
+      <PanelShell title="Tupo AI" subtitle="Notes, action items and answers" onClose={onClose}>
+        <div className="space-y-2 p-4">
+          <div className="rounded-xl border border-white/10 bg-white/5 p-3" role="note">
+            <div className="mb-1.5 flex items-center gap-2">
+              <Sparkles size={15} className="text-white/40" />
+              <span className="text-sm font-semibold text-white">{aiOff}</span>
+            </div>
+            <p className="text-xs leading-relaxed text-white/60">
+              The AI notetaker, summaries and answers are unavailable until a super
+              administrator turns AI back on. Captions and your own notes still work.
+            </p>
+          </div>
+        </div>
+      </PanelShell>
+    );
+  }
 
   /* --- Not yet invited --- */
   if (!aiEnabled || !aiPresent) {

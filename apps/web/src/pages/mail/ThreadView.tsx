@@ -11,6 +11,7 @@ import { replySubject, forwardSubject } from './replyHelpers';
 import { RichTextEditor } from './RichTextEditor';
 import { DeliverySheet } from './DeliverySheet';
 import * as api from './api';
+import { AiOffNote } from '../../components/AiOffNote';
 import type { MailThreadView, MailMessageView, MailLabel, MailMessageKind } from '@tupo/shared';
 import type { ComposerSeed } from './Composer';
 
@@ -154,12 +155,17 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   const [delivery, setDelivery] = useState<string | null>(null);
   const [showLabels, setShowLabels] = useState(false);
   const [aiAvailable, setAiAvailable] = useState(false);
+  const [aiOff, setAiOff] = useState<string | null>(null);
   const [summary, setSummary] = useState<MailAiThreadSummary | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [smartReplies, setSmartReplies] = useState<Array<{ intent: string; text: string }> | null>(null);
   const [repliesBusy, setRepliesBusy] = useState(false);
 
-  useEffect(() => { api.aiStatus().then(setAiAvailable).catch(() => setAiAvailable(false)); }, []);
+  useEffect(() => {
+    api.aiState()
+      .then((s) => { setAiAvailable(s.available); setAiOff(s.off); })
+      .catch(() => setAiAvailable(false));
+  }, []);
   useEffect(() => { setSummary(null); setSmartReplies(null); }, [threadId]);
 
   const runSummary = async () => {
@@ -235,6 +241,12 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
               {summaryBusy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={16} />}
             </IconButton>
           )}
+          {aiOff && thread.messages.length > 0 && (
+            <span title={aiOff} aria-label={aiOff} role="note"
+              className="grid h-8 w-8 place-items-center text-text-secondary-light opacity-40 dark:text-text-secondary-dark">
+              <Sparkles size={16} />
+            </span>
+          )}
           <IconButton label="Archive" size="sm" onClick={() => { api.moveThread(threadId, 'archive').then(() => { onBack(); onChanged(); }); }}><Archive size={16} /></IconButton>
           <IconButton label="Delete" size="sm" onClick={() => { api.moveThread(threadId, 'trash').then(() => { onBack(); onChanged(); }); }}><Trash2 size={16} /></IconButton>
         </div>
@@ -307,6 +319,8 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
             )}
           </React.Fragment>
         ))}
+
+        {aiOff && !replyTo && <AiOffNote message={aiOff} className="self-start" />}
 
         {aiAvailable && !replyTo && (() => {
           const last = thread.messages.filter((m) => !m.isDraft).slice(-1)[0];

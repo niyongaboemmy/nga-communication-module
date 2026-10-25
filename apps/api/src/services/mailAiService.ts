@@ -21,6 +21,7 @@ import type {
   MailAiSmartReplies, MailAiCampaignDraft,
 } from '@tupo/shared';
 import { htmlToText } from '@tupo/mail';
+import { assertTupoAiEnabled } from './aiPolicy.js';
 
 export { isAnyProviderConfigured };
 
@@ -28,7 +29,12 @@ export class MailAiError extends Error {
   constructor(message: string, readonly status = 400) { super(message); this.name = 'MailAiError'; }
 }
 
-function ensureConfigured(): void {
+/**
+ * The school's AI switch first (it is the answer the user can act on least, so
+ * it must not hide behind "not configured"), then a provider to call.
+ */
+async function ensureConfigured(): Promise<void> {
+  await assertTupoAiEnabled();
   if (!isAnyProviderConfigured()) {
     throw new MailAiError(
       'The AI assistant is not configured. An administrator needs to add an API key for at least one provider.',
@@ -124,7 +130,7 @@ export interface ComposeInput {
 }
 
 export async function composeAssist(input: ComposeInput): Promise<MailAiComposeResult> {
-  ensureConfigured();
+  await ensureConfigured();
 
   const rewriteActions: MailAiAction[] = ['improve', 'formal', 'friendly', 'concise', 'expand', 'grammar', 'translate'];
   if (rewriteActions.includes(input.action) && !input.currentText?.trim()) {
@@ -174,7 +180,7 @@ const SUBJECT_SCHEMA: JSONSchema = {
 };
 
 export async function suggestSubjects(bodyText: string): Promise<MailAiSubjectResult> {
-  ensureConfigured();
+  await ensureConfigured();
   if (!bodyText.trim()) throw new MailAiError('Write the message first, then ask for a subject.');
   const { data, providerUsed } = await generateStructuredContent<{ suggestions: string[] }>({
     prompt:
@@ -217,7 +223,7 @@ const SUMMARY_SCHEMA: JSONSchema = {
 };
 
 export async function summariseThread(threadText: string, readerName: string): Promise<MailAiThreadSummary> {
-  ensureConfigured();
+  await ensureConfigured();
   const { data, providerUsed } = await generateStructuredContent<{
     summary: string; keyPoints: string[];
     actionItems: Array<{ text: string; owner: string; due: string }>; needsReply: boolean;
@@ -264,7 +270,7 @@ const REPLIES_SCHEMA: JSONSchema = {
 };
 
 export async function smartReplies(threadText: string, readerName: string): Promise<MailAiSmartReplies> {
-  ensureConfigured();
+  await ensureConfigured();
   const { data, providerUsed } = await generateStructuredContent<{
     replies: Array<{ intent: string; text: string }>;
   }>({
@@ -297,7 +303,7 @@ const CAMPAIGN_SCHEMA: JSONSchema = {
 };
 
 export async function draftCampaign(brief: string, audience?: string): Promise<MailAiCampaignDraft> {
-  ensureConfigured();
+  await ensureConfigured();
   if (!brief.trim()) throw new MailAiError('Describe the announcement first.');
   const { data, providerUsed } = await generateStructuredContent<{
     subject: string; bodyHtml: string; mergeFields: string[];

@@ -5,6 +5,7 @@ import * as mail from '@tupo/mail';
 import { MailError } from '@tupo/mail';
 import * as mailAi from '../services/mailAiService.js';
 import { MailAiError } from '../services/mailAiService.js';
+import { isAiDisabledError, aiDisabledBody, tupoAiState } from '../services/aiPolicy.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
 import { hasPermission } from '../access/gate.js';
@@ -387,15 +388,19 @@ const aiWrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
   async (req: Request, res: Response, next: NextFunction) => {
     try { await fn(req, res); }
     catch (err) {
+      if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
       if (err instanceof MailAiError) return res.status(err.status).json(fail(err.message));
       if (err instanceof MailError) return res.status(err.status).json(fail(err.message));
       next(err);
     }
   };
 
-router.get('/ai/status', authorizePermission('MAIL_AI_USE'), (_req, res) => {
-  res.json(ok({ available: mailAi.isAnyProviderConfigured() }));
-});
+router.get('/ai/status', authorizePermission('MAIL_AI_USE'), aiWrap(async (_req, res) => {
+  // `available` is false when the school has turned AI off, so an older client
+  // simply hides the assistant; `policy` says why, for the "turned off" note.
+  const policy = await tupoAiState();
+  res.json(ok({ available: policy.enabled && mailAi.isAnyProviderConfigured(), policy }));
+}));
 
 router.post('/ai/compose', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
   const b = req.body ?? {};

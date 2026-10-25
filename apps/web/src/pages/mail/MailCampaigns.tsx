@@ -8,6 +8,7 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
 import { RichTextEditor } from './RichTextEditor';
 import * as api from './api';
+import { AiOffNote } from '../../components/AiOffNote';
 import type { MailCampaignView, MailDistributionList, MailTemplate } from '@tupo/shared';
 import './mail.css';
 
@@ -46,10 +47,15 @@ const Editor: React.FC<{
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [aiAvailable, setAiAvailable] = useState(false);
+  const [aiOff, setAiOff] = useState<string | null>(null);
   const [brief, setBrief] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
 
-  useEffect(() => { api.aiStatus().then(setAiAvailable).catch(() => setAiAvailable(false)); }, []);
+  useEffect(() => {
+    api.aiState()
+      .then((s) => { setAiAvailable(s.available); setAiOff(s.off); })
+      .catch(() => setAiAvailable(false));
+  }, []);
 
   const draftWithAi = async () => {
     if (!brief.trim()) return;
@@ -106,6 +112,7 @@ const Editor: React.FC<{
             </button>
           </div>
         )}
+        {aiOff && <AiOffNote message={aiOff} />}
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Internal name (optional)"
           className="w-full rounded-xl border border-border-light bg-transparent px-3 py-2 text-sm dark:border-border-dark/60" />
         <div>

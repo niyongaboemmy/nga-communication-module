@@ -127,6 +127,19 @@ export const cancelCampaign = (id: string) => apiPost(`/api/mail/campaigns/${id}
 export const aiStatus = () =>
   apiGet<{ available: boolean }>('/api/mail/ai/status').then((r) => r.data!.available);
 
+/**
+ * The assistant's state for this user: `available` (AI on, a provider
+ * configured, MAIL_AI_USE held) and `off`, the school's "AI is turned off"
+ * message when the super admin has switched AI off — shown instead of the
+ * AI actions. A user without MAIL_AI_USE gets neither.
+ */
+export const aiState = () =>
+  apiGet<{ available: boolean; policy?: { enabled: boolean; message: string } }>('/api/mail/ai/status')
+    .then((r) => ({
+      available: r.data!.available,
+      off: r.data!.policy && !r.data!.policy.enabled ? r.data!.policy.message : null,
+    }));
+
 export const aiCompose = (body: {
   action: MailAiAction; instruction?: string; currentText?: string; subject?: string;
   recipients?: string[]; threadId?: string; tone?: string;
