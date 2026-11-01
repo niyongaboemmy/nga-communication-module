@@ -5,6 +5,8 @@
  * rows are snake_case and mapped once, in `@tupo/mail`.
  */
 
+import type { AiAnswer } from './myAi.js';
+
 /* ────────────────────────────────────────────────────────────────────────── *
  * Folders, labels, recipient kinds
  * ────────────────────────────────────────────────────────────────────────── */
@@ -293,6 +295,8 @@ export const MAIL_AI_ACTIONS = [
 export type MailAiAction = (typeof MAIL_AI_ACTIONS)[number];
 
 export interface MailAiComposeRequest {
+  /** One-off choice of AI for this request (My AI): "school" or "<credentialId>[:<model>]". */
+  aiRoute?: string;
   action: MailAiAction;
   /** Free-text instruction (draft/reply), or target language (translate). */
   instruction?: string;
@@ -314,11 +318,15 @@ export interface MailAiComposeResult {
   /** A one-line note on what changed, shown before the user accepts. */
   note: string;
   providerUsed: string;
+  /** Which AI answered (school or the person's own key). */
+  ai?: AiAnswer;
 }
 
 export interface MailAiSubjectResult {
   suggestions: string[];
   providerUsed: string;
+  /** Which AI answered (school or the person's own key). */
+  ai?: AiAnswer;
 }
 
 export interface MailAiThreadSummary {
@@ -328,11 +336,15 @@ export interface MailAiThreadSummary {
   /** Whether the thread seems to need a reply from the reader. */
   needsReply: boolean;
   providerUsed: string;
+  /** Which AI answered (school or the person's own key). */
+  ai?: AiAnswer;
 }
 
 export interface MailAiSmartReplies {
   replies: Array<{ intent: string; text: string }>;
   providerUsed: string;
+  /** Which AI answered (school or the person's own key). */
+  ai?: AiAnswer;
 }
 
 export interface MailAiCampaignDraft {
@@ -340,6 +352,8 @@ export interface MailAiCampaignDraft {
   bodyHtml: string;
   mergeFields: string[];
   providerUsed: string;
+  /** Which AI answered (school or the person's own key). */
+  ai?: AiAnswer;
 }
 
 /** Strip a run of Re:/Fwd: prefixes and fold case — used for thread grouping. */

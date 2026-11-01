@@ -68,6 +68,7 @@ describe('@nga/access AI usage decisions (vendored core)', () => {
         assessments: p.assessments,
         grading: p.features.grading,
         thirdPartyExtensions: p.thirdPartyExtensions,
+        thirdPartyExtensionsStaff: p.thirdPartyExtensionsStaff,
       }).toEqual(c.expect);
     });
   }

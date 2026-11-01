@@ -1,7 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import { ok } from '@tupo/shared';
-import { authMiddleware } from '../middleware/auth.js';
+import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { tupoAiState } from '../services/aiPolicy.js';
+import { getRoutes, schoolWithoutGateway } from '../services/myAiGateway.js';
 
 /**
  * GET /api/ai/policy — is AI on for Tupo right now?
@@ -17,6 +18,25 @@ router.use(authMiddleware);
 router.get('/policy', async (_req: Request, res: Response) => {
   const state = await tupoAiState();
   res.json(ok({ enabled: state.enabled, reason: state.reason, message: state.message }));
+});
+
+/**
+ * GET /api/ai/my-routes — what answers the signed-in person in Tupo (My AI).
+ *
+ * The MIS route map (cached 60 s per person, no secrets), so the AI panels can
+ * offer "Answers with: School AI ▾". `{ enabled: false, choices: [] }` while My
+ * AI is off for the school or for Tupo, or the MIS cannot say — the panels then
+ * show nothing new. Never asks the MIS while the policy has My AI off.
+ */
+router.get('/my-routes', async (req: Request, res: Response) => {
+  const misUserId = (req as AuthenticatedRequest).user?.misUserId;
+  const off = { enabled: false, choices: [] };
+  if (!misUserId) return res.json(ok(off));
+  // Same pre-checks as a real call; 'school' is a choice that never needs the MIS.
+  const settled = await schoolWithoutGateway({ misUserId, task: 'assist', feature: 'tupo.routes', aiRoute: 'school' });
+  if (settled && settled.reason !== 'NO_ROUTE') return res.json(ok({ ...off, reason: settled.reason }));
+  const routes = await getRoutes(String(misUserId));
+  res.json(ok(routes ?? { ...off, reason: 'GATEWAY_UNAVAILABLE' }));
 });
 
 export default router;

@@ -9,6 +9,7 @@ import { recheckMisStatus } from '../services/misStatus.js';
 import { config } from '../config.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { noteAiPolicyVersion } from '../services/aiPolicy.js';
+import { noteAiRoutesVersion } from '../services/myAiGateway.js';
 import { exchangeCode, fetchMe, misAvatarUrl, misCoverUrl, verifyMisSessionDetailed } from '../services/misClient.js';
 import { accessMode } from '../access/mode.js';
 import { getAccessSnapshot, noteAccessVersion } from '../access/snapshot.js';
@@ -307,7 +308,7 @@ router.get('/verify-mis', authMiddleware, async (req: Request, res: Response) =>
   const misToken = (req as AuthenticatedRequest).user?.misToken;
   if (!misToken) return res.status(401).json(fail('No MIS session on this token.'));
 
-  const { state, accessVersion, avatarUrl, coverUrl, aiPolicyVersion } = await verifyMisSessionDetailed(misToken);
+  const { state, accessVersion, avatarUrl, coverUrl, aiPolicyVersion, aiRoutesVersion } = await verifyMisSessionDetailed(misToken);
   if (state === 'invalid') return res.status(401).json(fail('Your MIS session has ended.'));
   // Access control v2: a new access_version means the user's grants changed —
   // drop the cached snapshot so the next check re-fetches it.
@@ -315,6 +316,8 @@ router.get('/verify-mis', authMiddleware, async (req: Request, res: Response) =>
   if (misUserId && accessVersion !== null) noteAccessVersion(misUserId, accessVersion);
   // Same for the school's AI policy: a new ai_policy_v drops the cached copy.
   noteAiPolicyVersion(aiPolicyVersion);
+  // My AI: a new ai_routes_v (or ai_policy_v) drops this person's cached route map.
+  noteAiRoutesVersion(misUserId, aiRoutesVersion, aiPolicyVersion);
   // 'unreachable' is a network blip, not a logout — don't sign everyone out
   // over it; the next poll settles the question.
   // The poll carries the current NGA profile picture: store it, and hand it to the

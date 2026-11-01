@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { getPool } from '@tupo/db';
 import { generatePlainText } from './aiProviders/index.js';
+import { personalCall, schoolWithoutGateway, type AiWho } from './myAiGateway.js';
+import type { AiAnswer } from '@tupo/shared';
 
 /**
  * Inline message translation (FR-MSG-25).
@@ -14,6 +16,13 @@ import { generatePlainText } from './aiProviders/index.js';
  * text — so an edited message does not keep serving a translation of what it
  * used to say. Without that the feature is actively misleading: someone reads a
  * corrected message in translation and gets the uncorrected version.
+ *
+ * My AI (task "translate"): the cache is shared by everyone in the
+ * conversation, so it only ever holds the SCHOOL AI's answers. A person whose
+ * own key would answer skips the cache entirely — they asked for their model,
+ * not a neighbour's — and their key's answer is never written into it, so
+ * nobody else is served a translation made with (and paid by) someone's key.
+ * If their key falls back to the school AI, that answer is shared as usual.
  */
 
 export const SUPPORTED_LANGUAGES = {
@@ -36,6 +45,8 @@ export interface Translation {
   language: LanguageCode;
   text: string;
   cached: boolean;
+  /** Which AI answered (school or the person's own key). */
+  ai?: AiAnswer;
 }
 
 /**
@@ -65,7 +76,7 @@ function buildPrompt(body: string, language: LanguageCode): string {
 }
 
 export async function translateMessage(
-  messageId: string, body: string, language: LanguageCode,
+  messageId: string, body: string, language: LanguageCode, who?: AiWho,
 ): Promise<Translation> {
   const text = body.trim();
   if (!text) throw new Error('There is nothing to translate.');
@@ -74,17 +85,25 @@ export async function translateMessage(
   }
 
   const hash = sourceHash(text);
+  const call = personalCall(who, 'translate', 'tupo.chat.translate');
+  // null: this person's own key would be asked, so the shared cache is skipped.
+  const schoolAnswer = await schoolWithoutGateway(call);
 
-  const { rows } = await getPool().query<{ translated: string }>(
-    `SELECT translated FROM message_translations
-      WHERE message_id = $1 AND language = $2 AND source_hash = $3`,
-    [messageId, language, hash],
-  );
-  if (rows[0]) return { language, text: rows[0].translated, cached: true };
+  if (schoolAnswer) {
+    const { rows } = await getPool().query<{ translated: string }>(
+      `SELECT translated FROM message_translations
+        WHERE message_id = $1 AND language = $2 AND source_hash = $3`,
+      [messageId, language, hash],
+    );
+    if (rows[0]) return { language, text: rows[0].translated, cached: true, ai: schoolAnswer };
+  }
 
-  const { data } = await generatePlainText(buildPrompt(text, language), 1_000);
+  const { data, ai } = await generatePlainText(buildPrompt(text, language), 1_000, { personal: call });
   const translated = data.trim();
   if (!translated) throw new Error('The translation came back empty.');
+
+  // A personal key's answer stays with the person who asked for it.
+  if (ai?.route === 'personal') return { language, text: translated, cached: false, ai };
 
   await getPool().query(
     `INSERT INTO message_translations (message_id, language, translated, source_hash)
@@ -96,5 +115,5 @@ export async function translateMessage(
     [messageId, language, translated, hash],
   );
 
-  return { language, text: translated, cached: false };
+  return { language, text: translated, cached: false, ai };
 }

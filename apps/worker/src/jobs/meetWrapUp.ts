@@ -60,7 +60,9 @@ async function generate(
   try {
     const res = await fetch(`${base}/api/meet/${meetingId}/ai/${path}`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      // The token is already marked `system`; the header says so too, so the API
+      // never sends a wrap-up to the host's own AI key (My AI is for people waiting).
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Tupo-Caller': 'worker' },
       body: '{}',
     });
     const body = await res.json().catch(() => ({})) as {

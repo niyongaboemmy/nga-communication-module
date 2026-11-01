@@ -25,6 +25,11 @@ export type SessionUser = z.infer<typeof sessionUserSchema>;
  */
 export interface SessionClaims extends SessionUser {
   misToken?: string;
+  /**
+   * Set only on the worker's short-lived host token (meet wrap-up): background
+   * work with no person waiting. Such calls always use the school AI, never My AI.
+   */
+  system?: boolean;
 }
 
 export const ssoExchangeSchema = z.object({ code: z.string().min(1, 'Authorization code is required') });

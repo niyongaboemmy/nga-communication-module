@@ -6,6 +6,8 @@ import {
   generateStructuredContent, generatePlainText, isAnyProviderConfigured,
 } from './aiProviders/index.js';
 import type { JSONSchema } from './aiProviders/index.js';
+import { personalCall, type AiWho } from './myAiGateway.js';
+import type { AiAnswer } from '@tupo/shared';
 
 /**
  * The AI layer for Meet.
@@ -336,7 +338,8 @@ const AGENDA_SCHEMA: JSONSchema = {
  * Generators
  * ------------------------------------------------------------------ */
 
-export interface AiResult<T> { data: T; providerUsed: string }
+/** `ai`: which AI answered (the school chain, or the person's own key via My AI). */
+export interface AiResult<T> { data: T; providerUsed: string; ai?: AiAnswer }
 
 export interface SummaryContent {
   headline: string; bullets: string[]; topics: string[]; openQuestions: string[];
@@ -344,9 +347,9 @@ export interface SummaryContent {
 
 /** The rolling in-meeting summary. Called on an interval, not per utterance. */
 export async function generateSummary(
-  transcript: string, ctx: MeetingContext,
+  transcript: string, ctx: MeetingContext, who?: AiWho,
 ): Promise<AiResult<SummaryContent>> {
-  const { data, providerUsed } = await generateStructuredContent<SummaryContent>({
+  const { data, providerUsed, ai } = await generateStructuredContent<SummaryContent>({
     prompt:
       `${GROUND_RULES}${contextBlock(ctx)}\n` +
       'Summarise the discussion SO FAR. This is a live, mid-meeting summary: describe what has ' +
@@ -354,14 +357,14 @@ export async function generateSummary(
     schema: SUMMARY_SCHEMA,
     schemaName: 'meeting_summary',
     maxOutputTokens: 1200,
-  });
-  return { data, providerUsed };
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.summary') });
+  return { data, providerUsed, ai };
 }
 
 export async function generateActionItems(
-  transcript: string, ctx: MeetingContext,
+  transcript: string, ctx: MeetingContext, who?: AiWho,
 ): Promise<AiResult<MeetActionItem[]>> {
-  const { data, providerUsed } = await generateStructuredContent<{ items: MeetActionItem[] }>({
+  const { data, providerUsed, ai } = await generateStructuredContent<{ items: MeetActionItem[] }>({
     prompt:
       `${GROUND_RULES}${contextBlock(ctx)}\n` +
       'Extract action items — things someone committed to DO. Assign an owner only when the ' +
@@ -371,20 +374,20 @@ export async function generateActionItems(
     schema: ACTION_ITEMS_SCHEMA,
     schemaName: 'action_items',
     maxOutputTokens: 1500,
-  });
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.action-items') });
   // Normalise the empty-string placeholders the strict schema forces on us.
   const items = (data.items ?? []).map((i) => ({
     ...i,
     owner: i.owner?.trim() || undefined,
     due: i.due?.trim() || undefined,
   }));
-  return { data: items, providerUsed };
+  return { data: items, providerUsed, ai };
 }
 
 export async function generateDecisions(
-  transcript: string, ctx: MeetingContext,
+  transcript: string, ctx: MeetingContext, who?: AiWho,
 ): Promise<AiResult<MeetDecision[]>> {
-  const { data, providerUsed } = await generateStructuredContent<{ decisions: MeetDecision[] }>({
+  const { data, providerUsed, ai } = await generateStructuredContent<{ decisions: MeetDecision[] }>({
     prompt:
       `${GROUND_RULES}${contextBlock(ctx)}\n` +
       'List the decisions the group actually reached. A decision is a settled choice, not a ' +
@@ -393,8 +396,8 @@ export async function generateDecisions(
     schema: DECISIONS_SCHEMA,
     schemaName: 'decisions',
     maxOutputTokens: 1500,
-  });
-  return { data: data.decisions ?? [], providerUsed };
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.decisions') });
+  return { data: data.decisions ?? [], providerUsed, ai };
 }
 
 export interface MinutesContent {
@@ -409,9 +412,9 @@ export interface MinutesContent {
 
 /** The full post-meeting record. Run once, by the worker, on `meeting.ended`. */
 export async function generateMinutes(
-  transcript: string, ctx: MeetingContext, chatLog?: string,
+  transcript: string, ctx: MeetingContext, chatLog?: string, who?: AiWho,
 ): Promise<AiResult<MinutesContent>> {
-  const { data, providerUsed } = await generateStructuredContent<MinutesContent>({
+  const { data, providerUsed, ai } = await generateStructuredContent<MinutesContent>({
     prompt:
       `${GROUND_RULES}${contextBlock(ctx)}\n` +
       'Write the minutes of this meeting: a record someone who was not there can read and ' +
@@ -422,14 +425,14 @@ export async function generateMinutes(
     schema: MINUTES_SCHEMA,
     schemaName: 'meeting_minutes',
     maxOutputTokens: 4000,
-  });
-  return { data, providerUsed };
+  }, { personal: personalCall(who, 'author', 'tupo.meet.minutes') });
+  return { data, providerUsed, ai };
 }
 
 export async function generateChapters(
-  transcript: string, ctx: MeetingContext,
+  transcript: string, ctx: MeetingContext, who?: AiWho,
 ): Promise<AiResult<MeetChapter[]>> {
-  const { data, providerUsed } = await generateStructuredContent<{ chapters: MeetChapter[] }>({
+  const { data, providerUsed, ai } = await generateStructuredContent<{ chapters: MeetChapter[] }>({
     prompt:
       `${GROUND_RULES}${contextBlock(ctx)}\n` +
       'Divide the meeting into chapters by topic. Take each start offset from the [mm:ss] mark ' +
@@ -438,8 +441,8 @@ export async function generateChapters(
     schema: CHAPTERS_SCHEMA,
     schemaName: 'chapters',
     maxOutputTokens: 2000,
-  });
-  return { data: data.chapters ?? [], providerUsed };
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.chapters') });
+  return { data: data.chapters ?? [], providerUsed, ai };
 }
 
 export interface QaContent { answer: string; grounded: boolean; citations: string[] }
@@ -451,9 +454,9 @@ export interface QaContent { answer: string; grounded: boolean; citations: strin
  * has not covered this" instead of a confident answer assembled from nothing.
  */
 export async function askMeeting(
-  transcript: string, ctx: MeetingContext, question: string,
+  transcript: string, ctx: MeetingContext, question: string, who?: AiWho,
 ): Promise<AiResult<QaContent>> {
-  const { data, providerUsed } = await generateStructuredContent<QaContent>({
+  const { data, providerUsed, ai } = await generateStructuredContent<QaContent>({
     prompt:
       `${GROUND_RULES}${contextBlock(ctx)}\n` +
       'Answer the question from the transcript alone. If the transcript does not contain the ' +
@@ -463,8 +466,8 @@ export async function askMeeting(
     schema: QA_SCHEMA,
     schemaName: 'meeting_qa',
     maxOutputTokens: 1200,
-  });
-  return { data, providerUsed };
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.ask') });
+  return { data, providerUsed, ai };
 }
 
 export interface LessonFollowUpContent {
@@ -476,9 +479,9 @@ export interface LessonFollowUpContent {
 
 /** Teaching-specific follow-up. Exportable into TaskMentor's question bank. */
 export async function generateLessonFollowUp(
-  transcript: string, ctx: MeetingContext,
+  transcript: string, ctx: MeetingContext, who?: AiWho,
 ): Promise<AiResult<LessonFollowUpContent>> {
-  const { data, providerUsed } = await generateStructuredContent<LessonFollowUpContent>({
+  const { data, providerUsed, ai } = await generateStructuredContent<LessonFollowUpContent>({
     prompt:
       `${GROUND_RULES}${contextBlock(ctx)}\n` +
       'This was a lesson. Produce follow-up material: the concepts actually taught, what a ' +
@@ -488,8 +491,8 @@ export async function generateLessonFollowUp(
     schema: LESSON_SCHEMA,
     schemaName: 'lesson_followup',
     maxOutputTokens: 4000,
-  });
-  return { data, providerUsed };
+  }, { personal: personalCall(who, 'author', 'tupo.meet.lesson-followup') });
+  return { data, providerUsed, ai };
 }
 
 export interface AgendaContent {
@@ -498,9 +501,9 @@ export interface AgendaContent {
 
 /** Pre-meeting: an agenda from the title and description. No transcript yet. */
 export async function generateAgenda(
-  ctx: MeetingContext, durationMinutes: number,
+  ctx: MeetingContext, durationMinutes: number, who?: AiWho,
 ): Promise<AiResult<AgendaContent>> {
-  const { data, providerUsed } = await generateStructuredContent<AgendaContent>({
+  const { data, providerUsed, ai } = await generateStructuredContent<AgendaContent>({
     prompt:
       'You are helping a teacher or administrator prepare a school meeting on the NGA Tupo ' +
       `platform.\n\n${contextBlock(ctx)}Planned duration: ${durationMinutes} minutes.\n\n` +
@@ -509,8 +512,8 @@ export async function generateAgenda(
     schema: AGENDA_SCHEMA,
     schemaName: 'agenda',
     maxOutputTokens: 1200,
-  });
-  return { data, providerUsed };
+  }, { personal: personalCall(who, 'author', 'tupo.meet.agenda') });
+  return { data, providerUsed, ai };
 }
 
 /** One-line title for a meeting the host never named. */

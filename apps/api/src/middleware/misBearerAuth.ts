@@ -5,6 +5,7 @@ import { fail } from '@tupo/shared';
 import type { Role, RoleLevel } from '@tupo/shared';
 import { verifyMisToken } from '../services/misClient.js';
 import { noteAiPolicyVersion } from '../services/aiPolicy.js';
+import { noteAiRoutesVersion } from '../services/myAiGateway.js';
 import { attachAccess } from '../access/gate.js';
 import { noteAccessVersion } from '../access/snapshot.js';
 import type { AuthenticatedRequest } from './auth.js';
@@ -82,7 +83,7 @@ async function misUserIdFor(token: string): Promise<string | 'invalid' | 'unreac
   if (hit && hit.expiresAt > Date.now()) return hit.misUserId;
   if (hit) verified.delete(key);
 
-  const { state, userId, accessVersion, aiPolicyVersion } = await verifyMisToken(token);
+  const { state, userId, accessVersion, aiPolicyVersion, aiRoutesVersion } = await verifyMisToken(token);
   if (state !== 'valid' || !userId) return state === 'unreachable' ? 'unreachable' : 'invalid';
 
   // Map order is insertion order, so the first key is the oldest entry.
@@ -91,6 +92,8 @@ async function misUserIdFor(token: string): Promise<string | 'invalid' | 'unreac
   // Same as the /verify-mis poll: a new access_version drops the cached snapshot.
   if (accessVersion !== null) noteAccessVersion(userId, accessVersion);
   noteAiPolicyVersion(aiPolicyVersion);
+  // My AI: a new ai_routes_v (or ai_policy_v) drops this person's cached route map.
+  noteAiRoutesVersion(userId, aiRoutesVersion, aiPolicyVersion);
   return userId;
 }
 
