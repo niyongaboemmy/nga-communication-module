@@ -43,6 +43,14 @@ export interface AiWho {
   aiRoute?: string | null;
   /** Background work (the worker's host token): always the school AI. */
   system?: boolean;
+  /**
+   * External AI hand-off (`aiHandoff` in the request body, EXTERNAL_AI_CONTRACT.md §1),
+   * as sent: parsed and gated at the provider chokepoint. Never set for the worker.
+   */
+  handoffRaw?: unknown;
+  /** For the hand-off gate: the person's MIS token (their MIS permission list) and role level. */
+  misToken?: string | null;
+  roleLevel?: string | null;
 }
 
 /** One AI call: who, and what for. */
@@ -51,6 +59,12 @@ export interface PersonalAiCall extends AiWho {
   /** Short machine name for the MIS usage log, e.g. "tupo.mail.compose". */
   feature: string;
   inAssessment?: boolean;
+  /**
+   * The prompt may carry pupils' names or words (a thread, a transcript, someone
+   * else's message): a hand-off prompt then needs the school's pupilNames policy
+   * and the person's consent for this request.
+   */
+  pupilData?: boolean;
 }
 
 /** Header the worker sends with its host token. Spoofing it only makes your own call use the school AI. */
@@ -61,18 +75,32 @@ export const SYSTEM_CALLER_HEADER = 'x-tupo-caller';
  * (minted with `system: true` in services/queue.ts) or the worker says so.
  */
 export function aiWhoOf(req: Request): AiWho {
-  const user = (req as Request & { user?: { misUserId?: string; system?: boolean } }).user;
-  const raw = (req.body as { aiRoute?: unknown } | undefined)?.aiRoute;
+  const user = (req as Request & {
+    user?: { misUserId?: string; system?: boolean; misToken?: string; roleLevel?: string | null };
+  }).user;
+  const body = req.body as { aiRoute?: unknown; aiHandoff?: unknown } | undefined;
+  const raw = body?.aiRoute;
+  const system = user?.system === true || req.get(SYSTEM_CALLER_HEADER) === 'worker';
   return {
     misUserId: user?.misUserId ? String(user.misUserId) : null,
     aiRoute: isAiRouteValue(raw) ? raw : null,
-    system: user?.system === true || req.get(SYSTEM_CALLER_HEADER) === 'worker',
+    system,
+    // Hand-off is for a person at the keyboard, never the worker.
+    ...(!system && body?.aiHandoff != null
+      ? { handoffRaw: body.aiHandoff, misToken: user?.misToken ?? null, roleLevel: user?.roleLevel ?? null }
+      : {}),
   };
 }
 
+/** Did this request ask for a hand-off ("Open in my AI" / "Paste the answer")? No provider is needed then. */
+export const wantsHandoff = (who: AiWho | null | undefined): boolean => {
+  const m = (who?.handoffRaw as { mode?: unknown } | undefined)?.mode;
+  return !who?.system && (m === 'prompt' || m === 'import');
+};
+
 export const personalCall = (
-  who: AiWho | null | undefined, task: AiTask, feature: string,
-): PersonalAiCall | undefined => (who ? { ...who, task, feature } : undefined);
+  who: AiWho | null | undefined, task: AiTask, feature: string, opts: { pupilData?: boolean } = {},
+): PersonalAiCall | undefined => (who ? { ...who, task, feature, ...(opts.pupilData ? { pupilData: true } : {}) } : undefined);
 
 /* ────────────────────────────────────────────────────────────────────────── *
  * The MIS calls

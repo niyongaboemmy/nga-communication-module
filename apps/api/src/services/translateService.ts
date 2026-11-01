@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { getPool } from '@tupo/db';
 import { generatePlainText } from './aiProviders/index.js';
-import { personalCall, schoolWithoutGateway, type AiWho } from './myAiGateway.js';
+import { personalCall, schoolWithoutGateway, wantsHandoff, type AiWho } from './myAiGateway.js';
 import type { AiAnswer } from '@tupo/shared';
 
 /**
@@ -23,6 +23,7 @@ import type { AiAnswer } from '@tupo/shared';
  * not a neighbour's — and their key's answer is never written into it, so
  * nobody else is served a translation made with (and paid by) someone's key.
  * If their key falls back to the school AI, that answer is shared as usual.
+ * A hand-off ("Open in my AI" / "Paste the answer") follows the same rule.
  */
 
 export const SUPPORTED_LANGUAGES = {
@@ -77,6 +78,8 @@ function buildPrompt(body: string, language: LanguageCode): string {
 
 export async function translateMessage(
   messageId: string, body: string, language: LanguageCode, who?: AiWho,
+  /** Someone else wrote the message (possibly a pupil): a hand-off prompt needs consent. */
+  opts: { othersWords?: boolean } = {},
 ): Promise<Translation> {
   const text = body.trim();
   if (!text) throw new Error('There is nothing to translate.');
@@ -85,9 +88,13 @@ export async function translateMessage(
   }
 
   const hash = sourceHash(text);
-  const call = personalCall(who, 'translate', 'tupo.chat.translate');
+  const call = personalCall(who, 'translate', 'tupo.chat.translate', { pupilData: opts.othersWords === true });
+  // External AI hand-off: the same rule as a personal key. The cache is neither
+  // read (the person asked for their own AI's answer, or for the prompt) nor
+  // written (a pasted answer is never served to anyone else).
+  const handoff = wantsHandoff(who);
   // null: this person's own key would be asked, so the shared cache is skipped.
-  const schoolAnswer = await schoolWithoutGateway(call);
+  const schoolAnswer = handoff ? null : await schoolWithoutGateway(call);
 
   if (schoolAnswer) {
     const { rows } = await getPool().query<{ translated: string }>(
@@ -102,8 +109,8 @@ export async function translateMessage(
   const translated = data.trim();
   if (!translated) throw new Error('The translation came back empty.');
 
-  // A personal key's answer stays with the person who asked for it.
-  if (ai?.route === 'personal') return { language, text: translated, cached: false, ai };
+  // A personal key's (or a pasted hand-off) answer stays with the person who asked for it.
+  if (ai?.route === 'personal' || ai?.route === 'handoff') return { language, text: translated, cached: false, ai };
 
   await getPool().query(
     `INSERT INTO message_translations (message_id, language, translated, source_hash)

@@ -6,7 +6,8 @@
 
 /** Which AI answered one call. Sent next to `providerUsed` on every AI answer. */
 export interface AiAnswer {
-  route: 'personal' | 'school';
+  /** 'handoff': the person pasted an answer from their own Claude / ChatGPT ("via your own AI (pasted)"). */
+  route: 'personal' | 'school' | 'handoff';
   /** Why: PERSONAL, NO_ROUTE, PERSONAL_OFF, SYSTEM_CALL, KEY_NOT_ACTIVE, GATEWAY_UNAVAILABLE, … */
   reason: string;
   credentialId?: number;
@@ -38,6 +39,15 @@ export interface MyAiRoutes {
     credentialId?: number; provider?: string; model?: string; label?: string; fallbackToSchool?: boolean;
   }>;
   choices: MyAiChoice[];
+  /** "Open in my AI" (own Claude / ChatGPT: prompt out, answer pasted back) is offered to this person. */
+  handoff?: boolean;
+}
+
+/** One "Open in my AI" prompt (EXTERNAL_AI_CONTRACT.md §1): what the AI endpoints return in prompt mode. */
+export interface AiHandoffPayload {
+  prompt: string;
+  expects: 'json' | 'text';
+  schemaName?: string;
 }
 
 /**

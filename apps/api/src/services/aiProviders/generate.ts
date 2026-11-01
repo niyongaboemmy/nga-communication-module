@@ -4,6 +4,11 @@ import { isQuotaError, friendlyAIErrorMessage } from './errors.js';
 import { assertTupoAiEnabled } from '../aiPolicy.js';
 import { postJson, postText, withPersonalAi, type PersonalAiCall } from '../myAiGateway.js';
 import type { AiAnswer } from '@tupo/shared';
+import {
+  HandoffPrompt, assertHandoffAllowed, assertHandoffPupilData, jsonHandoffPrompt, parseHandoff,
+  readPastedJson, readPastedText, scrub, type AiHandoff,
+} from '../externalAi.js';
+import type { AiPolicy } from '../../vendor/nga-access/index.js';
 
 export interface GenerateStructuredContentResult<T> {
   data: T;
@@ -22,6 +27,24 @@ export interface GenerateStructuredContentOptions {
   personal?: PersonalAiCall;
 }
 
+/** What answered a pasted hand-off answer: shown as "via your own AI (pasted)". */
+const HANDOFF_AI: AiAnswer = { route: 'handoff', reason: 'HANDOFF' };
+
+/**
+ * External AI hand-off (services/externalAi.ts): the call asked for its prompt
+ * ("Open in my AI") or brought a pasted answer. Gated here, at the chokepoint,
+ * after the school's master switch: policy.external.handoff and the person's
+ * AI_EXTERNAL_CONNECT. Never for background work. undefined = a normal call.
+ */
+async function handoffFor(
+  call: PersonalAiCall | null | undefined,
+): Promise<{ handoff: AiHandoff; policy: AiPolicy } | undefined> {
+  if (!call || call.system || call.handoffRaw == null) return undefined;
+  const handoff = parseHandoff(call.handoffRaw);
+  if (!handoff) return undefined;
+  return { handoff, policy: await assertHandoffAllowed(call) };
+}
+
 /**
  * Tries each configured provider in order, skipping any cooling down from a
  * recent quota error, and returns the first success.
@@ -34,6 +57,16 @@ export async function generateStructuredContent<T = unknown>(
   // before My AI: a personal key only ever picks WHICH AI answers an allowed call.
   // Throws AiDisabledError, which the routes answer as 403 AI_DISABLED.
   await assertTupoAiEnabled();
+  const handoff = await handoffFor(options?.personal);
+  if (handoff) {
+    if (handoff.handoff.mode === 'prompt') {
+      assertHandoffPupilData(handoff.policy, options?.personal?.pupilData, handoff.handoff.pupilConsent);
+      throw new HandoffPrompt({
+        prompt: scrub(jsonHandoffPrompt(params.prompt, params.schema)), expects: 'json', schemaName: params.schemaName,
+      });
+    }
+    return { data: readPastedJson<T>(handoff.handoff.text, params.schema), providerUsed: 'handoff', ai: HANDOFF_AI };
+  }
   return withPersonalAi<T>(options?.personal, {
     // Exactly the prompt and schema the school chain gets.
     personal: (misUserId, base) => postJson<T>(misUserId, {
@@ -130,6 +163,14 @@ export async function generatePlainText(
   // The school's master switch (MIS ai_policy) comes before any provider and My AI.
   // Throws AiDisabledError, which the routes answer as 403 AI_DISABLED.
   await assertTupoAiEnabled();
+  const handoff = await handoffFor(options?.personal);
+  if (handoff) {
+    if (handoff.handoff.mode === 'prompt') {
+      assertHandoffPupilData(handoff.policy, options?.personal?.pupilData, handoff.handoff.pupilConsent);
+      throw new HandoffPrompt({ prompt: scrub(prompt), expects: 'text' });
+    }
+    return { data: readPastedText(handoff.handoff.text), providerUsed: 'handoff', ai: HANDOFF_AI };
+  }
   const out = await withPersonalAi<string>(options?.personal, {
     // Exactly the prompt the school chain gets (no system prompt there either).
     personal: (misUserId, base) => postText(misUserId, { ...base, prompt }),

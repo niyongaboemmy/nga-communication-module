@@ -7,6 +7,7 @@ import * as mailAi from '../services/mailAiService.js';
 import { MailAiError } from '../services/mailAiService.js';
 import { isAiDisabledError, aiDisabledBody, tupoAiState } from '../services/aiPolicy.js';
 import { aiWhoOf, isPersonalAiError, personalAiBody } from '../services/myAiGateway.js';
+import { handoffResponse } from '../services/externalAi.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
 import { hasPermission } from '../access/gate.js';
@@ -389,6 +390,9 @@ const aiWrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
   async (req: Request, res: Response, next: NextFunction) => {
     try { await fn(req, res); }
     catch (err) {
+      // External AI hand-off: the prompt (200) or its refusal.
+      const handoff = handoffResponse(err);
+      if (handoff) return res.status(handoff.status).json(handoff.body);
       if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
       // My AI: the person's own key failed and the school may not answer instead.
       if (isPersonalAiError(err)) return res.status(err.status).json(personalAiBody(err));

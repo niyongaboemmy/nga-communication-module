@@ -197,7 +197,7 @@ export async function tidyNote(
     `\nThe note:\n${body}`,
     Math.max(300, Math.ceil(body.length / 2)),
     // The author's own key may tidy their own note (My AI, task "assist").
-    { personal: personalCall(who, 'assist', 'tupo.meet.note-tidy') },
+    { personal: personalCall(who, 'assist', 'tupo.meet.note-tidy', { pupilData: !!context.recentTranscript }) },
   );
   return { body: data.trim(), providerUsed, ai };
 }
