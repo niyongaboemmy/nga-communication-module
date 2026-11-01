@@ -11,6 +11,7 @@ import * as api from './api';
 import { AiOffNote } from '../../components/AiOffNote';
 import type { AiAnswer, MailCampaignView, MailDistributionList, MailTemplate } from '@tupo/shared';
 import { AiAnsweredBy, AiSourceControl } from '../../components/MyAi';
+import { HandoffControl, handoffPrompt, importHandoff } from '../../components/Handoff';
 import './mail.css';
 
 const STATUS_TONE: Record<string, 'slate' | 'blue' | 'amber' | 'green' | 'red'> = {
@@ -74,6 +75,15 @@ const Editor: React.FC<{
     } finally { setAiBusy(false); }
   };
 
+  const audienceNames = () => lists.filter((l) => listIds.includes(l.id)).map((l) => l.name).join(', ') || undefined;
+  /** "Paste the answer": the person's own AI's draft, checked like any AI answer. */
+  const importCampaign = async (text: string) => {
+    setError(null);
+    const r = await api.aiCampaign(brief, audienceNames(), null, importHandoff(text));
+    setSubject(r.subject); setBody(r.bodyHtml);
+    setAnsweredBy({ ai: r.ai, providerUsed: r.providerUsed });
+  };
+
   const applyTemplate = (id: string) => {
     setTemplateId(id);
     const t = templates.find((x) => x.id === id);
@@ -117,6 +127,13 @@ const Editor: React.FC<{
             </button>
             <div className="mt-1 flex flex-wrap items-center gap-x-2">
               <AiSourceControl value={aiRoute} onChange={setAiRoute} menu="down" className="-ml-2" />
+              {/* The brief is the person's own text: no pupil data. */}
+              <HandoffControl
+                className="-ml-2"
+                disabled={aiBusy || !brief.trim()}
+                requestPrompt={(consent) => handoffPrompt('/api/mail/ai/campaign', { brief, audience: audienceNames() }, consent)}
+                importAnswer={importCampaign}
+              />
               {answeredBy && (
                 <AiAnsweredBy ai={answeredBy.ai} providerUsed={answeredBy.providerUsed}
                   className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark" />

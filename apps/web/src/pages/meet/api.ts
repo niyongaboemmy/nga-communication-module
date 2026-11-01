@@ -1,3 +1,4 @@
+import type { AiHandoffRequest } from '../../lib/handoff';
 import {
   apiGet, apiPost, apiPut, apiPatch, apiDelete, apiDownload, SESSION_KEY, ApiError,
 } from '../../lib/api';
@@ -211,22 +212,25 @@ export interface LessonFollowUpContent {
   misconceptions: string[];
 }
 
-export const aiSummary = (id: string, aiRoute?: AiRoute) => aiCall<SummaryContent>(id, 'summary', { aiRoute });
-export const aiActionItems = (id: string, aiRoute?: AiRoute) => aiCall<MeetActionItem[]>(id, 'action-items', { aiRoute });
-export const aiDecisions = (id: string, aiRoute?: AiRoute) => aiCall<MeetDecision[]>(id, 'decisions', { aiRoute });
-export const aiMinutes = (id: string, aiRoute?: AiRoute) => aiCall<MinutesContent>(id, 'minutes', { aiRoute });
-export const aiChapters = (id: string, aiRoute?: AiRoute) => aiCall<MeetChapter[]>(id, 'chapters', { aiRoute });
-export const aiLessonFollowUp = (id: string, aiRoute?: AiRoute) =>
-  aiCall<LessonFollowUpContent>(id, 'lesson-followup', { aiRoute });
+/** External AI "Paste the answer" (components/Handoff.tsx): the pasted reply instead of an AI call. */
+type Handoff = AiHandoffRequest | undefined;
+
+export const aiSummary = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<SummaryContent>(id, 'summary', { aiRoute, aiHandoff });
+export const aiActionItems = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<MeetActionItem[]>(id, 'action-items', { aiRoute, aiHandoff });
+export const aiDecisions = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<MeetDecision[]>(id, 'decisions', { aiRoute, aiHandoff });
+export const aiMinutes = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<MinutesContent>(id, 'minutes', { aiRoute, aiHandoff });
+export const aiChapters = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<MeetChapter[]>(id, 'chapters', { aiRoute, aiHandoff });
+export const aiLessonFollowUp = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) =>
+  aiCall<LessonFollowUpContent>(id, 'lesson-followup', { aiRoute, aiHandoff });
 export const aiEngagement = (id: string, narrate = true) =>
   aiCall<EngagementContent>(id, 'engagement', { narrate });
-export const aiAgenda = (id: string, durationMinutes?: number, aiRoute?: AiRoute) =>
+export const aiAgenda = (id: string, durationMinutes?: number, aiRoute?: AiRoute, aiHandoff?: Handoff) =>
   aiCall<{ agenda: Array<{ item: string; minutes: number; purpose: string }> }>(
-    id, 'agenda', { durationMinutes, aiRoute });
+    id, 'agenda', { durationMinutes, aiRoute, aiHandoff });
 
-export const aiAsk = (id: string, question: string, aiRoute?: AiRoute) =>
+export const aiAsk = (id: string, question: string, aiRoute?: AiRoute, aiHandoff?: Handoff) =>
   apiPost<{ answer: string; grounded: boolean; citations: string[]; providerUsed: string; ai?: AiAnswer }>(
-    `/api/meet/${id}/ai/ask`, { question, aiRoute }).then((r) => r.data!);
+    `/api/meet/${id}/ai/ask`, { question, aiRoute, aiHandoff }).then((r) => r.data!);
 
 export const aiTranslate = (id: string, text: string, targetLang: string) =>
   apiPost<{ text: string; providerUsed: string }>(

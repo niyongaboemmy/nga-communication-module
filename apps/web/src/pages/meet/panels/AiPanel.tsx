@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import type { AiAnswer, MeetActionItem, MeetDecision, MeetParticipant } from '@tupo/shared';
 import { AiAnsweredBy, AiSourceControl } from '../../../components/MyAi';
+import { HandoffControl, handoffPrompt, importHandoff } from '../../../components/Handoff';
 import { PanelShell, PanelButton, PanelEmpty, PanelToggle } from './Shell';
 import * as meetApi from '../api';
 import type { SummaryContent } from '../api';
@@ -120,6 +121,31 @@ export const AiPanel: React.FC<AiPanelProps> = ({
     }
   };
 
+  /**
+   * "Open in my AI" for the open tab. Every one is built from the transcript,
+   * which carries what pupils said and their names: "Include pupil details" applies.
+   */
+  const HANDOFF_PATH: Record<Tab, string> = { summary: 'summary', actions: 'action-items', decisions: 'decisions', ask: 'ask' };
+  const handoffBody = (): Record<string, unknown> => (tab === 'ask' ? { question: question.trim() } : {});
+  const importAnswer = async (text: string) => {
+    setError(null);
+    const h = importHandoff(text);
+    if (tab === 'summary') {
+      const r = await meetApi.aiSummary(meetingId, null, h);
+      setSummary({ content: r.content, provider: r.providerUsed, ai: r.ai });
+    } else if (tab === 'actions') {
+      const r = await meetApi.aiActionItems(meetingId, null, h);
+      setActions({ content: r.content, provider: r.providerUsed, ai: r.ai });
+    } else if (tab === 'decisions') {
+      const r = await meetApi.aiDecisions(meetingId, null, h);
+      setDecisions({ content: r.content, provider: r.providerUsed, ai: r.ai });
+    } else {
+      const r = await meetApi.aiAsk(meetingId, question.trim(), null, h);
+      setAnswer({ ...r, provider: r.providerUsed });
+      setQuestion('');
+    }
+  };
+
   /* --- Turned off by the school --- */
   // Above everything else: the meeting's own setting and the host's choice do
   // not matter while the super admin has AI switched off.
@@ -211,6 +237,16 @@ export const AiPanel: React.FC<AiPanelProps> = ({
       onClose={onClose}
       footer={<>
         <AiSourceControl value={aiRoute} onChange={setAiRoute} onDark className="mb-1.5 -ml-2" />
+        <HandoffControl
+          key={tab}
+          onDark
+          menu="up"
+          pupilData
+          className="mb-1.5 -ml-2"
+          disabled={busy !== null || !enoughTranscript || (tab === 'ask' && !question.trim())}
+          requestPrompt={(consent) => handoffPrompt(`/api/meet/${meetingId}/ai/${HANDOFF_PATH[tab]}`, handoffBody(), consent)}
+          importAnswer={importAnswer}
+        />
         {tab === 'ask' ? (
         <form onSubmit={ask} className="flex gap-2">
           <input

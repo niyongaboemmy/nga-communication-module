@@ -16,6 +16,7 @@ import type {
 } from './api';
 import type { AiAnswer } from '@tupo/shared';
 import { AiAnsweredBy, AiSourceControl } from '../../components/MyAi';
+import { HandoffControl, handoffPrompt, importHandoff } from '../../components/Handoff';
 
 /**
  * Format an attendance duration.
@@ -121,6 +122,27 @@ export const MeetingSummary: React.FC = () => {
       setGenerating(null);
     }
   };
+
+  /** "Paste the answer": saved like a generated artifact; throws so the box shows why. */
+  const importArtifact = async (kind: string, fn: () => Promise<{ ai?: AiAnswer }>) => {
+    setError(null);
+    const r = await fn();
+    setAnswered((prev) => ({ ...prev, [kind]: r.ai }));
+    setArtifacts(await meetApi.getArtifacts(id));
+  };
+
+  /** "Answers with" plus "Open in my AI" (both built from the transcript: pupil details need consent). */
+  const sources = (path: 'minutes' | 'lesson-followup', kind: string,
+    run: (h: ReturnType<typeof importHandoff>) => Promise<{ ai?: AiAnswer }>) => (
+    <div className="flex flex-col items-center gap-1">
+      <AiSourceControl value={aiRoute} onChange={setAiRoute} menu="down" />
+      <HandoffControl
+        pupilData
+        requestPrompt={(consent) => handoffPrompt(`/api/meet/${id}/ai/${path}`, {}, consent)}
+        importAnswer={(text) => importArtifact(kind, () => run(importHandoff(text)))}
+      />
+    </div>
+  );
 
   if (loading) {
     return (
@@ -396,7 +418,7 @@ export const MeetingSummary: React.FC = () => {
             disabled={!canUseAi || transcript.length < 5}
             busy={generating === 'minutes'}
             onGenerate={() => void generate('minutes', () => meetApi.aiMinutes(id, aiRoute))}
-            source={<AiSourceControl value={aiRoute} onChange={setAiRoute} menu="down" />}
+            source={sources('minutes', 'minutes', (h) => meetApi.aiMinutes(id, null, h))}
           />
         )
       )}
@@ -711,7 +733,7 @@ export const MeetingSummary: React.FC = () => {
               disabled={!canUseAi || transcript.length < 5}
               busy={generating === 'lesson_followup'}
               onGenerate={() => void generate('lesson_followup', () => meetApi.aiLessonFollowUp(id, aiRoute))}
-              source={<AiSourceControl value={aiRoute} onChange={setAiRoute} menu="down" />}
+              source={sources('lesson-followup', 'lesson_followup', (h) => meetApi.aiLessonFollowUp(id, null, h))}
             />
           )}
         </div>
