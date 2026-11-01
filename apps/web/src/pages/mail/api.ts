@@ -143,19 +143,21 @@ export const aiState = () =>
 export const aiCompose = (body: {
   action: MailAiAction; instruction?: string; currentText?: string; subject?: string;
   recipients?: string[]; threadId?: string; tone?: string;
+  /** My AI: a one-off choice of AI ("school" or "<credentialId>:<model>"); omitted = the saved choice. */
+  aiRoute?: string | null;
 }) => apiPost<MailAiComposeResult>('/api/mail/ai/compose', body).then((r) => r.data!);
 
-export const aiSubject = (bodyText: string) =>
-  apiPost<MailAiSubjectResult>('/api/mail/ai/subject', { bodyText }).then((r) => r.data!);
+export const aiSubject = (bodyText: string, aiRoute?: string | null) =>
+  apiPost<MailAiSubjectResult>('/api/mail/ai/subject', { bodyText, aiRoute }).then((r) => r.data!);
 
-export const aiSummarize = (threadId: string) =>
-  apiPost<MailAiThreadSummary>('/api/mail/ai/summarize', { threadId }).then((r) => r.data!);
+export const aiSummarize = (threadId: string, aiRoute?: string | null) =>
+  apiPost<MailAiThreadSummary>('/api/mail/ai/summarize', { threadId, aiRoute }).then((r) => r.data!);
 
-export const aiSmartReplies = (threadId: string) =>
-  apiPost<MailAiSmartReplies>('/api/mail/ai/smart-replies', { threadId }).then((r) => r.data!);
+export const aiSmartReplies = (threadId: string, aiRoute?: string | null) =>
+  apiPost<MailAiSmartReplies>('/api/mail/ai/smart-replies', { threadId, aiRoute }).then((r) => r.data!);
 
-export const aiCampaign = (brief: string, audience?: string) =>
-  apiPost<MailAiCampaignDraft>('/api/mail/ai/campaign', { brief, audience }).then((r) => r.data!);
+export const aiCampaign = (brief: string, audience?: string, aiRoute?: string | null) =>
+  apiPost<MailAiCampaignDraft>('/api/mail/ai/campaign', { brief, audience, aiRoute }).then((r) => r.data!);
 
 /* Attachments — reuse the files service two-step upload. */
 export async function uploadAttachment(file: File): Promise<{ fileId: string; name: string; mime: string; size: number }> {

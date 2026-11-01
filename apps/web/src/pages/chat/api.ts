@@ -1,6 +1,6 @@
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../../lib/api';
 import type {
-  ConversationSummary, SubjectSummary, MessagePage, NotificationLevel, WireMember, WireMessage,
+  AiAnswer, ConversationSummary, SubjectSummary, MessagePage, NotificationLevel, WireMember, WireMessage,
 } from '@tupo/shared';
 
 /**
@@ -376,7 +376,7 @@ export type LanguageCode = keyof typeof TRANSLATION_LANGUAGES;
 
 export const translateMessage = (
   conversationId: string, messageId: string, language: LanguageCode,
-) => apiPost<{ language: LanguageCode; text: string; cached: boolean }>(
+) => apiPost<{ language: LanguageCode; text: string; cached: boolean; ai?: AiAnswer }>(
   `/api/chat/conversations/${conversationId}/messages/${messageId}/translate`, { language },
 ).then((r) => r.data!);
 

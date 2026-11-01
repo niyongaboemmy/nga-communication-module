@@ -12,6 +12,7 @@ import { RichTextEditor } from './RichTextEditor';
 import { DeliverySheet } from './DeliverySheet';
 import * as api from './api';
 import { AiOffNote } from '../../components/AiOffNote';
+import { AiAnsweredBy } from '../../components/MyAi';
 import type { MailThreadView, MailMessageView, MailLabel, MailMessageKind } from '@tupo/shared';
 import type { ComposerSeed } from './Composer';
 
@@ -258,7 +259,7 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
             <div className="mb-1.5 flex items-center gap-1.5 text-blue-700 dark:text-blue-300">
               <Sparkles size={14} />
               <span className="text-xs font-semibold uppercase tracking-wide">Thread summary</span>
-              <span className="ml-auto text-[10px] font-normal opacity-70">via {summary.providerUsed}</span>
+              <AiAnsweredBy ai={summary.ai} providerUsed={summary.providerUsed} className="ml-auto text-[10px] font-normal opacity-70" />
             </div>
             <p className="text-text-primary-light dark:text-text-primary-dark">{summary.summary}</p>
             {summary.keyPoints.length > 0 && (

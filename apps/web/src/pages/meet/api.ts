@@ -5,6 +5,7 @@ import type {
   MeetJoinTicket, MeetSettings, MeetActionItem, MeetChapter, MeetDecision, MeetNote,
   MeetRecording, MeetTransport, NoteSource, RecordingMode, RTCIceServerLike,
 } from '@tupo/shared';
+import type { AiAnswer } from '@tupo/shared';
 import { meetingFolder } from '@tupo/shared';
 
 /** Meet's REST surface, typed. Everything else in the module goes through here. */
@@ -182,8 +183,11 @@ export const getArtifacts = (id: string) =>
 
 /* --- AI generators. Each returns the artifact it just produced. --- */
 
+/** `aiRoute` (My AI): a one-off choice of AI; omitted = the person's saved choice. */
+type AiRoute = string | null | undefined;
+
 const aiCall = <T>(id: string, path: string, body: Record<string, unknown> = {}) =>
-  apiPost<{ id: string; kind: string; content: T; providerUsed: string }>(
+  apiPost<{ id: string; kind: string; content: T; providerUsed: string; ai?: AiAnswer }>(
     `/api/meet/${id}/ai/${path}`, body).then((r) => r.data!);
 
 export interface SummaryContent {
@@ -207,21 +211,22 @@ export interface LessonFollowUpContent {
   misconceptions: string[];
 }
 
-export const aiSummary = (id: string) => aiCall<SummaryContent>(id, 'summary');
-export const aiActionItems = (id: string) => aiCall<MeetActionItem[]>(id, 'action-items');
-export const aiDecisions = (id: string) => aiCall<MeetDecision[]>(id, 'decisions');
-export const aiMinutes = (id: string) => aiCall<MinutesContent>(id, 'minutes');
-export const aiChapters = (id: string) => aiCall<MeetChapter[]>(id, 'chapters');
-export const aiLessonFollowUp = (id: string) => aiCall<LessonFollowUpContent>(id, 'lesson-followup');
+export const aiSummary = (id: string, aiRoute?: AiRoute) => aiCall<SummaryContent>(id, 'summary', { aiRoute });
+export const aiActionItems = (id: string, aiRoute?: AiRoute) => aiCall<MeetActionItem[]>(id, 'action-items', { aiRoute });
+export const aiDecisions = (id: string, aiRoute?: AiRoute) => aiCall<MeetDecision[]>(id, 'decisions', { aiRoute });
+export const aiMinutes = (id: string, aiRoute?: AiRoute) => aiCall<MinutesContent>(id, 'minutes', { aiRoute });
+export const aiChapters = (id: string, aiRoute?: AiRoute) => aiCall<MeetChapter[]>(id, 'chapters', { aiRoute });
+export const aiLessonFollowUp = (id: string, aiRoute?: AiRoute) =>
+  aiCall<LessonFollowUpContent>(id, 'lesson-followup', { aiRoute });
 export const aiEngagement = (id: string, narrate = true) =>
   aiCall<EngagementContent>(id, 'engagement', { narrate });
-export const aiAgenda = (id: string, durationMinutes?: number) =>
+export const aiAgenda = (id: string, durationMinutes?: number, aiRoute?: AiRoute) =>
   aiCall<{ agenda: Array<{ item: string; minutes: number; purpose: string }> }>(
-    id, 'agenda', { durationMinutes });
+    id, 'agenda', { durationMinutes, aiRoute });
 
-export const aiAsk = (id: string, question: string) =>
-  apiPost<{ answer: string; grounded: boolean; citations: string[]; providerUsed: string }>(
-    `/api/meet/${id}/ai/ask`, { question }).then((r) => r.data!);
+export const aiAsk = (id: string, question: string, aiRoute?: AiRoute) =>
+  apiPost<{ answer: string; grounded: boolean; citations: string[]; providerUsed: string; ai?: AiAnswer }>(
+    `/api/meet/${id}/ai/ask`, { question, aiRoute }).then((r) => r.data!);
 
 export const aiTranslate = (id: string, text: string, targetLang: string) =>
   apiPost<{ text: string; providerUsed: string }>(
