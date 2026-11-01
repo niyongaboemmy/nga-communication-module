@@ -1,6 +1,8 @@
 import { getPool, snowflake } from '@tupo/db';
 import type { MeetNote, NoteSource } from '@tupo/shared';
 import { generatePlainText } from './aiProviders/index.js';
+import { personalCall, type AiWho } from './myAiGateway.js';
+import type { AiAnswer } from '@tupo/shared';
 
 /**
  * Personal notes.
@@ -176,9 +178,9 @@ export async function captureFromTranscript(
  * is worse than a scruffy one. The original is preserved on the row either way.
  */
 export async function tidyNote(
-  body: string, context: { title: string; recentTranscript?: string },
-): Promise<{ body: string; providerUsed: string }> {
-  const { data, providerUsed } = await generatePlainText(
+  body: string, context: { title: string; recentTranscript?: string }, who?: AiWho,
+): Promise<{ body: string; providerUsed: string; ai?: AiAnswer }> {
+  const { data, providerUsed, ai } = await generatePlainText(
     'You are tidying up a note someone typed quickly during a school meeting.\n\n' +
     'Rules:\n' +
     '- Keep the author\'s meaning and every fact they wrote. Add nothing.\n' +
@@ -194,8 +196,10 @@ export async function tidyNote(
       : '') +
     `\nThe note:\n${body}`,
     Math.max(300, Math.ceil(body.length / 2)),
+    // The author's own key may tidy their own note (My AI, task "assist").
+    { personal: personalCall(who, 'assist', 'tupo.meet.note-tidy') },
   );
-  return { body: data.trim(), providerUsed };
+  return { body: data.trim(), providerUsed, ai };
 }
 
 /** The notes that belong in the meeting's written record. */

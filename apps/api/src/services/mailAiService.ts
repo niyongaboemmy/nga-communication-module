@@ -22,6 +22,7 @@ import type {
 } from '@tupo/shared';
 import { htmlToText } from '@tupo/mail';
 import { assertTupoAiEnabled } from './aiPolicy.js';
+import { personalCall, type AiWho } from './myAiGateway.js';
 
 export { isAnyProviderConfigured };
 
@@ -129,7 +130,11 @@ export interface ComposeInput {
   threadText?: string;
 }
 
-export async function composeAssist(input: ComposeInput): Promise<MailAiComposeResult> {
+/**
+ * `who` is the person asking. Their own key (My AI) may answer: drafting and
+ * rewriting are task "author"; summaries and smart replies are "assist".
+ */
+export async function composeAssist(input: ComposeInput, who?: AiWho): Promise<MailAiComposeResult> {
   await ensureConfigured();
 
   const rewriteActions: MailAiAction[] = ['improve', 'formal', 'friendly', 'concise', 'expand', 'grammar', 'translate'];
@@ -157,7 +162,9 @@ export async function composeAssist(input: ComposeInput): Promise<MailAiComposeR
     'emphasis, <a href> for links. No inline styles, no classes, no <html>/<head>/<body>.',
   );
 
-  const { data, providerUsed } = await generatePlainText(parts.join('\n'), 1400);
+  const { data, providerUsed, ai } = await generatePlainText(parts.join('\n'), 1400, {
+    personal: personalCall(who, 'author', `tupo.mail.${input.action === 'reply' ? 'reply' : input.action === 'draft' ? 'compose' : 'rewrite'}`),
+  });
   const html = sanitizeAiHtml(data);
   if (!htmlToText(html).trim()) throw new MailAiError('The assistant returned an empty draft. Try rephrasing.', 502);
 
@@ -166,7 +173,7 @@ export async function composeAssist(input: ComposeInput): Promise<MailAiComposeR
     formal: 'Made it more formal', friendly: 'Made it warmer', concise: 'Made it shorter',
     expand: 'Expanded your notes', grammar: 'Fixed spelling and grammar', translate: `Translated to ${input.instruction}`,
   };
-  return { html, note: NOTE[input.action], providerUsed };
+  return { html, note: NOTE[input.action], providerUsed, ai };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -179,20 +186,21 @@ const SUBJECT_SCHEMA: JSONSchema = {
   required: ['suggestions'],
 };
 
-export async function suggestSubjects(bodyText: string): Promise<MailAiSubjectResult> {
+export async function suggestSubjects(bodyText: string, who?: AiWho): Promise<MailAiSubjectResult> {
   await ensureConfigured();
   if (!bodyText.trim()) throw new MailAiError('Write the message first, then ask for a subject.');
-  const { data, providerUsed } = await generateStructuredContent<{ suggestions: string[] }>({
+  const { data, providerUsed, ai } = await generateStructuredContent<{ suggestions: string[] }>({
     prompt:
       `${GROUND}\nPropose 3 subject lines for this email. Each under 70 characters, specific, ` +
       `no "Re:"/"Fwd:", no trailing punctuation.\n\nEmail:\n${bodyText.slice(0, 4000)}`,
     schema: SUBJECT_SCHEMA,
     schemaName: 'mail_subjects',
     maxOutputTokens: 300,
-  });
+  }, { personal: personalCall(who, 'author', 'tupo.mail.subject') });
   return {
     suggestions: (data.suggestions ?? []).map((s) => s.replace(/^["']|["'.\s]+$/g, '').slice(0, 120)).filter(Boolean).slice(0, 3),
     providerUsed,
+    ai,
   };
 }
 
@@ -222,9 +230,9 @@ const SUMMARY_SCHEMA: JSONSchema = {
   required: ['summary', 'keyPoints', 'actionItems', 'needsReply'],
 };
 
-export async function summariseThread(threadText: string, readerName: string): Promise<MailAiThreadSummary> {
+export async function summariseThread(threadText: string, readerName: string, who?: AiWho): Promise<MailAiThreadSummary> {
   await ensureConfigured();
-  const { data, providerUsed } = await generateStructuredContent<{
+  const { data, providerUsed, ai } = await generateStructuredContent<{
     summary: string; keyPoints: string[];
     actionItems: Array<{ text: string; owner: string; due: string }>; needsReply: boolean;
   }>({
@@ -235,7 +243,7 @@ export async function summariseThread(threadText: string, readerName: string): P
     schema: SUMMARY_SCHEMA,
     schemaName: 'mail_thread_summary',
     maxOutputTokens: 900,
-  });
+  }, { personal: personalCall(who, 'assist', 'tupo.mail.summarise') });
   return {
     summary: data.summary ?? '',
     keyPoints: (data.keyPoints ?? []).filter(Boolean),
@@ -244,6 +252,7 @@ export async function summariseThread(threadText: string, readerName: string): P
     })).filter((a) => a.text?.trim()),
     needsReply: !!data.needsReply,
     providerUsed,
+    ai,
   };
 }
 
@@ -269,9 +278,9 @@ const REPLIES_SCHEMA: JSONSchema = {
   required: ['replies'],
 };
 
-export async function smartReplies(threadText: string, readerName: string): Promise<MailAiSmartReplies> {
+export async function smartReplies(threadText: string, readerName: string, who?: AiWho): Promise<MailAiSmartReplies> {
   await ensureConfigured();
-  const { data, providerUsed } = await generateStructuredContent<{
+  const { data, providerUsed, ai } = await generateStructuredContent<{
     replies: Array<{ intent: string; text: string }>;
   }>({
     prompt:
@@ -281,10 +290,11 @@ export async function smartReplies(threadText: string, readerName: string): Prom
     schema: REPLIES_SCHEMA,
     schemaName: 'mail_smart_replies',
     maxOutputTokens: 500,
-  });
+  }, { personal: personalCall(who, 'assist', 'tupo.mail.smart-replies') });
   return {
     replies: (data.replies ?? []).filter((r) => r.text?.trim()).slice(0, 3),
     providerUsed,
+    ai,
   };
 }
 
@@ -302,10 +312,10 @@ const CAMPAIGN_SCHEMA: JSONSchema = {
   required: ['subject', 'bodyHtml', 'mergeFields'],
 };
 
-export async function draftCampaign(brief: string, audience?: string): Promise<MailAiCampaignDraft> {
+export async function draftCampaign(brief: string, audience?: string, who?: AiWho): Promise<MailAiCampaignDraft> {
   await ensureConfigured();
   if (!brief.trim()) throw new MailAiError('Describe the announcement first.');
-  const { data, providerUsed } = await generateStructuredContent<{
+  const { data, providerUsed, ai } = await generateStructuredContent<{
     subject: string; bodyHtml: string; mergeFields: string[];
   }>({
     prompt:
@@ -317,11 +327,12 @@ export async function draftCampaign(brief: string, audience?: string): Promise<M
     schema: CAMPAIGN_SCHEMA,
     schemaName: 'mail_campaign_draft',
     maxOutputTokens: 900,
-  });
+  }, { personal: personalCall(who, 'author', 'tupo.mail.campaign') });
   return {
     subject: (data.subject ?? '').slice(0, 300),
     bodyHtml: sanitizeAiHtml(data.bodyHtml ?? ''),
     mergeFields: [...new Set((data.mergeFields ?? []).map((f) => f.replace(/[{}]/g, '').trim()).filter(Boolean))],
     providerUsed,
+    ai,
   };
 }

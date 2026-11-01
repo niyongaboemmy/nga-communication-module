@@ -1001,7 +1001,8 @@
           "enabled": false,
           "assessments": "teacher",
           "grading": false,
-          "thirdPartyExtensions": false
+          "thirdPartyExtensions": false,
+          "thirdPartyExtensionsStaff": true
         }
       },
       {
@@ -1016,7 +1017,8 @@
           "enabled": false,
           "assessments": "teacher",
           "grading": false,
-          "thirdPartyExtensions": false
+          "thirdPartyExtensions": false,
+          "thirdPartyExtensionsStaff": true
         }
       },
       {
@@ -1042,7 +1044,22 @@
           "enabled": true,
           "assessments": "always_off",
           "grading": false,
-          "thirdPartyExtensions": false
+          "thirdPartyExtensions": false,
+          "thirdPartyExtensionsStaff": true
+        }
+      },
+      {
+        "name": "staff tools can be switched off",
+        "input": {
+          "enabled": true,
+          "thirdPartyExtensionsStaff": false
+        },
+        "expect": {
+          "enabled": true,
+          "assessments": "teacher",
+          "grading": false,
+          "thirdPartyExtensions": false,
+          "thirdPartyExtensionsStaff": false
         }
       }
     ]

@@ -58,7 +58,9 @@ function serviceToken(user: SessionClaims): string {
   const {
     misToken: _misToken, iat: _iat, exp: _exp, nbf: _nbf, ...claims
   } = user as SessionClaims & { iat?: number; exp?: number; nbf?: number };
-  return jwt.sign(claims, config.jwtSecret, { expiresIn: '15m' });
+  // `system`: this token is background work, so every AI call it makes uses the
+  // school AI, never the host's own key (My AI, PERSONAL_AI_PROVIDERS_PLAN §10.3).
+  return jwt.sign({ ...claims, system: true }, config.jwtSecret, { expiresIn: '15m' });
 }
 
 export async function enqueueMeetWrapUp(meetingId: string, host: SessionClaims): Promise<boolean> {

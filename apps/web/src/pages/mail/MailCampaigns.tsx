@@ -9,7 +9,8 @@ import { useAuth } from '../../context/AuthContext';
 import { RichTextEditor } from './RichTextEditor';
 import * as api from './api';
 import { AiOffNote } from '../../components/AiOffNote';
-import type { MailCampaignView, MailDistributionList, MailTemplate } from '@tupo/shared';
+import type { AiAnswer, MailCampaignView, MailDistributionList, MailTemplate } from '@tupo/shared';
+import { AiAnsweredBy, AiSourceControl } from '../../components/MyAi';
 import './mail.css';
 
 const STATUS_TONE: Record<string, 'slate' | 'blue' | 'amber' | 'green' | 'red'> = {
@@ -50,6 +51,9 @@ const Editor: React.FC<{
   const [aiOff, setAiOff] = useState<string | null>(null);
   const [brief, setBrief] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
+  // My AI: which AI drafts (null = the person's saved choice), and which one did.
+  const [aiRoute, setAiRoute] = useState<string | null>(null);
+  const [answeredBy, setAnsweredBy] = useState<{ ai?: AiAnswer; providerUsed: string } | null>(null);
 
   useEffect(() => {
     api.aiState()
@@ -62,8 +66,9 @@ const Editor: React.FC<{
     setAiBusy(true); setError(null);
     try {
       const audience = lists.filter((l) => listIds.includes(l.id)).map((l) => l.name).join(', ');
-      const r = await api.aiCampaign(brief, audience || undefined);
+      const r = await api.aiCampaign(brief, audience || undefined, aiRoute);
       setSubject(r.subject); setBody(r.bodyHtml);
+      setAnsweredBy({ ai: r.ai, providerUsed: r.providerUsed });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The assistant could not draft that.');
     } finally { setAiBusy(false); }
@@ -110,6 +115,13 @@ const Editor: React.FC<{
               className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-blue-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-50">
               {aiBusy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} Generate subject & body
             </button>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2">
+              <AiSourceControl value={aiRoute} onChange={setAiRoute} menu="down" className="-ml-2" />
+              {answeredBy && (
+                <AiAnsweredBy ai={answeredBy.ai} providerUsed={answeredBy.providerUsed}
+                  className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark" />
+              )}
+            </div>
           </div>
         )}
         {aiOff && <AiOffNote message={aiOff} />}

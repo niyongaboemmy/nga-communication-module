@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { Sparkles, Wand2, X, Loader2, Check, Undo2, ArrowUpRight } from 'lucide-react';
 import { Button } from '../../components/ui';
 import * as api from './api';
-import type { MailAiAction } from '@tupo/shared';
+import type { AiAnswer, MailAiAction } from '@tupo/shared';
+import { AiAnsweredBy, AiSourceControl } from '../../components/MyAi';
 
 /** Strip HTML to text for the model — cheap and good enough for a prompt. */
 export const htmlToPlain = (html: string) =>
@@ -34,7 +35,9 @@ export const AiAssistant: React.FC<Props> = ({ getCurrentHtml, subject, recipien
   const [instruction, setInstruction] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ html: string; note: string; provider: string } | null>(null);
+  const [result, setResult] = useState<{ html: string; note: string; provider: string; ai?: AiAnswer } | null>(null);
+  // My AI: null = the person's saved choice; "school" or "<id>:<model>" = this request only.
+  const [aiRoute, setAiRoute] = useState<string | null>(null);
   const [translateOpen, setTranslateOpen] = useState(false);
 
   const run = async (action: MailAiAction, extra?: string) => {
@@ -48,8 +51,9 @@ export const AiAssistant: React.FC<Props> = ({ getCurrentHtml, subject, recipien
         subject,
         recipients,
         threadId: action === 'reply' ? threadId : undefined,
+        aiRoute,
       });
-      setResult({ html: r.html, note: r.note, provider: r.providerUsed });
+      setResult({ html: r.html, note: r.note, provider: r.providerUsed, ai: r.ai });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The assistant could not help with that.');
     } finally {
@@ -114,6 +118,7 @@ export const AiAssistant: React.FC<Props> = ({ getCurrentHtml, subject, recipien
               </div>
             )}
           </div>
+          <AiSourceControl value={aiRoute} onChange={setAiRoute} className="mt-2 -ml-2" />
         </>
       )}
 
@@ -121,7 +126,9 @@ export const AiAssistant: React.FC<Props> = ({ getCurrentHtml, subject, recipien
 
       {result && (
         <div>
-          <p className="mb-1 text-xs text-text-secondary-light dark:text-text-secondary-dark">{result.note} · via {result.provider}</p>
+          <p className="mb-1 text-xs text-text-secondary-light dark:text-text-secondary-dark">
+            {result.note} · <AiAnsweredBy ai={result.ai} providerUsed={result.provider} />
+          </p>
           <div className="tupo-prose max-h-52 overflow-y-auto rounded-lg border border-border-light bg-surface-light/50 p-2.5 text-sm dark:border-border-dark/60 dark:bg-surface-dark/40"
             dangerouslySetInnerHTML={{ __html: result.html }} />
           <div className="mt-2 flex items-center gap-2">

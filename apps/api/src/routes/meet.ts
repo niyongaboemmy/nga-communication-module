@@ -31,6 +31,7 @@ import {
   getProviderStatus, isAnyProviderConfigured, isAiDisabledError, aiDisabledBody,
 } from '../services/aiProviders/index.js';
 import { tupoAiState } from '../services/aiPolicy.js';
+import { aiWhoOf, isPersonalAiError, personalAiBody } from '../services/myAiGateway.js';
 import { enqueueMeetWrapUp } from '../services/queue.js';
 import { audit } from '../services/userService.js';
 import { activity } from '../activity/relay.js';
@@ -1254,6 +1255,8 @@ const AI_PERM = 'MEET_AI_USE';
  */
 function aiFailure(res: Response, err: unknown, fallback: string) {
   if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
+  // My AI: the person's own key failed and the school may not answer instead.
+  if (isPersonalAiError(err)) return res.status(err.status).json(personalAiBody(err));
   return res.status(502).json(fail(err instanceof Error ? err.message : fallback));
 }
 
@@ -1267,14 +1270,15 @@ router.post('/:id/ai/summary', authorizePermission(AI_PERM), async (req: Request
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateSummary(ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateSummary(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'summary', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
     await meet.logMeetEvent(pre.m.id, 'ai.artifact_generated', {
       actorId: actor(req).id, payload: { kind: 'summary', providerUsed },
     });
-    res.json(ok({ ...saved, kind: 'summary', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'summary', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
     aiFailure(res, err, 'AI generation failed.');
   }
@@ -1284,11 +1288,12 @@ router.post('/:id/ai/action-items', authorizePermission(AI_PERM), async (req: Re
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateActionItems(ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateActionItems(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'action_items', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'action_items', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'action_items', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
     aiFailure(res, err, 'AI generation failed.');
   }
@@ -1298,11 +1303,12 @@ router.post('/:id/ai/decisions', authorizePermission(AI_PERM), async (req: Reque
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateDecisions(ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateDecisions(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'decisions', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'decisions', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'decisions', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
     aiFailure(res, err, 'AI generation failed.');
   }
@@ -1320,12 +1326,12 @@ router.post('/:id/ai/minutes', authorizePermission(AI_PERM), async (req: Request
     );
     const chatLog = chat.map((c) => `${c.sender_name}: ${c.body}`).join('\n');
 
-    const { data, providerUsed } = await ai.generateMinutes(
-      ai.renderTranscript(pre.lines), pre.ctx, chatLog || undefined);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateMinutes(
+      ai.renderTranscript(pre.lines), pre.ctx, chatLog || undefined, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'minutes', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'minutes', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'minutes', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
     aiFailure(res, err, 'AI generation failed.');
   }
@@ -1335,11 +1341,12 @@ router.post('/:id/ai/chapters', authorizePermission(AI_PERM), async (req: Reques
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateChapters(ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateChapters(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'chapters', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'chapters', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'chapters', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
     aiFailure(res, err, 'AI generation failed.');
   }
@@ -1353,14 +1360,14 @@ router.post('/:id/ai/ask', authorizePermission(AI_PERM), async (req: Request, re
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.askMeeting(
-      ai.renderTranscript(pre.lines), pre.ctx, parsed.data.question);
+    const { data, providerUsed, ai: answeredBy } = await ai.askMeeting(
+      ai.renderTranscript(pre.lines), pre.ctx, parsed.data.question, aiWhoOf(req));
     // Q&A answers are saved so the panel keeps a history, but they are not the
     // meeting's "current" artifact of any kind.
     await ai.saveArtifact(pre.m.id, 'qa_answer', { question: parsed.data.question, ...data }, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...data, providerUsed }));
+    res.json(ok({ ...data, providerUsed, ai: answeredBy }));
   } catch (err) {
     aiFailure(res, err, 'AI generation failed.');
   }
@@ -1370,12 +1377,12 @@ router.post('/:id/ai/lesson-followup', authorizePermission(AI_PERM), async (req:
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateLessonFollowUp(
-      ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateLessonFollowUp(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'lesson_followup', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'lesson_followup', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'lesson_followup', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
     aiFailure(res, err, 'AI generation failed.');
   }
@@ -1424,11 +1431,11 @@ router.post('/:id/ai/agenda', authorizePermission(AI_PERM), async (req: Request,
       : 30);
 
   try {
-    const { data, providerUsed } = await ai.generateAgenda(await contextFor(m), minutes);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateAgenda(await contextFor(m), minutes, aiWhoOf(req));
     const saved = await ai.saveArtifact(m.id, 'agenda', data, {
       providerUsed, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'agenda', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'agenda', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
     aiFailure(res, err, 'AI generation failed.');
   }
@@ -1583,7 +1590,7 @@ router.post('/:id/notes/:noteId/tidy', async (req: Request, res: Response) => {
     const tidied = await notes.tidyNote(existing.body, {
       title: m?.title ?? 'Meeting',
       recentTranscript: recent.length ? ai.renderTranscript(recent.slice(-25), 3000) : undefined,
-    });
+    }, aiWhoOf(req));
     await getPool().query(
       `UPDATE meeting_notes
           SET body = $3, source = 'tidied',
@@ -1594,7 +1601,8 @@ router.post('/:id/notes/:noteId/tidy', async (req: Request, res: Response) => {
       [param(req, 'noteId'), me.id, tidied.body, existing.body, tidied.providerUsed],
     );
     const updated = await notes.listNotes(meetingId, me.id);
-    res.json(ok(updated.find((n) => n.id === param(req, 'noteId'))));
+    const note = updated.find((n) => n.id === param(req, 'noteId'));
+    res.json(ok(note ? { ...note, ai: tidied.ai } : note));
   } catch (err) {
     aiFailure(res, err, 'The AI could not tidy that.');
   }

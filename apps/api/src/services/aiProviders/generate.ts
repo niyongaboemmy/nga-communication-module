@@ -2,15 +2,24 @@ import type { GenerateJSONParams } from './types.js';
 import { orderedProviders, isCoolingDown, markCoolingDown } from './registry.js';
 import { isQuotaError, friendlyAIErrorMessage } from './errors.js';
 import { assertTupoAiEnabled } from '../aiPolicy.js';
+import { postJson, postText, withPersonalAi, type PersonalAiCall } from '../myAiGateway.js';
+import type { AiAnswer } from '@tupo/shared';
 
 export interface GenerateStructuredContentResult<T> {
   data: T;
   providerUsed: string;
+  /** Which AI answered: the school chain, or the person's own key (My AI). */
+  ai?: AiAnswer;
 }
 
 export interface GenerateStructuredContentOptions {
   /** Try these providers, in this order, instead of AI_PROVIDER_ORDER. */
   providerOrder?: string[];
+  /**
+   * A call made by a person: their own key (My AI) may answer it through the
+   * MIS gateway. Left out for background work, which always uses the school AI.
+   */
+  personal?: PersonalAiCall;
 }
 
 /**
@@ -21,9 +30,24 @@ export async function generateStructuredContent<T = unknown>(
   params: GenerateJSONParams,
   options?: GenerateStructuredContentOptions,
 ): Promise<GenerateStructuredContentResult<T>> {
-  // The school's master switch (MIS ai_policy) comes before any provider.
+  // The school's master switch (MIS ai_policy) comes before any provider, and
+  // before My AI: a personal key only ever picks WHICH AI answers an allowed call.
   // Throws AiDisabledError, which the routes answer as 403 AI_DISABLED.
   await assertTupoAiEnabled();
+  return withPersonalAi<T>(options?.personal, {
+    // Exactly the prompt and schema the school chain gets.
+    personal: (misUserId, base) => postJson<T>(misUserId, {
+      ...base, prompt: params.prompt, schema: params.schema,
+      schemaName: params.schemaName, maxOutputTokens: params.maxOutputTokens,
+    }),
+    school: () => schoolStructuredContent<T>(params, options),
+  });
+}
+
+async function schoolStructuredContent<T>(
+  params: GenerateJSONParams,
+  options?: GenerateStructuredContentOptions,
+): Promise<GenerateStructuredContentResult<T>> {
   const providers = orderedProviders(options?.providerOrder);
   let lastErr: unknown = null;
   let attempted = 0;
@@ -103,9 +127,22 @@ export async function generatePlainText(
   maxOutputTokens?: number,
   options?: GenerateStructuredContentOptions,
 ): Promise<GenerateStructuredContentResult<string>> {
-  // The school's master switch (MIS ai_policy) comes before any provider.
+  // The school's master switch (MIS ai_policy) comes before any provider and My AI.
   // Throws AiDisabledError, which the routes answer as 403 AI_DISABLED.
   await assertTupoAiEnabled();
+  const out = await withPersonalAi<string>(options?.personal, {
+    // Exactly the prompt the school chain gets (no system prompt there either).
+    personal: (misUserId, base) => postText(misUserId, { ...base, prompt }),
+    school: () => schoolPlainText(prompt, maxOutputTokens, options),
+  });
+  return out.ai.route === 'personal' ? { ...out, data: String(out.data ?? '').trim() } : out;
+}
+
+async function schoolPlainText(
+  prompt: string,
+  maxOutputTokens?: number,
+  options?: GenerateStructuredContentOptions,
+): Promise<GenerateStructuredContentResult<string>> {
   const providers = orderedProviders(options?.providerOrder);
   let lastErr: unknown = null;
   let attempted = 0;

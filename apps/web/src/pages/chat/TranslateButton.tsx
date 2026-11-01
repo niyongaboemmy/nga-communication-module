@@ -5,6 +5,8 @@ import { useNotify } from '../../context/NotificationContext';
 import * as chatApi from './api';
 import { TRANSLATION_LANGUAGES } from './api';
 import type { LanguageCode } from './api';
+import type { AiAnswer } from '@tupo/shared';
+import { answeredByText } from '../../components/MyAi';
 
 /**
  * Translate one message in place (FR-MSG-25).
@@ -25,14 +27,14 @@ export const TranslateControl: React.FC<{
   const { notify } = useNotify();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ language: LanguageCode; text: string } | null>(null);
+  const [result, setResult] = useState<{ language: LanguageCode; text: string; ai?: AiAnswer } | null>(null);
 
   const translate = async (language: LanguageCode) => {
     setOpen(false);
     setBusy(true);
     try {
       const r = await chatApi.translateMessage(conversationId, messageId, language);
-      setResult({ language, text: r.text });
+      setResult({ language, text: r.text, ai: r.ai });
     } catch (err) {
       notify({
         title: 'Could not translate that',
@@ -54,6 +56,10 @@ export const TranslateControl: React.FC<{
         <p className="mb-0.5 flex items-center gap-1 text-[10px] uppercase tracking-wide opacity-70">
           <Languages size={9} />
           {TRANSLATION_LANGUAGES[result.language]} · machine translation
+          {/* My AI: only said when the person's own key answered (or failed over). */}
+          {(result.ai?.route === 'personal' || result.ai?.fallbackFrom) && (
+            <span className="normal-case tracking-normal">· {answeredByText(result.ai)}</span>
+          )}
           <button
             onClick={() => setResult(null)}
             aria-label="Hide the translation"

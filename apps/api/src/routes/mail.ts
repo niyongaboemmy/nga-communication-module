@@ -6,6 +6,7 @@ import { MailError } from '@tupo/mail';
 import * as mailAi from '../services/mailAiService.js';
 import { MailAiError } from '../services/mailAiService.js';
 import { isAiDisabledError, aiDisabledBody, tupoAiState } from '../services/aiPolicy.js';
+import { aiWhoOf, isPersonalAiError, personalAiBody } from '../services/myAiGateway.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
 import { hasPermission } from '../access/gate.js';
@@ -389,6 +390,8 @@ const aiWrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
     try { await fn(req, res); }
     catch (err) {
       if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
+      // My AI: the person's own key failed and the school may not answer instead.
+      if (isPersonalAiError(err)) return res.status(err.status).json(personalAiBody(err));
       if (err instanceof MailAiError) return res.status(err.status).json(fail(err.message));
       if (err instanceof MailError) return res.status(err.status).json(fail(err.message));
       next(err);
@@ -418,28 +421,29 @@ router.post('/ai/compose', authorizePermission('MAIL_AI_USE'), aiWrap(async (req
     senderName: b.senderName ? str(b.senderName, 120) : actor(req).name,
     tone: b.tone ? str(b.tone, 40) : undefined,
     threadText,
-  });
+  }, aiWhoOf(req));
   res.json(ok(result));
 }));
 
 router.post('/ai/subject', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
-  res.json(ok(await mailAi.suggestSubjects(str(req.body?.bodyText, 20_000))));
+  res.json(ok(await mailAi.suggestSubjects(str(req.body?.bodyText, 20_000), aiWhoOf(req))));
 }));
 
 router.post('/ai/summarize', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
   const me = actor(req);
   const { text } = await mail.threadPlainText(me.id, str(req.body?.threadId));
-  res.json(ok(await mailAi.summariseThread(text, me.name)));
+  res.json(ok(await mailAi.summariseThread(text, me.name, aiWhoOf(req))));
 }));
 
 router.post('/ai/smart-replies', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
   const me = actor(req);
   const { text } = await mail.threadPlainText(me.id, str(req.body?.threadId));
-  res.json(ok(await mailAi.smartReplies(text, me.name)));
+  res.json(ok(await mailAi.smartReplies(text, me.name, aiWhoOf(req))));
 }));
 
 router.post('/ai/campaign', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
-  res.json(ok(await mailAi.draftCampaign(str(req.body?.brief, 4000), req.body?.audience ? str(req.body.audience, 200) : undefined)));
+  res.json(ok(await mailAi.draftCampaign(
+    str(req.body?.brief, 4000), req.body?.audience ? str(req.body.audience, 200) : undefined, aiWhoOf(req))));
 }));
 
 export default router;
