@@ -233,9 +233,11 @@ export async function mailboxCounts(userId: string): Promise<MailboxCounts> {
   }>(
     `SELECT
        (SELECT count(*) FROM mail_recipients r
-         WHERE r.user_id = $1 AND NOT r.is_read AND r.folder = 'inbox' AND NOT r.is_hidden)::text AS inbox,
+         WHERE r.user_id = $1 AND NOT r.is_read AND r.folder = 'inbox' AND NOT r.is_hidden
+           AND EXISTS (SELECT 1 FROM mail_messages rm WHERE rm.id = r.message_id AND NOT rm.is_draft))::text AS inbox,
        (SELECT count(*) FROM mail_recipients r
-         WHERE r.user_id = $1 AND r.is_starred AND NOT r.is_hidden)::text AS starred,
+         WHERE r.user_id = $1 AND r.is_starred AND NOT r.is_hidden
+           AND EXISTS (SELECT 1 FROM mail_messages rm WHERE rm.id = r.message_id AND NOT rm.is_draft))::text AS starred,
        (SELECT count(*) FROM mail_messages m
          WHERE m.from_user_id = $1 AND m.is_draft)::text AS drafts,
        (SELECT count(*) FROM mail_messages m
@@ -296,6 +298,8 @@ export async function listThreads(userId: string, opts: ListOpts): Promise<{
          FROM mail_recipients r
          JOIN mail_threads t ON t.id = r.thread_id
         WHERE r.user_id = $1 AND NOT r.is_hidden AND ${folderCond}
+          -- A draft's recipient rows exist before it is sent: never list it to them.
+          AND EXISTS (SELECT 1 FROM mail_messages rm WHERE rm.id = r.message_id AND NOT rm.is_draft)
           AND ($2::text IS NULL OR $2 = ANY(SELECT jsonb_array_elements_text(r.labels)))
           AND ($3::text IS NULL OR t.subject ILIKE $3 OR t.last_snippet ILIKE $3)
           AND ($4::timestamptz IS NULL OR t.last_message_at < $4::timestamptz)
