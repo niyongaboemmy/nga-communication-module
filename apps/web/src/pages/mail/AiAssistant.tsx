@@ -4,6 +4,7 @@ import { Button } from '../../components/ui';
 import * as api from './api';
 import type { AiAnswer, MailAiAction } from '@tupo/shared';
 import { AiAnsweredBy, AiSourceControl } from '../../components/MyAi';
+import { HandoffControl, handoffPrompt, importHandoff } from '../../components/Handoff';
 
 /** Strip HTML to text for the model — cheap and good enough for a prompt. */
 export const htmlToPlain = (html: string) =>
@@ -63,6 +64,25 @@ export const AiAssistant: React.FC<Props> = ({ getCurrentHtml, subject, recipien
 
   const hasText = htmlToPlain(getCurrentHtml()).length > 0;
 
+  /**
+   * "Open in my AI": the same request the main button makes — a reply when
+   * replying, else "write it" from the instruction, else "improve" what is there.
+   */
+  const handoffAction: MailAiAction = threadId ? 'reply' : instruction.trim() ? 'draft' : 'improve';
+  const handoffBody = () => ({
+    action: handoffAction,
+    instruction: handoffAction === 'improve' ? undefined : instruction,
+    currentText: htmlToPlain(getCurrentHtml()),
+    subject,
+    recipients,
+    threadId: handoffAction === 'reply' ? threadId : undefined,
+  });
+  const importAnswer = async (text: string) => {
+    setError(null);
+    const r = await api.aiCompose({ ...handoffBody(), aiHandoff: importHandoff(text) });
+    setResult({ html: r.html, note: r.note, provider: r.providerUsed, ai: r.ai });
+  };
+
   return (
     <div className="absolute bottom-full left-0 z-20 mb-2 w-[22rem] rounded-xl border border-border-light bg-white p-3 shadow-xl dark:border-border-dark dark:bg-elevated-dark">
       <div className="mb-2 flex items-center gap-2">
@@ -119,6 +139,15 @@ export const AiAssistant: React.FC<Props> = ({ getCurrentHtml, subject, recipien
             )}
           </div>
           <AiSourceControl value={aiRoute} onChange={setAiRoute} className="mt-2 -ml-2" />
+          <HandoffControl
+            className="mt-1 -ml-2"
+            menu="up"
+            // A reply carries the thread (other people's words): pupil details need consent.
+            pupilData={handoffAction === 'reply'}
+            disabled={!!busy || (handoffAction === 'improve' && !hasText)}
+            requestPrompt={(consent) => handoffPrompt('/api/mail/ai/compose', handoffBody(), consent)}
+            importAnswer={importAnswer}
+          />
         </>
       )}
 

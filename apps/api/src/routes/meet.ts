@@ -31,7 +31,8 @@ import {
   getProviderStatus, isAnyProviderConfigured, isAiDisabledError, aiDisabledBody,
 } from '../services/aiProviders/index.js';
 import { tupoAiState } from '../services/aiPolicy.js';
-import { aiWhoOf, isPersonalAiError, personalAiBody } from '../services/myAiGateway.js';
+import { aiWhoOf, isPersonalAiError, personalAiBody, wantsHandoff } from '../services/myAiGateway.js';
+import { handoffResponse } from '../services/externalAi.js';
 import { enqueueMeetWrapUp } from '../services/queue.js';
 import { audit } from '../services/userService.js';
 import { activity } from '../activity/relay.js';
@@ -1239,7 +1240,8 @@ async function aiPreflight(req: Request, res: Response): Promise<
     return null;
   }
 
-  if (!isAnyProviderConfigured()) {
+  // A hand-off ("Open in my AI" / "Paste the answer") calls no provider.
+  if (!isAnyProviderConfigured() && !wantsHandoff(aiWhoOf(req))) {
     res.status(503).json(fail('AI is not configured on this server.'));
     return null;
   }
@@ -1254,6 +1256,9 @@ const AI_PERM = 'MEET_AI_USE';
  * chain giving up, a 502.
  */
 function aiFailure(res: Response, err: unknown, fallback: string) {
+  // External AI hand-off: the prompt (200) or its refusal.
+  const handoff = handoffResponse(err);
+  if (handoff) return res.status(handoff.status).json(handoff.body);
   if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
   // My AI: the person's own key failed and the school may not answer instead.
   if (isPersonalAiError(err)) return res.status(err.status).json(personalAiBody(err));
@@ -1423,7 +1428,9 @@ router.post('/:id/ai/agenda', authorizePermission(AI_PERM), async (req: Request,
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
   if (await refusedByAiPolicy(res)) return;
-  if (!isAnyProviderConfigured()) return res.status(503).json(fail('AI is not configured on this server.'));
+  if (!isAnyProviderConfigured() && !wantsHandoff(aiWhoOf(req))) {
+    return res.status(503).json(fail('AI is not configured on this server.'));
+  }
 
   const minutes = Number(req.body?.durationMinutes) ||
     (m.scheduled_start && m.scheduled_end
@@ -1571,7 +1578,7 @@ router.post('/:id/notes/:noteId/tidy', async (req: Request, res: Response) => {
   const meetingId = param(req, 'id');
   const me = await participantFor(req, meetingId);
   if (!me) return res.status(403).json(fail('You were not in this meeting.'));
-  if (!isAnyProviderConfigured()) {
+  if (!isAnyProviderConfigured() && !wantsHandoff(aiWhoOf(req))) {
     return res.status(503).json(fail('AI is not configured on this server.'));
   }
 

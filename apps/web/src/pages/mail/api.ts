@@ -1,4 +1,5 @@
 import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from '../../lib/api';
+import type { AiHandoffRequest } from '../../lib/handoff';
 import type {
   MailThreadSummary, MailThreadView, MailLabel, MailboxCounts, MailFolder, MailPrefs,
   MailRecipientDelivery, MailDistributionList, MailTemplate, MailCampaignView, MailComposePayload,
@@ -145,19 +146,21 @@ export const aiCompose = (body: {
   recipients?: string[]; threadId?: string; tone?: string;
   /** My AI: a one-off choice of AI ("school" or "<credentialId>:<model>"); omitted = the saved choice. */
   aiRoute?: string | null;
+  /** External AI: "Paste the answer" (import) — see components/Handoff.tsx. */
+  aiHandoff?: AiHandoffRequest;
 }) => apiPost<MailAiComposeResult>('/api/mail/ai/compose', body).then((r) => r.data!);
 
-export const aiSubject = (bodyText: string, aiRoute?: string | null) =>
-  apiPost<MailAiSubjectResult>('/api/mail/ai/subject', { bodyText, aiRoute }).then((r) => r.data!);
+export const aiSubject = (bodyText: string, aiRoute?: string | null, aiHandoff?: AiHandoffRequest) =>
+  apiPost<MailAiSubjectResult>('/api/mail/ai/subject', { bodyText, aiRoute, aiHandoff }).then((r) => r.data!);
 
-export const aiSummarize = (threadId: string, aiRoute?: string | null) =>
-  apiPost<MailAiThreadSummary>('/api/mail/ai/summarize', { threadId, aiRoute }).then((r) => r.data!);
+export const aiSummarize = (threadId: string, aiRoute?: string | null, aiHandoff?: AiHandoffRequest) =>
+  apiPost<MailAiThreadSummary>('/api/mail/ai/summarize', { threadId, aiRoute, aiHandoff }).then((r) => r.data!);
 
-export const aiSmartReplies = (threadId: string, aiRoute?: string | null) =>
-  apiPost<MailAiSmartReplies>('/api/mail/ai/smart-replies', { threadId, aiRoute }).then((r) => r.data!);
+export const aiSmartReplies = (threadId: string, aiRoute?: string | null, aiHandoff?: AiHandoffRequest) =>
+  apiPost<MailAiSmartReplies>('/api/mail/ai/smart-replies', { threadId, aiRoute, aiHandoff }).then((r) => r.data!);
 
-export const aiCampaign = (brief: string, audience?: string, aiRoute?: string | null) =>
-  apiPost<MailAiCampaignDraft>('/api/mail/ai/campaign', { brief, audience, aiRoute }).then((r) => r.data!);
+export const aiCampaign = (brief: string, audience?: string, aiRoute?: string | null, aiHandoff?: AiHandoffRequest) =>
+  apiPost<MailAiCampaignDraft>('/api/mail/ai/campaign', { brief, audience, aiRoute, aiHandoff }).then((r) => r.data!);
 
 /* Attachments — reuse the files service two-step upload. */
 export async function uploadAttachment(file: File): Promise<{ fileId: string; name: string; mime: string; size: number }> {

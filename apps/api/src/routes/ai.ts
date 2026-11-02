@@ -3,6 +3,7 @@ import { ok } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { tupoAiState } from '../services/aiPolicy.js';
 import { getRoutes, schoolWithoutGateway } from '../services/myAiGateway.js';
+import { handoffOffered } from '../services/externalAi.js';
 
 /**
  * GET /api/ai/policy — is AI on for Tupo right now?
@@ -37,6 +38,16 @@ router.get('/my-routes', async (req: Request, res: Response) => {
   if (settled && settled.reason !== 'NO_ROUTE') return res.json(ok({ ...off, reason: settled.reason }));
   const routes = await getRoutes(String(misUserId));
   res.json(ok(routes ?? { ...off, reason: 'GATEWAY_UNAVAILABLE' }));
+});
+
+/**
+ * GET /api/ai/external — is "Open in my AI" (the person's own Claude / ChatGPT:
+ * prompt out, answer pasted back) offered to the signed-in person right now?
+ * The school's switches, policy.external.handoff and their AI_EXTERNAL_CONNECT.
+ */
+router.get('/external', async (req: Request, res: Response) => {
+  const user = (req as AuthenticatedRequest).user;
+  res.json(ok({ handoff: user ? await handoffOffered(user) : false }));
 });
 
 export default router;

@@ -5,6 +5,7 @@ import {
   Sparkles, ListChecks, CheckCircle2,
 } from 'lucide-react';
 import type { MailAiThreadSummary } from '@tupo/shared';
+import { HandoffControl, handoffPrompt, importHandoff } from '../../components/Handoff';
 import { Avatar, IconButton, Spinner, EmptyState, Button } from '../../components/ui';
 import { apiDownload } from '../../lib/api';
 import { replySubject, forwardSubject } from './replyHelpers';
@@ -254,6 +255,16 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+        {aiAvailable && !summary && thread.messages.length > 0 && (
+          // "Summarise in my AI": the thread holds other people's words (maybe pupils'), so consent applies.
+          <HandoffControl
+            label="Summarise in my AI"
+            pupilData
+            className="flex justify-end"
+            requestPrompt={(consent) => handoffPrompt('/api/mail/ai/summarize', { threadId }, consent)}
+            importAnswer={async (text) => setSummary(await api.aiSummarize(threadId, null, importHandoff(text)))}
+          />
+        )}
         {summary && (
           <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-900/50 dark:bg-blue-900/15">
             <div className="mb-1.5 flex items-center gap-1.5 text-blue-700 dark:text-blue-300">

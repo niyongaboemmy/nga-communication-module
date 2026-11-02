@@ -357,7 +357,7 @@ export async function generateSummary(
     schema: SUMMARY_SCHEMA,
     schemaName: 'meeting_summary',
     maxOutputTokens: 1200,
-  }, { personal: personalCall(who, 'assist', 'tupo.meet.summary') });
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.summary', { pupilData: true }) });
   return { data, providerUsed, ai };
 }
 
@@ -374,7 +374,7 @@ export async function generateActionItems(
     schema: ACTION_ITEMS_SCHEMA,
     schemaName: 'action_items',
     maxOutputTokens: 1500,
-  }, { personal: personalCall(who, 'assist', 'tupo.meet.action-items') });
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.action-items', { pupilData: true }) });
   // Normalise the empty-string placeholders the strict schema forces on us.
   const items = (data.items ?? []).map((i) => ({
     ...i,
@@ -396,7 +396,7 @@ export async function generateDecisions(
     schema: DECISIONS_SCHEMA,
     schemaName: 'decisions',
     maxOutputTokens: 1500,
-  }, { personal: personalCall(who, 'assist', 'tupo.meet.decisions') });
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.decisions', { pupilData: true }) });
   return { data: data.decisions ?? [], providerUsed, ai };
 }
 
@@ -425,7 +425,7 @@ export async function generateMinutes(
     schema: MINUTES_SCHEMA,
     schemaName: 'meeting_minutes',
     maxOutputTokens: 4000,
-  }, { personal: personalCall(who, 'author', 'tupo.meet.minutes') });
+  }, { personal: personalCall(who, 'author', 'tupo.meet.minutes', { pupilData: true }) });
   return { data, providerUsed, ai };
 }
 
@@ -441,7 +441,7 @@ export async function generateChapters(
     schema: CHAPTERS_SCHEMA,
     schemaName: 'chapters',
     maxOutputTokens: 2000,
-  }, { personal: personalCall(who, 'assist', 'tupo.meet.chapters') });
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.chapters', { pupilData: true }) });
   return { data: data.chapters ?? [], providerUsed, ai };
 }
 
@@ -466,7 +466,7 @@ export async function askMeeting(
     schema: QA_SCHEMA,
     schemaName: 'meeting_qa',
     maxOutputTokens: 1200,
-  }, { personal: personalCall(who, 'assist', 'tupo.meet.ask') });
+  }, { personal: personalCall(who, 'assist', 'tupo.meet.ask', { pupilData: true }) });
   return { data, providerUsed, ai };
 }
 
@@ -491,7 +491,7 @@ export async function generateLessonFollowUp(
     schema: LESSON_SCHEMA,
     schemaName: 'lesson_followup',
     maxOutputTokens: 4000,
-  }, { personal: personalCall(who, 'author', 'tupo.meet.lesson-followup') });
+  }, { personal: personalCall(who, 'author', 'tupo.meet.lesson-followup', { pupilData: true }) });
   return { data, providerUsed, ai };
 }
 
@@ -512,7 +512,7 @@ export async function generateAgenda(
     schema: AGENDA_SCHEMA,
     schemaName: 'agenda',
     maxOutputTokens: 1200,
-  }, { personal: personalCall(who, 'author', 'tupo.meet.agenda') });
+  }, { personal: personalCall(who, 'author', 'tupo.meet.agenda', { pupilData: ctx.participants.length > 0 }) });
   return { data, providerUsed, ai };
 }
 

@@ -3,6 +3,7 @@ import cors from 'cors';
 import { fail } from '@tupo/shared';
 import { config } from './config.js';
 import { isAiDisabledError, aiDisabledBody } from './services/aiPolicy.js';
+import { handoffResponse } from './services/externalAi.js';
 import ssoRoutes from './routes/sso.js';
 import healthRoutes from './routes/health.js';
 import rolesPermissionsRoutes from './routes/rolesPermissions.js';
@@ -76,6 +77,9 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   }
   // Any AI route that let the chokepoint's refusal through still answers 403.
   if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
+  // An AI route that let a hand-off prompt (200) or refusal through.
+  const handoff = handoffResponse(err);
+  if (handoff) return res.status(handoff.status).json(handoff.body);
   console.error('[api] unhandled error:', err);
   res.status(500).json(fail('An unexpected error occurred.'));
 });

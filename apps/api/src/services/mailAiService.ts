@@ -22,7 +22,7 @@ import type {
 } from '@tupo/shared';
 import { htmlToText } from '@tupo/mail';
 import { assertTupoAiEnabled } from './aiPolicy.js';
-import { personalCall, type AiWho } from './myAiGateway.js';
+import { personalCall, wantsHandoff, type AiWho } from './myAiGateway.js';
 
 export { isAnyProviderConfigured };
 
@@ -34,9 +34,10 @@ export class MailAiError extends Error {
  * The school's AI switch first (it is the answer the user can act on least, so
  * it must not hide behind "not configured"), then a provider to call.
  */
-async function ensureConfigured(): Promise<void> {
+async function ensureConfigured(who?: AiWho): Promise<void> {
   await assertTupoAiEnabled();
-  if (!isAnyProviderConfigured()) {
+  // A hand-off ("Open in my AI" / "Paste the answer") calls no provider.
+  if (!isAnyProviderConfigured() && !wantsHandoff(who)) {
     throw new MailAiError(
       'The AI assistant is not configured. An administrator needs to add an API key for at least one provider.',
       503,
@@ -134,8 +135,14 @@ export interface ComposeInput {
  * `who` is the person asking. Their own key (My AI) may answer: drafting and
  * rewriting are task "author"; summaries and smart replies are "assist".
  */
+/** Plain prose (a pasted hand-off answer) as the minimal HTML the composer expects. */
+function proseToHtml(text: string): string {
+  const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text.trim().split(/\n\s*\n/).map((p) => `<p>${esc(p.trim()).replace(/\n/g, '<br>')}</p>`).join('');
+}
+
 export async function composeAssist(input: ComposeInput, who?: AiWho): Promise<MailAiComposeResult> {
-  await ensureConfigured();
+  await ensureConfigured(who);
 
   const rewriteActions: MailAiAction[] = ['improve', 'formal', 'friendly', 'concise', 'expand', 'grammar', 'translate'];
   if (rewriteActions.includes(input.action) && !input.currentText?.trim()) {
@@ -163,9 +170,15 @@ export async function composeAssist(input: ComposeInput, who?: AiWho): Promise<M
   );
 
   const { data, providerUsed, ai } = await generatePlainText(parts.join('\n'), 1400, {
-    personal: personalCall(who, 'author', `tupo.mail.${input.action === 'reply' ? 'reply' : input.action === 'draft' ? 'compose' : 'rewrite'}`),
+    personal: personalCall(
+      who, 'author', `tupo.mail.${input.action === 'reply' ? 'reply' : input.action === 'draft' ? 'compose' : 'rewrite'}`,
+      // A reply carries the thread (other people's words, possibly pupils'); the
+      // person's own draft or instruction does not.
+      { pupilData: input.action === 'reply' && !!input.threadText?.trim() },
+    ),
   });
-  const html = sanitizeAiHtml(data);
+  // A pasted answer may be plain prose rather than the HTML asked for.
+  const html = sanitizeAiHtml(ai?.route === 'handoff' && !/<[a-z][\s\S]*>/i.test(data) ? proseToHtml(data) : data);
   if (!htmlToText(html).trim()) throw new MailAiError('The assistant returned an empty draft. Try rephrasing.', 502);
 
   const NOTE: Record<MailAiAction, string> = {
@@ -187,7 +200,7 @@ const SUBJECT_SCHEMA: JSONSchema = {
 };
 
 export async function suggestSubjects(bodyText: string, who?: AiWho): Promise<MailAiSubjectResult> {
-  await ensureConfigured();
+  await ensureConfigured(who);
   if (!bodyText.trim()) throw new MailAiError('Write the message first, then ask for a subject.');
   const { data, providerUsed, ai } = await generateStructuredContent<{ suggestions: string[] }>({
     prompt:
@@ -231,7 +244,7 @@ const SUMMARY_SCHEMA: JSONSchema = {
 };
 
 export async function summariseThread(threadText: string, readerName: string, who?: AiWho): Promise<MailAiThreadSummary> {
-  await ensureConfigured();
+  await ensureConfigured(who);
   const { data, providerUsed, ai } = await generateStructuredContent<{
     summary: string; keyPoints: string[];
     actionItems: Array<{ text: string; owner: string; due: string }>; needsReply: boolean;
@@ -243,7 +256,7 @@ export async function summariseThread(threadText: string, readerName: string, wh
     schema: SUMMARY_SCHEMA,
     schemaName: 'mail_thread_summary',
     maxOutputTokens: 900,
-  }, { personal: personalCall(who, 'assist', 'tupo.mail.summarise') });
+  }, { personal: personalCall(who, 'assist', 'tupo.mail.summarise', { pupilData: true }) });
   return {
     summary: data.summary ?? '',
     keyPoints: (data.keyPoints ?? []).filter(Boolean),
@@ -279,7 +292,7 @@ const REPLIES_SCHEMA: JSONSchema = {
 };
 
 export async function smartReplies(threadText: string, readerName: string, who?: AiWho): Promise<MailAiSmartReplies> {
-  await ensureConfigured();
+  await ensureConfigured(who);
   const { data, providerUsed, ai } = await generateStructuredContent<{
     replies: Array<{ intent: string; text: string }>;
   }>({
@@ -290,7 +303,7 @@ export async function smartReplies(threadText: string, readerName: string, who?:
     schema: REPLIES_SCHEMA,
     schemaName: 'mail_smart_replies',
     maxOutputTokens: 500,
-  }, { personal: personalCall(who, 'assist', 'tupo.mail.smart-replies') });
+  }, { personal: personalCall(who, 'assist', 'tupo.mail.smart-replies', { pupilData: true }) });
   return {
     replies: (data.replies ?? []).filter((r) => r.text?.trim()).slice(0, 3),
     providerUsed,
@@ -313,7 +326,7 @@ const CAMPAIGN_SCHEMA: JSONSchema = {
 };
 
 export async function draftCampaign(brief: string, audience?: string, who?: AiWho): Promise<MailAiCampaignDraft> {
-  await ensureConfigured();
+  await ensureConfigured(who);
   if (!brief.trim()) throw new MailAiError('Describe the announcement first.');
   const { data, providerUsed, ai } = await generateStructuredContent<{
     subject: string; bodyHtml: string; mergeFields: string[];

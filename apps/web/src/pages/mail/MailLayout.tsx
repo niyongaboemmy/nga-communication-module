@@ -9,6 +9,7 @@ import { MailList } from './MailList';
 import { ThreadView } from './ThreadView';
 import { Composer, type ComposerSeed } from './Composer';
 import * as api from './api';
+import { MAIL_FOLDERS } from '@tupo/shared';
 import type { MailFolder, MailLabel, MailboxCounts, MailThreadSummary } from '@tupo/shared';
 import './mail.css';
 
@@ -26,7 +27,11 @@ export const MailLayout: React.FC = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const [folder, setFolder] = useState<MailFolder>('inbox');
+  // ?folder=drafts: where the NGA connector's openUrl lands after saving a draft.
+  const [folder, setFolder] = useState<MailFolder>(() => {
+    const f = new URLSearchParams(window.location.search).get('folder');
+    return (MAIL_FOLDERS as readonly string[]).includes(f ?? '') ? (f as MailFolder) : 'inbox';
+  });
   const [labelId, setLabelId] = useState<string | null>(null);
   const [counts, setCounts] = useState<MailboxCounts>(EMPTY_COUNTS);
   const [labels, setLabels] = useState<MailLabel[]>([]);

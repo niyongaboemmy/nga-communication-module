@@ -21,6 +21,7 @@ import {
 } from '../services/translateService.js';
 import { isAiDisabledError, aiDisabledBody } from '../services/aiPolicy.js';
 import { aiWhoOf, isPersonalAiError, personalAiBody } from '../services/myAiGateway.js';
+import { handoffResponse } from '../services/externalAi.js';
 
 /**
  * Chat REST.
@@ -897,8 +898,13 @@ router.post('/conversations/:id/messages/:messageId/translate',
     if (!message.body) return res.status(400).json(fail('There is nothing to translate.'));
 
     try {
-      res.json(ok(await translateMessage(messageId, message.body, language, aiWhoOf(req))));
+      res.json(ok(await translateMessage(messageId, message.body, language, aiWhoOf(req), {
+        othersWords: message.senderId !== me.id,
+      })));
     } catch (err) {
+      // External AI hand-off: the prompt (200) or its refusal.
+      const handoff = handoffResponse(err);
+      if (handoff) return res.status(handoff.status).json(handoff.body);
       if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
       if (isPersonalAiError(err)) return res.status(err.status).json(personalAiBody(err));
       // A model being unavailable is a 503, not a 500: nothing is wrong with

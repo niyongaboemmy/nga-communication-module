@@ -131,6 +131,8 @@ const FALLBACK_WHY: Record<string, string> = {
 
 /** One line of text for "who answered", or null when there is nothing to say. */
 export function answeredByText(ai: AiAnswer | null | undefined, providerUsed?: string | null): string | null {
+  // "Paste the answer" (components/Handoff.tsx): the person's own Claude / ChatGPT answered.
+  if (ai?.route === 'handoff') return 'via your own AI (pasted)';
   if (ai?.route === 'personal') {
     return `via ${[ai.label || ai.provider || 'My AI', ai.model].filter(Boolean).join(' · ')}`;
   }
