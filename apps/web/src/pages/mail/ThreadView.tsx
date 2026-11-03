@@ -1,5 +1,5 @@
 import { SafeHtml, sanitizeHtml, escapeText } from '../../components/SafeHtml';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, Reply, ReplyAll, Forward, Archive, Trash2, Star, Tag, MoreVertical,
   Paperclip, Download, ChevronDown, ChevronRight, BarChart3, Clock, X, Send, Edit3, Loader2,
@@ -85,6 +85,8 @@ const MessageCard: React.FC<{
   message: MailMessageView; myUserId: string; expanded: boolean; onToggle: () => void;
   onReply: (k: MailMessageKind) => void; onDelivery: () => void; onEditDraft: () => void; onChanged: () => void;
 }> = ({ message, myUserId, expanded, onToggle, onReply, onDelivery, onEditDraft, onChanged }) => {
+  const [showQuoted, setShowQuoted] = useState(false);
+  const quote = useMemo(() => withoutTrailingQuote(message.bodyHtml), [message.bodyHtml]);
   const isMine = message.from.userId === myUserId;
   // Reply and forward only for those who can send (C-12): the buttons used to
   // show for everyone and fail on press.
@@ -120,9 +122,18 @@ const MessageCard: React.FC<{
         <div className="px-3 pb-3">
           <SafeHtml
             className="tupo-prose max-w-none border-t border-border-light pt-3 dark:border-border-dark/40"
-            html={message.bodyHtml}
+            html={showQuoted || !quote.hidden ? message.bodyHtml : quote.html}
             fallback='<p class="text-text-secondary-light">(no content)</p>'
           />
+          {/* Gmail's "•••" (U-13): the earlier messages a reply quotes are in
+              the thread already; hidden until asked for. */}
+          {quote.hidden && (
+            <button onClick={() => setShowQuoted((v) => !v)} aria-expanded={showQuoted}
+              aria-label={showQuoted ? 'Hide quoted text' : 'Show quoted text'}
+              className="mt-1 rounded-md bg-surface-light px-2 py-0.5 text-xs font-bold tracking-widest text-text-secondary-light hover:bg-slate-200 dark:bg-surface-dark dark:hover:bg-slate-700">
+              •••
+            </button>
+          )}
 
           {message.attachments.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
@@ -160,6 +171,40 @@ const MessageCard: React.FC<{
   );
 };
 
+/**
+ * A reply's quote of the messages before it (U-13): the trailing top-level
+ * <blockquote>s, and an "On … wrote:" line just above them. Returns the body
+ * without them, and whether anything was hidden. Never hides a whole message.
+ */
+function withoutTrailingQuote(html: string): { html: string; hidden: boolean } {
+  if (typeof DOMParser === 'undefined' || !/<blockquote/i.test(html)) return { html, hidden: false };
+  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, 'text/html');
+  const root = doc.body.firstElementChild as HTMLElement | null;
+  if (!root) return { html, hidden: false };
+  const isBlank = (n: ChildNode) => n.nodeType === 3 ? !n.textContent?.trim()
+    : n.nodeType === 1 && !(n as Element).textContent?.trim() && !(n as Element).querySelector('img');
+  // The quote may sit inside wrapper elements (an editor's <div>, a mail
+  // client's container): look in the last one that is not itself the quote.
+  let box: Element = root;
+  for (;;) {
+    let tail = box.lastElementChild;
+    while (box.lastChild && isBlank(box.lastChild)) box.lastChild.remove();
+    tail = box.lastElementChild;
+    if (tail && /^(DIV|SECTION|ARTICLE)$/.test(tail.tagName) && box.lastChild === tail) { box = tail; continue; }
+    break;
+  }
+  let removed = false;
+  for (;;) {
+    let last = box.lastChild;
+    while (last && isBlank(last)) { last.remove(); last = box.lastChild; }
+    if (last && last.nodeType === 1 && (last as Element).tagName === 'BLOCKQUOTE') { last.remove(); removed = true; continue; }
+    if (removed && last && /wrote:\s*$/i.test(last.textContent ?? '')) last.remove();
+    break;
+  }
+  if (!removed || !root.textContent?.trim()) return { html, hidden: false };
+  return { html: root.innerHTML, hidden: true };
+}
+
 export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack, onChanged, onCompose }) => {
   const [thread, setThread] = useState<MailThreadView | null>(null);
   const [starred, setStarred] = useState(false);
@@ -186,6 +231,10 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   };
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // A long thread folds its middle into one "N older messages" bar (U-13):
+  // the first message, then the bar, then the last two and anything open.
+  const [showOlder, setShowOlder] = useState(false);
+  useEffect(() => { setShowOlder(false); }, [threadId]);
   const [replyTo, setReplyTo] = useState<{ id: string; kind: MailMessageKind; initialBody?: string } | null>(null);
   const [delivery, setDelivery] = useState<string | null>(null);
   const [showLabels, setShowLabels] = useState(false);
@@ -241,6 +290,13 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   if (loading) return <div className="grid h-full place-items-center"><Spinner /></div>;
   if (!thread) return <EmptyState title="Thread not found" hint="It may have been deleted." />;
 
+  const msgs = thread.messages;
+  const folded = !showOlder && msgs.length > 4
+    ? msgs.slice(1, -2).filter((m) => !expanded.has(m.id))
+    : [];
+  const hiddenCount = folded.length;
+  const visibleMessages: Array<(typeof msgs)[number] | 'older'> = hiddenCount < 2 ? msgs
+    : [msgs[0]!, 'older', ...msgs.slice(1).filter((m) => !folded.includes(m))];
   const currentLabels = thread.labels;
   const where = thread.folder ?? 'inbox';
   // Optimistic (P-04): the tick changes at once. It used to wait, swallow a
@@ -388,7 +444,14 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
           </div>
         )}
 
-        {thread.messages.map((m) => (
+        {visibleMessages.map((m) => m === 'older' ? (
+          <button key="older" onClick={() => setShowOlder(true)}
+            className="flex w-full items-center gap-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-400">
+            <span className="h-px flex-1 bg-border-light dark:bg-border-dark/50" />
+            <span className="rounded-full border border-border-light px-3 py-1 dark:border-border-dark/60">{hiddenCount} older messages</span>
+            <span className="h-px flex-1 bg-border-light dark:bg-border-dark/50" />
+          </button>
+        ) : (
           <React.Fragment key={m.id}>
             <MessageCard
               message={m}
