@@ -1,4 +1,5 @@
 import React from 'react';
+import { reportError } from '../lib/errorReport';
 import { AlertTriangle, RotateCcw } from 'lucide-react';
 
 /**
@@ -49,6 +50,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
     // Logged rather than swallowed: a boundary that hides the failure from the
     // console is how a bug survives to production.
     console.error('[boundary] a component tree failed:', error, info.componentStack);
+    reportError(error);
   }
 
   render() {

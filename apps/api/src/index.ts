@@ -4,6 +4,7 @@ import { app } from './app.js';
 import { installProcessGuards } from './utils/asyncErrors.js';
 import { startMeetSweep } from './services/meetLifecycle.js';
 import { activity } from './activity/relay.js';
+import { startApiMetrics, stopApiMetrics } from './services/observability.js';
 import activityCatalog from './activity/catalog.json' with { type: 'json' };
 
 installProcessGuards('api');
@@ -17,6 +18,7 @@ installProcessGuards('api');
 const isPrimaryInstance = (process.env.NODE_APP_INSTANCE ?? '0') === '0';
 
 async function start(): Promise<void> {
+  startApiMetrics();
   try {
     await pingDb();
     console.log('[api] database connection ok');
@@ -61,6 +63,7 @@ async function start(): Promise<void> {
     server.close(async () => {
       // Forward whatever analytics is still queued; bounded by the relay's own timeout.
       await activity().stop().catch(() => {});
+      await stopApiMetrics();
       await closeDb();
       process.exit(0);
     });

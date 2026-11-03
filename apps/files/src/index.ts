@@ -3,7 +3,7 @@ import express from 'express';
 import { installProcessGuards } from './utils/asyncErrors.js';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
-import { getPool, pingDb, snowflake, closeDb } from '@tupo/db';
+import { getPool, pingDb, snowflake, closeDb, startProcessMetrics } from '@tupo/db';
 import { ok, fail, MEETING_FOLDER_PATTERN } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
@@ -17,6 +17,24 @@ const storage = createStorageDriver();
 
 app.disable('x-powered-by');
 app.use(cors({ origin: config.corsOrigins, credentials: true }));
+
+// The files service's own numbers (R-04). Downloads can be long streams, so
+// latency is measured to the first byte of the answer, not to its end.
+const metrics = startProcessMetrics('files');
+app.use((req, res, next) => {
+  const started = process.hrtime.bigint();
+  const writeHead = res.writeHead.bind(res) as (...a: unknown[]) => typeof res;
+  (res as unknown as { writeHead: (...a: unknown[]) => typeof res }).writeHead = (...a: unknown[]) => {
+    if (!req.path.endsWith('/health')) metrics.time('http', Number(process.hrtime.bigint() - started) / 1e6);
+    return writeHead(...a);
+  };
+  res.on('finish', () => {
+    metrics.count('http_requests');
+    if (res.statusCode >= 500) metrics.count('http_5xx');
+    else if (res.statusCode >= 400) metrics.count('http_4xx');
+  });
+  next();
+});
 app.use(express.json({ limit: '256kb' }));
 
 interface FileRequest extends express.Request { user?: SessionClaims }
@@ -545,6 +563,6 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   throw err;
 });
 
-const shutdown = () => server.close(async () => { await closeDb(); process.exit(0); });
+const shutdown = () => server.close(async () => { await metrics.stop(); await closeDb(); process.exit(0); });
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

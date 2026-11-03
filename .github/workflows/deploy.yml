@@ -85,6 +85,9 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
             "$EC2_USER@$EC2_HOST" "bash -euo pipefail -s" <<REMOTE
             cd /opt/apps/nga-communication-module
+            # The release id on every error row and in the web bundle (R-05);
+            # \`pm2 reload --update-env\` below hands it to the services.
+            export TUPO_RELEASE=${GITHUB_SHA::8}
 
             npm ci --no-audit --no-fund
 

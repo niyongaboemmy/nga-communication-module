@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import { Queue, Worker, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
-import { pingDb } from '@tupo/db';
+import { pingDb, installProcessGuards, startProcessMetrics, recordError, RELEASE } from '@tupo/db';
 import { runMeetWrapUp, type MeetWrapUpData } from './jobs/meetWrapUp.js';
 import { runScheduledMessages } from './jobs/scheduledMessages.js';
 import { runChatSweeps } from './jobs/chatSweeps.js';
@@ -12,15 +12,15 @@ import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
 import { announcePost } from '@tupo/feed';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
 import { runPartitionMaintenance, partitionsAhead } from './jobs/partitions.js';
+import { collectHostSamples, evaluateAlerts, pruneMonitoring } from './jobs/monitor.js';
 import { runEmailDigest } from '@tupo/mail';
 import { reminders, profileMedia } from '@tupo/notify';
 import * as mailDelivery from '@tupo/mail';
 import * as chat from '@tupo/chat';
 
-// Last-resort guards: a stray rejection is logged, not fatal; an uncaught
-// exception exits so pm2 restarts the worker from a clean state.
-process.on('unhandledRejection', (reason) => console.error('[worker] unhandled rejection (kept running):', reason));
-process.on('uncaughtException', (err) => { console.error('[worker] uncaught exception — exiting:', err); process.exit(1); });
+// Last-resort guards, shared by every service: logged, recorded on the
+// System page, and an uncaught exception exits so pm2 restarts the worker.
+installProcessGuards('worker');
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -32,6 +32,10 @@ const connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
 // BullMQ reserves ':' as its internal Redis key separator and rejects it in names.
 export const QUEUE_NAME = 'tupo-jobs';
 export const queue = new Queue(QUEUE_NAME, { connection });
+
+// The worker's own numbers (R-04): jobs done and failed, and the backlog.
+const metrics = startProcessMetrics('worker');
+metrics.gauge('queue_waiting', () => queue.getWaitingCount());
 
 let processed = 0;
 let lastJobAt: string | null = null;
@@ -166,6 +170,14 @@ const worker = new Worker(
         return runPartitionMaintenance();
       }
 
+      // The watchman (R-03, R-04, R-07): host numbers, then the alert rules.
+      case 'monitor:tick': {
+        await collectHostSamples(connection);
+        return { firing: await evaluateAlerts() };
+      }
+      case 'monitor:prune':
+        return pruneMonitoring();
+
       default:
         // Fail loudly rather than silently dropping work we don't recognise.
         throw new Error(`Unknown job type: ${job.name}`);
@@ -174,7 +186,12 @@ const worker = new Worker(
   { connection, concurrency: 5 }
 );
 
-worker.on('failed', (job, err) => console.error(`[worker] job ${job?.id} (${job?.name}) failed:`, err.message));
+worker.on('failed', (job, err) => {
+  console.error(`[worker] job ${job?.id} (${job?.name}) failed:`, err.message);
+  metrics.count('jobs_failed');
+  void recordError({ source: 'worker', message: err.message, stack: err.stack, route: `job ${job?.name ?? 'unknown'}`, release: RELEASE });
+});
+worker.on('completed', () => metrics.count('jobs_done'));
 
 /**
  * The scheduled-message clock.
@@ -312,6 +329,19 @@ queue.add('partitions:ensure', { boot: true }, {
   removeOnFail: 10,
 }).catch((err) => console.error('[worker] could not queue boot partition maintenance:', err.message));
 
+queue.add('monitor:tick', {}, {
+  jobId: 'monitor-tick',
+  repeat: { every: 60_000 },
+  removeOnComplete: 10,
+  removeOnFail: 20,
+}).catch((err) => console.error('[worker] could not register the monitor:', err.message));
+queue.add('monitor:prune', {}, {
+  jobId: 'monitor-prune',
+  repeat: { every: 60 * 60_000 },
+  removeOnComplete: 5,
+  removeOnFail: 5,
+}).catch((err) => console.error('[worker] could not register monitor pruning:', err.message));
+
 worker.on('ready', () => console.log('[worker] connected to redis, waiting for jobs'));
 
 const app = express();
@@ -367,6 +397,7 @@ const server = app.listen(port, () => {
 const shutdown = async () => {
   console.log('\n[worker] draining — finishing in-flight jobs');
   await worker.close();
+  await metrics.stop();
   await queue.close();
   await connection.quit();
   server.close(() => process.exit(0));

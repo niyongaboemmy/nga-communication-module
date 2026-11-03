@@ -39,17 +39,5 @@ if (!(original as { __tupoAsync?: boolean }).__tupoAsync) {
   Layer.prototype.handle_request = patched as never;
 }
 
-/**
- * Last-resort process guards. A stray rejection is logged and the process
- * keeps serving; a synchronous exception that escaped every handler is
- * logged and the process exits, so pm2 restarts it from a known state.
- */
-export function installProcessGuards(service: string): void {
-  process.on('unhandledRejection', (reason) => {
-    console.error(`[${service}] unhandled rejection (kept running):`, reason);
-  });
-  process.on('uncaughtException', (err) => {
-    console.error(`[${service}] uncaught exception — exiting for a clean restart:`, err);
-    process.exit(1);
-  });
-}
+/** The last-resort guards are shared by every service (A-02, R-05). */
+export { installProcessGuards } from '@tupo/db';

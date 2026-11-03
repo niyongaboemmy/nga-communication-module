@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, XCircle, Loader2, AlertTriangle, RefreshCw, Clock } from 'lucide-react';
 import { Button } from '../components/ui';
+import { SystemInsights } from './SystemInsights';
 
 /**
  * Live check of every backend service — the first place to look when
@@ -92,7 +93,7 @@ export const SystemStatus: React.FC = () => {
   const problems = services.filter((s) => s.state !== 'healthy' && s.state !== 'checking').length;
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-6 sm:p-8">
+    <div className="mx-auto max-w-4xl px-4 py-6 sm:p-8">
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-50">System status</h1>
@@ -146,6 +147,8 @@ export const SystemStatus: React.FC = () => {
           </li>
         ))}
       </ul>
+
+      <SystemInsights />
     </div>
   );
 };

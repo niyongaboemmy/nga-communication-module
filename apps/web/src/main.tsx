@@ -5,6 +5,10 @@ import './index.css';
 import { initNgaInstall } from './pwa/ngaInstall';
 import { InstallPromptGate } from './pwa/InstallPromptGate';
 import { startActivity } from './activity';
+import { installErrorReporting } from './lib/errorReport';
+
+// Crashes reach the System page (R-05).
+installErrorReporting();
 
 // Installable app + "install this too" when opened from the installed NGA app.
 initNgaInstall();

@@ -18,8 +18,15 @@ const worker   = process.env.TUPO_WORKER_URL   ?? 'http://localhost:5193';
  * Order matters: Vite matches these in declaration order, so the more specific
  * `/api/files` prefix must come before the catch-all `/api`.
  */
+/**
+ * The release id stamped into the bundle, so a browser error says which build
+ * it came from (R-05). The deploy sets TUPO_RELEASE; otherwise the build time.
+ */
+const release = process.env.TUPO_RELEASE ?? new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: { __TUPO_RELEASE__: JSON.stringify(release) },
   build: {
     rolldownOptions: {
       output: {

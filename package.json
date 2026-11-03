@@ -66,6 +66,7 @@
     "verify:notifications:ui": "node scripts/verify-notification-center.mjs",
     "verify:navigation": "node scripts/verify-navigation.mjs",
     "verify:local-first": "node scripts/verify-local-first.mjs",
+    "verify:monitoring": "node scripts/verify-monitoring.mjs",
     "verify:errors": "node scripts/verify-load-errors.mjs",
     "verify:access:ui": "node scripts/verify-access-ux.mjs",
     "verify:admin:ui": "node scripts/verify-admin-ui.mjs",

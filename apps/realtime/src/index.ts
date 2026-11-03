@@ -18,6 +18,7 @@ import { registerFeedHandlers } from './feed/handlers.js';
 import { createAccessCache, findInactiveUsers, revocationsFor, sessionEnded } from './access.js';
 import { issuedBeforeRevocation } from './utils/ssoLogout.js';
 import { stopActivity } from './activity.js';
+import { startProcessMetrics } from '@tupo/db';
 import {
   broadcastPresence, markOffline, readPresence, recomputePresence, toChoice, toStatus, writeChoice,
 } from './presence.js';
@@ -367,7 +368,14 @@ const presenceHeartbeat = startPresenceHeartbeat();
 
 installProcessGuards('realtime');
 
+// The gateway's own numbers (R-04): connected sockets, and new connections per
+// minute — a burst of the latter after a deploy is the reconnect wave.
+const metrics = startProcessMetrics('realtime');
+metrics.gauge('sockets', () => io.engine.clientsCount);
+metrics.gauge('meet_sockets', () => meetNsp.sockets.size);
+
 io.on('connection', (socket) => {
+  metrics.count('connections');
   hardenSocket(socket);
   const user = socket.data.user as SessionClaims;
 
@@ -575,6 +583,7 @@ const shutdown = async (signal: string) => {
   stopping = true;
   clearInterval(presenceHeartbeat);
   clearInterval(accessSweep);
+  void metrics.stop();
   console.log(`\n[realtime] ${signal} received — telling clients to reconnect`);
   // Clients treat this as a planned restart: no session re-check, and each
   // reconnects after its own random delay so they do not all return at once

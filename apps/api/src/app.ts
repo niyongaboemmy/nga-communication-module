@@ -25,6 +25,9 @@ import accessRoutes from './routes/access.js';
 import integrationRoutes from './routes/integration.js';
 import activityRoutes from './routes/activity.js';
 import aiRoutes from './routes/ai.js';
+import systemRoutes from './routes/system.js';
+import { requestMetrics } from './services/observability.js';
+import { recordError, RELEASE } from '@tupo/db';
 
 /**
  * The Express app with no side effects — no database init, no listen — so
@@ -33,6 +36,8 @@ import aiRoutes from './routes/ai.js';
 export const app = express();
 
 app.disable('x-powered-by');
+// Requests, errors and latency per minute (R-04); a no-op until index.ts starts metrics.
+app.use(requestMetrics);
 // nginx (and the Vite dev proxy) sit on the same host, so the client address is
 // the one they put in X-Forwarded-For. Without this every request's req.ip was
 // 127.0.0.1: the per-IP guest and sign-in throttles were one global bucket, and
@@ -90,6 +95,7 @@ app.use('/api/oversight', oversightRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/access', accessRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/system', systemRoutes);
 // Called by the MIS server with the user's MIS token, not a Tupo session.
 app.use('/api/integration', integrationRoutes);
 
@@ -128,5 +134,12 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
     return res.status(400).json(fail('One of the values sent is not valid.'));
   }
   console.error(`[api] unhandled error on ${req.method} ${req.path}:`, err);
+  // Grouped on the System page (R-05). The route pattern, not the URL, so
+  // /messages/123 and /messages/456 are one problem.
+  void recordError({
+    source: 'api', message: err.message, stack: err.stack, release: RELEASE,
+    route: `${req.method} ${req.baseUrl}${(req.route as { path?: string } | undefined)?.path ?? req.path}`,
+    userId: (req as express.Request & { user?: { id?: string } }).user?.id ?? null,
+  });
   res.status(500).json(fail('An unexpected error occurred.'));
 });

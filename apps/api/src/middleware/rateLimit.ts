@@ -41,6 +41,8 @@ export const BUCKETS: Bucket[] = [
   { name: 'mail-compose', method: 'POST', pattern: /^\/api\/mail\/compose$/, limit: 60, windowSec: 60, what: 'mail actions' },
   { name: 'mail-ai', method: 'POST', pattern: /^\/api\/mail\/ai\//, limit: 30, windowSec: 600, what: 'AI requests' },
   { name: 'meet-ai', method: 'POST', pattern: new RegExp(`^/api/meet/${id}/ai(/|$)`), limit: 30, windowSec: 600, what: 'AI requests' },
+  // A browser in a crash loop must not become a write storm (R-05).
+  { name: 'client-errors', method: 'POST', pattern: /^\/api\/system\/client-errors$/, limit: 30, windowSec: 600, what: 'error reports' },
   { name: 'search', method: 'GET', pattern: /^\/api\/(search|chat\/search)(\/|$)/, limit: 90, windowSec: 60, what: 'searches' },
 ];
 

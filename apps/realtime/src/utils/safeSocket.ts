@@ -1,4 +1,5 @@
 import type { Socket } from 'socket.io';
+import { recordError, RELEASE } from '@tupo/db';
 
 /**
  * Socket handler safety (A-02).
@@ -56,6 +57,10 @@ export function hardenSocket<S extends Socket>(socket: S, service = 'realtime'):
   const on = socket.on.bind(socket) as (ev: string, fn: (...args: unknown[]) => unknown) => S;
   const report = (event: string, err: unknown, args: unknown[]) => {
     console.error(`[${service}] handler '${event}' failed for socket ${socket.id}:`, err);
+    // Grouped on the System page by event (R-05).
+    const e = err instanceof Error ? err : new Error(String(err));
+    void recordError({ source: 'realtime', message: e.message, stack: e.stack, route: `socket ${event}`, release: RELEASE,
+      userId: (socket.data as { user?: { id?: string } } | undefined)?.user?.id ?? null });
     const ack = args[args.length - 1];
     if (typeof ack === 'function') {
       try { (ack as (r: unknown) => void)({ ok: false, error: 'Something went wrong. Please try again.' }); } catch { /* client gone */ }
@@ -75,13 +80,5 @@ export function hardenSocket<S extends Socket>(socket: S, service = 'realtime'):
   return socket;
 }
 
-/** See apps/api/src/utils/asyncErrors.ts — the same last-resort guards. */
-export function installProcessGuards(service: string): void {
-  process.on('unhandledRejection', (reason) => {
-    console.error(`[${service}] unhandled rejection (kept running):`, reason);
-  });
-  process.on('uncaughtException', (err) => {
-    console.error(`[${service}] uncaught exception — exiting for a clean restart:`, err);
-    process.exit(1);
-  });
-}
+/** The last-resort guards are shared by every service (A-02, R-05). */
+export { installProcessGuards } from '@tupo/db';
