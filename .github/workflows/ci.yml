@@ -69,9 +69,11 @@ jobs:
       - name: Web build and bundle budget
         run: npm run build -w @tupo/web && npm run check:bundle
 
-      # Critical for now: the one open "high" is nodemailer 6.x, whose only
-      # fixed release (10.1.0, a major bump) was days old when this gate was
-      # added. Raise this to --audit-level=high once that upgrade lands
-      # (tracked in docs/REMEDIATION_DELIVERY_PLAN.md, follow-ups).
+      # Critical for now. nodemailer is on 10.x (S-06) and body-parser and
+      # markdown-it are patched; the open "high" is zod 3 (memory on oversized
+      # inputs; request bodies are capped at 1 MB), whose only fix is zod 4, a
+      # breaking upgrade of every validator, which also unblocks openai's.
+      # Raise this to --audit-level=high once that lands
+      # (docs/RESPONSIVENESS_PLAN_2026-11.md, follow-ups).
       - name: Dependency audit
         run: npm audit --omit=dev --audit-level=critical

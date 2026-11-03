@@ -117,8 +117,11 @@ export function classifySmtpError(e: {
 export async function sendSmtp(cfg: SmtpConfig, mail: OutboundMail): Promise<SmtpResult> {
   try {
     const info = await getTransport(cfg).sendMail({
-      from: `"${sanitizeName(mail.fromName)}" <${cfg.from}>`,
-      to: mail.toName ? `"${sanitizeName(mail.toName)}" <${mail.to}>` : mail.to,
+      // Objects, not hand-built strings: MAIL_FROM is often "Name <addr>" in
+      // production, and wrapping that in another "<…>" sent every message with
+      // a stray ">" in the sender's name.
+      from: { name: sanitizeName(mail.fromName), address: bareAddress(cfg.from) },
+      to: mail.toName ? { name: sanitizeName(mail.toName), address: bareAddress(mail.to) } : mail.to,
       replyTo: mail.replyTo,
       subject: mail.subject,
       html: mail.html,
@@ -150,4 +153,10 @@ export async function verifySmtp(cfg: SmtpConfig): Promise<boolean> {
 
 function sanitizeName(name: string): string {
   return name.replace(/["\r\n]/g, '').slice(0, 120);
+}
+
+/** "NGA Tupo <mis@nga.ac.rw>" or "mis@nga.ac.rw" → "mis@nga.ac.rw". */
+export function bareAddress(value: string): string {
+  const angle = /<([^<>\s]+@[^<>\s]+)>\s*$/.exec(value);
+  return (angle ? angle[1]! : value).trim();
 }

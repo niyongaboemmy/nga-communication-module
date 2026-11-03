@@ -21,7 +21,7 @@
     "@tupo/notify": "*",
     "@tupo/shared": "*",
     "ioredis": "^5.4.2",
-    "nodemailer": "^6.9.16",
+    "nodemailer": "10.1.7",
     "pg": "^8.13.1",
     "sanitize-html": "^2.17.0"
   },
