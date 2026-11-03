@@ -1456,6 +1456,25 @@ export async function messageInfo(viewerId: string, conversationId: string, mess
   }));
 }
 
+/**
+ * Jump to a date (FR-MSG-16): the first message of the main flow at or after
+ * `at`, or, if the conversation has nothing that late, the last one before it.
+ */
+export async function messageAt(conversationId: string, at: Date): Promise<string | null> {
+  const { rows } = await getPool().query<{ id: string }>(
+    `(SELECT id, 0 AS pref, seq FROM messages
+        WHERE conversation_id = $1 AND created_at >= $2 AND thread_root_id IS NULL AND deleted_at IS NULL
+        ORDER BY seq ASC LIMIT 1)
+     UNION ALL
+     (SELECT id, 1 AS pref, seq FROM messages
+        WHERE conversation_id = $1 AND created_at < $2 AND thread_root_id IS NULL AND deleted_at IS NULL
+        ORDER BY seq DESC LIMIT 1)
+     ORDER BY pref LIMIT 1`,
+    [conversationId, at],
+  );
+  return rows[0]?.id ?? null;
+}
+
 export async function receiptsVisibleTo(userId: string): Promise<boolean> {
   const { rows } = await getPool().query<{ read_receipts: boolean }>(
     'SELECT read_receipts FROM user_chat_prefs WHERE user_id = $1', [userId]);

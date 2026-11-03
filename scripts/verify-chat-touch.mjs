@@ -83,6 +83,17 @@ try {
   check('scrolling down keeps loading what came after, to the end', await log.getByText('line 119').first().isVisible().catch(() => false));
   check('and then "Jump to latest" goes away', !(await latestBtn.isVisible().catch(() => false)));
 
+  console.log('\nGo to date');
+  await pool.query(`UPDATE messages SET created_at = '2026-09-01T08:00:00Z' WHERE conversation_id = $1 AND body = ANY($2)`,
+    [convId, Array.from({ length: 10 }, (_, i) => `line ${String(i).padStart(3, '0')}`)]);
+  await desk.goto(`${BASE}/app/chat?c=${convId}&panel=search`);
+  const dateInput = desk.getByLabel('Go to date');
+  await dateInput.waitFor({ timeout: 10_000 });
+  await dateInput.fill('2026-09-01');
+  check('picking a day opens the conversation at that day',
+    await log.getByText('line 000').first().waitFor({ timeout: 8_000 }).then(() => true).catch(() => false)
+    && !(await log.getByText('line 119').first().isVisible().catch(() => false)));
+
   console.log('\nMessage info');
   const mineMsg = (await (await fetch(`${API}/api/chat/conversations/${convId}/messages`, { method: 'POST', headers: { authorization: `Bearer ${me.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ body: `did you read this ${tag}`, nonce: `info-${tag}` }) })).json()).data.message;
   await fetch(`${API}/api/chat/conversations/${convId}/read`, { method: 'POST', headers: { authorization: `Bearer ${other.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ seq: mineMsg.seq }) });

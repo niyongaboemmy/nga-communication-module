@@ -425,6 +425,10 @@ export interface ChatReport {
   createdAt: string; resolvedAt: string | null; resolutionNote: string | null; priorReports: number;
 }
 
+/** The message to open for a date (FR-MSG-16). */
+export const messageAt = (conversationId: string, at: Date) =>
+  apiGet<{ messageId: string | null }>(`/api/chat/conversations/${conversationId}/messages/at?at=${encodeURIComponent(at.toISOString())}`).then((r) => r.data!.messageId);
+
 /** "Message info" (U-04): only for your own messages. */
 export interface MessageInfoEntry { userId: string; name: string; avatarUrl: string | null; state: 'read' | 'delivered' | 'sent'; at: string | null }
 export const messageInfo = (conversationId: string, messageId: string) =>
