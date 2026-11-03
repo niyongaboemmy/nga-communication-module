@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -184,18 +184,33 @@ export const MeetingRoom: React.FC = () => {
     [idOrCode, meeting, startCall],
   );
 
+  /*
+   * A recording in progress is saved before leaving or ending (E-09). It used
+   * to be thrown away: leaving unmounted the recorder, which stopped it and
+   * uploaded nothing, and the row stayed "recording" so the next start failed.
+   */
+  const recorderRef = useRef<ReturnType<typeof useMeetRecorder> | null>(null);
+  const saveRecordingFirst = useCallback(async () => {
+    const r = recorderRef.current;
+    if (r?.state !== 'recording') return;
+    notify({ title: 'Saving the recording…', tone: 'info', key: 'meet-recording-save' });
+    await r.stop().catch(() => {});
+  }, [notify]);
+
   const leave = useCallback(async () => {
+    await saveRecordingFirst();
     await endCall();
     navigate('/app/meet');
-  }, [endCall, navigate]);
+  }, [endCall, navigate, saveRecordingFirst]);
 
   const endForAll = useCallback(async () => {
     if (!meeting || !room) return;
+    await saveRecordingFirst();
     await room.hostCommand({ action: 'end' });
     await meetApi.endMeeting(meeting.id).catch(() => {});
     await endCall();
     navigate(`/app/meet/${meeting.id}/summary`);
-  }, [meeting, room, endCall, navigate]);
+  }, [meeting, room, endCall, navigate, saveRecordingFirst]);
 
   /**
    * Recording.
@@ -214,6 +229,20 @@ export const MeetingRoom: React.FC = () => {
     presenterId: room?.presenterId ?? null,
     onStateChange: (active) => room?.setRecording(active),
   });
+  recorderRef.current = recorder;
+  // Closing the tab mid-recording would lose it: the browser asks first.
+  useEffect(() => {
+    if (recorder.state !== 'recording') return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [recorder.state]);
+
+  useEffect(() => {
+    if (recorder.state === 'error' && recorder.error) {
+      notify({ title: 'Recording problem', body: recorder.error, tone: 'error', key: 'meet-recording-error' });
+    }
+  }, [recorder.state, recorder.error, notify]);
 
   const toggleRecording = useCallback(async () => {
     if (!meeting || !room) return;
@@ -222,8 +251,14 @@ export const MeetingRoom: React.FC = () => {
       // and does not composite them, so there is no server-side path — asking
       // for one used to be exactly what broke recording whenever the media
       // server was configured.
-      if (recorder.state === 'recording') await recorder.stop();
-      else await recorder.start();
+      if (recorder.state === 'recording') { await recorder.stop(); return; }
+      // Recording is off by default for a meeting. A host who may record and
+      // presses Start means "record this", so turn it on rather than refuse.
+      if (!room.settings.recordingEnabled) {
+        await meetApi.saveSettings(meeting.id, { recordingEnabled: true });
+        room.patchSettings({ recordingEnabled: true });
+      }
+      await recorder.start();
     } catch (err) {
       notify({
         title: 'Could not change recording',
