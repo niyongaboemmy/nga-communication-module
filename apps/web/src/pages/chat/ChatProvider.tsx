@@ -10,6 +10,10 @@ import { useAuth } from '../../context/AuthContext';
 import { apiGet } from '../../lib/api';
 import * as chatApi from './api';
 import * as outbox from './outbox';
+import { cacheGet, cacheSet, debouncedWriter } from '../../lib/localStore';
+
+/** Newest messages kept on the device per conversation (P-02). */
+const CACHED_MESSAGES = 100;
 
 /**
  * The chat store.
@@ -289,10 +293,43 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * Loading
    * ────────────────────────────────────────────────────────────────────── */
 
+  /*
+   * Prefetch (P-09): the newest page of the few conversations most likely to be
+   * opened next — unread ones, newest first — goes onto the device while the
+   * browser is idle. Opening one is then instant, as in WhatsApp. Skipped on
+   * Save-Data and slow links, and never for the conversation already open.
+   */
+  const prefetched = useRef(new Map<string, number>());
+  const prefetchUnread = useCallback((list: ConversationSummary[]) => {
+    const conn = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+    if (conn?.saveData || conn?.effectiveType === '2g' || conn?.effectiveType === 'slow-2g') return;
+    const targets = list
+      .filter((c) => c.unread > 0 && !c.subjectId && c.id !== activeIdRef.current
+        && prefetched.current.get(c.id) !== c.lastSeq)
+      .slice(0, 5);
+    if (!targets.length) return;
+    const idle = (cb: () => void) => ('requestIdleCallback' in window
+      ? window.requestIdleCallback(cb, { timeout: 5000 })
+      : globalThis.setTimeout(cb, 2000));
+    idle(() => {
+      void (async () => {
+        for (const c of targets) {
+          try {
+            const page = await chatApi.listMessages(c.id, { limit: 40 });
+            prefetched.current.set(c.id, c.lastSeq);
+            await cacheSet(`chat:msgs:${c.id}`, page.messages);
+          } catch { return; /* offline or refused: stop, it is only a head start */ }
+        }
+      })();
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const list = await chatApi.listConversations();
+      listFromNetwork.current = true;
       setConversations(list);
+      prefetchUnread(list);
       setConversationsError(false);
       // Server-side drafts follow the user between devices; seed the local
       // cache from them, without clobbering something being typed right now.
@@ -310,7 +347,29 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  useEffect(() => { if (user) void refresh(); }, [user, refresh]);
+  /*
+   * Local first (P-03): the list from the device renders at once, then the
+   * network copy replaces it. The cache never overwrites what the network
+   * already delivered, and an empty cache changes nothing.
+   */
+  const listFromNetwork = useRef(false);
+  useEffect(() => {
+    if (!user) return;
+    listFromNetwork.current = false;
+    let cancelled = false;
+    void cacheGet<ConversationSummary[]>('chat:conversations').then((cached) => {
+      if (cancelled || listFromNetwork.current || !cached?.length) return;
+      setConversations(cached);
+      setConversationsLoading(false);
+    });
+    void refresh();
+    return () => { cancelled = true; };
+  }, [user, refresh]);
+
+  const saveConversations = useMemo(() => debouncedWriter<ConversationSummary[]>(() => 'chat:conversations'), []);
+  useEffect(() => {
+    if (listFromNetwork.current) saveConversations(conversations);
+  }, [conversations, saveConversations]);
   // The offline queue belongs to whoever is signed in.
   useEffect(() => { outbox.setOutboxOwner(user?.id ?? null); }, [user]);
 
@@ -344,15 +403,39 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     delivery: e.attempts >= outbox.MAX_ATTEMPTS ? 'failed' : 'pending', readCount: 0, metadata: e.metadata ?? {},
   });
 
+  /** Counts windows loaded by jumpTo, so a slower first page cannot undo one. */
+  const jumps = useRef(0);
+  /** The conversation whose first page has come from the network (not the device). */
+  const networkPageFor = useRef<string | null>(null);
+
   /** Load the newest page whenever the open conversation changes. */
   useEffect(() => {
     setMessagesConversationId(null);
+    networkPageFor.current = null;
     if (!activeId) { setMessages([]); setHasMore(false); return; }
     let cancelled = false;
+    let fromNetwork = false;
+    let fromCache = false;
+    const jumpsAtStart = jumps.current;
     setMessagesLoading(true);
+    // The newest messages from the device first (P-03): opening a conversation
+    // already seen is instant, and the page below replaces them.
+    void cacheGet<WireMessage[]>(`chat:msgs:${activeId}`).then((cached) => {
+      if (cancelled || fromNetwork || !cached?.length) return;
+      fromCache = true;
+      setMessages(cached);
+      setHasMore(true);
+      setMessagesConversationId(activeId);
+      setMessagesLoading(false);
+    });
     Promise.all([chatApi.listMessages(activeId, { limit: 40 }), outbox.pending().catch(() => [])])
       .then(([page, queuedHere]) => {
         if (cancelled) return;
+        fromNetwork = true;
+        networkPageFor.current = activeId;
+        // Shown from the device, then a jump (a link to one message) loaded the
+        // window around its target: this newest page must not replace it.
+        if (jumps.current !== jumpsAtStart) return;
         // What is still waiting in the outbox shows as pending after a reload
         // (CHAT-M12), instead of seeming lost until it is flushed.
         const known = new Set(page.messages.map((m) => m.nonce).filter(Boolean));
@@ -363,10 +446,24 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setHasMore(page.hasMore);
         setMessagesConversationId(activeId);
       })
-      .catch(() => { if (!cancelled) { setMessages([]); setHasMore(false); } })
+      // Offline with a copy on the device: keep showing it rather than an empty
+      // conversation. The reconnect catch-up fills in what is missing.
+      .catch(() => { if (!cancelled && !fromCache) { setMessages([]); setHasMore(false); } })
       .finally(() => { if (!cancelled) setMessagesLoading(false); });
     return () => { cancelled = true; };
   }, [activeId]);
+
+  /* The open conversation's newest confirmed messages go back to the device,
+   * for the next instant open (P-02). Pending and failed sends stay in the
+   * outbox, which is their real home. */
+  const saveMessages = useMemo(() => debouncedWriter<WireMessage[]>(
+    () => (activeIdRef.current ? `chat:msgs:${activeIdRef.current}` : null),
+  ), []);
+  useEffect(() => {
+    if (!messagesConversationId || messagesConversationId !== activeIdRef.current) return;
+    const confirmed = messages.filter((m) => m.seq > 0 && m.delivery !== 'pending' && m.delivery !== 'failed');
+    if (confirmed.length) saveMessages(confirmed.slice(-CACHED_MESSAGES));
+  }, [messages, messagesConversationId, saveMessages]);
 
   const loadOlder = useCallback(async () => {
     const id = activeIdRef.current;
@@ -1117,10 +1214,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setTimeout(() => setHighlightedId((cur) => (cur === messageId ? null : cur)), 2200);
     };
 
-    if (messages.some((m) => m.id === messageId)) { flash(); return; }
+    // Already on screen — unless what is on screen is the device copy, which the
+    // network page is about to replace: then load the window from the server.
+    if (networkPageFor.current === conversationId && messages.some((m) => m.id === messageId)) { flash(); return; }
 
     try {
       const context = await chatApi.messageContext(conversationId, messageId);
+      jumps.current += 1;
       setMessages(context.messages);
       setHasMore(context.hasMore);
       flash();

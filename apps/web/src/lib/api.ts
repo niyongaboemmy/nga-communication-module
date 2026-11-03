@@ -1,5 +1,6 @@
 import type { Envelope } from '@tupo/shared';
 import { getDeviceId } from '../vendor/nga-activity';
+import { cacheClearAll } from './localStore';
 
 export class ApiError extends Error {
   /** `body`: the server's whole answer, for a refusal that carries more than a message (a code, the newer record). */
@@ -15,6 +16,8 @@ export const PERMISSIONS_KEY = 'tupo_permissions';
 export const ROLE_PERMISSIONS_KEY = 'tupo_role_permissions';
 
 export function clearSession(): void {
+  // What this person saw must not render for whoever signs in next (P-02).
+  void cacheClearAll();
   localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(USER_KEY);
   localStorage.removeItem(PERMISSIONS_KEY);

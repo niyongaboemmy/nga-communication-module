@@ -8,6 +8,7 @@ import { useAuth } from '../../context/AuthContext';
 import { usePermissions } from '../../hooks/usePermissions';
 import { getSocket, onSocket } from '../../lib/socket';
 import * as api from './api';
+import { cacheGet, cacheSet } from '../../lib/localStore';
 
 /**
  * One store for every post the Feed has loaded, keyed by id, plus the socket
@@ -265,6 +266,8 @@ function applyReactionLocally(
 export function useFeedList(
   loader: (cursor?: string) => Promise<{ items: FeedPostView[]; nextCursor: string | null }>,
   deps: React.DependencyList,
+  /** Keep the first page on the device under this key, and show it first (P-03). */
+  cacheKey?: string,
 ) {
   const { ingest, watch, onNewPost } = useFeed();
   const [ids, setIds] = useState<string[]>([]);
@@ -276,6 +279,11 @@ export function useFeedList(
   const [moreError, setMoreError] = useState<string | null>(null);
   const loaderRef = useRef(loader);
   loaderRef.current = loader;
+  const cacheKeyRef = useRef(cacheKey);
+  cacheKeyRef.current = cacheKey;
+  /** Set once the network answers, so a slower cache read never overwrites it. */
+  const fresh = useRef(false);
+  const shownFromCache = useRef(false);
 
   const load = useCallback(async (reset: boolean) => {
     reset ? setLoading(true) : setMore(true);
@@ -283,6 +291,10 @@ export function useFeedList(
     setMoreError(null);
     try {
       const page = await loaderRef.current(reset ? undefined : cursor ?? undefined);
+      if (reset) {
+        fresh.current = true;
+        if (cacheKeyRef.current) void cacheSet(cacheKeyRef.current, page);
+      }
       ingest(page.items);
       const pageIds = page.items.map((p) => p.id);
       setIds((prev) => (reset ? pageIds : [...prev, ...pageIds.filter((id) => !prev.includes(id))]));
@@ -290,14 +302,33 @@ export function useFeedList(
       watch(pageIds);
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Could not load the feed.';
-      if (reset) setError(message); else setMoreError(message);
+      // Shown from the device and now offline: keep the posts rather than an error.
+      if (reset && !shownFromCache.current) setError(message); else if (!reset) setMoreError(message);
     } finally {
       setLoading(false); setMore(false);
     }
   }, [cursor, ingest, watch]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { setIds([]); setCursor(null); void load(true); }, deps);
+  useEffect(() => {
+    setIds([]); setCursor(null);
+    fresh.current = false;
+    shownFromCache.current = false;
+    let stale = false;
+    const key = cacheKeyRef.current;
+    if (key) {
+      void cacheGet<{ items: FeedPostView[]; nextCursor: string | null }>(key).then((cached) => {
+        if (stale || fresh.current || !cached?.items.length) return;
+        shownFromCache.current = true;
+        ingest(cached.items);
+        setIds(cached.items.map((p) => p.id));
+        setCursor(cached.nextCursor);
+        setLoading(false);
+      });
+    }
+    void load(true);
+    return () => { stale = true; };
+  }, deps);
 
   // New posts that arrive live get spliced to the top (home only passes a cb).
   const prepend = useCallback((id: string) => setIds((prev) => (prev.includes(id) ? prev : [id, ...prev])), []);

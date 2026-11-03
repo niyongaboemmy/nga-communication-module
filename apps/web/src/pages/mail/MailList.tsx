@@ -5,10 +5,11 @@ import {
 } from 'lucide-react';
 import { useNotify } from '../../context/NotificationContext';
 import { useConfirmDialog } from '../../components/ConfirmDialog';
-import { Avatar, IconButton, Spinner, EmptyState } from '../../components/ui';
+import { Avatar, IconButton, EmptyState, Skeleton } from '../../components/ui';
 import * as api from './api';
 import type { MailFolder, MailThreadSummary, MailLabel } from '@tupo/shared';
 import { LoadError } from '../../components/LoadError';
+import { cacheGet, cacheSet } from '../../lib/localStore';
 
 interface Props {
   folder: MailFolder;
@@ -62,10 +63,18 @@ export const MailList: React.FC<Props> = ({
    * place, with no spinner, keeping the selection, the scroll position and
    * any pages already loaded. A new folder, label or search starts afresh.
    */
+  /** The device copy of this folder's first page (P-02); searches are never cached. */
+  const cacheKey = query ? null : `mail:list:${folder}:${labelId ?? ''}`;
+  const gotNetwork = useRef(false);
+  const shownFromCache = useRef(false);
   const load = useCallback(async (reset: boolean, soft = false) => {
     if (!soft) { reset ? setLoading(true) : setLoadingMore(true); }
     try {
       const page = await api.listThreads({ folder, label: labelId ?? undefined, q: query || undefined, cursor: reset ? undefined : cursor ?? undefined });
+      if (reset) {
+        gotNetwork.current = true;
+        if (cacheKey) void cacheSet(cacheKey, page.threads);
+      }
       setThreads((prev) => {
         if (!reset) return [...prev, ...page.threads];
         if (!soft) return page.threads;
@@ -79,16 +88,34 @@ export const MailList: React.FC<Props> = ({
       setFailed(false);
     } catch {
       // A failed first page is an error, not an empty folder (F-06). A failed
-      // "load more" keeps what is already on screen.
-      if (reset) setFailed(true);
+      // "load more" keeps what is already on screen, and so does a failed
+      // refresh of a folder shown from the device (offline: the banner says so).
+      if (reset && !shownFromCache.current) setFailed(true);
     } finally {
       setLoading(false); setLoadingMore(false);
     }
-  }, [folder, labelId, query, cursor]);
+  }, [folder, labelId, query, cursor, cacheKey]);
 
   const threadsRef = useRef(threads);
   threadsRef.current = threads;
-  useEffect(() => { setSelected(new Set()); load(true); /* eslint-disable-next-line */ }, [folder, labelId, query]);
+  useEffect(() => {
+    setSelected(new Set());
+    // Local first (P-03): the folder as last seen, at once; the fetch replaces it.
+    gotNetwork.current = false;
+    shownFromCache.current = false;
+    let stale = false;
+    if (cacheKey) {
+      void cacheGet<MailThreadSummary[]>(cacheKey).then((cached) => {
+        if (stale || gotNetwork.current || !cached?.length) return;
+        shownFromCache.current = true;
+        setThreads(cached);
+        setLoading(false);
+      });
+    }
+    load(true);
+    return () => { stale = true; };
+    /* eslint-disable-next-line */
+  }, [folder, labelId, query]);
   const firstKey = useRef(true);
   useEffect(() => {
     if (firstKey.current) { firstKey.current = false; return; }
@@ -194,7 +221,19 @@ export const MailList: React.FC<Props> = ({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {loading ? (
-          <div className="grid h-40 place-items-center"><Spinner /></div>
+          // Rows shaped like the real ones (P-07), so nothing jumps when they arrive.
+          <div aria-busy="true" aria-label="Loading messages">
+            {Array.from({ length: 7 }, (_, i) => (
+              <div key={i} className="flex items-start gap-3 border-b border-border-light/60 px-3 py-3 dark:border-border-dark/30">
+                <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
+                <div className="min-w-0 flex-1 space-y-2 pt-0.5">
+                  <div className="flex justify-between gap-3"><Skeleton className="h-3 w-1/3" /><Skeleton className="h-3 w-10" /></div>
+                  <Skeleton className="h-3 w-2/3" />
+                  <Skeleton className="h-3 w-5/6" />
+                </div>
+              </div>
+            ))}
+          </div>
         ) : failed ? (
           <LoadError compact what="this folder" onRetry={() => load(true)} />
         ) : threads.length === 0 ? (

@@ -26,7 +26,7 @@ export const FeedHome: React.FC = () => {
     (cursor?: string) => api.getFeed({ cursor, sort, filter: filter === 'all' ? undefined : filter }),
     [sort, filter],
   );
-  const list = useFeedList(loader, [sort, filter]);
+  const list = useFeedList(loader, [sort, filter], `feed:home:${sort}:${filter}`);
 
   // Live posts land in a "new posts" pill rather than jumping the scroll.
   useEffect(() => list.onNewPost((post) => {
