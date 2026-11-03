@@ -529,17 +529,62 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
      * log, newest seq onwards, and merge in place — a dropped connection no
      * longer means a gap in the open conversation until you switch away.
      */
+    const catchingUp = new Set<string>();
     const catchUp = async (conversationId: string) => {
-      const newest = messagesRef.current.reduce(
-        (max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
-      if (!newest) return;
+      // One at a time per conversation: a reconnect, a gap and a returning tab
+      // can all ask within the same second.
+      if (catchingUp.has(conversationId)) return;
+      catchingUp.add(conversationId);
       try {
-        const page = await chatApi.listMessages(conversationId, { after: newest, limit: 100 });
-        if (activeIdRef.current !== conversationId || !page.messages.length) return;
-        setMessages((prev) => page.messages.reduce(
-          (list, m) => reconcile(list, m.senderId === meId ? m : personalise(m, meId)), prev));
-      } catch { /* the next message or switch will fill it */ }
+        // Page forward until nothing is missing (S-11) — it used to stop after
+        // 100, leaving a hole after a long absence. Past 1,000 messages the
+        // newest page replaces the log instead: older ones load on scroll.
+        for (let pageNo = 0; pageNo < 10; pageNo++) {
+          const newest = messagesRef.current.reduce(
+            (max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
+          if (!newest) return;
+          const page = await chatApi.listMessages(conversationId, { after: newest, limit: 100 });
+          if (activeIdRef.current !== conversationId || !page.messages.length) return;
+          setMessages((prev) => page.messages.reduce(
+            (list, m) => reconcile(list, m.senderId === meId ? m : personalise(m, meId)), prev));
+          messagesRef.current = page.messages.reduce(
+            (list, m) => reconcile(list, m.senderId === meId ? m : personalise(m, meId)), messagesRef.current);
+          if (page.messages.length < 100) return;
+        }
+        const fresh = await chatApi.listMessages(conversationId, { limit: 40 });
+        if (activeIdRef.current !== conversationId) return;
+        setMessages(fresh.messages);
+        setHasMore(fresh.hasMore);
+      } catch { /* the next message, reconnect or switch will fill it */ }
+      finally { catchingUp.delete(conversationId); }
     };
+
+    /*
+     * Resync (S-11, S-13). A phone that slept, a tab that sat in the
+     * background, a network that came back: the socket may never have noticed
+     * it missed anything. Counters, the open conversation and threads are
+     * brought up to date then too, not only on a socket reconnect. And when the
+     * socket cannot connect at all (some school networks block it), the same
+     * resync runs every 15 s so the app still moves, only less instantly.
+     */
+    let hiddenAt = 0;
+    const resync = () => {
+      const id = activeIdRef.current;
+      if (id) void catchUp(id);
+      void refresh();
+      void refreshThreadUnread();
+    };
+    const onVisibility = () => {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      if (hiddenAt && Date.now() - hiddenAt > 30_000) resync();
+      hiddenAt = 0;
+    };
+    const onOnline = () => resync();
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', onOnline);
+    const pollTimer = window.setInterval(() => {
+      if (!socket.connected && navigator.onLine && !document.hidden) resync();
+    }, 15_000);
 
     /*
      * "Delivered" (B-11): this device has the message. Batched per second and
@@ -565,6 +610,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // gateway) still belongs in the thread pane, not the main flow.
       if (message.threadRootId) { onThreadReply({ conversationId, rootId: message.threadRootId, message }); return; }
       if (conversationId === activeIdRef.current) {
+        // A jump in sequence means something did not arrive (a dropped event
+        // during a blip): fetch what is missing (S-11). Thread replies share
+        // the sequence, so a jump is sometimes only that — the fetch then
+        // finds nothing and costs one small request.
+        const newest = messagesRef.current.reduce(
+          (max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
+        if (newest && message.seq > newest + 1) void catchUp(conversationId);
         setMessages((prev) => reconcile(prev, message.senderId === user.id
           ? message : personalise(message, user.id)));
       }
@@ -781,6 +833,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (socket.connected) onConnect();
 
     return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', onOnline);
+      window.clearInterval(pollTimer);
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('message:new', onNew);

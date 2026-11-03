@@ -13,6 +13,7 @@ import * as api from './api';
 import { MAIL_FOLDERS } from '@tupo/shared';
 import type { MailFolder, MailLabel, MailboxCounts, MailThreadSummary } from '@tupo/shared';
 import './mail.css';
+import { useResync } from '../../hooks/useResync';
 
 const EMPTY_COUNTS: MailboxCounts = { inbox: 0, starred: 0, drafts: 0, scheduled: 0 };
 
@@ -90,6 +91,8 @@ export const MailLayout: React.FC = () => {
   const closeThread = () => { setSelected(null); navigate(`/app/mail${viewQuery ? `?${viewQuery}` : ''}`); };
 
   const bumpAll = () => { refreshMeta(); setRefreshKey((k) => k + 1); };
+  // Mail that arrived while the socket was down or the tab was asleep (S-15).
+  useResync(bumpAll);
 
   const pickFolder = (f: MailFolder) => {
     const q = setView({ folder: f });

@@ -3,6 +3,7 @@ import type { AppNotification } from '@tupo/shared';
 import { apiGet, apiPost } from '../lib/api';
 import { onSocket } from '../lib/socket';
 import { useAuth } from './AuthContext';
+import { useResync } from '../hooks/useResync';
 
 /**
  * The notification centre's state (F-01): what is behind the bell, how many
@@ -97,6 +98,8 @@ export const NotificationCenterProvider: React.FC<{ children: React.ReactNode }>
   }, [user, query]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  // Whatever arrived while the socket was down or the tab was asleep (S-15).
+  useResync(() => { void refresh(); });
 
   const loadMore = useCallback(async () => {
     if (!nextBefore || loading) return;
