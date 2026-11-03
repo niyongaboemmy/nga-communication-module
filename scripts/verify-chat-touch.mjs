@@ -83,6 +83,21 @@ try {
   check('scrolling down keeps loading what came after, to the end', await log.getByText('line 119').first().isVisible().catch(() => false));
   check('and then "Jump to latest" goes away', !(await latestBtn.isVisible().catch(() => false)));
 
+  console.log('\nMessage info');
+  const mineMsg = (await (await fetch(`${API}/api/chat/conversations/${convId}/messages`, { method: 'POST', headers: { authorization: `Bearer ${me.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ body: `did you read this ${tag}`, nonce: `info-${tag}` }) })).json()).data.message;
+  await fetch(`${API}/api/chat/conversations/${convId}/read`, { method: 'POST', headers: { authorization: `Bearer ${other.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ seq: mineMsg.seq }) });
+  await desk.goto(`${BASE}/app/chat?c=${convId}`);
+  const mineRow = desk.locator('li[data-message-row]').filter({ hasText: `did you read this ${tag}` }).first();
+  await mineRow.waitFor({ timeout: 10_000 });
+  await mineRow.hover();
+  await mineRow.getByRole('button', { name: 'More actions' }).click();
+  await desk.getByRole('menuitem', { name: 'Message info' }).click();
+  const info = desk.getByRole('dialog', { name: 'Message info' });
+  check('"Message info" on my message shows who has read it',
+    await info.getByText('Read by 1 of 1').waitFor({ timeout: 5_000 }).then(() => true).catch(() => false)
+    && await info.getByText(/Uma Other/).isVisible().catch(() => false));
+  await desk.keyboard.press('Escape');
+
   console.log('\nOn a phone');
   const phone = await (await contextFor(browser, me, true)).newPage();
   await phone.goto(`${BASE}/app/chat?c=${convId}`);

@@ -97,4 +97,31 @@ describe('ticks over the API', () => {
     expect(await tickOf(ada, conv, sent[0].id)).toBe('read');
     expect(await tickOf(ada, conv, sent[4].id)).toBe('read');
   });
+
+  it('message info: the sender sees who read, who has it, who does not yet (U-04)', async () => {
+    const ada = await user('Ada'); const ben = await user('Ben'); const cy = await user('Cy'); const dee = await user('Dee');
+    const conv = (await as(ada).post('/api/chat/conversations', { type: 'group', name: `rc-${nonce()}`, memberIds: [ben.id, cy.id, dee.id] })).body.data.conversation.id;
+    const msg = (await as(ada).post(`/api/chat/conversations/${conv}/messages`, { body: 'who read this?', nonce: nonce() })).body.data.message;
+    await chat.markDelivered(cy.id, conv, [msg.id]);
+    await as(ben).post(`/api/chat/conversations/${conv}/read`, { seq: msg.seq });
+    const res = await as(ada).get(`/api/chat/conversations/${conv}/messages/${msg.id}/info`);
+    expect(res.status).toBe(200);
+    const byName = Object.fromEntries(res.body.data.members.map((m: { name: string; state: string; at: string | null }) => [m.name, m]));
+    expect(byName.Ben).toMatchObject({ state: 'read' });
+    expect(byName.Ben.at).toBeTruthy();
+    expect(byName.Cy).toMatchObject({ state: 'delivered' });
+    expect(byName.Dee).toMatchObject({ state: 'sent', at: null });
+    expect(res.body.data.members[0].name).toBe('Ben');
+    // Not the sender: refused. Unknown message: not found.
+    expect((await as(ben).get(`/api/chat/conversations/${conv}/messages/${msg.id}/info`)).status).toBe(403);
+    expect((await as(ada).get(`/api/chat/conversations/${conv}/messages/nope/info`)).status).toBe(404);
+  });
+
+  it('message info is refused to a sender who hides their own reads (reciprocity)', async () => {
+    const ada = await user('Ada'); const ben = await user('Ben');
+    const conv = (await as(ada).post('/api/chat/conversations/direct', { userId: ben.id })).body.data.conversation.id;
+    const msg = (await as(ada).post(`/api/chat/conversations/${conv}/messages`, { body: 'hi', nonce: nonce() })).body.data.message;
+    await getPool().query(`INSERT INTO user_chat_prefs (user_id, read_receipts) VALUES ($1, false) ON CONFLICT (user_id) DO UPDATE SET read_receipts = false`, [ada.id]);
+    expect((await as(ada).get(`/api/chat/conversations/${conv}/messages/${msg.id}/info`)).status).toBe(403);
+  });
 });

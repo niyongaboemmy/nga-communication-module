@@ -600,6 +600,14 @@ async function fanOutNewMessage(
   }
 }
 
+/** Who has read one of my messages, and when (U-04). */
+router.get('/conversations/:id/messages/:messageId/info', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, messageId } = req.params as { id: string; messageId: string };
+  await chat.requireMembership(me.id, id);
+  res.json(ok({ members: await chat.messageInfo(me.id, id, messageId) }));
+}));
+
 router.post('/conversations/:id/read', wrap(async (req, res) => {
   const me = actor(req);
   const id = req.params.id!;
