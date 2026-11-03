@@ -1,3 +1,4 @@
+import type { AiHandoffRequest } from '../../lib/handoff';
 import {
   apiGet, apiPost, apiPut, apiPatch, apiDelete, apiDownload, SESSION_KEY, ApiError,
 } from '../../lib/api';
@@ -5,6 +6,7 @@ import type {
   MeetJoinTicket, MeetSettings, MeetActionItem, MeetChapter, MeetDecision, MeetNote,
   MeetRecording, MeetTransport, NoteSource, RecordingMode, RTCIceServerLike,
 } from '@tupo/shared';
+import type { AiAnswer } from '@tupo/shared';
 import { meetingFolder } from '@tupo/shared';
 
 /** Meet's REST surface, typed. Everything else in the module goes through here. */
@@ -12,8 +14,15 @@ import { meetingFolder } from '@tupo/shared';
 export interface MeetCapabilities {
   sfu: boolean;
   turn: boolean;
+  /** A provider is configured on this server (a deployment fact). */
   ai: boolean;
   aiProviders: Record<string, boolean>;
+  /**
+   * The school's AI switch (MIS ai_policy). When `enabled` is false every AI
+   * route answers 403 AI_DISABLED and the panels show `message` instead.
+   * Optional: an older API does not send it.
+   */
+  aiPolicy?: { enabled: boolean; reason: string; message: string };
   meshMaxParticipants: number;
   maxVideoTiles: number;
   aiSummaryIntervalMs: number;
@@ -175,8 +184,11 @@ export const getArtifacts = (id: string) =>
 
 /* --- AI generators. Each returns the artifact it just produced. --- */
 
+/** `aiRoute` (My AI): a one-off choice of AI; omitted = the person's saved choice. */
+type AiRoute = string | null | undefined;
+
 const aiCall = <T>(id: string, path: string, body: Record<string, unknown> = {}) =>
-  apiPost<{ id: string; kind: string; content: T; providerUsed: string }>(
+  apiPost<{ id: string; kind: string; content: T; providerUsed: string; ai?: AiAnswer }>(
     `/api/meet/${id}/ai/${path}`, body).then((r) => r.data!);
 
 export interface SummaryContent {
@@ -200,21 +212,25 @@ export interface LessonFollowUpContent {
   misconceptions: string[];
 }
 
-export const aiSummary = (id: string) => aiCall<SummaryContent>(id, 'summary');
-export const aiActionItems = (id: string) => aiCall<MeetActionItem[]>(id, 'action-items');
-export const aiDecisions = (id: string) => aiCall<MeetDecision[]>(id, 'decisions');
-export const aiMinutes = (id: string) => aiCall<MinutesContent>(id, 'minutes');
-export const aiChapters = (id: string) => aiCall<MeetChapter[]>(id, 'chapters');
-export const aiLessonFollowUp = (id: string) => aiCall<LessonFollowUpContent>(id, 'lesson-followup');
+/** External AI "Paste the answer" (components/Handoff.tsx): the pasted reply instead of an AI call. */
+type Handoff = AiHandoffRequest | undefined;
+
+export const aiSummary = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<SummaryContent>(id, 'summary', { aiRoute, aiHandoff });
+export const aiActionItems = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<MeetActionItem[]>(id, 'action-items', { aiRoute, aiHandoff });
+export const aiDecisions = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<MeetDecision[]>(id, 'decisions', { aiRoute, aiHandoff });
+export const aiMinutes = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<MinutesContent>(id, 'minutes', { aiRoute, aiHandoff });
+export const aiChapters = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) => aiCall<MeetChapter[]>(id, 'chapters', { aiRoute, aiHandoff });
+export const aiLessonFollowUp = (id: string, aiRoute?: AiRoute, aiHandoff?: Handoff) =>
+  aiCall<LessonFollowUpContent>(id, 'lesson-followup', { aiRoute, aiHandoff });
 export const aiEngagement = (id: string, narrate = true) =>
   aiCall<EngagementContent>(id, 'engagement', { narrate });
-export const aiAgenda = (id: string, durationMinutes?: number) =>
+export const aiAgenda = (id: string, durationMinutes?: number, aiRoute?: AiRoute, aiHandoff?: Handoff) =>
   aiCall<{ agenda: Array<{ item: string; minutes: number; purpose: string }> }>(
-    id, 'agenda', { durationMinutes });
+    id, 'agenda', { durationMinutes, aiRoute, aiHandoff });
 
-export const aiAsk = (id: string, question: string) =>
-  apiPost<{ answer: string; grounded: boolean; citations: string[]; providerUsed: string }>(
-    `/api/meet/${id}/ai/ask`, { question }).then((r) => r.data!);
+export const aiAsk = (id: string, question: string, aiRoute?: AiRoute, aiHandoff?: Handoff) =>
+  apiPost<{ answer: string; grounded: boolean; citations: string[]; providerUsed: string; ai?: AiAnswer }>(
+    `/api/meet/${id}/ai/ask`, { question, aiRoute, aiHandoff }).then((r) => r.data!);
 
 export const aiTranslate = (id: string, text: string, targetLang: string) =>
   apiPost<{ text: string; providerUsed: string }>(

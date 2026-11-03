@@ -6,9 +6,9 @@
  * their whole audience and refuse manual unfollow.
  */
 import type { PoolClient } from 'pg';
-import { getPool, snowflake } from '@tupo/db';
+import { getPool, snowflake, activeUserSql } from '@tupo/db';
 import type {
-  CreatePagePayload, FeedPageDetail, FeedPageEditor, FeedPageKind, FeedPageLink, FeedPageSummary,
+  CreatePagePayload, FeedPageDetail, FeedPageEditor, FeedPageFollower, FeedPageKind, FeedPageLink, FeedPageSummary,
   UpdatePageEditorPayload, UpdatePagePayload,
 } from '@tupo/shared';
 import { FEED_LIMITS, FEED_PAGE_KINDS, FEED_AUDIENCES, FEED_ACCENT_RE } from '@tupo/shared';
@@ -133,8 +133,9 @@ export async function getPage(actor: FeedActor, idOrSlug: string): Promise<FeedP
   }
   const { rows: editors } = await getPool().query<{
     id: string; name: string; avatar_url: string | null; role: FeedPageEditor['role']; title: string;
+    active: boolean;
   }>(
-    `SELECT u.id, u.name, u.avatar_url, e.role, e.title
+    `SELECT u.id, u.name, u.avatar_url, e.role, e.title, ${activeUserSql('u')} AS active
        FROM feed_page_editors e JOIN users u ON u.id = e.user_id
       WHERE e.page_id = $1
       ORDER BY e.role = 'owner' DESC, e.title <> '' DESC, e.added_at`,
@@ -143,7 +144,10 @@ export async function getPage(actor: FeedActor, idOrSlug: string): Promise<FeedP
   return {
     ...toPageSummary(row, actor),
     createdAt: row.created_at,
-    editors: editors.map((e) => ({ id: e.id, name: e.name, avatarUrl: e.avatar_url, role: e.role, title: e.title })),
+    editors: editors.map((e) => ({
+      id: e.id, name: e.name, avatarUrl: e.avatar_url, role: e.role, title: e.title,
+      ...(e.active ? {} : { inactive: true }),
+    })),
   };
 }
 
@@ -415,8 +419,10 @@ export async function addEditor(
    * keep-one-owner rule below was no obstacle because they had just become one.
    */
   const page = await assertPageOwner(actor, pageId);
-  const { rows } = await getPool().query('SELECT 1 FROM users WHERE id = $1', [userId]);
+  const { rows } = await getPool().query<{ active: boolean }>(
+    `SELECT ${activeUserSql('u')} AS active FROM users u WHERE u.id = $1`, [userId]);
   if (!rows.length) throw new FeedError('No such user.', 404);
+  if (!rows[0]!.active) throw new FeedError('That person is no longer active.', 409);
   await getPool().query(
     `INSERT INTO feed_page_editors (page_id, user_id, role, title, added_by) VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (page_id, user_id) DO UPDATE SET role = EXCLUDED.role, title = EXCLUDED.title`,
@@ -521,12 +527,49 @@ export async function followedPageIds(userId: string): Promise<string[]> {
   return rows.map((r) => r.page_id);
 }
 
-/** For fan-out: the followers of a page who want to be notified. */
+const FOLLOWERS_PAGE_SIZE = 50;
+
+/**
+ * Who follows this page, newest first, for its owners only. Editors publish as
+ * the page but do not get its audience list, and neither do platform admins
+ * (assertPageGovernance) -- who reads a page is the owner's business. Paged by
+ * `followed_at` so a 2,000-follower school page loads a screenful at a time;
+ * `q` narrows by name.
+ */
+export async function listFollowers(
+  actor: FeedActor, pageId: string, opts: { q?: string; before?: string | null } = {},
+): Promise<{ followers: FeedPageFollower[]; nextCursor: string | null }> {
+  const row = await assertPageOwner(actor, pageId);
+  const q = (opts.q ?? '').trim().slice(0, 80);
+  const before = opts.before && !Number.isNaN(Date.parse(opts.before)) ? opts.before : null;
+  const { rows } = await getPool().query<{
+    id: string; name: string; avatar_url: string | null; role: string | null; followed_at: Date;
+  }>(
+    `SELECT u.id, u.name, u.avatar_url, u.role, f.followed_at
+       FROM feed_page_followers f JOIN users u ON u.id = f.user_id
+      WHERE f.page_id = $1 AND ${activeUserSql('u')}
+        AND ($2::text = '' OR u.name ILIKE '%' || $2 || '%')
+        AND ($3::timestamptz IS NULL OR f.followed_at < $3)
+      ORDER BY f.followed_at DESC, u.id DESC
+      LIMIT $4`,
+    [row.id, q, before, FOLLOWERS_PAGE_SIZE + 1],
+  );
+  const page = rows.slice(0, FOLLOWERS_PAGE_SIZE);
+  return {
+    followers: page.map((r) => ({
+      id: r.id, name: r.name, avatarUrl: r.avatar_url, roleName: r.role, followedAt: r.followed_at.toISOString(),
+    })),
+    nextCursor: rows.length > FOLLOWERS_PAGE_SIZE ? page[page.length - 1]!.followed_at.toISOString() : null,
+  };
+}
+
+/** For fan-out: the followers of a page who want to be notified. Active people only. */
 export async function pageFollowers(
   client: PoolClient, pageId: string,
 ): Promise<Array<{ user_id: string; notify: boolean }>> {
   const { rows } = await client.query<{ user_id: string; notify: boolean }>(
-    'SELECT user_id, notify FROM feed_page_followers WHERE page_id = $1', [pageId],
+    `SELECT f.user_id, f.notify FROM feed_page_followers f JOIN users u ON u.id = f.user_id
+      WHERE f.page_id = $1 AND ${activeUserSql('u')}`, [pageId],
   );
   return rows;
 }

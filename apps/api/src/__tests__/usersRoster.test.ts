@@ -35,11 +35,11 @@ afterAll(async () => { await closeDb(); });
 describe('GET /api/users', () => {
   it('pages with a real total beyond the page size', async () => {
     for (let i = 0; i < 7; i++) await user(`Pupil ${i}`, await roleId('Student'));
-    const first = await request(app).get('/api/users?limit=3&offset=0').set('Authorization', admin.auth);
+    const first = await request(app).get('/api/users?limit=3&offset=0&status=all').set('Authorization', admin.auth);
     expect(first.status).toBe(200);
     expect(first.body.data).toHaveLength(3);
     expect(first.body.total).toBe(8);
-    const last = await request(app).get('/api/users?limit=3&offset=6').set('Authorization', admin.auth);
+    const last = await request(app).get('/api/users?limit=3&offset=6&status=all').set('Authorization', admin.auth);
     expect(last.body.data).toHaveLength(2);
     const names = [...first.body.data, ...last.body.data].map((u: { name: string }) => u.name);
     expect(new Set(names).size).toBe(5);
@@ -49,14 +49,14 @@ describe('GET /api/users', () => {
     await user('Sam Student', await roleId('Student'));
     await user('Nora None', null);
     await user('Sid Suspended', await roleId('Student'), { status: 'suspended' });
-    const students = await request(app).get(`/api/users?role=${await roleId('Student')}`).set('Authorization', admin.auth);
+    const students = await request(app).get(`/api/users?role=${await roleId('Student')}&status=all`).set('Authorization', admin.auth);
     expect(students.body.data.map((u: { name: string }) => u.name).sort()).toEqual(['Sam Student', 'Sid Suspended']);
     const none = await request(app).get('/api/users?role=none').set('Authorization', admin.auth);
     expect(none.body.data.map((u: { name: string }) => u.name)).toEqual(['Nora None']);
     const suspended = await request(app).get('/api/users?status=suspended').set('Authorization', admin.auth);
     expect(suspended.body.total).toBe(1);
     // Facets ignore the status filter, so every chip keeps its own number.
-    expect(suspended.body.facets).toMatchObject({ all: 4, active: 3, suspended: 1, unassigned: 1 });
+    expect(suspended.body.facets).toMatchObject({ all: 4, active: 3, inactive: 1, suspended: 1, unassigned: 1 });
   });
 
   it('sorts by last sign-in with never-signed-in last', async () => {
@@ -119,7 +119,7 @@ describe('GET /api/users/export.csv', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/csv/);
     const lines = res.text.replace(/^﻿/, '').trim().split('\r\n');
-    expect(lines[0]).toBe('Name,Email,MIS id,Role,Status,Role set by admin,Last sign-in');
+    expect(lines[0]).toBe('Name,Email,MIS id,Role,Status,MIS status,Role set by admin,Last sign-in');
     expect(lines).toHaveLength(2);
     expect(lines[1]!.startsWith(`"'=HYPERLINK(""http://evil"")"`)).toBe(true);
     const { rows } = await getPool().query(`SELECT metadata FROM audit_log WHERE action = 'users.export'`);

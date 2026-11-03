@@ -1,5 +1,5 @@
 import { Redis } from 'ioredis';
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import { presenceKey, lastSeenKey } from '@tupo/shared';
 import { config } from '../config.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
@@ -417,7 +417,10 @@ export interface DashboardOverview {
   scopedUsers: number | null;
   people: {
     total: number; onlineNow: number; activeToday: number; active7d: number;
-    suspended: number; neverActive: number;
+    suspended: number;
+    /** Not active: suspended here, or deactivated / removed in NGA MIS. */
+    inactive: number;
+    neverActive: number;
     byStatus: Record<string, number>;
   };
   chat: { messages: number; activeSenders: number; activeConversations: number; dms: number };
@@ -466,13 +469,14 @@ export async function overview(
       `SELECT
          count(*)::int AS total,
          count(*) FILTER (WHERE status <> 'active')::int AS suspended,
+         count(*) FILTER (WHERE NOT is_active)::int AS inactive,
          count(*) FILTER (WHERE last_seen_at > now() - interval '24 hours')::int AS active_today,
          count(*) FILTER (WHERE last_seen_at > now() - interval '7 days')::int AS active_7d,
-         count(*) FILTER (WHERE last_seen_at IS NULL AND last_login_at IS NULL)::int AS never_active,
+         count(*) FILTER (WHERE is_active AND last_seen_at IS NULL AND last_login_at IS NULL)::int AS never_active,
          jsonb_object_agg(coalesce(nullif(academic_level, ''), 'unknown'), c)
            FILTER (WHERE academic_level IS NOT NULL) AS by_level
        FROM (
-         SELECT status, last_seen_at, last_login_at, academic_level,
+         SELECT status, ${activeUserSql('users')} AS is_active, last_seen_at, last_login_at, academic_level,
                 count(*) OVER (PARTITION BY academic_level) AS c
            FROM users WHERE ${scopeSql('id', 1)}
        ) u`, p),
@@ -562,6 +566,7 @@ export async function overview(
               sum(a.messages)::int AS messages, sum(a.mails)::int AS mails, sum(a.posts)::int AS posts,
               (sum(a.messages) + sum(a.mails) + sum(a.posts))::int AS total
          FROM activity a JOIN users u ON u.id = a.uid
+        WHERE ${activeUserSql('u')}
         GROUP BY u.id, u.name, u.avatar_url, u.role, u.academic_level
         ORDER BY total DESC
         LIMIT 8`, pp),
@@ -597,7 +602,7 @@ export async function overview(
       `SELECT id, name, avatar_url, role, last_seen_at
          FROM users
         WHERE ${scopeSql('id', 1)}
-          AND status = 'active'
+          AND ${activeUserSql('users')}
           AND (last_seen_at IS NULL OR last_seen_at < now() - interval '7 days')
           AND academic_level IN ('student', 'staff', 'class_teacher', 'program_lead')
         ORDER BY last_seen_at ASC NULLS FIRST
@@ -616,13 +621,13 @@ export async function overview(
   const scanIds = userIds
     ? userIds
     : (await pool.query<{ id: string }>(
-        `SELECT id FROM users WHERE last_seen_at > now() - interval '20 minutes' LIMIT 5000`,
+        `SELECT id FROM users WHERE last_seen_at > now() - interval '20 minutes' AND ${activeUserSql('users')} LIMIT 5000`,
       )).rows.map((r) => r.id);
   const onlineMap = await presenceFor(scanIds);
   const onlineNow = Object.values(onlineMap).filter((s) => s && s !== 'offline').length;
 
   const pr = people.rows[0] as {
-    total: number; suspended: number; active_today: number; active_7d: number;
+    total: number; suspended: number; inactive: number; active_today: number; active_7d: number;
     never_active: number; by_level: Record<string, number> | null;
   };
   const cr = chat.rows[0] as { messages: number; senders: number; conversations: number };
@@ -656,6 +661,7 @@ export async function overview(
       activeToday: pr.active_today,
       active7d: pr.active_7d,
       suspended: pr.suspended,
+      inactive: pr.inactive,
       neverActive: pr.never_active,
       byStatus: pr.by_level ?? {},
     },
@@ -711,7 +717,7 @@ export async function onlineRoster(actor: Actor, filter: ScopeFilter): Promise<{
   }>(
     `SELECT id, name, avatar_url, role, academic_level, last_seen_at
        FROM users
-      WHERE ${scopeSql('id', 1)} AND status = 'active'
+      WHERE ${scopeSql('id', 1)} AND ${activeUserSql('users')}
         AND last_seen_at > now() - interval '30 minutes'
       ORDER BY last_seen_at DESC
       LIMIT 200`,

@@ -20,6 +20,8 @@ import { useConfirmDialog } from '../../components/ConfirmDialog';
 
 interface RosterUser {
   id: string; mis_user_id: string; name: string; email: string; avatar_url: string | null; role: string; status: string;
+  /** NGA MIS account status; null = not synced yet (counts as active). */
+  mis_status: string | null; active: boolean;
   role_id: number | null; role_name: string | null; role_level: string | null;
   role_assigned_by_admin: boolean; last_login_at: string | null;
 }
@@ -27,7 +29,7 @@ interface AssignableRole {
   id: number; name: string; level: string; members: number; permissionCount: number;
   assignable: boolean; grantsGovernance: boolean;
 }
-interface Facets { all: number; active: number; suspended: number; unassigned: number }
+interface Facets { all: number; active: number; inactive: number; suspended: number; unassigned: number }
 type RosterPage = { data?: RosterUser[]; total?: number; facets?: Facets };
 
 const PAGE_SIZE = 50;
@@ -279,9 +281,11 @@ export const Users: React.FC = () => {
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by status">
-        {chip('', 'Everyone', facets?.all)}
-        {chip('active', 'Active', facets?.active)}
-        {chip('suspended', 'Suspended', facets?.suspended)}
+        {/* No status in the address = the server's default, active people only. */}
+        {chip('', 'Active', facets?.active)}
+        {chip('inactive', 'Inactive', facets?.inactive)}
+        {chip('suspended', 'Suspended in Tupo', facets?.suspended)}
+        {chip('all', 'Everyone', facets?.all)}
         {filtered && (
           <button onClick={() => { setDraft(''); setParams(new URLSearchParams(), { replace: true }); }}
             className="ml-1 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400">
@@ -310,7 +314,9 @@ export const Users: React.FC = () => {
             hint={q ? 'Try part of a name or an email address, or clear the filters.' : 'Clear the filters to see everyone.'}
           />
         ) : users.length === 0 ? (
-          <EmptyState title="No users yet" hint="Users appear here the first time they sign in through the MIS." />
+          status
+            ? <EmptyState title="No users match" hint="Try another status." />
+            : <EmptyState title="No users yet" hint="Users appear here the first time they sign in through the MIS." />
         ) : (
           <div className={`overflow-x-auto transition-opacity ${loading ? 'opacity-60' : ''}`} aria-busy={loading}>
             <table className="table-stack w-full text-sm">
@@ -375,6 +381,12 @@ export const Users: React.FC = () => {
                       </td>
                       <td data-label="Status" className="px-4 py-3">
                         <Badge tone={u.status === 'active' ? 'green' : 'red'}>{u.status}</Badge>
+                        {u.mis_status && u.mis_status !== 'ACTIVE' && (
+                          <span title="The account is not active in NGA MIS, so Tupo hides it from pickers and recipient lists"
+                            className="ml-2 inline-flex align-middle">
+                            <Badge tone="amber">{u.mis_status === 'REMOVED' ? 'removed in MIS' : `MIS: ${u.mis_status.toLowerCase()}`}</Badge>
+                          </span>
+                        )}
                       </td>
                       <td data-label="Last sign-in" className="px-4 py-3 text-xs text-slate-400 tabular-nums">
                         <span>{u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'Never'}</span>

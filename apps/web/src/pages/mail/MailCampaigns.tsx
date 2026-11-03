@@ -9,7 +9,10 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
 import { RichTextEditor } from './RichTextEditor';
 import * as api from './api';
-import type { MailCampaignView, MailDistributionList, MailTemplate } from '@tupo/shared';
+import { AiOffNote } from '../../components/AiOffNote';
+import type { AiAnswer, MailCampaignView, MailDistributionList, MailTemplate } from '@tupo/shared';
+import { AiAnsweredBy, AiSourceControl } from '../../components/MyAi';
+import { HandoffControl, handoffPrompt, importHandoff } from '../../components/Handoff';
 import './mail.css';
 
 const STATUS_TONE: Record<string, 'slate' | 'blue' | 'amber' | 'green' | 'red'> = {
@@ -47,21 +50,39 @@ const Editor: React.FC<{
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [aiAvailable, setAiAvailable] = useState(false);
+  const [aiOff, setAiOff] = useState<string | null>(null);
   const [brief, setBrief] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
+  // My AI: which AI drafts (null = the person's saved choice), and which one did.
+  const [aiRoute, setAiRoute] = useState<string | null>(null);
+  const [answeredBy, setAnsweredBy] = useState<{ ai?: AiAnswer; providerUsed: string } | null>(null);
 
-  useEffect(() => { api.aiStatus().then(setAiAvailable).catch(() => setAiAvailable(false)); }, []);
+  useEffect(() => {
+    api.aiState()
+      .then((s) => { setAiAvailable(s.available); setAiOff(s.off); })
+      .catch(() => setAiAvailable(false));
+  }, []);
 
   const draftWithAi = async () => {
     if (!brief.trim()) return;
     setAiBusy(true); setError(null);
     try {
       const audience = lists.filter((l) => listIds.includes(l.id)).map((l) => l.name).join(', ');
-      const r = await api.aiCampaign(brief, audience || undefined);
+      const r = await api.aiCampaign(brief, audience || undefined, aiRoute);
       setSubject(r.subject); setBody(r.bodyHtml);
+      setAnsweredBy({ ai: r.ai, providerUsed: r.providerUsed });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The assistant could not draft that.');
     } finally { setAiBusy(false); }
+  };
+
+  const audienceNames = () => lists.filter((l) => listIds.includes(l.id)).map((l) => l.name).join(', ') || undefined;
+  /** "Paste the answer": the person's own AI's draft, checked like any AI answer. */
+  const importCampaign = async (text: string) => {
+    setError(null);
+    const r = await api.aiCampaign(brief, audienceNames(), null, importHandoff(text));
+    setSubject(r.subject); setBody(r.bodyHtml);
+    setAnsweredBy({ ai: r.ai, providerUsed: r.providerUsed });
   };
 
   const applyTemplate = (id: string) => {
@@ -105,8 +126,23 @@ const Editor: React.FC<{
               className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-blue-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-50">
               {aiBusy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} Generate subject & body
             </button>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2">
+              <AiSourceControl value={aiRoute} onChange={setAiRoute} menu="down" className="-ml-2" />
+              {/* The brief is the person's own text: no pupil data. */}
+              <HandoffControl
+                className="-ml-2"
+                disabled={aiBusy || !brief.trim()}
+                requestPrompt={(consent) => handoffPrompt('/api/mail/ai/campaign', { brief, audience: audienceNames() }, consent)}
+                importAnswer={importCampaign}
+              />
+              {answeredBy && (
+                <AiAnsweredBy ai={answeredBy.ai} providerUsed={answeredBy.providerUsed}
+                  className="text-[11px] text-text-secondary-light dark:text-text-secondary-dark" />
+              )}
+            </div>
           </div>
         )}
+        {aiOff && <AiOffNote message={aiOff} />}
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Internal name (optional)"
           className="w-full rounded-xl border border-border-light bg-transparent px-3 py-2 text-sm dark:border-border-dark/60" />
         <div>

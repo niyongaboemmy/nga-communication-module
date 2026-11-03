@@ -1,4 +1,4 @@
-import { getPool, resolveUserPermissions } from '@tupo/db';
+import { getPool, resolveUserPermissions, activeUserSql, isActiveUser } from '@tupo/db';
 import { issuedBeforeRevocation } from './utils/ssoLogout.js';
 
 /**
@@ -33,6 +33,9 @@ export function decideAccess(access: UserAccess | null): AccessDecision {
       message: 'unauthorized: your session is no longer valid, please sign in again',
     };
   }
+  if (access.status === 'inactive') {
+    return { ok: false, reason: 'suspended', message: 'forbidden: this NGA account is no longer active' };
+  }
   if (access.status !== 'active') {
     return { ok: false, reason: 'suspended', message: 'forbidden: this account has been suspended' };
   }
@@ -42,13 +45,16 @@ export function decideAccess(access: UserAccess | null): AccessDecision {
 /** Read status + permission set straight from the database, with the API's own loader. */
 export async function loadUserAccess(userId: string): Promise<UserAccess | null> {
   const pool = getPool();
-  const { rows } = await pool.query<{ status: string }>(
-    'SELECT status FROM users WHERE id = $1', [userId]
+  const { rows } = await pool.query<{ status: string; mis_status: string | null }>(
+    'SELECT status, mis_status FROM users WHERE id = $1', [userId]
   );
   if (rows.length === 0) return null;
   const resolved = await resolveUserPermissions(pool, userId);
   if (!resolved) return null;
-  return { status: rows[0]!.status, permissions: resolved.permissions };
+  const row = rows[0]!;
+  // Deactivated in NGA MIS reads as 'inactive' (the shared rule in @tupo/db).
+  const status = row.status !== 'active' ? row.status : isActiveUser(row) ? 'active' : 'inactive';
+  return { status, permissions: resolved.permissions };
 }
 
 /** Default freshness for per-event checks. */
@@ -105,10 +111,10 @@ export type AccessCache = ReturnType<typeof createAccessCache>;
  */
 export async function findInactiveUsers(userIds: string[]): Promise<Set<string>> {
   if (userIds.length === 0) return new Set();
-  const { rows } = await getPool().query<{ id: string; status: string }>(
-    'SELECT id, status FROM users WHERE id = ANY($1::text[])', [userIds]
+  const { rows } = await getPool().query<{ id: string }>(
+    `SELECT u.id FROM users u WHERE u.id = ANY($1::text[]) AND ${activeUserSql('u')}`, [userIds]
   );
-  const active = new Set(rows.filter((r) => r.status === 'active').map((r) => r.id));
+  const active = new Set(rows.map((r) => r.id));
   return new Set(userIds.filter((id) => !active.has(id)));
 }
 

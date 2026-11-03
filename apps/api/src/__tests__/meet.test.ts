@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
@@ -18,6 +18,7 @@ import { config } from '../config.js';
 import { decideAdmission, decideTransport, assertCapacity } from '../services/meetService.js';
 import { resetIceCache, isTurnConfigured } from '../services/turnService.js';
 import { computeEngagement, renderTranscript } from '../services/meetAiService.js';
+import { setAiPolicyForTests, __resetAiPolicyCache } from '../services/aiPolicy.js';
 
 /**
  * Meet's server-side behaviour.
@@ -101,7 +102,12 @@ beforeEach(async () => {
   resetIceCache();
 });
 
+// The school's AI switch lives in the MIS. These tests are about Meet, so it is
+// pinned on; the "turned off" behaviour has its own tests below.
+beforeAll(() => { setAiPolicyForTests({ v: 1, enabled: true }); });
+
 afterAll(async () => {
+  __resetAiPolicyCache();
   // Leave the shared test database as this suite found it. `files` references
   // `users` without a cascade, so a leftover row here fails the next suite's
   // reset with a foreign-key error a long way from its cause.
@@ -980,6 +986,31 @@ describe('AI endpoints', () => {
 
     await request(app).post(`/api/meet/${meeting.id}/ai/summary`)
       .set('Authorization', `Bearer ${pupil.token}`).expect(403);
+  });
+
+  it('refuses with AI_DISABLED when the school has turned AI off', async () => {
+    const host = await userWithRole('Staff', 'Host');
+    const meeting = await meetingWithTranscript(host.token, true);
+    setAiPolicyForTests({ v: 2, enabled: false });
+    try {
+      const res = await request(app).post(`/api/meet/${meeting.id}/ai/summary`)
+        .set('Authorization', `Bearer ${host.token}`).expect(403);
+      expect(res.body).toMatchObject({
+        success: false, code: 'AI_DISABLED', reason: 'GLOBAL_OFF', message: 'AI is turned off for the school.',
+      });
+
+      const caps = await request(app).get('/api/meet/capabilities')
+        .set('Authorization', `Bearer ${host.token}`).expect(200);
+      expect(caps.body.data.aiPolicy).toMatchObject({ enabled: false, reason: 'GLOBAL_OFF' });
+
+      // The per-app switch is honoured the same way.
+      setAiPolicyForTests({ v: 3, enabled: true, apps: { tupo: false } });
+      const app2 = await request(app).post(`/api/meet/${meeting.id}/ai/summary`)
+        .set('Authorization', `Bearer ${host.token}`).expect(403);
+      expect(app2.body.reason).toBe('APP_OFF');
+    } finally {
+      setAiPolicyForTests({ v: 1, enabled: true });
+    }
   });
 
   it('refuses when the meeting has AI switched off, even for a permitted host', async () => {

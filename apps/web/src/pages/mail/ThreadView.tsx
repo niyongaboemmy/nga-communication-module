@@ -8,12 +8,15 @@ import {
 import { usePermissions } from '../../hooks/usePermissions';
 import { useNotify } from '../../context/NotificationContext';
 import type { MailAiThreadSummary } from '@tupo/shared';
+import { HandoffControl, handoffPrompt, importHandoff } from '../../components/Handoff';
 import { Avatar, IconButton, Spinner, EmptyState, Button } from '../../components/ui';
 import { apiDownload } from '../../lib/api';
 import { replySubject, forwardSubject } from './replyHelpers';
 import { RichTextEditor } from './RichTextEditor';
 import { DeliverySheet } from './DeliverySheet';
 import * as api from './api';
+import { AiOffNote } from '../../components/AiOffNote';
+import { AiAnsweredBy } from '../../components/MyAi';
 import type { MailThreadView, MailMessageView, MailLabel, MailMessageKind } from '@tupo/shared';
 import type { ComposerSeed } from './Composer';
 
@@ -179,12 +182,17 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   const [delivery, setDelivery] = useState<string | null>(null);
   const [showLabels, setShowLabels] = useState(false);
   const [aiAvailable, setAiAvailable] = useState(false);
+  const [aiOff, setAiOff] = useState<string | null>(null);
   const [summary, setSummary] = useState<MailAiThreadSummary | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [smartReplies, setSmartReplies] = useState<Array<{ intent: string; text: string }> | null>(null);
   const [repliesBusy, setRepliesBusy] = useState(false);
 
-  useEffect(() => { api.aiStatus().then(setAiAvailable).catch(() => setAiAvailable(false)); }, []);
+  useEffect(() => {
+    api.aiState()
+      .then((s) => { setAiAvailable(s.available); setAiOff(s.off); })
+      .catch(() => setAiAvailable(false));
+  }, []);
   useEffect(() => { setSummary(null); setSmartReplies(null); }, [threadId]);
 
   const runSummary = async () => {
@@ -261,6 +269,12 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
               {summaryBusy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={16} />}
             </IconButton>
           )}
+          {aiOff && thread.messages.length > 0 && (
+            <span title={aiOff} aria-label={aiOff} role="note"
+              className="grid h-8 w-8 place-items-center text-text-secondary-light opacity-40 dark:text-text-secondary-dark">
+              <Sparkles size={16} />
+            </span>
+          )}
           <IconButton label={starred ? 'Unstar' : 'Star'} size="sm" active={starred}
             onClick={() => void act(() => api.starThread(threadId, !starred), false, () => setStarred(!starred))}>
             <Star size={16} className={starred ? 'fill-amber-400 text-amber-400' : ''} />
@@ -286,12 +300,22 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
       </div>
 
       <div className="mail-print min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+        {aiAvailable && !summary && thread.messages.length > 0 && (
+          // "Summarise in my AI": the thread holds other people's words (maybe pupils'), so consent applies.
+          <HandoffControl
+            label="Summarise in my AI"
+            pupilData
+            className="flex justify-end"
+            requestPrompt={(consent) => handoffPrompt('/api/mail/ai/summarize', { threadId }, consent)}
+            importAnswer={async (text) => setSummary(await api.aiSummarize(threadId, null, importHandoff(text)))}
+          />
+        )}
         {summary && (
           <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-900/50 dark:bg-blue-900/15">
             <div className="mb-1.5 flex items-center gap-1.5 text-blue-700 dark:text-blue-300">
               <Sparkles size={14} />
               <span className="text-xs font-semibold uppercase tracking-wide">Thread summary</span>
-              <span className="ml-auto text-[10px] font-normal opacity-70">via {summary.providerUsed}</span>
+              <AiAnsweredBy ai={summary.ai} providerUsed={summary.providerUsed} className="ml-auto text-[10px] font-normal opacity-70" />
             </div>
             <p className="text-text-primary-light dark:text-text-primary-dark">{summary.summary}</p>
             {summary.keyPoints.length > 0 && (
@@ -360,6 +384,8 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
             )}
           </React.Fragment>
         ))}
+
+        {aiOff && !replyTo && <AiOffNote message={aiOff} className="self-start" />}
 
         {aiAvailable && !replyTo && (() => {
           const last = thread.messages.filter((m) => !m.isDraft).slice(-1)[0];

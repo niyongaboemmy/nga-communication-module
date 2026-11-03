@@ -1,4 +1,5 @@
 import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from '../../lib/api';
+import type { AiHandoffRequest } from '../../lib/handoff';
 import type {
   MailThreadSummary, MailThreadView, MailLabel, MailboxCounts, MailFolder, MailPrefs,
   MailRecipientDelivery, MailDistributionList, MailTemplate, MailCampaignView, MailComposePayload,
@@ -132,22 +133,39 @@ export const cancelCampaign = (id: string) => apiPost(`/api/mail/campaigns/${id}
 export const aiStatus = () =>
   apiGet<{ available: boolean }>('/api/mail/ai/status').then((r) => r.data!.available);
 
+/**
+ * The assistant's state for this user: `available` (AI on, a provider
+ * configured, MAIL_AI_USE held) and `off`, the school's "AI is turned off"
+ * message when the super admin has switched AI off — shown instead of the
+ * AI actions. A user without MAIL_AI_USE gets neither.
+ */
+export const aiState = () =>
+  apiGet<{ available: boolean; policy?: { enabled: boolean; message: string } }>('/api/mail/ai/status')
+    .then((r) => ({
+      available: r.data!.available,
+      off: r.data!.policy && !r.data!.policy.enabled ? r.data!.policy.message : null,
+    }));
+
 export const aiCompose = (body: {
   action: MailAiAction; instruction?: string; currentText?: string; subject?: string;
   recipients?: string[]; threadId?: string; tone?: string;
+  /** My AI: a one-off choice of AI ("school" or "<credentialId>:<model>"); omitted = the saved choice. */
+  aiRoute?: string | null;
+  /** External AI: "Paste the answer" (import) — see components/Handoff.tsx. */
+  aiHandoff?: AiHandoffRequest;
 }) => apiPost<MailAiComposeResult>('/api/mail/ai/compose', body).then((r) => r.data!);
 
-export const aiSubject = (bodyText: string) =>
-  apiPost<MailAiSubjectResult>('/api/mail/ai/subject', { bodyText }).then((r) => r.data!);
+export const aiSubject = (bodyText: string, aiRoute?: string | null, aiHandoff?: AiHandoffRequest) =>
+  apiPost<MailAiSubjectResult>('/api/mail/ai/subject', { bodyText, aiRoute, aiHandoff }).then((r) => r.data!);
 
-export const aiSummarize = (threadId: string) =>
-  apiPost<MailAiThreadSummary>('/api/mail/ai/summarize', { threadId }).then((r) => r.data!);
+export const aiSummarize = (threadId: string, aiRoute?: string | null, aiHandoff?: AiHandoffRequest) =>
+  apiPost<MailAiThreadSummary>('/api/mail/ai/summarize', { threadId, aiRoute, aiHandoff }).then((r) => r.data!);
 
-export const aiSmartReplies = (threadId: string) =>
-  apiPost<MailAiSmartReplies>('/api/mail/ai/smart-replies', { threadId }).then((r) => r.data!);
+export const aiSmartReplies = (threadId: string, aiRoute?: string | null, aiHandoff?: AiHandoffRequest) =>
+  apiPost<MailAiSmartReplies>('/api/mail/ai/smart-replies', { threadId, aiRoute, aiHandoff }).then((r) => r.data!);
 
-export const aiCampaign = (brief: string, audience?: string) =>
-  apiPost<MailAiCampaignDraft>('/api/mail/ai/campaign', { brief, audience }).then((r) => r.data!);
+export const aiCampaign = (brief: string, audience?: string, aiRoute?: string | null, aiHandoff?: AiHandoffRequest) =>
+  apiPost<MailAiCampaignDraft>('/api/mail/ai/campaign', { brief, audience, aiRoute, aiHandoff }).then((r) => r.data!);
 
 /* Attachments — reuse the files service two-step upload. */
 export async function uploadAttachment(file: File): Promise<{ fileId: string; name: string; mime: string; size: number }> {

@@ -1,4 +1,4 @@
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import { notifyAndPush } from '@tupo/notify';
 import { accessMode } from './mode.js';
 import { fetchHolders } from './misAccess.js';
@@ -26,7 +26,7 @@ export async function legacyApproverPool(senderId: string): Promise<string[]> {
        FROM users u
        JOIN role_permissions rp ON rp.role_id = u.role_id
        JOIN permissions p ON p.id = rp.permission_id
-      WHERE p.key = 'MAIL_APPROVE' AND u.status = 'active' AND u.id <> $1`,
+      WHERE p.key = 'MAIL_APPROVE' AND ${activeUserSql('u')} AND u.id <> $1`,
     [senderId],
   );
   return rows.map((r) => r.id).sort();
@@ -40,7 +40,7 @@ export async function v2ApproverPool(senderId: string, senderMisId?: string | nu
     .filter((id) => !senderMisId || id !== String(senderMisId));
   if (!misIds.length) return [];
   const { rows } = await getPool().query<{ id: string }>(
-    `SELECT id FROM users WHERE mis_user_id = ANY($1::text[]) AND status = 'active' AND id <> $2`,
+    `SELECT id FROM users u WHERE u.mis_user_id = ANY($1::text[]) AND ${activeUserSql('u')} AND u.id <> $2`,
     [misIds, senderId],
   );
   return rows.map((r) => r.id).sort();

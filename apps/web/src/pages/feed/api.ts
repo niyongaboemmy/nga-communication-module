@@ -1,5 +1,6 @@
 import { apiGet, apiPost, apiPatch, apiDelete } from '../../lib/api';
 import type {
+  FeedPageFollower, FeedPostReactor,
   ComposePostPayload, ComposeReelPayload, ComposeStoryPayload, CreatePagePayload, EditPostPayload,
   FeedCommentView, FeedFilter, FeedPageAnalytics, FeedPageDetail, FeedPageSummary, FeedPollView,
   FeedPostView, FeedReaction, FeedReactionSummary, FeedReelCommentView, FeedReelsPage, FeedReelView,
@@ -41,6 +42,18 @@ export const updatePage = (id: string, patch: UpdatePagePayload) =>
   apiPatch<{ page: FeedPageDetail }>(`/api/feed/pages/${id}`, patch).then((r) => r.data!.page);
 
 export const deletePage = (id: string) => apiDelete(`/api/feed/pages/${id}`);
+
+/** Owners only (the server refuses everyone else). Newest first, 50 at a time. */
+export const listFollowers = (id: string, opts: { q?: string; before?: string | null } = {}) =>
+  apiGet<{ followers: FeedPageFollower[]; nextCursor: string | null }>(
+    `/api/feed/pages/${id}/followers${qs({ q: opts.q || undefined, before: opts.before || undefined })}`,
+  ).then((r) => r.data!);
+
+/** Who reacted to a post (anyone who can see the post may ask). Newest first, 50 at a time. */
+export const listReactors = (postId: string, opts: { reaction?: FeedReaction | null; before?: string | null } = {}) =>
+  apiGet<{ reactors: FeedPostReactor[]; counts: Partial<Record<FeedReaction, number>>; nextCursor: string | null }>(
+    `/api/feed/posts/${postId}/reactions${qs({ reaction: opts.reaction || undefined, before: opts.before || undefined })}`,
+  ).then((r) => r.data!);
 
 export const followPage = (id: string, notify = true) =>
   apiPost<{ page: FeedPageSummary }>(`/api/feed/pages/${id}/follow`, { notify }).then((r) => r.data!.page);

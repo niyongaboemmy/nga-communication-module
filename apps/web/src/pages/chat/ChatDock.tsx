@@ -30,6 +30,8 @@ import { Composer } from './Composer';
 function suppressedOn(pathname: string): boolean {
   // The chat page *is* the chat, so a floating shortcut to it is noise.
   if (pathname.startsWith('/app/chat')) return true;
+  // Channels has its own composer in the same corner.
+  if (pathname.startsWith('/app/channels')) return true;
   /*
    * Meet, both the in-app route and the guest one. A meeting already has its
    * own chat panel scoped to the room, and a second, different chat floating
@@ -46,9 +48,11 @@ const DockInner: React.FC = () => {
   const navigate = useNavigate();
   const { shouldShowMini } = useMeetCall();
   const {
-    activeId, setActiveId, active, connected,
+    activeId, setActiveId, active: activeAny, connected,
     totalUnread, totalMentions, threadsUnreadTotal, threadRootId, openThread,
   } = useChat();
+  // A subject channel opened on the Channels page does not follow you into the dock.
+  const active = activeAny?.subjectId ? null : activeAny;
 
   const [open, setOpen] = useState(false);
   /** Drives the badge's attention pulse — see the effect below. */

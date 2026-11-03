@@ -10,6 +10,7 @@ import { MailList } from './MailList';
 import { ThreadView } from './ThreadView';
 import { Composer, type ComposerSeed } from './Composer';
 import * as api from './api';
+import { MAIL_FOLDERS } from '@tupo/shared';
 import type { MailFolder, MailLabel, MailboxCounts, MailThreadSummary } from '@tupo/shared';
 import './mail.css';
 

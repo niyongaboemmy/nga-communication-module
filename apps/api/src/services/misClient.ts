@@ -70,6 +70,20 @@ export function misCoverUrl(data: unknown): string | null | undefined {
   return undefined;
 }
 
+/** `ai_policy_v` from an /auth/verify payload; null when this MIS does not send one. */
+function readAiPolicyVersion(data: { ai_policy_v?: unknown } | undefined): number | null {
+  const raw = data?.ai_policy_v;
+  const v = Number(raw);
+  return raw != null && Number.isFinite(v) ? v : null;
+}
+
+/** `ai_routes_v` (My AI: this person's keys/routes changed) from an /auth/verify payload. */
+function readAiRoutesVersion(data: { ai_routes_v?: unknown } | undefined): number | null {
+  const raw = data?.ai_routes_v;
+  const v = Number(raw);
+  return raw != null && Number.isFinite(v) ? v : null;
+}
+
 /** Is this MIS session still alive? Used by the /verify-mis poll. */
 export async function verifyMisSession(misToken: string): Promise<'valid' | 'invalid' | 'unreachable'> {
   return (await verifyMisSessionDetailed(misToken)).state;
@@ -85,6 +99,10 @@ export async function verifyMisSessionDetailed(misToken: string): Promise<{
   /** The current profile picture, when this MIS reports one (see misAvatarUrl). */
   avatarUrl?: string | null;
   coverUrl?: string | null;
+  /** The MIS AI policy version (`ai_policy_v`), when this MIS reports one. */
+  aiPolicyVersion?: number | null;
+  /** This person's My AI routes version (`ai_routes_v`), when this MIS reports one. */
+  aiRoutesVersion?: number | null;
 }> {
   try {
     // Bounded: a hung MIS must not hold the caller (the Home relay gives up
@@ -97,14 +115,18 @@ export async function verifyMisSessionDetailed(misToken: string): Promise<{
     let accessVersion: number | null = null;
     let avatarUrl: string | null | undefined;
     let coverUrl: string | null | undefined;
+    let aiPolicyVersion: number | null = null;
+    let aiRoutesVersion: number | null = null;
     try {
-      const body = (await response.json()) as { data?: { access_version?: unknown } };
+      const body = (await response.json()) as { data?: { access_version?: unknown; ai_policy_v?: unknown; ai_routes_v?: unknown } };
       const v = Number(body?.data?.access_version);
       accessVersion = body?.data?.access_version != null && Number.isFinite(v) ? v : null;
       avatarUrl = misAvatarUrl(body?.data);
       coverUrl = misCoverUrl(body?.data);
+      aiPolicyVersion = readAiPolicyVersion(body?.data);
+      aiRoutesVersion = readAiRoutesVersion(body?.data);
     } catch { /* older MIS / empty body: no version */ }
-    return { state: 'valid', accessVersion, avatarUrl, coverUrl };
+    return { state: 'valid', accessVersion, avatarUrl, coverUrl, aiPolicyVersion, aiRoutesVersion };
   } catch {
     return { state: 'unreachable', accessVersion: null };
   }
@@ -119,6 +141,8 @@ export async function verifyMisSessionDetailed(misToken: string): Promise<{
  */
 export async function verifyMisToken(misToken: string): Promise<{
   state: 'valid' | 'invalid' | 'unreachable'; userId: string | null; accessVersion: number | null;
+  aiPolicyVersion?: number | null;
+  aiRoutesVersion?: number | null;
 }> {
   try {
     // Bounded: a hung MIS must not hold the caller (the Home relay gives up
@@ -132,7 +156,7 @@ export async function verifyMisToken(misToken: string): Promise<{
     // nothing about the token, so the caller answers 503 and caches nothing.
     if ([400, 401, 403].includes(response.status)) return { state: 'invalid', userId: null, accessVersion: null };
     if (!response.ok) return { state: 'unreachable', userId: null, accessVersion: null };
-    let body: { data?: { userId?: unknown; access_version?: unknown } } | null;
+    let body: { data?: { userId?: unknown; access_version?: unknown; ai_policy_v?: unknown; ai_routes_v?: unknown } } | null;
     try {
       body = (await response.json()) as typeof body;
     } catch {
@@ -148,7 +172,10 @@ export async function verifyMisToken(misToken: string): Promise<{
     if (!userId) return { state: 'invalid', userId: null, accessVersion: null };
     const v = Number(body?.data?.access_version);
     const accessVersion = body?.data?.access_version != null && Number.isFinite(v) ? v : null;
-    return { state: 'valid', userId, accessVersion };
+    return {
+      state: 'valid', userId, accessVersion,
+      aiPolicyVersion: readAiPolicyVersion(body?.data), aiRoutesVersion: readAiRoutesVersion(body?.data),
+    };
   } catch {
     return { state: 'unreachable', userId: null, accessVersion: null };
   }

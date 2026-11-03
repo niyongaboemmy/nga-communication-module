@@ -25,6 +25,10 @@ export const users = pgTable('users', {
   roleAssignedByAdmin: boolean('role_assigned_by_admin').notNull().default(false),
   preferredTheme: text('preferred_theme'),
   status: text('status').notNull().default('active'), // active | suspended
+  /** NGA MIS account status (ACTIVE | INACTIVE | SUSPENDED | REMOVED); NULL = not
+   *  synced yet, counts as active. See activeUsers.ts for the one rule. */
+  misStatus: text('mis_status'),
+  misStatusSyncedAt: timestamp('mis_status_synced_at', { withTimezone: true }),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

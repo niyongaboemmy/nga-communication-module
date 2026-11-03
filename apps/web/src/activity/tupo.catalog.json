@@ -10,6 +10,7 @@
     { "key": "tupo.suspended", "label": "Account suspended", "module": "Home", "patterns": ["/suspended"] },
 
     { "key": "tupo.chat", "label": "Chat", "module": "Chat", "patterns": ["/app/chat", "/app/chat/invite/:code", "/app/chat/:conversationId/:messageId?"] },
+    { "key": "tupo.channels", "label": "Subject channels", "module": "Chat", "patterns": ["/app/channels"] },
 
     { "key": "tupo.feed.home", "label": "Home feed", "module": "Feed", "patterns": ["/app/feed"] },
     { "key": "tupo.feed.reels", "label": "Reels", "module": "Feed", "patterns": ["/app/feed/reels/:reelId?"] },

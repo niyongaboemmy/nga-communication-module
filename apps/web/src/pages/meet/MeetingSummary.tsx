@@ -7,12 +7,16 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useNotify } from '../../context/NotificationContext';
 import { usePermissions } from '../../hooks/usePermissions';
+import { useAiPolicy, aiOffMessage } from '../../hooks/useAiPolicy';
 import { Avatar, Button, Card, EmptyState } from '../../components/ui';
 import { ShareMeeting } from './ShareMeeting';
 import * as meetApi from './api';
 import type {
   EngagementContent, LessonFollowUpContent, MinutesContent,
 } from './api';
+import type { AiAnswer } from '@tupo/shared';
+import { AiAnsweredBy, AiSourceControl } from '../../components/MyAi';
+import { HandoffControl, handoffPrompt, importHandoff } from '../../components/Handoff';
 
 /**
  * Format an attendance duration.
@@ -62,8 +66,14 @@ export const MeetingSummary: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // My AI: which AI generates (null = the person's saved choice), and which one
+  // answered each kind generated on this page (stored artifacts keep only the provider).
+  const [aiRoute, setAiRoute] = useState<string | null>(null);
+  const [answered, setAnswered] = useState<Record<string, AiAnswer | undefined>>({});
 
-  const canUseAi = can('MEET_AI_USE');
+  // The school's AI switch (MIS ai_policy) sits in front of MEET_AI_USE.
+  const aiOff = aiOffMessage(useAiPolicy());
+  const canUseAi = can('MEET_AI_USE') && !aiOff;
   const canViewAttendance = can('MEET_ATTENDANCE_VIEW');
   const isHost = meeting?.yourRole === 'host' || meeting?.yourRole === 'cohost';
 
@@ -98,11 +108,13 @@ export const MeetingSummary: React.FC = () => {
     artifacts.find((a) => a.kind === kind)?.provider_used ??
     artifacts.find((a) => a.kind === kind)?.providerUsed ?? null;
 
-  const generate = async (kind: string, fn: () => Promise<unknown>) => {
+  const generate = async (kind: string, fn: () => Promise<{ ai?: AiAnswer } | unknown>) => {
     setGenerating(kind);
     setError(null);
     try {
-      await fn();
+      const r = await fn();
+      const ai = (r as { ai?: AiAnswer } | null)?.ai;
+      setAnswered((prev) => ({ ...prev, [kind]: ai }));
       setArtifacts(await meetApi.getArtifacts(id));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The AI could not generate that.');
@@ -110,6 +122,27 @@ export const MeetingSummary: React.FC = () => {
       setGenerating(null);
     }
   };
+
+  /** "Paste the answer": saved like a generated artifact; throws so the box shows why. */
+  const importArtifact = async (kind: string, fn: () => Promise<{ ai?: AiAnswer }>) => {
+    setError(null);
+    const r = await fn();
+    setAnswered((prev) => ({ ...prev, [kind]: r.ai }));
+    setArtifacts(await meetApi.getArtifacts(id));
+  };
+
+  /** "Answers with" plus "Open in my AI" (both built from the transcript: pupil details need consent). */
+  const sources = (path: 'minutes' | 'lesson-followup', kind: string,
+    run: (h: ReturnType<typeof importHandoff>) => Promise<{ ai?: AiAnswer }>) => (
+    <div className="flex flex-col items-center gap-1">
+      <AiSourceControl value={aiRoute} onChange={setAiRoute} menu="down" />
+      <HandoffControl
+        pupilData
+        requestPrompt={(consent) => handoffPrompt(`/api/meet/${id}/ai/${path}`, {}, consent)}
+        importAnswer={(text) => importArtifact(kind, () => run(importHandoff(text)))}
+      />
+    </div>
+  );
 
   if (loading) {
     return (
@@ -372,17 +405,20 @@ export const MeetingSummary: React.FC = () => {
               </Block>
             )}
 
-            <Provenance provider={providerFor('minutes')} />
+            <Provenance provider={providerFor('minutes')} ai={answered.minutes} />
           </Card>
         ) : (
           <GenerateCard
             title="No minutes yet"
-            body={transcript.length < 5
+            body={aiOff
+              ? aiOff
+              : transcript.length < 5
               ? 'There is not enough transcript. Minutes need live captions to have been on during the meeting.'
               : 'Generate a full record of the meeting from its transcript.'}
             disabled={!canUseAi || transcript.length < 5}
             busy={generating === 'minutes'}
-            onGenerate={() => void generate('minutes', () => meetApi.aiMinutes(id))}
+            onGenerate={() => void generate('minutes', () => meetApi.aiMinutes(id, aiRoute))}
+            source={sources('minutes', 'minutes', (h) => meetApi.aiMinutes(id, null, h))}
           />
         )
       )}
@@ -688,15 +724,16 @@ export const MeetingSummary: React.FC = () => {
                   </ul>
                 </Block>
               )}
-              <Provenance provider={providerFor('lesson_followup')} />
+              <Provenance provider={providerFor('lesson_followup')} ai={answered.lesson_followup} />
             </Card>
           ) : (
             <GenerateCard
               title="Lesson follow-up"
-              body="Revision points and practice questions from what was actually taught."
+              body={aiOff ?? 'Revision points and practice questions from what was actually taught.'}
               disabled={!canUseAi || transcript.length < 5}
               busy={generating === 'lesson_followup'}
-              onGenerate={() => void generate('lesson_followup', () => meetApi.aiLessonFollowUp(id))}
+              onGenerate={() => void generate('lesson_followup', () => meetApi.aiLessonFollowUp(id, aiRoute))}
+              source={sources('lesson-followup', 'lesson_followup', (h) => meetApi.aiLessonFollowUp(id, null, h))}
             />
           )}
         </div>
@@ -718,15 +755,20 @@ const Block: React.FC<{ title: string; children: React.ReactNode }> = ({ title, 
   </section>
 );
 
-const Provenance: React.FC<{ provider: string | null }> = ({ provider }) => (
+const Provenance: React.FC<{ provider: string | null; ai?: AiAnswer }> = ({ provider, ai }) => (
   <p className="border-t border-border-light pt-2 text-[11px] text-text-secondary-light/70 dark:border-border-dark/30 dark:text-text-secondary-dark/70">
-    Generated{provider ? ` by ${provider}` : ''} from the meeting transcript · check anything you plan to act on
+    {ai?.route === 'personal' || ai?.fallbackFrom
+      ? <><AiAnsweredBy ai={ai} providerUsed={provider} /> · from the meeting transcript</>
+      : <>Generated{provider ? ` by ${provider}` : ''} from the meeting transcript</>}
+    {' '}· check anything you plan to act on
   </p>
 );
 
 const GenerateCard: React.FC<{
   title: string; body: string; disabled: boolean; busy: boolean; onGenerate: () => void;
-}> = ({ title, body, disabled, busy, onGenerate }) => (
+  /** My AI's "Answers with ▾" (renders nothing for people without a key). */
+  source?: React.ReactNode;
+}> = ({ title, body, disabled, busy, onGenerate, source }) => (
   <Card className="p-5 text-center">
     <Sparkles size={20} className="mx-auto text-blue-500" />
     <h2 className="mt-2 text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">{title}</h2>
@@ -737,6 +779,7 @@ const GenerateCard: React.FC<{
       {busy ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
       Generate
     </Button>
+    {!disabled && source && <div className="mt-2 flex justify-center">{source}</div>}
   </Card>
 );
 

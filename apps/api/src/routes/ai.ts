@@ -1,0 +1,53 @@
+import { Router, type Request, type Response } from 'express';
+import { ok } from '@tupo/shared';
+import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
+import { tupoAiState } from '../services/aiPolicy.js';
+import { getRoutes, schoolWithoutGateway } from '../services/myAiGateway.js';
+import { handoffOffered } from '../services/externalAi.js';
+
+/**
+ * GET /api/ai/policy — is AI on for Tupo right now?
+ *
+ * The school-wide switch only (MIS ai_policy). Any signed-in user may ask: it
+ * says nothing about who holds MAIL_AI_USE or MEET_AI_USE, only whether the
+ * super admin has turned AI off, so the Mail and Meet panels can say so instead
+ * of offering a button that will be refused.
+ */
+const router = Router();
+router.use(authMiddleware);
+
+router.get('/policy', async (_req: Request, res: Response) => {
+  const state = await tupoAiState();
+  res.json(ok({ enabled: state.enabled, reason: state.reason, message: state.message }));
+});
+
+/**
+ * GET /api/ai/my-routes — what answers the signed-in person in Tupo (My AI).
+ *
+ * The MIS route map (cached 60 s per person, no secrets), so the AI panels can
+ * offer "Answers with: School AI ▾". `{ enabled: false, choices: [] }` while My
+ * AI is off for the school or for Tupo, or the MIS cannot say — the panels then
+ * show nothing new. Never asks the MIS while the policy has My AI off.
+ */
+router.get('/my-routes', async (req: Request, res: Response) => {
+  const misUserId = (req as AuthenticatedRequest).user?.misUserId;
+  const off = { enabled: false, choices: [] };
+  if (!misUserId) return res.json(ok(off));
+  // Same pre-checks as a real call; 'school' is a choice that never needs the MIS.
+  const settled = await schoolWithoutGateway({ misUserId, task: 'assist', feature: 'tupo.routes', aiRoute: 'school' });
+  if (settled && settled.reason !== 'NO_ROUTE') return res.json(ok({ ...off, reason: settled.reason }));
+  const routes = await getRoutes(String(misUserId));
+  res.json(ok(routes ?? { ...off, reason: 'GATEWAY_UNAVAILABLE' }));
+});
+
+/**
+ * GET /api/ai/external — is "Open in my AI" (the person's own Claude / ChatGPT:
+ * prompt out, answer pasted back) offered to the signed-in person right now?
+ * The school's switches, policy.external.handoff and their AI_EXTERNAL_CONNECT.
+ */
+router.get('/external', async (req: Request, res: Response) => {
+  const user = (req as AuthenticatedRequest).user;
+  res.json(ok({ handoff: user ? await handoffOffered(user) : false }));
+});
+
+export default router;

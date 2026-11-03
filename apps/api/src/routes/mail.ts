@@ -1,11 +1,14 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import { ok, fail, MAIL_FOLDERS } from '@tupo/shared';
 import type { MailFolder } from '@tupo/shared';
 import * as mail from '@tupo/mail';
 import { MailError } from '@tupo/mail';
 import * as mailAi from '../services/mailAiService.js';
 import { MailAiError } from '../services/mailAiService.js';
+import { isAiDisabledError, aiDisabledBody, tupoAiState } from '../services/aiPolicy.js';
+import { aiWhoOf, isPersonalAiError, personalAiBody } from '../services/myAiGateway.js';
+import { handoffResponse } from '../services/externalAi.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
 import { emitToUsers } from '../services/chatRealtime.js';
@@ -232,7 +235,7 @@ router.get('/directory', authorizePermission('MAIL_READ'), wrap(async (req, res)
     id: string; name: string; email: string; avatar_url: string | null;
   }>(
     `SELECT id, name, email, avatar_url FROM users
-      WHERE status = 'active'
+      WHERE ${activeUserSql('users')}
         AND ($1 = '' OR name ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%')
       ORDER BY name, email LIMIT 20`,
     [q],
@@ -436,15 +439,24 @@ const aiWrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
   async (req: Request, res: Response, next: NextFunction) => {
     try { await fn(req, res); }
     catch (err) {
+      // External AI hand-off: the prompt (200) or its refusal.
+      const handoff = handoffResponse(err);
+      if (handoff) return res.status(handoff.status).json(handoff.body);
+      if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
+      // My AI: the person's own key failed and the school may not answer instead.
+      if (isPersonalAiError(err)) return res.status(err.status).json(personalAiBody(err));
       if (err instanceof MailAiError) return res.status(err.status).json(fail(err.message));
       if (err instanceof MailError) return res.status(err.status).json(fail(err.message));
       next(err);
     }
   };
 
-router.get('/ai/status', authorizePermission('MAIL_AI_USE'), (_req, res) => {
-  res.json(ok({ available: mailAi.isAnyProviderConfigured() }));
-});
+router.get('/ai/status', authorizePermission('MAIL_AI_USE'), aiWrap(async (_req, res) => {
+  // `available` is false when the school has turned AI off, so an older client
+  // simply hides the assistant; `policy` says why, for the "turned off" note.
+  const policy = await tupoAiState();
+  res.json(ok({ available: policy.enabled && mailAi.isAnyProviderConfigured(), policy }));
+}));
 
 router.post('/ai/compose', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
   const b = req.body ?? {};
@@ -462,28 +474,29 @@ router.post('/ai/compose', authorizePermission('MAIL_AI_USE'), aiWrap(async (req
     senderName: b.senderName ? str(b.senderName, 120) : actor(req).name,
     tone: b.tone ? str(b.tone, 40) : undefined,
     threadText,
-  });
+  }, aiWhoOf(req));
   res.json(ok(result));
 }));
 
 router.post('/ai/subject', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
-  res.json(ok(await mailAi.suggestSubjects(str(req.body?.bodyText, 20_000))));
+  res.json(ok(await mailAi.suggestSubjects(str(req.body?.bodyText, 20_000), aiWhoOf(req))));
 }));
 
 router.post('/ai/summarize', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
   const me = actor(req);
   const { text } = await mail.threadPlainText(me.id, str(req.body?.threadId));
-  res.json(ok(await mailAi.summariseThread(text, me.name)));
+  res.json(ok(await mailAi.summariseThread(text, me.name, aiWhoOf(req))));
 }));
 
 router.post('/ai/smart-replies', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
   const me = actor(req);
   const { text } = await mail.threadPlainText(me.id, str(req.body?.threadId));
-  res.json(ok(await mailAi.smartReplies(text, me.name)));
+  res.json(ok(await mailAi.smartReplies(text, me.name, aiWhoOf(req))));
 }));
 
 router.post('/ai/campaign', authorizePermission('MAIL_AI_USE'), aiWrap(async (req, res) => {
-  res.json(ok(await mailAi.draftCampaign(str(req.body?.brief, 4000), req.body?.audience ? str(req.body.audience, 200) : undefined)));
+  res.json(ok(await mailAi.draftCampaign(
+    str(req.body?.brief, 4000), req.body?.audience ? str(req.body.audience, 200) : undefined, aiWhoOf(req))));
 }));
 
 export default router;

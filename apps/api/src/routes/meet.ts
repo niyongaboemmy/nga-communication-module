@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { getPool, snowflake } from '@tupo/db';
+import { getPool, snowflake, activeUserSql, filterActiveUserIds } from '@tupo/db';
 import {
   ok, fail, parseMeetSettings, meetRoleAtLeast, normalizeJoinCode,
   createMeetingSchema, updateMeetingSchema, joinMeetingSchema, askMeetingSchema,
@@ -27,7 +27,12 @@ import * as notifications from '@tupo/notify';
 import { reminders } from '@tupo/notify';
 import * as ai from '../services/meetAiService.js';
 import * as notes from '../services/meetNotesService.js';
-import { getProviderStatus, isAnyProviderConfigured } from '../services/aiProviders/index.js';
+import {
+  getProviderStatus, isAnyProviderConfigured, isAiDisabledError, aiDisabledBody,
+} from '../services/aiProviders/index.js';
+import { tupoAiState } from '../services/aiPolicy.js';
+import { aiWhoOf, isPersonalAiError, personalAiBody, wantsHandoff } from '../services/myAiGateway.js';
+import { handoffResponse } from '../services/externalAi.js';
 import { endMeetingEverywhere } from '../services/meetLifecycle.js';
 import { clearNotificationsAbout } from '../services/notificationSync.js';
 import { audit } from '../services/userService.js';
@@ -356,6 +361,9 @@ router.get('/live', async (req: Request, res: Response) => {
 
 router.get('/capabilities', async (_req: Request, res: Response) => {
   const cloudflare = sfu.isCloudflareSfuConfigured();
+  // The school-wide AI switch (MIS ai_policy). `ai` stays "is a provider
+  // configured" so the deployment notice keeps meaning what it says.
+  const aiPolicy = await tupoAiState();
   res.json(ok({
     // `sfu` stays a boolean the UI can branch on: is there a media server at
     // all? `mediaServer` says which, because the capacity and the recording
@@ -370,6 +378,7 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
     turn: isTurnConfigured(),
     ai: isAnyProviderConfigured(),
     aiProviders: getProviderStatus(),
+    aiPolicy,
     meshMaxParticipants: MESH_MAX_PARTICIPANTS,
     maxVideoTiles: MAX_VIDEO_TILES,
     simulcastLayers: SIMULCAST_LAYERS,
@@ -416,7 +425,7 @@ router.get('/directory', denyGuests,
       `SELECT u.id, u.name, u.email, u.avatar_url, r.name AS role_name
          FROM users u
          LEFT JOIN roles r ON r.id = u.role_id
-        WHERE u.status = 'active' AND u.id <> $2
+        WHERE ${activeUserSql('u')} AND u.id <> $2
           AND (u.name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%')
         ORDER BY u.name
         LIMIT 20`,
@@ -1282,6 +1291,17 @@ async function contextFor(m: meet.MeetingRow): Promise<ai.MeetingContext> {
 }
 
 /**
+ * The MIS AI policy (super admin's switch) as a 403 AI_DISABLED. True when the
+ * response has been sent.
+ */
+async function refusedByAiPolicy(res: Response): Promise<boolean> {
+  const policy = await tupoAiState();
+  if (policy.enabled) return false;
+  res.status(403).json({ success: false, code: 'AI_DISABLED', reason: policy.reason, message: policy.message });
+  return true;
+}
+
+/**
  * Guard shared by every generative endpoint: the permission, the meeting's own
  * AI setting, and enough transcript to say anything true.
  */
@@ -1292,6 +1312,10 @@ async function aiPreflight(req: Request, res: Response): Promise<
   if (!m) { res.status(404).json(fail('Meeting not found.')); return null; }
   // Generating notes reads the whole transcript: insiders only.
   if (!(await requireMeetingAccess(req, res, m, 'insider'))) return null;
+
+  // The school's master switch first: when the super admin has turned AI off,
+  // nothing anyone in the meeting does will change that, so say it plainly.
+  if (await refusedByAiPolicy(res)) return null;
 
   // Order matters. A meeting that never switched AI on, or that has no
   // transcript, is something the caller can fix — say so. "AI is not
@@ -1310,7 +1334,8 @@ async function aiPreflight(req: Request, res: Response): Promise<
     return null;
   }
 
-  if (!isAnyProviderConfigured()) {
+  // A hand-off ("Open in my AI" / "Paste the answer") calls no provider.
+  if (!isAnyProviderConfigured() && !wantsHandoff(aiWhoOf(req))) {
     res.status(503).json(fail('AI is not configured on this server.'));
     return null;
   }
@@ -1318,6 +1343,21 @@ async function aiPreflight(req: Request, res: Response): Promise<
 }
 
 const AI_PERM = 'MEET_AI_USE';
+
+/**
+ * A generator failed. The school having turned AI off is a 403 the client can
+ * name ("AI is turned off for the school"); anything else is the provider
+ * chain giving up, a 502.
+ */
+function aiFailure(res: Response, err: unknown, fallback: string) {
+  // External AI hand-off: the prompt (200) or its refusal.
+  const handoff = handoffResponse(err);
+  if (handoff) return res.status(handoff.status).json(handoff.body);
+  if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
+  // My AI: the person's own key failed and the school may not answer instead.
+  if (isPersonalAiError(err)) return res.status(err.status).json(personalAiBody(err));
+  return res.status(502).json(fail(err instanceof Error ? err.message : fallback));
+}
 
 router.get('/:id/ai', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
@@ -1330,16 +1370,17 @@ router.post('/:id/ai/summary', authorizePermission(AI_PERM), async (req: Request
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateSummary(ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateSummary(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'summary', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
     await meet.logMeetEvent(pre.m.id, 'ai.artifact_generated', {
       actorId: actor(req).id, payload: { kind: 'summary', providerUsed },
     });
-    res.json(ok({ ...saved, kind: 'summary', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'summary', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'AI generation failed.'));
+    aiFailure(res, err, 'AI generation failed.');
   }
 });
 
@@ -1347,13 +1388,14 @@ router.post('/:id/ai/action-items', authorizePermission(AI_PERM), async (req: Re
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateActionItems(ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateActionItems(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'action_items', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'action_items', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'action_items', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'AI generation failed.'));
+    aiFailure(res, err, 'AI generation failed.');
   }
 });
 
@@ -1361,13 +1403,14 @@ router.post('/:id/ai/decisions', authorizePermission(AI_PERM), async (req: Reque
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateDecisions(ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateDecisions(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'decisions', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'decisions', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'decisions', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'AI generation failed.'));
+    aiFailure(res, err, 'AI generation failed.');
   }
 });
 
@@ -1383,14 +1426,14 @@ router.post('/:id/ai/minutes', authorizePermission(AI_PERM), async (req: Request
     );
     const chatLog = chat.map((c) => `${c.sender_name}: ${c.body}`).join('\n');
 
-    const { data, providerUsed } = await ai.generateMinutes(
-      ai.renderTranscript(pre.lines), pre.ctx, chatLog || undefined);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateMinutes(
+      ai.renderTranscript(pre.lines), pre.ctx, chatLog || undefined, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'minutes', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'minutes', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'minutes', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'AI generation failed.'));
+    aiFailure(res, err, 'AI generation failed.');
   }
 });
 
@@ -1398,13 +1441,14 @@ router.post('/:id/ai/chapters', authorizePermission(AI_PERM), async (req: Reques
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateChapters(ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateChapters(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'chapters', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'chapters', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'chapters', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'AI generation failed.'));
+    aiFailure(res, err, 'AI generation failed.');
   }
 });
 
@@ -1416,16 +1460,16 @@ router.post('/:id/ai/ask', authorizePermission(AI_PERM), async (req: Request, re
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.askMeeting(
-      ai.renderTranscript(pre.lines), pre.ctx, parsed.data.question);
+    const { data, providerUsed, ai: answeredBy } = await ai.askMeeting(
+      ai.renderTranscript(pre.lines), pre.ctx, parsed.data.question, aiWhoOf(req));
     // Q&A answers are saved so the panel keeps a history, but they are not the
     // meeting's "current" artifact of any kind.
     await ai.saveArtifact(pre.m.id, 'qa_answer', { question: parsed.data.question, ...data }, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...data, providerUsed }));
+    res.json(ok({ ...data, providerUsed, ai: answeredBy }));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'AI generation failed.'));
+    aiFailure(res, err, 'AI generation failed.');
   }
 });
 
@@ -1433,14 +1477,14 @@ router.post('/:id/ai/lesson-followup', authorizePermission(AI_PERM), async (req:
   const pre = await aiPreflight(req, res);
   if (!pre) return;
   try {
-    const { data, providerUsed } = await ai.generateLessonFollowUp(
-      ai.renderTranscript(pre.lines), pre.ctx);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateLessonFollowUp(
+      ai.renderTranscript(pre.lines), pre.ctx, aiWhoOf(req));
     const saved = await ai.saveArtifact(pre.m.id, 'lesson_followup', data, {
       providerUsed, segmentCount: pre.lines.length, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'lesson_followup', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'lesson_followup', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'AI generation failed.'));
+    aiFailure(res, err, 'AI generation failed.');
   }
 });
 
@@ -1479,7 +1523,10 @@ router.post('/:id/ai/agenda', authorizePermission(AI_PERM), async (req: Request,
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
   if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
-  if (!isAnyProviderConfigured()) return res.status(503).json(fail('AI is not configured on this server.'));
+  if (await refusedByAiPolicy(res)) return;
+  if (!isAnyProviderConfigured() && !wantsHandoff(aiWhoOf(req))) {
+    return res.status(503).json(fail('AI is not configured on this server.'));
+  }
 
   const minutes = Number(req.body?.durationMinutes) ||
     (m.scheduled_start && m.scheduled_end
@@ -1487,13 +1534,13 @@ router.post('/:id/ai/agenda', authorizePermission(AI_PERM), async (req: Request,
       : 30);
 
   try {
-    const { data, providerUsed } = await ai.generateAgenda(await contextFor(m), minutes);
+    const { data, providerUsed, ai: answeredBy } = await ai.generateAgenda(await contextFor(m), minutes, aiWhoOf(req));
     const saved = await ai.saveArtifact(m.id, 'agenda', data, {
       providerUsed, requestedBy: actor(req).id,
     });
-    res.json(ok({ ...saved, kind: 'agenda', content: data, providerUsed }));
+    res.json(ok({ ...saved, kind: 'agenda', content: data, providerUsed, ai: answeredBy }));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'AI generation failed.'));
+    aiFailure(res, err, 'AI generation failed.');
   }
 });
 
@@ -1507,13 +1554,14 @@ router.post('/:id/ai/translate', authorizePermission('MEET_JOIN'), async (req: R
   if (typeof text !== 'string' || !text.trim() || typeof targetLang !== 'string') {
     return res.status(400).json(fail('text and targetLang are required.'));
   }
+  if (await refusedByAiPolicy(res)) return;
   if (!isAnyProviderConfigured()) return res.status(503).json(fail('AI is not configured on this server.'));
 
   try {
     const { data, providerUsed } = await ai.translateCaption(text.slice(0, 1000), targetLang);
     res.json(ok({ text: data, providerUsed }));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'Translation failed.'));
+    aiFailure(res, err, 'Translation failed.');
   }
 });
 
@@ -1633,7 +1681,7 @@ router.post('/:id/notes/:noteId/tidy', async (req: Request, res: Response) => {
   const meetingId = param(req, 'id');
   const me = await participantFor(req, meetingId);
   if (!me) return res.status(403).json(fail('You were not in this meeting.'));
-  if (!isAnyProviderConfigured()) {
+  if (!isAnyProviderConfigured() && !wantsHandoff(aiWhoOf(req))) {
     return res.status(503).json(fail('AI is not configured on this server.'));
   }
 
@@ -1652,7 +1700,7 @@ router.post('/:id/notes/:noteId/tidy', async (req: Request, res: Response) => {
     const tidied = await notes.tidyNote(existing.body, {
       title: m?.title ?? 'Meeting',
       recentTranscript: recent.length ? ai.renderTranscript(recent.slice(-25), 3000) : undefined,
-    });
+    }, aiWhoOf(req));
     await getPool().query(
       `UPDATE meeting_notes
           SET body = $3, source = 'tidied',
@@ -1663,9 +1711,10 @@ router.post('/:id/notes/:noteId/tidy', async (req: Request, res: Response) => {
       [param(req, 'noteId'), me.id, tidied.body, existing.body, tidied.providerUsed],
     );
     const updated = await notes.listNotes(meetingId, me.id);
-    res.json(ok(updated.find((n) => n.id === param(req, 'noteId'))));
+    const note = updated.find((n) => n.id === param(req, 'noteId'));
+    res.json(ok(note ? { ...note, ai: tidied.ai } : note));
   } catch (err) {
-    res.status(502).json(fail(err instanceof Error ? err.message : 'The AI could not tidy that.'));
+    aiFailure(res, err, 'The AI could not tidy that.');
   }
 });
 
@@ -1849,13 +1898,19 @@ router.post('/:id/invites', authorizePermission('MEET_SCHEDULE'), async (req: Re
   const userIds: string[] = Array.isArray(req.body?.userIds) ? req.body.userIds.slice(0, 500) : [];
   if (!userIds.length) return res.status(400).json(fail('No invitees given.'));
 
-  await getPool().query(
-    `INSERT INTO meeting_invites (meeting_id, user_id)
-     SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
-    [m.id, userIds],
-  );
-  reminders.queueMeetingReminderSync(m.id);
-  res.json(ok({ invited: userIds.length }));
+  // Only active people are invited; anyone suspended, or deactivated in NGA
+  // MIS, is left out and reported back so the host knows.
+  const active = await filterActiveUserIds(getPool(), userIds.map(String));
+  if (active.length) {
+    await getPool().query(
+      `INSERT INTO meeting_invites (meeting_id, user_id)
+       SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
+      [m.id, active],
+    );
+    reminders.queueMeetingReminderSync(m.id);
+  }
+  const skipped = [...new Set(userIds.map(String))].filter((id) => !active.includes(id));
+  res.json(ok({ invited: active.length, skipped }));
 });
 
 router.put('/:id/invites/me', async (req: Request, res: Response) => {

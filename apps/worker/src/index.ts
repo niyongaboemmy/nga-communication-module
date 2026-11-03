@@ -15,6 +15,7 @@ import { runPartitionMaintenance, partitionsAhead } from './jobs/partitions.js';
 import { runEmailDigest } from '@tupo/mail';
 import { reminders, profileMedia } from '@tupo/notify';
 import * as mailDelivery from '@tupo/mail';
+import * as chat from '@tupo/chat';
 
 // Last-resort guards: a stray rejection is logged, not fatal; an uncaught
 // exception exits so pm2 restarts the worker from a clean state.
@@ -54,12 +55,20 @@ const worker = new Worker(
       // Slow (four model calls) and not worth making anyone wait for, which is
       // exactly what the queue is for.
       // Everyone's NGA photo + cover from MIS, so lists show people as they are now
-      // rather than as they were the last time they signed in to Tupo.
+      // rather than as they were the last time they signed in to Tupo. The same
+      // lookup carries each person's MIS account status (users.mis_status), which
+      // is what drops deactivated people from every picker and recipient list.
       case 'avatars:sync': {
         processed++;
         lastJobAt = new Date().toISOString();
         const result = await profileMedia.runProfileMediaSync();
         if (result.errors.length) console.warn('[worker] avatars:sync —', result.errors.slice(0, 3).join(' | '));
+        // Someone just became inactive: out of their subject channels now
+        // rather than at the next chat sweep.
+        if (result.statusesUpdated > 0) {
+          await chat.leaveSubjectChannelsForInactive()
+            .catch((err) => console.warn('[worker] subject-channel cleanup failed:', err instanceof Error ? err.message : err));
+        }
         return result;
       }
 

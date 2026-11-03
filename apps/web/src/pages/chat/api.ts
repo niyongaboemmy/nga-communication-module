@@ -1,6 +1,6 @@
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../../lib/api';
 import type {
-  ConversationSummary, MessagePage, NotificationLevel, WireMember, WireMessage,
+  AiAnswer, ConversationSummary, SubjectSummary, MessagePage, NotificationLevel, WireMember, WireMessage,
 } from '@tupo/shared';
 
 /**
@@ -409,7 +409,7 @@ export type LanguageCode = keyof typeof TRANSLATION_LANGUAGES;
 
 export const translateMessage = (
   conversationId: string, messageId: string, language: LanguageCode,
-) => apiPost<{ language: LanguageCode; text: string; cached: boolean }>(
+) => apiPost<{ language: LanguageCode; text: string; cached: boolean; ai?: AiAnswer }>(
   `/api/chat/conversations/${conversationId}/messages/${messageId}/translate`, { language },
 ).then((r) => r.data!);
 
@@ -457,3 +457,13 @@ export const listInvites = (conversationId: string) =>
   apiGet<{ invites: ActiveInvite[] }>(`/api/chat/conversations/${conversationId}/invites`).then((r) => r.data!.invites);
 export const revokeInvite = (code: string) =>
   apiDelete<{ revoked: boolean }>(`/api/chat/invites/${encodeURIComponent(code)}`);
+/* ── Subject channels (the Channels page) ──────────────────────────────── */
+
+export const listSubjects = () =>
+  apiGet<{ subjects: SubjectSummary[] }>('/api/chat/subjects').then((r) => r.data!.subjects);
+
+/** Teachers of the subject (or admins) only; the server refuses anyone else. */
+export const createSubjectChannel = (subjectId: string, input: { name: string; topic?: string }) =>
+  apiPost<{ conversation: ConversationSummary }>(`/api/chat/subjects/${subjectId}/channels`, input)
+    .then((r) => r.data!.conversation);
+

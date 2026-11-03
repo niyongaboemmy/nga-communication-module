@@ -6,6 +6,8 @@ import { getPool, closeDb, snowflake } from '@tupo/db';
 import { app } from '../app.js';
 import { config } from '../config.js';
 import { LOGOUT_EVENT, setJwksFetcher } from '../utils/ssoLogout.js';
+import { __lastStatusRecheck } from '../routes/sso.js';
+import { setMisStatusTransport } from '../services/misStatus.js';
 
 /**
  * Single sign-out (nga_central_mis/docs/SINGLE_SIGN_OUT.md): signing out of
@@ -52,6 +54,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   setJwksFetcher(null);
+  setMisStatusTransport(null);
   await getPool().query('DELETE FROM users WHERE id = $1', [userId]);
   await closeDb();
 });
@@ -87,5 +90,35 @@ describe('POST /api/sso/backchannel-logout', () => {
 
   it('accepts a sign-out for someone who never opened Tupo', async () => {
     expect((await backchannel({ logout_token: logoutToken('77777777') })).status).toBe(200);
+  });
+});
+
+describe('MIS account status after a back-channel logout', () => {
+  it('re-checks the person in MIS: disabled there means inactive here', async () => {
+    const asked: unknown[] = [];
+    setMisStatusTransport(async (url, init) => {
+      asked.push({ url, ids: JSON.parse(init.body).user_ids });
+      return { status: 200, body: { data: { users: [{ user_id: Number(misUserId), status: 'INACTIVE' }] } } };
+    });
+    expect((await backchannel({ logout_token: logoutToken(misUserId) })).status).toBe(200);
+    await __lastStatusRecheck();
+    expect(asked).toEqual([{ url: `${config.misBaseUrl.replace(/\/$/, '')}/users/profile-media/lookup`, ids: [Number(misUserId)] }]);
+    const { rows } = await getPool().query('SELECT mis_status FROM users WHERE id = $1', [userId]);
+    expect(rows[0].mis_status).toBe('INACTIVE');
+
+    // Even a session issued after the logout is refused while MIS says inactive.
+    await new Promise((r) => setTimeout(r, 1100));
+    const res = await probe(session(0));
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('ACCOUNT_INACTIVE');
+  });
+
+  it('an older MIS without status changes nothing', async () => {
+    await getPool().query(`UPDATE users SET mis_status = 'ACTIVE' WHERE id = $1`, [userId]);
+    setMisStatusTransport(async () => ({ status: 200, body: { data: { users: [{ user_id: Number(misUserId), avatar: null }] } } }));
+    expect((await backchannel({ logout_token: logoutToken(misUserId) })).status).toBe(200);
+    await __lastStatusRecheck();
+    const { rows } = await getPool().query('SELECT mis_status FROM users WHERE id = $1', [userId]);
+    expect(rows[0].mis_status).toBe('ACTIVE');
   });
 });

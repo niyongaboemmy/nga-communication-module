@@ -1223,12 +1223,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }).catch(() => {});
   }, []);
 
+  // Subject channels have their own page (Channels) and are left out of Chat's
+  // numbers, as they are left out of its list.
   const totalUnread = useMemo(
-    () => conversations.reduce((n, c) => n + (isMuted(c) ? 0 : c.unread), 0),
+    () => conversations.reduce((n, c) => n + (isMuted(c) || c.subjectId ? 0 : c.unread), 0),
     [conversations],
   );
   const totalMentions = useMemo(
-    () => conversations.reduce((n, c) => n + c.unreadMentions, 0),
+    () => conversations.reduce((n, c) => n + (c.subjectId ? 0 : c.unreadMentions), 0),
     [conversations],
   );
   const threadsUnreadTotal = useMemo(

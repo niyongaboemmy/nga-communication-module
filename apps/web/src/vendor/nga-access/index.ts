@@ -1,6 +1,6 @@
 // VENDORED from nga_central_mis/packages/access/src/index.ts -- do not edit.
 // Re-sync with: node nga_central_mis/packages/access/sync.mjs <this dir>
-// sha256:a5b3d717fd447d32a7040f6a4c427bd2aa5cbab6ab13af9ae99d2be356ff5d69
+// sha256:3e82e94bf94080d5ad03623a2ee1519edf8c463fb944af19c9c46a6017355c7d
 /**
  * @nga/access -- the shared access-decision core.
  *
@@ -12,7 +12,7 @@
  * vendor an exact copy (see packages/access/README.md) -- never edit a copy.
  */
 
-export const ACCESS_CORE_VERSION = "1.2.0";
+export const ACCESS_CORE_VERSION = "1.6.0";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -487,3 +487,398 @@ export function validateManifest(m: Manifest): string[] {
 /** Is a depth restricted for this capability? */
 export const isRestricted = (def: Pick<CapabilityDef, "restricted">, depth: Depth | null) =>
   def.restricted === true || (!!depth && Array.isArray(def.restricted) && def.restricted.includes(depth));
+
+// ---------------------------------------------------------------------------
+// AI usage control (AI_USAGE_CONTROL_PLAN.md §2)
+// ---------------------------------------------------------------------------
+//
+// One rule for every app, in this order:
+//   1. the super admin's school-wide policy (MIS PlatformSetting 'ai_policy');
+//   2. inside a quiz / assignment / project, the item's ai_mode as set by the
+//      teacher who prepared it (only for a LEARNER working in it);
+//   3. otherwise the role capability AI_USE.
+// Everything fails closed: no policy means no AI.
+
+export type AiMode = "off" | "hints" | "full";
+export const AI_MODES: readonly AiMode[] = ["off", "hints", "full"];
+
+export type AiApp = "mis" | "tm" | "tmcode" | "desktop" | "tupo" | "da";
+export const AI_APPS: readonly AiApp[] = ["mis", "tm", "tmcode", "desktop", "tupo", "da"];
+
+/**
+ * assist   chat / tutor / ask-AI / TMCode chat and agent modes
+ * complete inline code completion
+ * hint     Socratic hints that never give the answer
+ * author   staff content tools (generators, rubrics, lesson studio, drafts)
+ * grading  background AI grading on submit -- a system action, no user
+ */
+export type AiFeature = "assist" | "complete" | "hint" | "author" | "grading";
+
+export interface AiPolicy {
+  v: number;
+  /** Master switch. Off means no AI anywhere, for anyone. */
+  enabled: boolean;
+  /** Per-app switches; a missing app counts as on (the master switch rules). */
+  apps: Partial<Record<AiApp, boolean>>;
+  features: { grading: boolean };
+  /** "always_off" locks every quiz/assignment to off whatever the teacher chose. */
+  assessments: "teacher" | "always_off";
+  /** TMCode third-party AI tools (extensions, terminal CLIs) for learners. Client-enforced. */
+  thirdPartyExtensions: boolean;
+  /**
+   * The same for staff (users who grade: teachers, admins), who use Claude Code, Gemini and
+   * the like to draft grades. Separate so the school can keep students' off. Default on.
+   */
+  thirdPartyExtensionsStaff: boolean;
+  /** "My AI": users' own provider keys (PERSONAL_AI_PROVIDERS_PLAN.md §4). Default off. */
+  personal: AiPersonalPolicy;
+  /** People's own Claude/ChatGPT subscriptions (REUSING_AI_SUBSCRIPTIONS_ANALYSIS.md). Default off. */
+  external: AiExternalPolicy;
+  updated_at?: string | null;
+  updated_by?: number | null;
+}
+
+export const AI_POLICY_DEFAULT: AiPolicy = {
+  v: 0,
+  enabled: false,
+  apps: { mis: true, tm: true, tmcode: true, desktop: true, tupo: true, da: true },
+  features: { grading: false },
+  assessments: "teacher",
+  thirdPartyExtensions: false,
+  thirdPartyExtensionsStaff: true,
+  personal: {
+    enabled: false,
+    staff: { allowed: true, providers: [], customEndpoints: false },
+    students: { allowed: false, providers: ["openrouter"], maxDailyRequests: 50 },
+    inAssessments: "never",
+    fallbackToSchool: true,
+    apps: {},
+  },
+  external: { connector: false, handoff: false, pupilNames: "with_consent" },
+};
+
+/** Coerce stored/remote JSON into a policy. Anything unreadable stays off. */
+export function normalizeAiPolicy(raw: unknown): AiPolicy {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
+  const apps: Partial<Record<AiApp, boolean>> = { ...AI_POLICY_DEFAULT.apps };
+  if (r.apps && typeof r.apps === "object") {
+    for (const a of AI_APPS) if (typeof r.apps[a] === "boolean") apps[a] = r.apps[a];
+  }
+  return {
+    v: Number.isFinite(Number(r.v)) ? Number(r.v) : 0,
+    enabled: r.enabled === true,
+    apps,
+    features: { grading: r.features?.grading === true },
+    assessments: r.assessments === "always_off" ? "always_off" : "teacher",
+    thirdPartyExtensions: r.thirdPartyExtensions === true,
+    // Absent (a policy saved before this field existed) means the default: on for staff.
+    thirdPartyExtensionsStaff: r.thirdPartyExtensionsStaff !== false,
+    personal: normalizeAiPersonalPolicy(r.personal),
+    external: normalizeAiExternalPolicy(r.external),
+    updated_at: typeof r.updated_at === "string" ? r.updated_at : null,
+    updated_by: Number.isFinite(Number(r.updated_by)) && r.updated_by != null ? Number(r.updated_by) : null,
+  };
+}
+
+export const normalizeAiMode = (m: unknown): AiMode =>
+  AI_MODES.includes(m as AiMode) ? (m as AiMode) : "off";
+
+export interface AiAssessmentContext {
+  kind: "quiz" | "assignment" | "project";
+  id: number;
+  aiMode: AiMode;
+  /** A secure/monitored TMCode exam session is running for this item. */
+  examActive?: boolean;
+}
+
+export interface AiContext {
+  app: AiApp;
+  feature: AiFeature;
+  /** The caller holds the AI_USE capability (role default). */
+  hasAiUse: boolean;
+  /** Set only when the caller is a learner working inside the item. */
+  assessment?: AiAssessmentContext | null;
+}
+
+export type AiReason =
+  | "GLOBAL_OFF"
+  | "APP_OFF"
+  | "FEATURE_OFF"
+  | "ASSESSMENT_LOCKED"
+  | "TEACHER_OFF"
+  | "EXAM_ACTIVE"
+  | "HINTS_ONLY"
+  | "ROLE_OFF"
+  | "ALLOWED_BY_TEACHER"
+  | "ALLOWED_BY_ROLE"
+  | "ALLOWED_BY_POLICY";
+
+export interface AiDecision {
+  allowed: boolean;
+  reason: AiReason;
+}
+
+/** Short, user-facing explanation for each reason. */
+export const AI_REASON_MESSAGES: Record<AiReason, string> = {
+  GLOBAL_OFF: "AI is turned off for the school.",
+  APP_OFF: "AI is turned off in this app.",
+  FEATURE_OFF: "This AI feature is turned off for the school.",
+  ASSESSMENT_LOCKED: "AI is off for all quizzes and assignments.",
+  TEACHER_OFF: "Your teacher turned AI off for this activity.",
+  EXAM_ACTIVE: "AI is off during this exam.",
+  HINTS_ONLY: "Only AI hints are allowed for this activity.",
+  ROLE_OFF: "Your role does not include AI tools.",
+  ALLOWED_BY_TEACHER: "Your teacher allows AI for this activity.",
+  ALLOWED_BY_ROLE: "AI is available.",
+  ALLOWED_BY_POLICY: "AI is available.",
+};
+
+const aiDeny = (reason: AiReason): AiDecision => ({ allowed: false, reason });
+const aiAllow = (reason: AiReason): AiDecision => ({ allowed: true, reason });
+
+export function decideAi(policy: AiPolicy | null | undefined, ctx: AiContext): AiDecision {
+  if (!policy || !policy.enabled) return aiDeny("GLOBAL_OFF");
+  if (policy.apps[ctx.app] === false) return aiDeny("APP_OFF");
+  if (ctx.feature === "grading") {
+    return policy.features.grading ? aiAllow("ALLOWED_BY_POLICY") : aiDeny("FEATURE_OFF");
+  }
+  const a = ctx.assessment;
+  if (a) {
+    if (policy.assessments === "always_off") return aiDeny("ASSESSMENT_LOCKED");
+    const mode = normalizeAiMode(a.aiMode);
+    if (mode === "off") return aiDeny(a.examActive ? "EXAM_ACTIVE" : "TEACHER_OFF");
+    if (mode === "hints" && ctx.feature !== "hint") return aiDeny("HINTS_ONLY");
+    return aiAllow("ALLOWED_BY_TEACHER");
+  }
+  return ctx.hasAiUse ? aiAllow("ALLOWED_BY_ROLE") : aiDeny("ROLE_OFF");
+}
+
+/** Is the school-wide policy on for this app at all (no user involved)? */
+export const aiAppEnabled = (policy: AiPolicy | null | undefined, app: AiApp) =>
+  !!policy && policy.enabled && policy.apps[app] !== false;
+
+// ---------------------------------------------------------------------------
+// Personal AI ("My AI"): users' own provider keys (PERSONAL_AI_PROVIDERS_PLAN.md §4)
+// ---------------------------------------------------------------------------
+// Personal AI changes who pays and which model answers; it never changes the rules.
+// decideAi() always runs first. decidePersonalRoute() only picks between the user's own
+// key and the school's AI for a call that is already allowed.
+
+export type AiProviderId =
+  | "openai"
+  | "anthropic"
+  | "gemini"
+  | "groq"
+  | "deepseek"
+  | "openrouter"
+  | "mistral"
+  | "glm"
+  | "cerebras"
+  | "custom";
+export const AI_PROVIDER_IDS: readonly AiProviderId[] = [
+  "openai", "anthropic", "gemini", "groq", "deepseek", "openrouter", "mistral", "glm", "cerebras", "custom",
+];
+
+/**
+ * Providers students may never use with their own key, whatever the allowlist says:
+ * Gemini's API terms are 18+ (23 Mar 2026) and DeepSeek stores data in the PRC and
+ * may train on it.
+ */
+export const AI_STUDENT_BLOCKED_PROVIDERS: readonly AiProviderId[] = ["gemini", "deepseek"];
+
+/** What a call is for, as a user picks it in My AI. "translate" is an assist feature. */
+export type AiTask = "assist" | "author" | "complete" | "hint" | "translate";
+export const AI_TASKS: readonly AiTask[] = ["assist", "author", "complete", "hint", "translate"];
+export type AiPersonalApp = "mis" | "tm" | "tupo" | "da";
+export const AI_PERSONAL_APPS: readonly AiPersonalApp[] = ["mis", "tm", "tupo", "da"];
+
+export const aiTaskFeature = (task: AiTask): AiFeature => (task === "translate" ? "assist" : task);
+
+export interface AiPersonalPolicy {
+  /** Master switch for My AI. Off: everyone uses the school's AI. */
+  enabled: boolean;
+  staff: {
+    allowed: boolean;
+    /** Allowlist; empty means every provider except "custom". */
+    providers: AiProviderId[];
+    /** OpenAI-compatible endpoints at a URL the user types (SSRF-guarded). */
+    customEndpoints: boolean;
+  };
+  students: {
+    allowed: boolean;
+    providers: AiProviderId[];
+    maxDailyRequests: number;
+  };
+  /** "never": inside a quiz/assignment/project only the school's AI answers. */
+  inAssessments: "never" | "allowed";
+  /** May a failed personal call be answered by the school's (free) AI instead. */
+  fallbackToSchool: boolean;
+  /** Per-app opt-out; a missing app counts as on. */
+  apps: Partial<Record<AiPersonalApp, boolean>>;
+}
+
+const asProviders = (v: unknown, fallback: AiProviderId[]): AiProviderId[] =>
+  Array.isArray(v) ? (v.filter((p) => AI_PROVIDER_IDS.includes(p as AiProviderId)) as AiProviderId[]) : fallback;
+
+export function normalizeAiPersonalPolicy(raw: unknown): AiPersonalPolicy {
+  const d = AI_POLICY_DEFAULT.personal;
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
+  const apps: Partial<Record<AiPersonalApp, boolean>> = {};
+  if (r.apps && typeof r.apps === "object") {
+    for (const a of AI_PERSONAL_APPS) if (typeof r.apps[a] === "boolean") apps[a] = r.apps[a];
+  }
+  const max = Number(r.students?.maxDailyRequests);
+  return {
+    enabled: r.enabled === true,
+    staff: {
+      allowed: r.staff?.allowed !== false,
+      providers: asProviders(r.staff?.providers, d.staff.providers),
+      customEndpoints: r.staff?.customEndpoints === true,
+    },
+    students: {
+      allowed: r.students?.allowed === true,
+      providers: asProviders(r.students?.providers, d.students.providers),
+      maxDailyRequests: Number.isFinite(max) && max >= 0 ? Math.floor(max) : d.students.maxDailyRequests,
+    },
+    inAssessments: r.inAssessments === "allowed" ? "allowed" : "never",
+    fallbackToSchool: r.fallbackToSchool !== false,
+    apps,
+  };
+}
+
+/** May this kind of user add a key for this provider at all? */
+export function personalProviderAllowed(p: AiPersonalPolicy, provider: AiProviderId, isStudent: boolean): boolean {
+  if (isStudent) {
+    if (AI_STUDENT_BLOCKED_PROVIDERS.includes(provider) || provider === "custom") return false;
+    return p.students.providers.includes(provider);
+  }
+  if (provider === "custom") return p.staff.customEndpoints;
+  return p.staff.providers.length === 0 || p.staff.providers.includes(provider);
+}
+
+/** One row of a user's "what answers what" matrix, as MIS resolves it (no secrets). */
+export interface AiPersonalRoute {
+  app: AiPersonalApp | "*";
+  task: AiTask | "*";
+  credentialId: number;
+  provider: AiProviderId;
+  model: string;
+  label?: string;
+  fallback: "school" | "none";
+  /** The credential's health; only "active" keys are used. */
+  status: string;
+  /** Apps this key may be used from (the user's own choice). */
+  allowedApps?: AiPersonalApp[];
+}
+
+export interface AiPersonalContext {
+  app: AiPersonalApp;
+  task: AiTask;
+  isStudent: boolean;
+  /** Holds AI_PERSONAL_PROVIDERS (staff) or AI_PERSONAL_PROVIDERS_STUDENT. */
+  hasPersonalCap: boolean;
+  /** A learner working inside a quiz/assignment/project. */
+  inAssessment?: boolean;
+  /** Background work with no person waiting (grading, wrap-ups): always the school's AI. */
+  system?: boolean;
+}
+
+export type AiPersonalReason =
+  | "PERSONAL"
+  | "PERSONAL_OFF"
+  | "APP_OFF"
+  | "SYSTEM_CALL"
+  | "IN_ASSESSMENT"
+  | "NOT_ALLOWED"
+  | "NO_ROUTE"
+  | "KEY_NOT_ACTIVE"
+  | "APP_NOT_ALLOWED_FOR_KEY"
+  | "PROVIDER_BLOCKED";
+
+export interface AiPersonalDecision {
+  /** null: the school's AI answers. */
+  route: AiPersonalRoute | null;
+  reason: AiPersonalReason;
+  /** If the personal call fails, may the school's AI answer instead. */
+  fallbackToSchool: boolean;
+}
+
+export const AI_PERSONAL_REASON_MESSAGES: Record<AiPersonalReason, string> = {
+  PERSONAL: "Your own AI answers.",
+  PERSONAL_OFF: "My AI is turned off for the school.",
+  APP_OFF: "My AI is turned off in this app.",
+  SYSTEM_CALL: "Background work always uses the school's AI.",
+  IN_ASSESSMENT: "Quizzes and assignments always use the school's AI.",
+  NOT_ALLOWED: "Your role cannot use its own AI keys.",
+  NO_ROUTE: "You have not chosen your own AI for this.",
+  KEY_NOT_ACTIVE: "Your key needs attention in My AI, so the school's AI answered.",
+  APP_NOT_ALLOWED_FOR_KEY: "You have not allowed this key in this app.",
+  PROVIDER_BLOCKED: "This provider is not allowed for your account.",
+};
+
+/** The most specific route wins: (app, task) > (app, *) > (*, task) > (*, *). */
+export function matchPersonalRoute(
+  routes: readonly AiPersonalRoute[],
+  app: AiPersonalApp,
+  task: AiTask,
+): AiPersonalRoute | null {
+  const order: Array<[AiPersonalRoute["app"], AiPersonalRoute["task"]]> = [[app, task], [app, "*"], ["*", task], ["*", "*"]];
+  for (const [a, t] of order) {
+    const hit = routes.find((r) => r.app === a && r.task === t);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+export function decidePersonalRoute(
+  policy: AiPolicy | null | undefined,
+  ctx: AiPersonalContext,
+  routes: readonly AiPersonalRoute[],
+): AiPersonalDecision {
+  const school = (reason: AiPersonalReason): AiPersonalDecision => ({ route: null, reason, fallbackToSchool: true });
+  const p = policy?.personal;
+  if (!policy || !p || !p.enabled) return school("PERSONAL_OFF");
+  if (p.apps[ctx.app] === false) return school("APP_OFF");
+  if (ctx.system) return school("SYSTEM_CALL");
+  if (ctx.inAssessment && p.inAssessments === "never") return school("IN_ASSESSMENT");
+  const groupAllowed = ctx.isStudent ? p.students.allowed : p.staff.allowed;
+  if (!groupAllowed || !ctx.hasPersonalCap) return school("NOT_ALLOWED");
+  const route = matchPersonalRoute(routes, ctx.app, ctx.task);
+  if (!route) return school("NO_ROUTE");
+  if (!personalProviderAllowed(p, route.provider, ctx.isStudent)) return school("PROVIDER_BLOCKED");
+  if (route.allowedApps && !route.allowedApps.includes(ctx.app)) return school("APP_NOT_ALLOWED_FOR_KEY");
+  if (route.status !== "active") {
+    return { route: null, reason: "KEY_NOT_ACTIVE", fallbackToSchool: true };
+  }
+  return { route, reason: "PERSONAL", fallbackToSchool: p.fallbackToSchool && route.fallback === "school" };
+}
+
+// ---------------------------------------------------------------------------
+// External AI: people's own Claude / ChatGPT subscriptions (REUSING_AI_SUBSCRIPTIONS_ANALYSIS.md)
+// ---------------------------------------------------------------------------
+// A subscription can never be used by the NGA apps directly (vendor terms). Two legitimate
+// routes instead, both staff-only (AI_EXTERNAL_CONNECT) and both behind decideAi():
+//   connector  NGA as an MCP server added to the person's own Claude/ChatGPT: read tools,
+//              and write tools that only ever create drafts a person confirms in the app.
+//   handoff    "Open in Claude/ChatGPT" with NGA's prompt, then "Paste the answer" back.
+// Pupil-identifying data leaves the school only with the person's existing access AND an
+// explicit per-session consent ("with_consent"), or never.
+
+export interface AiExternalPolicy {
+  connector: boolean;
+  handoff: boolean;
+  pupilNames: "never" | "with_consent";
+}
+
+export function normalizeAiExternalPolicy(raw: unknown): AiExternalPolicy {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, any>;
+  return {
+    connector: r.connector === true,
+    handoff: r.handoff === true,
+    pupilNames: r.pupilNames === "never" ? "never" : "with_consent",
+  };
+}
+
+/** May pupil-identifying data go to the person's external AI for this request? */
+export const externalPupilDataAllowed = (p: AiPolicy | null | undefined, consented: boolean) =>
+  !!p && p.external.pupilNames === "with_consent" && consented === true;

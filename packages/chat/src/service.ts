@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { getPool, snowflake } from '@tupo/db';
+import { getPool, snowflake, activeUserSql, filterActiveUserIds } from '@tupo/db';
 import { previewsForMessages } from './unfurl.js';
 import type { PoolClient } from 'pg';
 import {
@@ -160,6 +160,7 @@ interface ConversationRow {
   muted_until: string | null; draft: string | null;
   peer_id: string | null; peer_name: string | null;
   peer_avatar: string | null; peer_role: string | null;
+  subject_id: string | null; subject_name: string | null; subject_code: string | null;
 }
 
 /**
@@ -179,9 +180,11 @@ const CONVERSATION_SELECT = `
          m.role AS my_role, m.unread_count, m.unread_mentions, m.last_read_seq,
          m.is_starred, m.notification, m.muted_until, m.draft,
          peer.id AS peer_id, peer.name AS peer_name,
-         peer.avatar_url AS peer_avatar, peer.role AS peer_role
+         peer.avatar_url AS peer_avatar, peer.role AS peer_role,
+         c.subject_id, sub.name AS subject_name, sub.code AS subject_code
     FROM conversation_members m
     JOIN conversations c ON c.id = m.conversation_id
+    LEFT JOIN subjects sub ON sub.id = c.subject_id
     LEFT JOIN users ls ON ls.id = c.last_message_sender
     LEFT JOIN LATERAL (
       SELECT u.id, u.name, u.avatar_url, u.role
@@ -214,6 +217,9 @@ function toConversation(r: ConversationRow): ConversationSummary {
     avatarFileId: isDm ? null : r.avatar_file_id,
     memberCount: r.member_count,
     lastSeq: Number(r.last_seq),
+    subjectId: r.subject_id ?? null,
+    subjectName: r.subject_name ?? null,
+    subjectCode: r.subject_code ?? null,
     myRole: r.my_role,
     unread: r.unread_count,
     unreadMentions: r.unread_mentions,
@@ -313,7 +319,13 @@ export async function createConversation(
     const creatorRole: MemberRole = input.type === 'dm' ? 'member' : 'owner';
     await addMembers(client, id, [{ userId: creatorId, role: creatorRole }]);
 
-    const others = (input.memberIds ?? []).filter((u) => u && u !== creatorId);
+    // Only active people join: someone suspended, or deactivated in NGA MIS,
+    // is dropped from a new conversation rather than failing it.
+    const requested = [...new Set((input.memberIds ?? []).filter((u) => u && u !== creatorId))];
+    const others = await filterActiveUserIds(client, requested);
+    if (input.type === 'dm' && requested.length && !others.length) {
+      throw new ChatError('This person is no longer active.', 409);
+    }
     if (others.length) {
       await addMembers(client, id, others.map((userId) => ({ userId, role: 'member' as MemberRole })));
     }
@@ -381,6 +393,9 @@ export async function openDirect(
     [userId, peerId],
   );
   if (blocked.length) throw new ChatError('You cannot message this person.', 403);
+
+  const [activePeer] = await filterActiveUserIds(getPool(), [peerId]);
+  if (!activePeer) throw new ChatError('This person is no longer active.', 409);
 
   const { rows: existing } = await getPool().query<{ id: string }>(
     `SELECT c.id
@@ -1388,10 +1403,10 @@ export async function listMembers(conversationId: string): Promise<WireMember[]>
   const { rows } = await getPool().query<{
     user_id: string; name: string; avatar_url: string | null; role: MemberRole;
     platform_role: string | null; joined_at: string; last_read_seq: string;
-    last_seen_at: Date | null;
+    last_seen_at: Date | null; active: boolean;
   }>(
     `SELECT m.user_id, u.name, u.avatar_url, m.role, u.role AS platform_role,
-            m.joined_at, m.last_read_seq, u.last_seen_at
+            m.joined_at, m.last_read_seq, u.last_seen_at, ${activeUserSql('u')} AS active
        FROM conversation_members m
        JOIN users u ON u.id = m.user_id
       WHERE m.conversation_id = $1 AND m.left_at IS NULL
@@ -1414,14 +1429,17 @@ export async function listMembers(conversationId: string): Promise<WireMember[]>
     lastSeenAt: r.last_seen_at ? r.last_seen_at.toISOString() : null,
     joinedAt: r.joined_at,
     lastReadSeq: Number(r.last_read_seq),
+    ...(r.active ? {} : { inactive: true }),
   }));
 }
 
-/** Who should receive socket traffic and notifications for a conversation. */
+/** Who should receive socket traffic and notifications for a conversation.
+ *  Members who are no longer active are skipped: nobody is listening. */
 export async function memberIdsOf(conversationId: string): Promise<string[]> {
   const { rows } = await getPool().query<{ user_id: string }>(
-    `SELECT user_id FROM conversation_members
-      WHERE conversation_id = $1 AND left_at IS NULL`,
+    `SELECT m.user_id FROM conversation_members m
+       JOIN users u ON u.id = m.user_id
+      WHERE m.conversation_id = $1 AND m.left_at IS NULL AND ${activeUserSql('u')}`,
     [conversationId],
   );
   return rows.map((r) => r.user_id);
@@ -3284,7 +3302,7 @@ export async function addMembersTo(
   // dropped rather than failing the whole batch — adding thirty people should
   // not be undone by one stale id from a directory sync.
   const { rows: valid } = await getPool().query<{ id: string }>(
-    `SELECT id FROM users WHERE id = ANY($1::text[]) AND status = 'active'`, [wanted]);
+    `SELECT id FROM users WHERE id = ANY($1::text[]) AND ${activeUserSql('users')}`, [wanted]);
 
   const client = await getPool().connect();
   try {
@@ -3776,7 +3794,7 @@ export async function getProfile(viewerId: string, userId: string): Promise<User
   }>(
     `SELECT id, name, avatar_url, cover_url, role, title, pronouns, timezone,
             status_emoji, status_text, status_expires_at, last_seen_at
-       FROM users WHERE id = $1 AND status = 'active'`,
+       FROM users WHERE id = $1 AND ${activeUserSql('users')}`,
     [userId],
   );
   const u = rows[0];

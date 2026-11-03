@@ -14,3 +14,4 @@ export * from './presence.js';
 export * from './notifications.js';
 export * from './unfurl.js';
 export * from './safety.js';
+export * from './subjects.js';

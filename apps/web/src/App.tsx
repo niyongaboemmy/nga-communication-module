@@ -22,6 +22,7 @@ import { MODULES, ADMIN } from './components/shell/navigation';
 import { AppShell, ComingSoon } from './pages/AppShell';
 import { ChatLayout } from './pages/chat/ChatLayout';
 import { ChatPermalink, ChatInvite } from './pages/chat/ChatLinks';
+import { ChannelsLayout } from './pages/channels/ChannelsLayout';
 import { MeetHome } from './pages/meet/MeetHome';
 import { Scheduler } from './pages/meet/Scheduler';
 import { MeetHistory } from './pages/meet/MeetHistory';
@@ -138,6 +139,7 @@ export const App: React.FC = () => (
             {/* Links produced by notifications, "copy link" and invites. */}
             <Route path="chat/invite/:code" element={<ChatInvite />} />
             <Route path="chat/:conversationId/:messageId?" element={<ChatPermalink />} />
+            <Route path="channels" element={<ChannelsLayout />} />
             <Route path="feed" element={
               <RequirePermission anyOf={['FEED_VIEW']}><FeedProviderLayout /></RequirePermission>}>
               <Route index element={<FeedHome />} />

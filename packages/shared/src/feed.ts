@@ -187,6 +187,19 @@ export interface FeedPageEditor extends FeedPerson {
   role: FeedPageEditorRole;
   /** Display title on the page's team list; empty when none was given. */
   title: string;
+  /** Their account is no longer active (suspended, or deactivated in NGA MIS). */
+  inactive?: boolean;
+}
+
+/** One person who reacted to a post, and how. */
+export interface FeedPostReactor extends FeedPerson {
+  reaction: FeedReaction;
+  reactedAt: string;
+}
+
+/** One follower of a page, as only that page's owners may see them. */
+export interface FeedPageFollower extends FeedPerson {
+  followedAt: string;
 }
 
 export interface FeedPageDetail extends FeedPageSummary {

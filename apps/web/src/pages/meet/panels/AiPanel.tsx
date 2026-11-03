@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle, CheckSquare, FileText, Gavel, Loader2, RefreshCw, Send, Sparkles,
 } from 'lucide-react';
-import type { MeetActionItem, MeetDecision, MeetParticipant } from '@tupo/shared';
+import type { AiAnswer, MeetActionItem, MeetDecision, MeetParticipant } from '@tupo/shared';
+import { AiAnsweredBy, AiSourceControl } from '../../../components/MyAi';
+import { HandoffControl, handoffPrompt, importHandoff } from '../../../components/Handoff';
 import { PanelShell, PanelButton, PanelEmpty, PanelToggle } from './Shell';
 import * as meetApi from '../api';
 import type { SummaryContent } from '../api';
@@ -26,6 +28,8 @@ import type { SummaryContent } from '../api';
 export interface AiPanelProps {
   meetingId: string;
   aiEnabled: boolean;
+  /** The school's "AI is turned off" message (MIS ai_policy), or null when AI is on. */
+  aiOff?: string | null;
   aiPresent: boolean;
   transcribing: boolean;
   captionsSupported: boolean;
@@ -45,41 +49,49 @@ type Tab = 'summary' | 'actions' | 'decisions' | 'ask';
 const MIN_SEGMENTS = 8;
 
 export const AiPanel: React.FC<AiPanelProps> = ({
-  meetingId, aiEnabled, aiPresent, transcribing, captionsSupported, captionCount,
+  meetingId, aiEnabled, aiOff = null, aiPresent, transcribing, captionsSupported, captionCount,
   canUseAi, isHost, thinking, onClose, onEnableAi, onEnableTranscription,
 }) => {
   const [tab, setTab] = useState<Tab>('summary');
-  const [summary, setSummary] = useState<{ content: SummaryContent; provider: string } | null>(null);
-  const [actions, setActions] = useState<{ content: MeetActionItem[]; provider: string } | null>(null);
-  const [decisions, setDecisions] = useState<{ content: MeetDecision[]; provider: string } | null>(null);
+  const [summary, setSummary] = useState<{ content: SummaryContent; provider: string; ai?: AiAnswer } | null>(null);
+  const [actions, setActions] = useState<{ content: MeetActionItem[]; provider: string; ai?: AiAnswer } | null>(null);
+  const [decisions, setDecisions] = useState<{ content: MeetDecision[]; provider: string; ai?: AiAnswer } | null>(null);
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState<
-    { answer: string; grounded: boolean; citations: string[]; provider: string } | null>(null);
+    { answer: string; grounded: boolean; citations: string[]; provider: string; ai?: AiAnswer } | null>(null);
+  // My AI: null = the person's saved choice; "school" or "<id>:<model>" = a one-off pick.
+  const [aiRoute, setAiRoute] = useState<string | null>(null);
   const [busy, setBusy] = useState<Tab | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const enoughTranscript = captionCount >= MIN_SEGMENTS;
 
-  const run = useCallback(async (which: Tab) => {
+  /**
+   * `auto`: the server's "worth re-summarising" nudge, not a tap. Those keep to
+   * the school AI unless the person picked one of their own keys here, so an
+   * open panel never quietly spends someone's own key on every nudge.
+   */
+  const run = useCallback(async (which: Tab, auto = false) => {
     setBusy(which);
     setError(null);
+    const route = auto && (aiRoute === null || aiRoute === 'school') ? 'school' : aiRoute;
     try {
       if (which === 'summary') {
-        const r = await meetApi.aiSummary(meetingId);
-        setSummary({ content: r.content, provider: r.providerUsed });
+        const r = await meetApi.aiSummary(meetingId, route);
+        setSummary({ content: r.content, provider: r.providerUsed, ai: r.ai });
       } else if (which === 'actions') {
-        const r = await meetApi.aiActionItems(meetingId);
-        setActions({ content: r.content, provider: r.providerUsed });
+        const r = await meetApi.aiActionItems(meetingId, route);
+        setActions({ content: r.content, provider: r.providerUsed, ai: r.ai });
       } else if (which === 'decisions') {
-        const r = await meetApi.aiDecisions(meetingId);
-        setDecisions({ content: r.content, provider: r.providerUsed });
+        const r = await meetApi.aiDecisions(meetingId, route);
+        setDecisions({ content: r.content, provider: r.providerUsed, ai: r.ai });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The AI could not answer.');
     } finally {
       setBusy(null);
     }
-  }, [meetingId]);
+  }, [meetingId, aiRoute]);
 
   /**
    * The server tells the room when there is enough new transcript to be worth
@@ -87,8 +99,10 @@ export const AiPanel: React.FC<AiPanelProps> = ({
    * a room that has been silent for five minutes.
    */
   useEffect(() => {
-    if (thinking === 'summary' && aiPresent && enoughTranscript) void run('summary');
-  }, [thinking, aiPresent, enoughTranscript, run]);
+    if (thinking === 'summary' && aiPresent && enoughTranscript && !aiOff) void run('summary', true);
+    // `run` changes with the AI choice; that must not trigger a summary by itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thinking, aiPresent, enoughTranscript, aiOff]);
 
   const ask = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -97,7 +111,7 @@ export const AiPanel: React.FC<AiPanelProps> = ({
     setBusy('ask');
     setError(null);
     try {
-      const r = await meetApi.aiAsk(meetingId, q);
+      const r = await meetApi.aiAsk(meetingId, q, aiRoute);
       setAnswer({ ...r, provider: r.providerUsed });
       setQuestion('');
     } catch (err) {
@@ -106,6 +120,53 @@ export const AiPanel: React.FC<AiPanelProps> = ({
       setBusy(null);
     }
   };
+
+  /**
+   * "Open in my AI" for the open tab. Every one is built from the transcript,
+   * which carries what pupils said and their names: "Include pupil details" applies.
+   */
+  const HANDOFF_PATH: Record<Tab, string> = { summary: 'summary', actions: 'action-items', decisions: 'decisions', ask: 'ask' };
+  const handoffBody = (): Record<string, unknown> => (tab === 'ask' ? { question: question.trim() } : {});
+  const importAnswer = async (text: string) => {
+    setError(null);
+    const h = importHandoff(text);
+    if (tab === 'summary') {
+      const r = await meetApi.aiSummary(meetingId, null, h);
+      setSummary({ content: r.content, provider: r.providerUsed, ai: r.ai });
+    } else if (tab === 'actions') {
+      const r = await meetApi.aiActionItems(meetingId, null, h);
+      setActions({ content: r.content, provider: r.providerUsed, ai: r.ai });
+    } else if (tab === 'decisions') {
+      const r = await meetApi.aiDecisions(meetingId, null, h);
+      setDecisions({ content: r.content, provider: r.providerUsed, ai: r.ai });
+    } else {
+      const r = await meetApi.aiAsk(meetingId, question.trim(), null, h);
+      setAnswer({ ...r, provider: r.providerUsed });
+      setQuestion('');
+    }
+  };
+
+  /* --- Turned off by the school --- */
+  // Above everything else: the meeting's own setting and the host's choice do
+  // not matter while the super admin has AI switched off.
+  if (aiOff) {
+    return (
+      <PanelShell title="Tupo AI" subtitle="Notes, action items and answers" onClose={onClose}>
+        <div className="space-y-2 p-4">
+          <div className="rounded-xl border border-white/10 bg-white/5 p-3" role="note">
+            <div className="mb-1.5 flex items-center gap-2">
+              <Sparkles size={15} className="text-white/40" />
+              <span className="text-sm font-semibold text-white">{aiOff}</span>
+            </div>
+            <p className="text-xs leading-relaxed text-white/60">
+              The AI notetaker, summaries and answers are unavailable until a super
+              administrator turns AI back on. Captions and your own notes still work.
+            </p>
+          </div>
+        </div>
+      </PanelShell>
+    );
+  }
 
   /* --- Not yet invited --- */
   if (!aiEnabled || !aiPresent) {
@@ -174,7 +235,19 @@ export const AiPanel: React.FC<AiPanelProps> = ({
       title="Tupo AI"
       subtitle={`${captionCount} caption${captionCount === 1 ? '' : 's'} captured`}
       onClose={onClose}
-      footer={tab === 'ask' ? (
+      footer={<>
+        <AiSourceControl value={aiRoute} onChange={setAiRoute} onDark className="mb-1.5 -ml-2" />
+        <HandoffControl
+          key={tab}
+          onDark
+          menu="up"
+          pupilData
+          className="mb-1.5 -ml-2"
+          disabled={busy !== null || !enoughTranscript || (tab === 'ask' && !question.trim())}
+          requestPrompt={(consent) => handoffPrompt(`/api/meet/${meetingId}/ai/${HANDOFF_PATH[tab]}`, handoffBody(), consent)}
+          importAnswer={importAnswer}
+        />
+        {tab === 'ask' ? (
         <form onSubmit={ask} className="flex gap-2">
           <input
             value={question}
@@ -201,7 +274,8 @@ export const AiPanel: React.FC<AiPanelProps> = ({
             ? <><Loader2 size={13} className="animate-spin" /> Thinking…</>
             : <><RefreshCw size={13} /> Refresh</>}
         </PanelButton>
-      )}
+        )}
+      </>}
     >
       <nav className="flex gap-1 border-b border-white/10 px-2 py-2">
         {([
@@ -270,7 +344,7 @@ export const AiPanel: React.FC<AiPanelProps> = ({
                   </ul>
                 </div>
               )}
-              <Provenance provider={summary.provider} />
+              <Provenance provider={summary.provider} ai={summary.ai} />
             </>
           ) : <PanelEmpty title="No summary yet." hint="It will appear as the conversation develops." />
         )}
@@ -299,7 +373,7 @@ export const AiPanel: React.FC<AiPanelProps> = ({
                       </li>
                     ))}
                   </ul>
-                  <Provenance provider={actions.provider} />
+                  <Provenance provider={actions.provider} ai={actions.ai} />
                 </>
               )
           ) : <PanelEmpty title="No action items yet." hint="Tap refresh to look for them." />
@@ -324,7 +398,7 @@ export const AiPanel: React.FC<AiPanelProps> = ({
                       </li>
                     ))}
                   </ul>
-                  <Provenance provider={decisions.provider} />
+                  <Provenance provider={decisions.provider} ai={decisions.ai} />
                 </>
               )
           ) : <PanelEmpty title="No decisions yet." hint="Tap refresh to look for them." />
@@ -349,7 +423,7 @@ export const AiPanel: React.FC<AiPanelProps> = ({
                   </ul>
                 </div>
               )}
-              <Provenance provider={answer.provider} />
+              <Provenance provider={answer.provider} ai={answer.ai} />
             </>
           ) : (
             <PanelEmpty
@@ -364,8 +438,10 @@ export const AiPanel: React.FC<AiPanelProps> = ({
 };
 
 /** Which model produced this. Always shown, never in fine print. */
-const Provenance: React.FC<{ provider: string }> = ({ provider }) => (
+const Provenance: React.FC<{ provider: string; ai?: AiAnswer }> = ({ provider, ai }) => (
   <p className="border-t border-white/5 pt-2 text-[10px] text-white/30">
-    Generated by {provider} · check anything you plan to act on
+    {ai?.route === 'personal' || ai?.fallbackFrom
+      ? <AiAnsweredBy ai={ai} providerUsed={provider} />
+      : <>Generated by {provider}</>} · check anything you plan to act on
   </p>
 );

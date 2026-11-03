@@ -1,4 +1,4 @@
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 
 /**
  * Meeting reminders, delivered by the NGA MIS Reminder Hub.
@@ -255,7 +255,7 @@ export async function loadMeetingAudiences(meetingIds: string[]): Promise<Map<st
            JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.left_at IS NULL
           WHERE m.id = ANY($1::text[])
        ) a
-       JOIN users u ON u.id = a.user_id AND u.status = 'active'
+       JOIN users u ON u.id = a.user_id AND ${activeUserSql('u')}
       ORDER BY a.meeting_id, u.mis_user_id`,
     [meetingIds],
   );

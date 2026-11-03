@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { Redis } from 'ioredis';
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import type { NotificationLevel } from '@tupo/shared';
 import { NOTIFICATION_LEVELS, CONVERSATION_TYPES, MEMBER_ROLES } from '@tupo/shared';
@@ -21,6 +21,9 @@ import { activity } from '../activity/relay.js';
 import {
   translateMessage, isSupportedLanguage, SUPPORTED_LANGUAGES,
 } from '../services/translateService.js';
+import { isAiDisabledError, aiDisabledBody } from '../services/aiPolicy.js';
+import { aiWhoOf, isPersonalAiError, personalAiBody } from '../services/myAiGateway.js';
+import { handoffResponse } from '../services/externalAi.js';
 
 /**
  * Chat REST.
@@ -231,7 +234,7 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
      */
     `SELECT id, name, avatar_url, role, email
        FROM users
-      WHERE id <> $1 AND status = 'active'
+      WHERE id <> $1 AND ${activeUserSql('users')}
         AND ($2 = '' OR name ILIKE '%' || $2 || '%' OR email ILIKE '%' || $2 || '%')
         -- Someone who blocked you, or whom you blocked, is not in your picker.
         AND NOT EXISTS (
@@ -288,6 +291,23 @@ router.get('/conversations', authorizePermission('MESSAGE_READ'), wrap(async (re
         : null,
     })),
   }));
+}));
+
+/* ── Subject channels (the Channels page) ──────────────────────────────── */
+
+router.get('/subjects', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  res.json(ok({ subjects: await chat.listMySubjects(me.id, me.roleLevel === 'ADMIN') }));
+}));
+
+// Teachers of the subject (or admins) -- decided in createSubjectChannel.
+router.post('/subjects/:id/channels', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  const conversation = await chat.createSubjectChannel(me.id, me.roleLevel === 'ADMIN', req.params.id!, {
+    name: String(req.body?.name ?? ''),
+    topic: typeof req.body?.topic === 'string' ? req.body.topic : null,
+  });
+  res.status(201).json(ok({ conversation }));
 }));
 
 router.get('/conversations/:id', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
@@ -963,8 +983,15 @@ router.post('/conversations/:id/messages/:messageId/translate',
     if (!message.body) return res.status(400).json(fail('There is nothing to translate.'));
 
     try {
-      res.json(ok(await translateMessage(messageId, message.body, language)));
+      res.json(ok(await translateMessage(messageId, message.body, language, aiWhoOf(req), {
+        othersWords: message.senderId !== me.id,
+      })));
     } catch (err) {
+      // External AI hand-off: the prompt (200) or its refusal.
+      const handoff = handoffResponse(err);
+      if (handoff) return res.status(handoff.status).json(handoff.body);
+      if (isAiDisabledError(err)) return res.status(403).json(aiDisabledBody(err));
+      if (isPersonalAiError(err)) return res.status(err.status).json(personalAiBody(err));
       // A model being unavailable is a 503, not a 500: nothing is wrong with
       // the request and retrying later is the right advice.
       res.status(503).json(fail(

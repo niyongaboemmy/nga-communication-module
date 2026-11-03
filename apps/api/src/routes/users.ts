@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { getPool } from '@tupo/db';
+import { getPool, activeUserSql } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
@@ -69,19 +69,36 @@ const SORTS: Record<string, string> = {
   status: 'u.status',
 };
 
+/**
+ * ?status= for the roster. Default `active` (the shared active-user rule);
+ * `inactive` = everyone else (suspended here or not active in NGA MIS);
+ * `suspended` = suspended by a Tupo administrator; `all` = everyone.
+ */
+const ROSTER_STATUS: Record<string, string> = {
+  active: activeUserSql('u'),
+  inactive: `NOT ${activeUserSql('u')}`,
+  suspended: `u.status = 'suspended'`,
+  all: 'true',
+};
+
 interface RosterFilters { q: string; role: string; status: string; sort: string; dir: 'asc' | 'desc' }
 
-function rosterFilters(req: Request): RosterFilters {
+/** The filters, or null when ?status= is not one we know. */
+function rosterFilters(req: Request): RosterFilters | null {
   const sort = String(req.query.sort ?? 'name');
+  const status = String(req.query.status ?? 'active').toLowerCase();
+  if (!ROSTER_STATUS[status]) return null;
   return {
     q: String(req.query.q ?? '').trim().slice(0, 100),
     // A role id, "none" for unassigned, or empty for any.
     role: String(req.query.role ?? '').trim(),
-    status: ['active', 'suspended'].includes(String(req.query.status)) ? String(req.query.status) : '',
+    status,
     sort: SORTS[sort] ? sort : 'name',
     dir: req.query.dir === 'desc' ? 'desc' : 'asc',
   };
 }
+
+const BAD_STATUS = "status must be 'active', 'inactive', 'suspended' or 'all'.";
 
 /** WHERE clause and parameters for a set of filters; `$1…` are used in order. */
 function rosterWhere(f: RosterFilters, skip: Array<keyof RosterFilters> = []): { sql: string; params: unknown[] } {
@@ -95,11 +112,12 @@ function rosterWhere(f: RosterFilters, skip: Array<keyof RosterFilters> = []): {
     if (f.role === 'none') where.push('u.role_id IS NULL');
     else if (/^\d+$/.test(f.role)) { params.push(Number(f.role)); where.push(`u.role_id = $${params.length}`); }
   }
-  if (f.status && !skip.includes('status')) { params.push(f.status); where.push(`u.status = $${params.length}`); }
+  if (!skip.includes('status')) where.push(ROSTER_STATUS[f.status]!);
   return { sql: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
 }
 
 const ROSTER_COLUMNS = `u.id, u.mis_user_id, u.name, u.email, u.avatar_url, u.role, u.status,
+            u.mis_status, ${activeUserSql('u')} AS active,
             u.role_assigned_by_admin, u.last_login_at,
             r.id AS role_id, r.name AS role_name, r.level AS role_level`;
 
@@ -111,6 +129,7 @@ function rosterOrder(f: RosterFilters): string {
 
 router.get('/', authorizePermission('USERS_VIEW', 'USERS_MANAGE'), async (req: Request, res: Response) => {
   const f = rosterFilters(req);
+  if (!f) return res.status(400).json(fail(BAD_STATUS));
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   const pool = getPool();
@@ -129,9 +148,10 @@ router.get('/', authorizePermission('USERS_VIEW', 'USERS_MANAGE'), async (req: R
   // Counts for the filter chips: everything but the status filter applies, so
   // each chip says how many it would show.
   const facetWhere = rosterWhere(f, ['status']);
-  const { rows: facets } = await pool.query<{ active: number; suspended: number; unassigned: number; all: number }>(
+  const { rows: facets } = await pool.query<{ active: number; inactive: number; suspended: number; unassigned: number; all: number }>(
     `SELECT count(*)::int AS all,
-            count(*) FILTER (WHERE u.status = 'active')::int AS active,
+            count(*) FILTER (WHERE ${ROSTER_STATUS.active})::int AS active,
+            count(*) FILTER (WHERE ${ROSTER_STATUS.inactive})::int AS inactive,
             count(*) FILTER (WHERE u.status = 'suspended')::int AS suspended,
             count(*) FILTER (WHERE u.role_id IS NULL)::int AS unassigned
        FROM users u ${facetWhere.sql}`,
@@ -179,20 +199,21 @@ function csvCell(value: unknown): string {
 router.get('/export.csv', authorizePermission('USERS_VIEW', 'USERS_MANAGE'), async (req: Request, res: Response) => {
   const actor = (req as AuthenticatedRequest).user!;
   const f = rosterFilters(req);
+  if (!f) return res.status(400).json(fail(BAD_STATUS));
   const { sql, params } = rosterWhere(f);
   const { rows } = await getPool().query(
     `SELECT ${ROSTER_COLUMNS} FROM users u LEFT JOIN roles r ON r.id = u.role_id ${sql} ${rosterOrder(f)} LIMIT 20000`,
     params,
   );
-  const header = ['Name', 'Email', 'MIS id', 'Role', 'Status', 'Role set by admin', 'Last sign-in'];
+  const header = ['Name', 'Email', 'MIS id', 'Role', 'Status', 'MIS status', 'Role set by admin', 'Last sign-in'];
   const lines = [header.join(',')].concat(rows.map((u) => [
-    u.name, u.email, u.mis_user_id, u.role_name ?? 'Unassigned', u.status,
+    u.name, u.email, u.mis_user_id, u.role_name ?? 'Unassigned', u.status, u.mis_status ?? '',
     u.role_assigned_by_admin ? 'yes' : 'no',
     u.last_login_at ? new Date(u.last_login_at).toISOString() : '',
   ].map(csvCell).join(',')));
   await audit({
     actorId: actor.id, action: 'users.export', targetType: 'users',
-    metadata: { rows: rows.length, filters: { q: f.q || undefined, role: f.role || undefined, status: f.status || undefined } },
+    metadata: { rows: rows.length, filters: { q: f.q || undefined, role: f.role || undefined, status: f.status } },
     ipAddress: req.ip, userAgent: req.headers['user-agent'],
   });
   const stamp = new Date().toISOString().slice(0, 10);
@@ -234,7 +255,7 @@ router.put('/:id/role', authorizePermission('USERS_MANAGE'), async (req: Request
   if (req.params.id === actor.id && roleId !== actor.roleId) {
     const { rows: admins } = await pool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM users u JOIN roles r ON r.id = u.role_id
-        WHERE r.level = 'ADMIN' AND u.status = 'active' AND u.id <> $1`,
+        WHERE r.level = 'ADMIN' AND ${activeUserSql('u')} AND u.id <> $1`,
       [actor.id]
     );
     if (Number(admins[0]?.count ?? 0) === 0) {
