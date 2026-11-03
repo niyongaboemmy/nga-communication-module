@@ -143,6 +143,8 @@ export const Tile: React.FC<TileProps> = ({
           autoPlay
           playsInline
           muted={isLocal}
+          data-meet-video={isLocal ? 'local' : 'remote'}
+          data-speaking={speaking ? 'true' : 'false'}
           // Mirrored only for your own camera — mirroring a shared screen or
           // someone else's face is disorienting rather than natural.
           className={

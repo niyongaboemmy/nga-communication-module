@@ -27,7 +27,7 @@ import {
   Volume2,
   VolumeX,
   MessageCircleMore,
-  MicVocal,
+  MicVocal, PictureInPicture2,
 } from 'lucide-react';
 import { PresentPicker } from './PresentationBar';
 import { useNotify } from '../../context/NotificationContext';
@@ -186,6 +186,22 @@ const LAYOUTS: Array<{ key: MeetLayout; label: string; Icon: typeof LayoutGrid }
  * ------------------------------------------------------------------ */
 
 export const ControlBar: React.FC<ControlBarProps> = (p) => {
+  const [pip, setPip] = React.useState(false);
+  React.useEffect(() => {
+    const sync = () => setPip(Boolean(document.pictureInPictureElement));
+    document.addEventListener('enterpictureinpicture', sync, true);
+    document.addEventListener('leavepictureinpicture', sync, true);
+    return () => { document.removeEventListener('enterpictureinpicture', sync, true); document.removeEventListener('leavepictureinpicture', sync, true); };
+  }, []);
+  const togglePip = async () => {
+    try {
+      if (document.pictureInPictureElement) { await document.exitPictureInPicture(); return; }
+      const video = document.querySelector<HTMLVideoElement>('video[data-meet-video="remote"][data-speaking="true"]')
+        ?? document.querySelector<HTMLVideoElement>('video[data-meet-video="remote"]')
+        ?? document.querySelector<HTMLVideoElement>('video[data-meet-video]');
+      await video?.requestPictureInPicture();
+    } catch { /* not allowed here (no video yet, or the browser said no) */ }
+  };
   const [reactionsOpen, setReactionsOpen] = useState(false);
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
@@ -479,6 +495,15 @@ export const ControlBar: React.FC<ControlBarProps> = (p) => {
             </Popover>
           )}
         </div>
+
+        {/* Picture-in-picture (U-33): the speaker floats over other apps while
+            you read notes or reply to a message. A button press is required
+            by browsers, so it is a control rather than automatic. */}
+        {typeof document !== 'undefined' && document.pictureInPictureEnabled && (
+          <Control label={pip ? 'Return the video to the meeting' : 'Pop out the video'} onClick={() => void togglePip()}>
+            <PictureInPicture2 size={19} />
+          </Control>
+        )}
 
         <Control label="Leave the meeting" danger onClick={p.onLeave}>
           <PhoneOff size={19} />
