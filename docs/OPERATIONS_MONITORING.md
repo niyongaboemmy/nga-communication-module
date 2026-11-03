@@ -61,7 +61,7 @@ Then run `sudo systemctl restart redis-server`. Presence and typing keys carry t
 
 - **The API** runs as 2 pm2 cluster instances. `pm2 reload` replaces them one at a time, so deploys and crashes do not drop requests. This was measured at 0 errors in 11,629 requests across two reloads; a single fork-mode process dropped 840.
 - **The gateway** runs as one process. On a restart it tells clients first. They reconnect over about 4 seconds and catch up from the API.
-- **Each deploy snapshots** the running build first (`scripts/release.sh snapshot`, newest 3 kept in `/opt/apps/tupo-releases`). It also keeps the previous web chunks, so tabs opened before the deploy still load theirs.
+- **Each deploy snapshots** the running build first (`scripts/release.sh snapshot`, newest 3 kept in `~/tupo-releases`). It also keeps the previous web chunks, so tabs opened before the deploy still load theirs.
 
 To roll back the code:
 

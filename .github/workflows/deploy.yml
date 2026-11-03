@@ -104,6 +104,12 @@ jobs:
             # Tabs opened before this deploy still load the chunks they know.
             bash scripts/release.sh keep-assets
 
+            # A database backup before every migration run (newest 10 kept).
+            mkdir -p "\$HOME/tupo-backups"
+            PGPASSWORD="\$(cat "\$HOME/.tupo/db_password")" pg_dump -h 127.0.0.1 -U tupo -Fc tupo_prod \\
+              -f "\$HOME/tupo-backups/tupo_prod-\$(date -u +%Y%m%dT%H%M%SZ)-deploy.dump"
+            ls -1t "\$HOME"/tupo-backups/*-deploy.dump | tail -n +11 | xargs -r rm -f --
+
             # Migrations are idempotent (each file is recorded once applied),
             # so running them on every deploy is safe and means a schema change
             # never has to be remembered as a manual step.
@@ -121,6 +127,10 @@ jobs:
             else
               echo "skipping db:seed (run workflow_dispatch with seed=true to run it)"
             fi
+
+            # One-time and self-healing host setup (push keys, alert recipients,
+            # Redis ceiling, mail backfill, API cluster mode). Idempotent.
+            bash scripts/deploy-setup.sh
 
             # reload, not restart: pm2 replaces the processes without dropping
             # the listening socket, so an in-flight request is not killed.

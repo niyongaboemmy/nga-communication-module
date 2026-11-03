@@ -14,7 +14,8 @@
 set -euo pipefail
 
 ROOT="${TUPO_ROOT:-/opt/apps/nga-communication-module}"
-STORE="${TUPO_RELEASES:-/opt/apps/tupo-releases}"
+# In the deploy user's home: /opt/apps belongs to another account on this host.
+STORE="${TUPO_RELEASES:-$HOME/tupo-releases}"
 KEEP="${TUPO_RELEASES_KEEP:-3}"
 # Both paths are used with rm below: refuse anything that is not a real, absolute path.
 case "$ROOT" in /?*) ;; *) echo "release: TUPO_ROOT must be absolute" >&2; exit 2 ;; esac
