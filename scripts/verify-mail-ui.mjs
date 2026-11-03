@@ -93,9 +93,14 @@ try {
   check('bold toolbar button applies <strong>', hasBold > 0);
 
   // ── AI assistant (Staff holds MAIL_AI_USE) ──────────────────────────────
+  // Shown only when AI is available: a provider configured AND the school's
+  // switch on in NGA MIS (off by default). Off, the button must not appear.
+  const aiState = await (await fetch('http://localhost:5190/api/mail/ai/status', { headers: { authorization: `Bearer ${ada.token}` } })).json().catch(() => ({}));
+  const aiAvailable = aiState?.data?.available === true;
   const aiBtn = page.getByRole('button', { name: 'AI', exact: true });
-  const aiVisible = await aiBtn.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
-  check('AI assistant button is shown in the composer', aiVisible);
+  const aiVisible = await aiBtn.waitFor({ state: 'visible', timeout: aiAvailable ? 8000 : 2000 }).then(() => true).catch(() => false);
+  check(aiAvailable ? 'AI assistant button is shown in the composer' : 'AI is off for the school, so the composer shows no AI button',
+    aiVisible === aiAvailable, aiState?.data?.policy?.reason ?? '');
   if (aiVisible) {
     await aiBtn.click();
     await page.getByText('Rewrite what I have').waitFor({ state: 'visible', timeout: 4000 }).catch(() => {});

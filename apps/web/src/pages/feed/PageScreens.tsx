@@ -18,7 +18,7 @@ import { LoadError } from '../../components/LoadError';
 import { useConfirmDialog } from '../../components/ConfirmDialog';
 import { uploadFile, validateFile } from '../chat/uploads';
 import { useFeed, useFeedList } from './FeedProvider';
-import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount, announcePage, usePageUpdates } from './Frame';
+import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount, announcePage, usePageUpdates , toggleFollowPage } from './Frame';
 import { Composer } from './Composer';
 import { SchedulePicker, toLocalInput } from './SchedulePicker';
 import { useDismiss, useMediaUrl, relativeTime } from './lib';
@@ -343,11 +343,13 @@ export const PageProfile: React.FC = () => {
   const canManage = page.myRole === 'owner';
 
   const toggleFollow = async () => {
+    const before = page;
+    setPage({ ...page, following: !page.following, followerCount: Math.max(0, page.followerCount + (page.following ? -1 : 1)) });
     try {
-      const updated = page.following ? await api.unfollowPage(page.id) : await api.followPage(page.id);
-      announcePage(updated);
-      setPage({ ...page, ...updated });
+      const updated = await toggleFollowPage(before);
+      setPage((p) => (p ? { ...p, ...updated } : p));
     } catch (e) {
+      setPage(before);
       notify({ title: e instanceof Error ? e.message : 'Could not update your follow', tone: 'error' });
     }
   };
@@ -920,6 +922,7 @@ const EditPageDialog: React.FC<{ page: FeedPageDetail; onClose: () => void; onSa
 export const PageDirectory: React.FC = () => {
   const { can } = usePermissions();
   const [pages, setPages] = useState<FeedPageSummary[]>([]);
+  const { notify } = useNotify();
   const [q, setQ] = useState('');
   const [kind, setKind] = useState<FeedPageKind | 'all'>('all');
   const [creating, setCreating] = useState(false);
@@ -929,9 +932,11 @@ export const PageDirectory: React.FC = () => {
   }, [q, kind]);
   useEffect(() => { const t = setTimeout(reload, 200); return () => clearTimeout(t); }, [reload]);
 
-  const follow = async (id: string, following: boolean) => {
-    const updated = following ? await api.unfollowPage(id) : await api.followPage(id);
-    announcePage(updated);
+  const follow = async (id: string) => {
+    const page = pages.find((p) => p.id === id);
+    if (!page) return;
+    try { await toggleFollowPage(page); }
+    catch (e) { notify({ title: e instanceof Error ? e.message : 'Could not update your follow', tone: 'error' }); }
   };
   usePageUpdates((u) => setPages((p) => p.map((x) => (x.id === u.id ? { ...x, ...u } : x))));
   const { left, right } = useFeedRails();
@@ -961,7 +966,7 @@ export const PageDirectory: React.FC = () => {
           </select>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
-          {pages.map((p) => <PageDirCard key={p.id} page={p} onFollow={() => follow(p.id, p.following)} />)}
+          {pages.map((p) => <PageDirCard key={p.id} page={p} onFollow={() => void follow(p.id)} />)}
         </div>
         {pages.length === 0 && <EmptyState title="No pages found" hint="Try a different search." />}
       </div>
@@ -973,7 +978,7 @@ export const PageDirectory: React.FC = () => {
 const PageDirCard: React.FC<{ page: FeedPageSummary; onFollow: () => void }> = ({ page, onFollow }) => {
   const avatar = useMediaUrl(page.avatarFileId, true, 0, undefined, true);
   return (
-    <div className="flex items-center gap-3 rounded-2xl border border-border-light bg-card-light p-3 dark:border-border-dark/40 dark:bg-elevated-dark/40">
+    <div data-page-id={page.id} className="flex items-center gap-3 rounded-2xl border border-border-light bg-card-light p-3 dark:border-border-dark/40 dark:bg-elevated-dark/40">
       <Link to={`/app/feed/p/${page.slug}`}><Avatar name={page.name} src={avatar} size={44} /></Link>
       <div className="min-w-0 flex-1">
         <Link to={`/app/feed/p/${page.slug}`} className="flex items-center gap-1 text-sm font-semibold text-text-primary-light hover:underline dark:text-text-primary-dark">

@@ -15,6 +15,7 @@ import { ConversationAvatar } from './ConversationAvatar';
 import type { Conversation } from './types';
 import { NewConversationDialog } from './NewConversationDialog';
 import { LoadError } from '../../components/LoadError';
+import { useNotify } from '../../context/NotificationContext';
 
 /**
  * The conversation list — the middle pane on desktop, the whole screen on a
@@ -173,6 +174,7 @@ const RowMenu: React.FC<{
     };
   }, [open, setOpen]);
 
+  const { notify } = useNotify();
   const run = (fn: () => unknown) => () => { setOpen(false); void fn(); };
 
   return (
@@ -197,7 +199,7 @@ const RowMenu: React.FC<{
           {hasUnread ? (
             <MenuItem icon={<MailOpen size={14} />} label="Mark as read" onClick={run(() => markConversationRead(c.id))} />
           ) : (
-            <MenuItem icon={<Mail size={14} />} label="Mark as unread" onClick={run(() => markUnread(c.id).catch(() => {}))} />
+            <MenuItem icon={<Mail size={14} />} label="Mark as unread" onClick={run(() => markUnread(c.id).catch(() => notify({ title: 'Could not mark that unread', tone: 'error' })))} />
           )}
           <MenuItem
             icon={<Star size={14} className={c.isStarred ? 'fill-amber-400 text-amber-400' : ''} />}

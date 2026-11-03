@@ -42,6 +42,9 @@ const DeliveryBadge: React.FC<{ status?: string; scheduledAt?: string | null; is
   return null;
 };
 
+/** An optimistic change to a row: new field values, or it leaves this view. */
+type ThreadChange = 'leave' | Partial<Pick<MailThreadSummary, 'unread' | 'starred'>>;
+
 export const MailList: React.FC<Props> = ({
   folder, labelId, labels, selectedThreadId, refreshKey, onOpen, onChanged,
 }) => {
@@ -125,18 +128,37 @@ export const MailList: React.FC<Props> = ({
 
   useEffect(() => { const t = setTimeout(() => setQuery(q.trim()), 300); return () => clearTimeout(t); }, [q]);
 
-  const act = async (fn: () => Promise<unknown>, done?: string) => {
+  /*
+   * Optimistic (P-04): the list changes the moment the button is pressed — a
+   * row leaves the folder, the star fills, the bold goes — and the server is
+   * told afterwards. A refusal says so and the quiet refresh that follows
+   * every action puts the list back as the server has it.
+   */
+  const applyLocal = (ids: string[], change?: ThreadChange) => {
+    if (!change) return;
+    const set = new Set(ids);
+    setThreads((prev) => (change === 'leave'
+      ? prev.filter((t) => !set.has(t.threadId))
+      : prev.map((t) => (set.has(t.threadId) ? { ...t, ...change } : t))));
+  };
+  const act = async (fn: () => Promise<unknown>, done?: string, change?: { ids: string[]; change?: ThreadChange }) => {
+    if (change) applyLocal(change.ids, change.change);
     try { await fn(); if (done) confirmed(done); }
     catch (e) { notify({ title: 'That did not work', body: e instanceof Error ? e.message : undefined, tone: 'error' }); }
     void load(true, true); onChanged();
   };
-  const bulk = async (fn: (id: string) => Promise<unknown>, done?: string) => {
-    const results = await Promise.allSettled([...selected].map((id) => fn(id)));
+  const bulk = async (fn: (id: string) => Promise<unknown>, done?: string, change?: ThreadChange) => {
+    const ids = [...selected];
+    applyLocal(ids, change);
+    setSelected(new Set());
+    const results = await Promise.allSettled(ids.map((id) => fn(id)));
     const failedCount = results.filter((r) => r.status === 'rejected').length;
     if (failedCount) notify({ title: `${failedCount} of ${results.length} could not be changed`, tone: 'error' });
     else if (done) confirmed(done);
-    setSelected(new Set()); void load(true, true); onChanged();
+    void load(true, true); onChanged();
   };
+  /** A move takes the row out of this view — except Starred and label views, which span folders. */
+  const leaves: ThreadChange | undefined = folder === 'starred' || labelId ? undefined : 'leave';
 
   /*
    * What can be done with a conversation depends on where it is (C-08 /
@@ -144,37 +166,41 @@ export const MailList: React.FC<Props> = ({
    * Archive offers Move to Inbox. The same list drives the row buttons, the
    * phone row menu and the bulk bar.
    */
-  type RowAction = { key: string; label: string; icon: React.ReactNode; run: (id: string) => Promise<unknown>; done: string };
+  type RowAction = {
+    key: string; label: string; icon: React.ReactNode; run: (id: string) => Promise<unknown>; done: string;
+    /** What the row looks like straight away (P-04). */
+    change?: ThreadChange;
+  };
   const actionsFor = (t: MailThreadSummary | null): RowAction[] => {
     const read = t ? t.unread : true;
     const list: RowAction[] = [];
     if (folder === 'trash') {
-      list.push({ key: 'restore', label: 'Restore', icon: <RotateCcw size={15} />, run: api.restoreThread, done: 'Restored' });
-      list.push({ key: 'purge', label: 'Delete forever', icon: <Trash2 size={15} />, run: api.purgeThread, done: 'Deleted forever' });
+      list.push({ key: 'restore', label: 'Restore', icon: <RotateCcw size={15} />, run: api.restoreThread, done: 'Restored', change: leaves });
+      list.push({ key: 'purge', label: 'Delete forever', icon: <Trash2 size={15} />, run: api.purgeThread, done: 'Deleted forever', change: 'leave' });
       return list;
     }
     if (folder === 'spam') {
-      list.push({ key: 'notspam', label: 'Not spam', icon: <ShieldCheck size={15} />, run: api.restoreThread, done: 'Moved to the Inbox' });
-      list.push({ key: 'trash', label: 'Delete', icon: <Trash2 size={15} />, run: (id) => api.moveThread(id, 'trash'), done: 'Moved to Trash' });
+      list.push({ key: 'notspam', label: 'Not spam', icon: <ShieldCheck size={15} />, run: api.restoreThread, done: 'Moved to the Inbox', change: leaves });
+      list.push({ key: 'trash', label: 'Delete', icon: <Trash2 size={15} />, run: (id) => api.moveThread(id, 'trash'), done: 'Moved to Trash', change: leaves });
       return list;
     }
-    if (folder === 'archive') list.push({ key: 'inbox', label: 'Move to Inbox', icon: <Inbox size={15} />, run: (id) => api.moveThread(id, 'inbox'), done: 'Moved to the Inbox' });
-    else if (!senderView) list.push({ key: 'archive', label: 'Archive', icon: <Archive size={15} />, run: (id) => api.moveThread(id, 'archive'), done: 'Archived' });
+    if (folder === 'archive') list.push({ key: 'inbox', label: 'Move to Inbox', icon: <Inbox size={15} />, run: (id) => api.moveThread(id, 'inbox'), done: 'Moved to the Inbox', change: leaves });
+    else if (!senderView) list.push({ key: 'archive', label: 'Archive', icon: <Archive size={15} />, run: (id) => api.moveThread(id, 'archive'), done: 'Archived', change: leaves });
     if (folder !== 'drafts' && folder !== 'scheduled') {
-      list.push({ key: 'trash', label: 'Delete', icon: <Trash2 size={15} />, run: (id) => api.moveThread(id, 'trash'), done: 'Moved to Trash' });
+      list.push({ key: 'trash', label: 'Delete', icon: <Trash2 size={15} />, run: (id) => api.moveThread(id, 'trash'), done: 'Moved to Trash', change: leaves });
     }
     if (!senderView) {
       list.push(read
-        ? { key: 'read', label: 'Mark read', icon: <MailOpen size={15} />, run: (id) => api.markThread(id, true), done: 'Marked read' }
-        : { key: 'unread', label: 'Mark unread', icon: <MailIcon size={15} />, run: (id) => api.markThread(id, false), done: 'Marked unread' });
+        ? { key: 'read', label: 'Mark read', icon: <MailOpen size={15} />, run: (id) => api.markThread(id, true), done: 'Marked read', change: { unread: false } }
+        : { key: 'unread', label: 'Mark unread', icon: <MailIcon size={15} />, run: (id) => api.markThread(id, false), done: 'Marked unread', change: { unread: true } });
     }
     return list;
   };
   const bulkActions: RowAction[] = [
     ...actionsFor(null),
     ...(!senderView && folder !== 'trash' && folder !== 'spam'
-      ? [{ key: 'unread', label: 'Mark unread', icon: <MailIcon size={15} />, run: (id: string) => api.markThread(id, false), done: 'Marked unread' },
-         { key: 'star', label: 'Star', icon: <Star size={15} />, run: (id: string) => api.starThread(id, true), done: 'Starred' }]
+      ? [{ key: 'unread', label: 'Mark unread', icon: <MailIcon size={15} />, run: (id: string) => api.markThread(id, false), done: 'Marked unread', change: { unread: true } as ThreadChange },
+         { key: 'star', label: 'Star', icon: <Star size={15} />, run: (id: string) => api.starThread(id, true), done: 'Starred', change: { starred: true } as ThreadChange }]
       : []),
   ].filter((a, i, all) => all.findIndex((b) => b.key === a.key) === i);
 
@@ -198,7 +224,7 @@ export const MailList: React.FC<Props> = ({
             <span className="text-sm font-medium">{selected.size} selected</span>
             <div className="ml-auto flex items-center gap-1">
               {bulkActions.map((a) => (
-                <IconButton key={a.key} label={a.label} size="sm" onClick={() => void bulk(a.run, a.done)}>{a.icon}</IconButton>
+                <IconButton key={a.key} label={a.label} size="sm" onClick={() => void bulk(a.run, a.done, a.change)}>{a.icon}</IconButton>
               ))}
               <button onClick={() => setSelected(new Set())} className="ml-1 text-xs text-blue-600 hover:underline dark:text-blue-400">Clear</button>
             </div>
@@ -262,7 +288,7 @@ export const MailList: React.FC<Props> = ({
                     />
                     <button
                       aria-label={t.starred ? 'Unstar' : 'Star'}
-                      onClick={(e) => { e.stopPropagation(); act(() => api.starThread(t.threadId, !t.starred)); }}
+                      onClick={(e) => { e.stopPropagation(); act(() => api.starThread(t.threadId, !t.starred), undefined, { ids: [t.threadId], change: { starred: !t.starred } }); }}
                       className="shrink-0"
                     >
                       <Star size={15} className={t.starred ? 'fill-amber-400 text-amber-400' : 'text-text-secondary-light'} />
@@ -293,7 +319,7 @@ export const MailList: React.FC<Props> = ({
                     </div>
                     <div className="hidden shrink-0 items-center gap-0.5 sm:flex" onClick={(e) => e.stopPropagation()}>
                       {actionsFor(t).map((a) => (
-                        <IconButton key={a.key} label={a.label} size="sm" onClick={() => void act(() => a.run(t.threadId), a.done)}>{a.icon}</IconButton>
+                        <IconButton key={a.key} label={a.label} size="sm" onClick={() => void act(() => a.run(t.threadId), a.done, { ids: [t.threadId], change: a.change })}>{a.icon}</IconButton>
                       ))}
                     </div>
                     {/* Phones have no hover (C-12): the folder's main action is one
@@ -301,7 +327,7 @@ export const MailList: React.FC<Props> = ({
                     {actionsFor(t)[0] && (
                       <span className="shrink-0 sm:hidden" onClick={(e) => e.stopPropagation()}>
                         <IconButton label={actionsFor(t)[0]!.label} size="sm"
-                          onClick={() => void act(() => actionsFor(t)[0]!.run(t.threadId), actionsFor(t)[0]!.done)}>
+                          onClick={() => void act(() => actionsFor(t)[0]!.run(t.threadId), actionsFor(t)[0]!.done, { ids: [t.threadId], change: actionsFor(t)[0]!.change })}>
                           {actionsFor(t)[0]!.icon}
                         </IconButton>
                       </span>
@@ -314,7 +340,7 @@ export const MailList: React.FC<Props> = ({
                       {rowMenu === t.threadId && (
                         <div role="menu" className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-xl border border-border-light bg-white py-1 shadow-xl dark:border-border-dark/50 dark:bg-elevated-dark">
                           {actionsFor(t).slice(1).map((a) => (
-                            <button key={a.key} role="menuitem" onClick={() => { setRowMenu(null); void act(() => a.run(t.threadId), a.done); }}
+                            <button key={a.key} role="menuitem" onClick={() => { setRowMenu(null); void act(() => a.run(t.threadId), a.done, { ids: [t.threadId], change: a.change }); }}
                               className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-surface-light dark:hover:bg-surface-dark">
                               {a.icon} {a.label}
                             </button>

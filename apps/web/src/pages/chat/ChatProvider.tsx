@@ -468,12 +468,18 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loadOlder = useCallback(async () => {
     const id = activeIdRef.current;
     if (!id || loadingMore || !hasMore) return;
-    const oldest = messages.find((m) => m.seq > 0);
+    // The list as it is now, not as this callback last saw it: the device
+    // copy (P-03) can be replaced by the network's page between the two, and
+    // asking for "before" the copy's oldest message read as the end of history.
+    const oldest = messagesRef.current.find((m) => m.seq > 0);
     if (!oldest) return;
 
     setLoadingMore(true);
     try {
       const page = await chatApi.listMessages(id, { before: oldest.seq, limit: 40 });
+      // Replaced while this page was on its way (another conversation, the
+      // network page, a jump): its answer is about a list that is gone.
+      if (activeIdRef.current !== id || messagesRef.current.find((m) => m.seq > 0)?.id !== oldest.id) return;
       // Prepend, and de-duplicate by id: a page boundary that overlaps a live
       // message arriving mid-scroll would otherwise show it twice.
       setMessages((prev) => {
@@ -488,7 +494,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setLoadingMore(false);
     }
-  }, [messages, hasMore, loadingMore]);
+  }, [hasMore, loadingMore]);
 
   /* ────────────────────────────────────────────────────────────────────── *
    * Socket
@@ -1076,8 +1082,16 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const conversationId = activeIdRef.current;
     if (!conversationId || !user) return;
 
+    // What to put back if the server says no (P-04).
+    let before: WireMessage['reactions'] | null = null;
+    const putBack = () => {
+      if (!before) return;
+      const restore = before;
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, reactions: restore } : m)));
+    };
     setMessages((prev) => prev.map((m) => {
       if (m.id !== messageId) return m;
+      before = m.reactions;
       const existing = m.reactions.find((r) => r.emoji === emoji);
       if (!existing) {
         return { ...m, reactions: [...m.reactions, { emoji, count: 1, mine: true, userIds: [user.id] }] };
@@ -1096,6 +1110,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (r?.ok && r.reactions) {
           setMessages((prev) => prev.map((m) => (m.id === messageId
             ? { ...m, reactions: r.reactions! } : m)));
+        } else {
+          // Refused (rate limit, archived conversation): it bounces back.
+          putBack();
         }
       });
       return;
@@ -1107,9 +1124,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       // Put it back. A reaction that silently did not stick is worse than one
       // that visibly bounced.
-      void refresh();
+      putBack();
     }
-  }, [user, refresh]);
+  }, [user]);
 
   const edit = useCallback(async (messageId: string, body: string) => {
     const conversationId = activeIdRef.current;
@@ -1166,9 +1183,22 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const pin = useCallback(async (messageId: string, pinned: boolean) => {
     const conversationId = activeIdRef.current;
     if (!conversationId) return;
-    const { message } = await chatApi.setPinned(conversationId, messageId, pinned);
-    setMessages((prev) => prev.map((m) => (m.id === messageId ? message : m)));
-  }, []);
+    // Optimistic (P-04): the pin shows (or goes) at once; a refusal puts it
+    // back and is rethrown for the caller to say so.
+    let before: WireMessage | undefined;
+    setMessages((prev) => prev.map((m) => {
+      if (m.id !== messageId) return m;
+      before = m;
+      return { ...m, pinnedAt: pinned ? new Date().toISOString() : null, pinnedBy: pinned ? (user?.id ?? null) : null };
+    }));
+    try {
+      const { message } = await chatApi.setPinned(conversationId, messageId, pinned);
+      setMessages((prev) => prev.map((m) => (m.id === messageId ? message : m)));
+    } catch (err) {
+      if (before) { const restore = before; setMessages((prev) => prev.map((m) => (m.id === messageId ? restore : m))); }
+      throw err;
+    }
+  }, [user]);
 
   const save = useCallback(async (messageId: string, saved: boolean) => {
     const conversationId = activeIdRef.current;
@@ -1305,11 +1335,25 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const markUnread = useCallback(async (conversationId: string, fromSeq?: number) => {
-    const r = await chatApi.markUnread(conversationId, fromSeq);
-    setConversations((prev) => prev.map((c) => (c.id === conversationId
-      ? { ...c, unread: r.unread, unreadMentions: r.unreadMentions, lastReadSeq: r.lastReadSeq } : c)));
+    // Optimistic (P-04): bold and counted at once, exact numbers from the
+    // server a moment later; a refusal restores the row and is rethrown.
+    let before: ConversationSummary | undefined;
+    setConversations((prev) => prev.map((c) => {
+      if (c.id !== conversationId) return c;
+      before = c;
+      const lastReadSeq = Math.max(0, (fromSeq ?? c.lastSeq) - 1);
+      return { ...c, lastReadSeq, unread: Math.max(1, c.lastSeq - lastReadSeq) };
+    }));
     // Leaving the conversation open would mark it straight back as read.
     if (activeIdRef.current === conversationId) setActiveId(null);
+    try {
+      const r = await chatApi.markUnread(conversationId, fromSeq);
+      setConversations((prev) => prev.map((c) => (c.id === conversationId
+        ? { ...c, unread: r.unread, unreadMentions: r.unreadMentions, lastReadSeq: r.lastReadSeq } : c)));
+    } catch (err) {
+      if (before) { const restore = before; setConversations((prev) => prev.map((c) => (c.id === conversationId ? restore : c))); }
+      throw err;
+    }
   }, []);
 
   const markConversationRead = useCallback((conversationId: string) => {

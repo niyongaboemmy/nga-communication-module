@@ -165,16 +165,23 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   useEffect(() => { setStarred(thread?.starred === true); }, [thread]);
   const { notify, confirm: confirmed } = useNotify();
   /** A thread action: done says so, a failure says so (C-12); `leave` closes the thread. */
-  const act = async (fn: () => Promise<unknown>, leave: boolean, after?: () => void, done?: string) => {
+  /*
+   * Optimistic (P-04): the star fills, or the thread closes back to the list,
+   * as soon as the button is pressed; the server is told after. A refusal is
+   * said out loud, `undo` puts a local change back, and the list's own
+   * refresh (onChanged) restores a thread that did not really move.
+   */
+  const act = async (fn: () => Promise<unknown>, leave: boolean, apply?: () => void, done?: string, undo?: () => void) => {
+    apply?.();
+    if (leave) onBack();
     try {
       await fn();
-      after?.();
       if (done) confirmed(done);
-      onChanged();
-      if (leave) onBack();
     } catch (e) {
+      undo?.();
       notify({ title: 'That did not work', body: e instanceof Error ? e.message : undefined, tone: 'error' });
     }
+    onChanged();
   };
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -226,10 +233,19 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
 
   const currentLabels = thread.labels;
   const where = thread.folder ?? 'inbox';
+  // Optimistic (P-04): the tick changes at once. It used to wait, swallow a
+  // refusal, and reload the whole thread behind a full-screen spinner.
   const toggleLabel = async (id: string) => {
-    const next = currentLabels.includes(id) ? currentLabels.filter((x) => x !== id) : [...currentLabels, id];
-    await api.setThreadLabels(threadId, next).catch(() => {});
-    load(); onChanged();
+    const before = currentLabels;
+    const next = before.includes(id) ? before.filter((x) => x !== id) : [...before, id];
+    setThread((t) => (t ? { ...t, labels: next } : t));
+    try {
+      await api.setThreadLabels(threadId, next);
+    } catch (e) {
+      setThread((t) => (t ? { ...t, labels: before } : t));
+      notify({ title: 'Could not change the labels', body: e instanceof Error ? e.message : undefined, tone: 'error' });
+    }
+    onChanged();
   };
 
   const doReply = (messageId: string, kind: MailMessageKind) => {
@@ -276,7 +292,7 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
             </span>
           )}
           <IconButton label={starred ? 'Unstar' : 'Star'} size="sm" active={starred}
-            onClick={() => void act(() => api.starThread(threadId, !starred), false, () => setStarred(!starred))}>
+            onClick={() => void act(() => api.starThread(threadId, !starred), false, () => setStarred(!starred), undefined, () => setStarred(starred))}>
             <Star size={16} className={starred ? 'fill-amber-400 text-amber-400' : ''} />
           </IconButton>
           {where !== 'trash' && where !== 'spam' && (

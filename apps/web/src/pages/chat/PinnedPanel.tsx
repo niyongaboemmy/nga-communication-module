@@ -8,6 +8,7 @@ import { RichText } from './RichText';
 import * as chatApi from './api';
 import { timeOf, dayLabel } from './data';
 import type { Conversation, Message } from './types';
+import { useNotify } from '../../context/NotificationContext';
 
 /**
  * Every pinned message in one list (B-10), opened from the header's pin
@@ -17,6 +18,7 @@ import type { Conversation, Message } from './types';
 export const PinnedPanel: React.FC<{ conversation: Conversation; onClose: () => void }> = ({ conversation, onClose }) => {
   const { can } = usePermissions();
   const { jumpTo, pin, messages } = useChat();
+  const { notify } = useNotify();
   const [pinned, setPinned] = useState<Message[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -66,7 +68,7 @@ export const PinnedPanel: React.FC<{ conversation: Conversation; onClose: () => 
                 <div className="mt-1.5 flex gap-3 text-xs">
                   <button onClick={() => void jumpTo(m.id)} className="font-medium text-blue-600 hover:underline dark:text-blue-400">Show in chat</button>
                   {can('MESSAGE_PIN') && (
-                    <button onClick={() => void pin(m.id, false)} className="text-text-secondary-light hover:underline dark:text-text-secondary-dark">Unpin</button>
+                    <button onClick={() => void pin(m.id, false).catch(() => notify({ title: 'Could not unpin that message', tone: 'error' }))} className="text-text-secondary-light hover:underline dark:text-text-secondary-dark">Unpin</button>
                   )}
                 </div>
               </li>

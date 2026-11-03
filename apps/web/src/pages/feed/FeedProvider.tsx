@@ -220,15 +220,43 @@ export const FeedProvider: React.FC<{ children: React.ReactNode }> = ({ children
     catch { patch(id, { bookmarked: cur.bookmarked }); }
   }, [posts, patch]);
 
+  // Optimistic (P-04): the vote and the RSVP show at once; the server's answer
+  // replaces them, and a refusal puts them back and is rethrown to the caller.
   const vote = useCallback<FeedCtx['vote']>(async (id, choices) => {
-    const poll = await api.votePoll(id, choices);
-    patch(id, (p) => ({ ...p, poll }));
-  }, [patch]);
+    const before = posts[id]?.poll;
+    if (before) {
+      const had = new Set(before.myVotes), will = new Set(choices);
+      patch(id, (p) => ({ ...p, poll: {
+        ...before,
+        myVotes: choices,
+        totalVoters: before.totalVoters + (had.size === 0 ? 1 : 0),
+        options: before.options.map((o, i) => ({ ...o, votes: o.votes + (will.has(i) ? 1 : 0) - (had.has(i) ? 1 : 0) })),
+      } }));
+    }
+    try {
+      const poll = await api.votePoll(id, choices);
+      patch(id, (p) => ({ ...p, poll }));
+    } catch (err) {
+      if (before) patch(id, (p) => ({ ...p, poll: before }));
+      throw err;
+    }
+  }, [posts, patch]);
 
   const rsvp = useCallback<FeedCtx['rsvp']>(async (id, going) => {
-    const r = await api.rsvpEvent(id, going);
-    patch(id, (p) => (p.event ? { ...p, event: { ...p.event, going: r.going, goingCount: r.goingCount } } : p));
-  }, [patch]);
+    const before = posts[id]?.event;
+    if (before) {
+      patch(id, (p) => (p.event ? { ...p, event: {
+        ...p.event, going, goingCount: Math.max(0, before.goingCount + (going === before.going ? 0 : going ? 1 : -1)),
+      } } : p));
+    }
+    try {
+      const r = await api.rsvpEvent(id, going);
+      patch(id, (p) => (p.event ? { ...p, event: { ...p.event, going: r.going, goingCount: r.goingCount } } : p));
+    } catch (err) {
+      if (before) patch(id, (p) => ({ ...p, event: before }));
+      throw err;
+    }
+  }, [posts, patch]);
 
   const onNewPost = useCallback((cb: (p: FeedPostView) => void) => {
     newPostCbs.current.add(cb);

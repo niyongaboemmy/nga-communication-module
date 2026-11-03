@@ -6,6 +6,7 @@ import { useChat } from './ChatProvider';
 import * as chatApi from './api';
 import { timeOf } from './data';
 import type { Conversation, Message } from './types';
+import { useNotify } from '../../context/NotificationContext';
 
 /**
  * Pinned messages (FR-MSG-11).
@@ -23,6 +24,7 @@ import type { Conversation, Message } from './types';
 export const PinnedBar: React.FC<{ conversation: Conversation }> = ({ conversation }) => {
   const { can } = usePermissions();
   const { jumpTo, pin, messages } = useChat();
+  const { notify } = useNotify();
   const [pinned, setPinned] = useState<Message[]>([]);
   const [expanded, setExpanded] = useState(false);
 
@@ -64,7 +66,7 @@ export const PinnedBar: React.FC<{ conversation: Conversation }> = ({ conversati
             </button>
 
             {can('MESSAGE_PIN') && (
-              <IconButton label={`Unpin message from ${m.senderName}`} size="sm" onClick={() => void pin(m.id, false)}>
+              <IconButton label={`Unpin message from ${m.senderName}`} size="sm" onClick={() => void pin(m.id, false).catch(() => notify({ title: 'Could not unpin that message', tone: 'error' }))}>
                 <X size={13} />
               </IconButton>
             )}

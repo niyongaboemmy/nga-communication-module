@@ -4,9 +4,11 @@ import { CalendarDays, MapPin, Video, Check, BarChart3, Clock } from 'lucide-rea
 import type { FeedEventView, FeedPollView } from '@tupo/shared';
 import { useFeed } from './FeedProvider';
 import { fullTime } from './lib';
+import { useNotify } from '../../context/NotificationContext';
 
 export const PollBlock: React.FC<{ postId: string; poll: FeedPollView }> = ({ postId, poll }) => {
   const { vote } = useFeed();
+  const { notify } = useNotify();
   const [busy, setBusy] = useState(false);
   const voted = poll.myVotes.length > 0;
   const showResults = voted || poll.closed;
@@ -23,7 +25,9 @@ export const PollBlock: React.FC<{ postId: string; poll: FeedPollView }> = ({ po
     // remove, which looked like the click had done nothing at all.
     if (!next.length) return;
     setBusy(true);
-    try { await vote(postId, next); } finally { setBusy(false); }
+    try { await vote(postId, next); }
+    catch (e) { notify({ title: 'Your vote did not count', body: e instanceof Error ? e.message : undefined, tone: 'error' }); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -77,12 +81,15 @@ export const PollBlock: React.FC<{ postId: string; poll: FeedPollView }> = ({ po
 
 export const EventBlock: React.FC<{ postId: string; event: FeedEventView }> = ({ postId, event }) => {
   const { rsvp } = useFeed();
+  const { notify } = useNotify();
   const [busy, setBusy] = useState(false);
   const start = new Date(event.startsAt);
   const toggle = async () => {
     if (busy) return;
     setBusy(true);
-    try { await rsvp(postId, !event.going); } finally { setBusy(false); }
+    try { await rsvp(postId, !event.going); }
+    catch (e) { notify({ title: 'Could not update your RSVP', body: e instanceof Error ? e.message : undefined, tone: 'error' }); }
+    finally { setBusy(false); }
   };
 
   return (

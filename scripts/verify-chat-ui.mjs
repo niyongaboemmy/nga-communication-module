@@ -873,9 +873,7 @@ try {
       body: JSON.stringify({ type: 'channel', name: `Names ${Date.now()}`, memberIds: [peer] }),
     });
   }, quietPerson.id);
-  await A.page.reload({ waitUntil: 'domcontentloaded' });
-  await A.page.waitForSelector('#composer');
-  await A.page.locator('li', { hasText: /^Names/ }).first().click();
+await A.page.locator('li', { hasText: /^Names/ }).first().click();
   await A.page.waitForTimeout(700);
 
   await A.page.locator('#composer').type('@Silent', { delay: 40 });
@@ -986,19 +984,28 @@ try {
   const foreignRow = namesLog.locator('li', { hasText: foreignText }).first();
   await foreignRow.waitFor({ timeout: 10000 });
   await foreignRow.hover();
-  check('a translate control is offered on someone else’s message',
-    await visible(foreignRow.getByRole('button', { name: 'Translate' }), 5000));
-  check('and not on your own — translating what you just typed is not a feature',
-    (await namesLog.locator('li', { hasText: typoText })
-      .getByRole('button', { name: 'Translate' }).count()) === 0);
+  // Translation is AI: offered only while the school's AI switch (NGA MIS
+  // ai_policy, off by default) is on.
+  const aiPolicy = await fetch(`${API}/api/ai/policy`, { headers: { Authorization: `Bearer ${A.token}` } })
+    .then((r) => r.json()).then((r) => r.data).catch(() => null);
+  if (aiPolicy && aiPolicy.enabled === false) {
+    check('with AI off for the school, no translate control is offered',
+      (await foreignRow.getByRole('button', { name: 'Translate' }).count()) === 0, aiPolicy.reason);
+  } else {
+    check('a translate control is offered on someone else’s message',
+      await visible(foreignRow.getByRole('button', { name: 'Translate' }), 5000));
+    check('and not on your own — translating what you just typed is not a feature',
+      (await namesLog.locator('li', { hasText: typoText })
+        .getByRole('button', { name: 'Translate' }).count()) === 0);
 
-  await foreignRow.getByRole('button', { name: 'Translate' }).click();
-  await A.page.getByRole('menuitem', { name: 'English' }).click();
-  const translated = await visible(foreignRow.getByText(/machine translation/i), 30000);
-  check('translating shows the result under the original, labelled as a machine translation',
-    translated);
-  check('and the original stays on screen — the translation is a reading aid, not a replacement',
-    await visible(foreignRow.getByText(foreignText)));
+    await foreignRow.getByRole('button', { name: 'Translate' }).click();
+    await A.page.getByRole('menuitem', { name: 'English' }).click();
+    const translated = await visible(foreignRow.getByText(/machine translation/i), 30000);
+    check('translating shows the result under the original, labelled as a machine translation',
+      translated);
+    check('and the original stays on screen — the translation is a reading aid, not a replacement',
+      await visible(foreignRow.getByText(foreignText)));
+  }
   await A.page.screenshot({ path: `${SHOTS}/17-translate.png` });
 
   /* ── Virtualisation ───────────────────────────────────────────────────── */
@@ -1035,9 +1042,11 @@ try {
   check('the long conversation really is long — the fixture itself is verified',
     bulkCount > 560, `${bulkCount} messages`);
 
-  await A.page.reload({ waitUntil: 'domcontentloaded' });
+  // Opened by id: right after a reload the list first shows the device copy
+  // (P-03) in its earlier order, so "the first row called Names" can be
+  // another Names conversation until the network copy re-sorts it.
+  await A.page.goto(`${BASE}/app/chat?c=${bulkConv.id}`, { waitUntil: 'domcontentloaded' });
   await A.page.waitForSelector('#composer');
-  await A.page.locator('li', { hasText: /^Names/ }).first().click();
   await A.page.waitForTimeout(1500);
 
   /** Geometry of the scroller that actually holds the log. */

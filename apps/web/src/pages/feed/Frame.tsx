@@ -9,6 +9,7 @@ import type { FeedPageSummary, FeedPostView, FeedReportReason } from '@tupo/shar
 import { FEED_REPORT_REASONS } from '@tupo/shared';
 import { Avatar } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
+import { useNotify } from '../../context/NotificationContext';
 import { useMediaUrl } from './lib';
 import { Composer } from './Composer';
 import { PostCard } from './PostCard';
@@ -157,6 +158,24 @@ export const RightRail: React.FC<{ suggestions: FeedPageSummary[]; onFollow: (id
  */
 export const announcePage = (page: FeedPageSummary) =>
   window.dispatchEvent(new CustomEvent<FeedPageSummary>('feed:page', { detail: page }));
+
+/**
+ * Follow or unfollow, optimistically (P-04): every screen showing the page
+ * flips at once (through announcePage), the server's copy replaces it, and a
+ * refusal flips it back and is rethrown for the caller to say so.
+ */
+export async function toggleFollowPage(page: FeedPageSummary): Promise<FeedPageSummary> {
+  const next = !page.following;
+  announcePage({ ...page, following: next, followerCount: Math.max(0, page.followerCount + (next ? 1 : -1)) });
+  try {
+    const updated = next ? await api.followPage(page.id) : await api.unfollowPage(page.id);
+    announcePage(updated);
+    return updated;
+  } catch (err) {
+    announcePage(page);
+    throw err;
+  }
+}
 export function usePageUpdates(apply: (page: FeedPageSummary) => void): void {
   const ref = useRef(apply);
   ref.current = apply;
@@ -174,10 +193,13 @@ export const useFeedRails = () => {
     ? prev.map((p) => (p.id === u.id ? { ...p, ...u } : p)) : [...prev, u])));
   const following = useMemo(() => pages.filter((p) => p.following), [pages]);
   const suggestions = useMemo(() => pages.filter((p) => !p.following && !p.mandatory), [pages]);
+  const { notify } = useNotify();
   const follow = useCallback(async (id: string) => {
-    const updated = await api.followPage(id);
-    announcePage(updated);
-  }, []);
+    const page = pages.find((p) => p.id === id);
+    if (!page) return;
+    try { await toggleFollowPage(page); }
+    catch (e) { notify({ title: e instanceof Error ? e.message : 'Could not follow that page', tone: 'error' }); }
+  }, [pages, notify]);
   return {
     pages, following, suggestions, follow,
     left: <LeftRail following={following} />,

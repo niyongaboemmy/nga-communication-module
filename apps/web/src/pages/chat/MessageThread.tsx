@@ -856,6 +856,7 @@ export const MessageThread: React.FC<{
     });
   }, [loadOlder]);
 
+  const oldestId = messages[0]?.id;
   useEffect(() => {
     const sentinel = topSentinel.current;
     const root = scrollRef.current;
@@ -866,7 +867,11 @@ export const MessageThread: React.FC<{
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, loading, loadingMore, loadOlderHoldingPosition]);
+    // `oldestId`: an observer only reports changes, so when the list under it
+    // is replaced (the device copy giving way to the network's page, P-03)
+    // while the top is already in view, it would never fire again and older
+    // messages would never load. Observing afresh asks the question again.
+  }, [hasMore, loading, loadingMore, loadOlderHoldingPosition, oldestId]);
 
   /*
    * Mark read when the newest message is actually on screen.
