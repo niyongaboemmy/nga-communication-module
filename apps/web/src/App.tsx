@@ -17,34 +17,54 @@ import { PendingAccess } from './pages/PendingAccess';
 import { Suspended } from './pages/Suspended';
 import { NotFound } from './pages/NotFound';
 import { AccessDenied } from './pages/AccessDenied';
-import { Settings } from './pages/Settings';
 import { MODULES, ADMIN } from './components/shell/navigation';
 import { AppShell, ComingSoon } from './pages/AppShell';
-import { ChatLayout } from './pages/chat/ChatLayout';
-import { ChatPermalink, ChatInvite } from './pages/chat/ChatLinks';
-import { ChannelsLayout } from './pages/channels/ChannelsLayout';
-import { MeetHome } from './pages/meet/MeetHome';
-import { Scheduler } from './pages/meet/Scheduler';
-import { MeetHistory } from './pages/meet/MeetHistory';
-import { MeetingRoom } from './pages/meet/MeetingRoom';
-import { MeetingSummary } from './pages/meet/MeetingSummary';
-import { GuestMeeting } from './pages/meet/GuestMeeting';
-import { SystemStatus } from './pages/SystemStatus';
-import { RolesPermissions } from './pages/admin/RolesPermissions';
-import { Users } from './pages/admin/Users';
-import { AuditLog } from './pages/admin/AuditLog';
-import { Oversight } from './pages/admin/Oversight';
-import { Dashboard } from './pages/admin/Dashboard';
-import { MailLayout } from './pages/mail/MailLayout';
-import { MailTemplates } from './pages/mail/MailTemplates';
-import { MailLists } from './pages/mail/MailLists';
-import { MailCampaigns } from './pages/mail/MailCampaigns';
-import { MailSettings } from './pages/mail/MailSettings';
 import { FeedProvider } from './pages/feed/FeedProvider';
-import { FeedHome } from './pages/feed/FeedHome';
-import { Reels } from './pages/feed/Reels';
-import { PageProfile, PageDirectory, PageInsights } from './pages/feed/PageScreens';
-import { SavedPosts, PostPermalink, ModerationQueue } from './pages/feed/Screens';
+import { lazyNamed, registerPreload } from './lib/lazyPage';
+
+/*
+ * Every screen is its own chunk (P-01): the first visit downloads the shell and
+ * the module the person lands on, not all of Tupo. The rail preloads the rest
+ * on idle and on hover (see lib/lazyPage). The shell, the providers and the
+ * chat dock stay in the main bundle: they are on every page.
+ */
+const Settings = lazyNamed(() => import('./pages/Settings'), 'Settings');
+const ChatLayout = lazyNamed(() => import('./pages/chat/ChatLayout'), 'ChatLayout');
+const ChatPermalink = lazyNamed(() => import('./pages/chat/ChatLinks'), 'ChatPermalink');
+const ChatInvite = lazyNamed(() => import('./pages/chat/ChatLinks'), 'ChatInvite');
+const ChannelsLayout = lazyNamed(() => import('./pages/channels/ChannelsLayout'), 'ChannelsLayout');
+const MeetHome = lazyNamed(() => import('./pages/meet/MeetHome'), 'MeetHome');
+const Scheduler = lazyNamed(() => import('./pages/meet/Scheduler'), 'Scheduler');
+const MeetHistory = lazyNamed(() => import('./pages/meet/MeetHistory'), 'MeetHistory');
+const MeetingRoom = lazyNamed(() => import('./pages/meet/MeetingRoom'), 'MeetingRoom');
+const MeetingSummary = lazyNamed(() => import('./pages/meet/MeetingSummary'), 'MeetingSummary');
+const GuestMeeting = lazyNamed(() => import('./pages/meet/GuestMeeting'), 'GuestMeeting');
+const SystemStatus = lazyNamed(() => import('./pages/SystemStatus'), 'SystemStatus');
+const RolesPermissions = lazyNamed(() => import('./pages/admin/RolesPermissions'), 'RolesPermissions');
+const Users = lazyNamed(() => import('./pages/admin/Users'), 'Users');
+const AuditLog = lazyNamed(() => import('./pages/admin/AuditLog'), 'AuditLog');
+const Oversight = lazyNamed(() => import('./pages/admin/Oversight'), 'Oversight');
+const Dashboard = lazyNamed(() => import('./pages/admin/Dashboard'), 'Dashboard');
+const MailLayout = lazyNamed(() => import('./pages/mail/MailLayout'), 'MailLayout');
+const MailTemplates = lazyNamed(() => import('./pages/mail/MailTemplates'), 'MailTemplates');
+const MailLists = lazyNamed(() => import('./pages/mail/MailLists'), 'MailLists');
+const MailCampaigns = lazyNamed(() => import('./pages/mail/MailCampaigns'), 'MailCampaigns');
+const MailSettings = lazyNamed(() => import('./pages/mail/MailSettings'), 'MailSettings');
+const FeedHome = lazyNamed(() => import('./pages/feed/FeedHome'), 'FeedHome');
+const Reels = lazyNamed(() => import('./pages/feed/Reels'), 'Reels');
+const PageProfile = lazyNamed(() => import('./pages/feed/PageScreens'), 'PageProfile');
+const PageDirectory = lazyNamed(() => import('./pages/feed/PageScreens'), 'PageDirectory');
+const PageInsights = lazyNamed(() => import('./pages/feed/PageScreens'), 'PageInsights');
+const SavedPosts = lazyNamed(() => import('./pages/feed/Screens'), 'SavedPosts');
+const PostPermalink = lazyNamed(() => import('./pages/feed/Screens'), 'PostPermalink');
+const ModerationQueue = lazyNamed(() => import('./pages/feed/Screens'), 'ModerationQueue');
+
+for (const [route, page] of [
+  ['/app/feed', FeedHome], ['/app/chat', ChatLayout], ['/app/channels', ChannelsLayout],
+  ['/app/meet', MeetHome], ['/app/mail', MailLayout], ['/app/settings', Settings],
+  ['/app/admin/dashboard', Dashboard], ['/app/admin/users', Users], ['/app/admin/roles', RolesPermissions],
+  ['/app/admin/audit', AuditLog], ['/app/admin/oversight', Oversight], ['/app/system', SystemStatus],
+] as const) registerPreload(route, page.preload);
 
 const FeedProviderLayout: React.FC = () => (
   <FeedProvider><Outlet /></FeedProvider>
@@ -127,6 +147,9 @@ export const App: React.FC = () => (
         the sign-in route costs nothing.
       */}
       <ChatProvider>
+        {/* Public routes (sign-in, guest meeting) load lazily too; inside /app the
+            shell holds its own boundary so the rail stays up while a module loads. */}
+        <React.Suspense fallback={null}>
         <Routes>
           <Route path="/" element={<SignIn />} />
           <Route path="/sso/callback" element={<SsoCallback />} />
@@ -201,6 +224,7 @@ export const App: React.FC = () => (
           </Route>
           <Route path="*" element={<OutsideNotFound />} />
         </Routes>
+        </React.Suspense>
 
         {/* Rendered outside <Routes> on purpose: it must survive every
             navigation, and it portals to document.body so no page can clip it.

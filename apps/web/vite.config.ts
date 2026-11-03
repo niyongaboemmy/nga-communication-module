@@ -20,6 +20,28 @@ const worker   = process.env.TUPO_WORKER_URL   ?? 'http://localhost:5193';
  */
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: {
+    rolldownOptions: {
+      output: {
+        /*
+         * Vendor groups (P-01). Libraries change far less often than Tupo, so
+         * each group keeps its hash (and the browser's cached copy) across
+         * deploys. Icons are grouped because, left alone, every icon becomes
+         * its own tiny file: about 60 requests on a phone for one screen.
+         * The rich-text editor is big and used only by Mail and the feed
+         * composer, so it stays out of the first download.
+         */
+        codeSplitting: {
+          groups: [
+            { name: 'react', test: /node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler)[\\/]/, priority: 30 },
+            { name: 'icons', test: /node_modules[\\/]lucide-react[\\/]/, priority: 20 },
+            { name: 'socket', test: /node_modules[\\/](socket\.io-client|engine\.io-client|socket\.io-parser|engine\.io-parser|@socket\.io)[\\/]/, priority: 20 },
+            { name: 'editor', test: /node_modules[\\/](@tiptap|prosemirror-[a-z-]+|linkifyjs)[\\/]/, priority: 20 },
+          ],
+        },
+      },
+    },
+  },
   server: {
     port: 5194,
     strictPort: true,

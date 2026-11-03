@@ -485,3 +485,9 @@ table td, table th, .tabular-nums { font-variant-numeric: tabular-nums; }
 .tupo-meter-seg {
   transition: background-color 90ms linear, opacity 90ms linear;
 }
+
+/* The top progress bar while a screen's code loads (AppShell › ScreenLoading). */
+@keyframes tupo-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}

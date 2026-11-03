@@ -65,6 +65,10 @@ jobs:
       - name: Unit and integration tests
         run: npm test
 
+      # P-01 / target T3: the first visit stays under 250 KB of gzip JS.
+      - name: Web build and bundle budget
+        run: npm run build -w @tupo/web && npm run check:bundle
+
       # Critical for now: the one open "high" is nodemailer 6.x, whose only
       # fixed release (10.1.0, a major bump) was days old when this gate was
       # added. Raise this to --audit-level=high once that upgrade lands

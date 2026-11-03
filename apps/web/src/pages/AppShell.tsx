@@ -17,6 +17,7 @@ import { UpdateNotice } from '../pwa/UpdateNotice';
 import { GlobalSearch } from '../components/GlobalSearch';
 import { usePresenceReporter } from '../hooks/usePresenceReporter';
 import { useModuleBadges } from '../hooks/useModuleBadges';
+import { preloadRoute, preloadWhenIdle } from '../lib/lazyPage';
 import { toPresence } from './chat/types';
 import { StatusPicker } from './Settings';
 import type { Presence } from './chat/types';
@@ -50,12 +51,29 @@ import type { Presence } from './chat/types';
  * Rail (tablet and desktop)
  * ------------------------------------------------------------------ */
 
+/**
+ * While a screen's code downloads: a thin progress bar at the top, shown only
+ * after 150 ms so a preloaded module never flashes it.
+ */
+const ScreenLoading: React.FC = () => {
+  const [show, setShow] = useState(false);
+  useEffect(() => { const t = window.setTimeout(() => setShow(true), 150); return () => window.clearTimeout(t); }, []);
+  if (!show) return null;
+  return (
+    <div role="progressbar" aria-label="Loading" className="h-0.5 w-full overflow-hidden bg-blue-100 dark:bg-blue-900/30">
+      <div className="h-full w-1/3 animate-[tupo-indeterminate_1s_ease-in-out_infinite] bg-blue-600" />
+    </div>
+  );
+};
+
 const RailLink: React.FC<{ entry: NavEntry; badge?: number }> = ({ entry, badge }) => {
   const { icon: Icon, to, label } = entry;
   return (
     <NavLink
       to={to}
       title={label}
+      onMouseEnter={() => preloadRoute(to)}
+      onFocus={() => preloadRoute(to)}
       className={({ isActive }) =>
         `group relative grid h-11 w-11 place-items-center rounded-xl transition-colors duration-150 ` +
         (isActive
@@ -120,6 +138,7 @@ const TabLink: React.FC<{ entry: NavEntry; badge?: number }> = ({ entry, badge }
   return (
     <NavLink
       to={to}
+      onTouchStart={() => preloadRoute(to)}
       className={({ isActive }) =>
         `relative flex flex-1 flex-col items-center gap-0.5 rounded-xl py-1.5 text-[10px] font-medium transition-colors duration-150 ` +
         (isActive
@@ -405,6 +424,13 @@ export const AppShell: React.FC = () => {
 
   const modules = MODULES.filter((i) => can(i.perm));
   const admin = ADMIN.filter((i) => can(i.perm));
+
+  // Once the shell is up, fetch the code of the other modules this person can
+  // open, in rail order, while the browser is idle (P-01).
+  const preloadKey = modules.map((m) => m.to).join(',');
+  useEffect(() => {
+    if (preloadKey) preloadWhenIdle(preloadKey.split(','));
+  }, [preloadKey]);
   const badges = useModuleBadges();
 
   return (
@@ -424,7 +450,10 @@ export const AppShell: React.FC = () => {
           {/* One broken screen must not take the shell with it (F-06); moving
               to another screen clears the error. */}
           <ErrorBoundary resetKey={location.pathname} label="this screen">
-            <Outlet />
+            {/* A module's code loads on first visit (P-01); the shell stays put. */}
+            <React.Suspense fallback={<ScreenLoading />}>
+              <Outlet />
+            </React.Suspense>
           </ErrorBoundary>
         </main>
       </div>

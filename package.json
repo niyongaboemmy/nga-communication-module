@@ -21,6 +21,7 @@
     "db:migrate": "npm run migrate -w @tupo/db",
     "db:seed": "npm run seed -w @tupo/db",
     "health": "node scripts/health.mjs",
+    "check:bundle": "node scripts/check-bundle.mjs",
     "clean": "rm -rf apps/*/dist packages/*/dist apps/web/dist",
     "preflight": "node scripts/preflight.mjs",
     "verify": "node scripts/verify.mjs",
