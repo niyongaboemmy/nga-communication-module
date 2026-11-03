@@ -12,7 +12,7 @@ import type { AiAnswer } from './myAi.js';
  * ────────────────────────────────────────────────────────────────────────── */
 
 /** Recipient-side mailbox folders. */
-export const MAIL_FOLDERS = ['inbox', 'starred', 'sent', 'drafts', 'scheduled', 'archive', 'trash', 'spam'] as const;
+export const MAIL_FOLDERS = ['inbox', 'starred', 'snoozed', 'sent', 'drafts', 'scheduled', 'archive', 'trash', 'spam'] as const;
 export type MailFolder = (typeof MAIL_FOLDERS)[number];
 
 export const MAIL_RECIPIENT_KINDS = ['to', 'cc', 'bcc'] as const;

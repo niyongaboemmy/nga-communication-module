@@ -13,8 +13,9 @@
  */
 import {
   deliverSmtp, runCampaign, runDueCampaigns, syncList, syncAllLists,
-  dispatchPendingSmtp, sendDueScheduled,
+  dispatchPendingSmtp, sendDueScheduled, wakeDueSnoozes,
 } from '@tupo/mail';
+import { notifyAndPush } from '@tupo/notify';
 
 export async function runMailSend(data: { messageId: string }): Promise<unknown> {
   return deliverSmtp(data.messageId);
@@ -37,6 +38,15 @@ const LIST_RESYNC_MS = 15 * 60_000;
  */
 export async function runMailSweeps(): Promise<unknown> {
   const scheduled = await sendDueScheduled();
+  // Snoozed conversations whose time has come go back to the Inbox, unread,
+  // with a notification so they are noticed (U-10).
+  const woken = await wakeDueSnoozes().catch(() => []);
+  for (const w of woken) {
+    await notifyAndPush([w.userId], {
+      kind: 'mail.snoozed', title: 'Back from snooze', body: w.subject,
+      link: `/app/mail/t/${w.threadId}`, subjectType: 'mail_thread', subjectId: w.threadId,
+    }).catch(() => {});
+  }
   const smtp = await dispatchPendingSmtp();
   const campaigns = await runDueCampaigns();
 

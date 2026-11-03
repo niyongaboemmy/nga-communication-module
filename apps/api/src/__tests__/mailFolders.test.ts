@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
+import { wakeDueSnoozes } from '@tupo/mail';
 import { app } from '../app.js';
 import { config } from '../config.js';
 
@@ -123,3 +124,31 @@ describe('who it is from, and merge fields', () => {
     expect(unknown.body.message).toContain('{{amount}}');
   });
 });
+
+describe('snooze (U-10)', () => {
+  it('leaves the Inbox until the time, then comes back unread; and can be woken early', async () => {
+    const sent = await as(ada.token).post('/api/mail/compose', { to: [`userId:${ben.id}`], subject: `Snooze me ${snowflake()}`, bodyHtml: '<p>later</p>' });
+    const thread = sent.body.data.threadId;
+    await as(ben.token).post(`/api/mail/threads/${thread}/read`, { read: true });
+    expect((await as(ben.token).post(`/api/mail/threads/${thread}/snooze`, { until: new Date(Date.now() - 1000).toISOString() })).status).toBe(400);
+    expect((await as(ben.token).post(`/api/mail/threads/${thread}/snooze`, { until: new Date(Date.now() + 2 * 3_600_000).toISOString() })).status).toBe(200);
+    expect(await folder(ben, 'inbox')).not.toContain(thread);
+    expect(await folder(ben, 'snoozed')).toContain(thread);
+    // Someone not in the conversation cannot snooze it.
+    expect((await as(cy.token).post(`/api/mail/threads/${thread}/snooze`, { until: new Date(Date.now() + 3_600_000).toISOString() })).status).toBe(404);
+
+    // Its time comes: the sweep puts it back, unread.
+    await getPool().query(`UPDATE mail_recipients SET snoozed_until = now() - interval '1 minute' WHERE thread_id = $1 AND folder = 'snoozed'`, [thread]);
+    const woken = await wakeDueSnoozes();
+    expect(woken.some((w) => w.threadId === thread && w.userId === ben.id)).toBe(true);
+    expect(await folder(ben, 'inbox')).toContain(thread);
+    const unread = (await getPool().query(`SELECT bool_or(NOT is_read) AS u FROM mail_recipients WHERE thread_id = $1 AND user_id = $2`, [thread, ben.id])).rows[0].u;
+    expect(unread).toBe(true);
+
+    // Woken early by hand.
+    await as(ben.token).post(`/api/mail/threads/${thread}/snooze`, { until: new Date(Date.now() + 3_600_000).toISOString() });
+    expect((await as(ben.token).post(`/api/mail/threads/${thread}/snooze`, { until: null })).status).toBe(200);
+    expect(await folder(ben, 'inbox')).toContain(thread);
+  });
+});
+

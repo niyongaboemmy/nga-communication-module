@@ -146,6 +146,21 @@ try {
   check('and shown when asked for', await bodies.getByText(`the quoted words ${tag}`).isVisible().catch(() => false));
   await bp.getByRole('button', { name: /3 older messages/ }).click();
   check('the folded messages open from the bar', await bp.getByText('message 3').first().isVisible().catch(() => false));
+
+  console.log('\nSnooze');
+  await bp.goto(`${BASE}/app/mail/t/${threadId}`);
+  await bp.getByRole('button', { name: 'Snooze', exact: true }).click();
+  await bp.getByRole('menuitem', { name: /^Tomorrow/ }).click();
+  const inboxRow = bp.locator('li').filter({ hasText: subjectLong });
+  await bp.waitForTimeout(1_500);
+  const folderOf = async () => (await pool.query(`SELECT array_agg(DISTINCT folder) AS f FROM mail_recipients WHERE thread_id = $1 AND user_id = $2`, [threadId, ben.id])).rows[0].f;
+  check('snoozing for tomorrow takes it out of the Inbox', JSON.stringify(await folderOf()) === '["snoozed"]', JSON.stringify(await folderOf()));
+  await bp.goto(`${BASE}/app/mail?folder=snoozed`);
+  check('it waits in Snoozed', await inboxRow.first().waitFor({ timeout: 8_000 }).then(() => true).catch(() => false));
+  await inboxRow.first().hover();
+  await inboxRow.first().getByRole('button', { name: 'Unsnooze' }).first().click();
+  await bp.waitForTimeout(1_500);
+  check('and Unsnooze brings it straight back', JSON.stringify(await folderOf()) === '["inbox"]', JSON.stringify(await folderOf()));
   await benCtx.close();
 } catch (err) {
   check('suite ran to completion', false, err?.message ?? String(err));

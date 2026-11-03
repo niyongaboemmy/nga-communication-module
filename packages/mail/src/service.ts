@@ -1028,6 +1028,41 @@ export async function moveThread(userId: string, threadId: string, folder: MailF
   if (!rowCount) throw new MailError('Thread not found in your mailbox.', 404);
 }
 
+/**
+ * Snooze (U-10): out of the Inbox until `until`, then back, unread. `null`
+ * wakes it now. Only received copies move; the sender's own stay in Sent.
+ */
+export async function snoozeThread(userId: string, threadId: string, until: Date | null): Promise<void> {
+  if (until && (Number.isNaN(until.getTime()) || until.getTime() <= Date.now() + 60_000)) {
+    throw new MailError('Pick a time at least a minute from now.');
+  }
+  if (until && until.getTime() > Date.now() + 366 * 86_400_000) throw new MailError('Pick a time within a year.');
+  const { rowCount } = await getPool().query(
+    until
+      ? `UPDATE mail_recipients SET folder = 'snoozed', snoozed_until = $3
+          WHERE thread_id = $1 AND user_id = $2 AND kind <> 'self' AND folder IN ('inbox', 'snoozed')
+            AND NOT is_hidden AND NOT pending`
+      : `UPDATE mail_recipients SET folder = 'inbox', snoozed_until = NULL, is_read = false
+          WHERE thread_id = $1 AND user_id = $2 AND folder = 'snoozed'`,
+    until ? [threadId, userId, until] : [threadId, userId],
+  );
+  if (!rowCount) throw new MailError(until ? 'Only conversations in the Inbox can be snoozed.' : 'That conversation is not snoozed.', 404);
+}
+
+/** Wake every snooze that is due; one row per person and conversation woken. */
+export async function wakeDueSnoozes(): Promise<Array<{ userId: string; threadId: string; subject: string }>> {
+  const { rows } = await getPool().query<{ user_id: string; thread_id: string; subject: string }>(
+    `WITH woken AS (
+       UPDATE mail_recipients SET folder = 'inbox', snoozed_until = NULL, is_read = false
+        WHERE folder = 'snoozed' AND snoozed_until <= now()
+        RETURNING user_id, thread_id
+     )
+     SELECT DISTINCT w.user_id, w.thread_id, COALESCE(t.subject, '(no subject)') AS subject
+       FROM woken w JOIN mail_threads t ON t.id = w.thread_id`,
+  );
+  return rows.map((r) => ({ userId: r.user_id, threadId: r.thread_id, subject: r.subject }));
+}
+
 /** Restore from Trash (C-08): received copies to the Inbox, the sender's to Sent. */
 export async function restoreThread(userId: string, threadId: string): Promise<void> {
   const { rowCount } = await getPool().query(

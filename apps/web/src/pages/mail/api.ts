@@ -38,6 +38,10 @@ export const getThread = (id: string) =>
 export const moveThread = (id: string, folder: MailFolder) =>
   apiPost(`/api/mail/threads/${id}/move`, { folder });
 
+/** Snooze until a time, or `null` to bring it back now (U-10). */
+export const snoozeThread = (id: string, until: Date | null) =>
+  apiPost(`/api/mail/threads/${id}/snooze`, { until: until ? until.toISOString() : null });
+
 export const starThread = (id: string, starred: boolean) =>
   apiPost(`/api/mail/threads/${id}/star`, { starred });
 

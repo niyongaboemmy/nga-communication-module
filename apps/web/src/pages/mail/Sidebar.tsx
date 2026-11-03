@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   Inbox, Star, Send, FileEdit, Clock, Archive, Trash2, Ban, PenSquare, Tag, Plus,
-  Users, LayoutTemplate, Megaphone, Settings, X, Pencil,
+  Users, LayoutTemplate, Megaphone, Settings, X, Pencil, AlarmClock,
 } from 'lucide-react';
 import { Button, UnreadBadge } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -24,6 +24,7 @@ interface Props {
 const FOLDERS: Array<{ key: MailFolder; label: string; icon: React.ElementType; countKey?: keyof MailboxCounts }> = [
   { key: 'inbox', label: 'Inbox', icon: Inbox, countKey: 'inbox' },
   { key: 'starred', label: 'Starred', icon: Star, countKey: 'starred' },
+  { key: 'snoozed', label: 'Snoozed', icon: AlarmClock },
   { key: 'sent', label: 'Sent', icon: Send },
   { key: 'drafts', label: 'Drafts', icon: FileEdit, countKey: 'drafts' },
   { key: 'scheduled', label: 'Scheduled', icon: Clock, countKey: 'scheduled' },

@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft, Reply, ReplyAll, Forward, Archive, Trash2, Star, Tag, MoreVertical,
   Paperclip, Download, ChevronDown, ChevronRight, BarChart3, Clock, X, Send, Edit3, Loader2,
-  Sparkles, ListChecks, CheckCircle2, RotateCcw, Inbox, Mail as MailIcon, Printer,
+  Sparkles, ListChecks, CheckCircle2, RotateCcw, Inbox, Mail as MailIcon, Printer, AlarmClock,
 } from 'lucide-react';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useNotify } from '../../context/NotificationContext';
@@ -176,6 +176,19 @@ const MessageCard: React.FC<{
  * <blockquote>s, and an "On … wrote:" line just above them. Returns the body
  * without them, and whether anything was hidden. Never hides a whole message.
  */
+/** Gmail's snooze choices, in local time. */
+function snoozeChoices(now = new Date()): Array<{ label: string; hint: string; at: Date }> {
+  const at = (days: number, hour: number) => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(hour, 0, 0, 0); return d; };
+  const fmt = (d: Date) => d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  const later = new Date(now.getTime() + 3 * 3_600_000);
+  const nextMonday = at(((8 - now.getDay()) % 7) || 7, 8);
+  return [
+    { label: 'Later today', hint: fmt(later), at: later },
+    { label: 'Tomorrow', hint: fmt(at(1, 8)), at: at(1, 8) },
+    { label: 'Next week', hint: fmt(nextMonday), at: nextMonday },
+  ];
+}
+
 function withoutTrailingQuote(html: string): { html: string; hidden: boolean } {
   if (typeof DOMParser === 'undefined' || !/<blockquote/i.test(html)) return { html, hidden: false };
   const doc = new DOMParser().parseFromString(`<div>${html}</div>`, 'text/html');
@@ -234,6 +247,7 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   // A long thread folds its middle into one "N older messages" bar (U-13):
   // the first message, then the bar, then the last two and anything open.
   const [showOlder, setShowOlder] = useState(false);
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
   useEffect(() => { setShowOlder(false); }, [threadId]);
   const [replyTo, setReplyTo] = useState<{ id: string; kind: MailMessageKind; initialBody?: string } | null>(null);
   const [delivery, setDelivery] = useState<string | null>(null);
@@ -297,6 +311,12 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   const hiddenCount = folded.length;
   const visibleMessages: Array<(typeof msgs)[number] | 'older'> = hiddenCount < 2 ? msgs
     : [msgs[0]!, 'older', ...msgs.slice(1).filter((m) => !folded.includes(m))];
+  /** Snooze (U-10): out of the Inbox until then; back unread, with a notification. */
+  const snooze = async (at: Date | null) => {
+    setSnoozeOpen(false);
+    await act(() => api.snoozeThread(threadId, at), true, undefined,
+      at ? `Snoozed until ${at.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : 'Back in the Inbox');
+  };
   const currentLabels = thread.labels;
   const where = thread.folder ?? 'inbox';
   // Optimistic (P-04): the tick changes at once. It used to wait, swallow a
@@ -385,6 +405,34 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
                 : where !== 'sent' && <IconButton label="Archive" size="sm" onClick={() => void act(() => api.moveThread(threadId, 'archive'), true, undefined, 'Archived')}><Archive size={16} /></IconButton>}
               <IconButton label="Delete" size="sm" onClick={() => void act(() => api.moveThread(threadId, 'trash'), true, undefined, 'Moved to Trash')}><Trash2 size={16} /></IconButton>
             </>
+          )}
+          {(where === 'inbox' || where === 'snoozed') && (
+            <div className="relative">
+              <IconButton label={where === 'snoozed' ? 'Snoozed' : 'Snooze'} size="sm" active={where === 'snoozed'} aria-expanded={snoozeOpen}
+                onClick={() => setSnoozeOpen((v) => !v)}><AlarmClock size={16} /></IconButton>
+              {snoozeOpen && (
+                <div role="menu" aria-label="Snooze until" className="absolute right-0 top-full z-10 mt-1 w-56 rounded-xl border border-border-light bg-white p-1 shadow-lg dark:border-border-dark dark:bg-elevated-dark">
+                  {snoozeChoices().map((c) => (
+                    <button key={c.label} role="menuitem" onClick={() => void snooze(c.at)}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-surface-light dark:hover:bg-surface-dark">
+                      <span>{c.label}</span><span className="text-xs text-text-secondary-light">{c.hint}</span>
+                    </button>
+                  ))}
+                  <label className="mt-1 flex items-center gap-2 border-t border-border-light px-2 pt-2 text-xs dark:border-border-dark/50">
+                    <span>Pick:</span>
+                    <input type="datetime-local" aria-label="Snooze until a date and time"
+                      onChange={(e) => { if (e.target.value) void snooze(new Date(e.target.value)); }}
+                      className="min-w-0 flex-1 rounded border border-border-light px-1 py-0.5 dark:border-border-dark dark:bg-elevated-dark" />
+                  </label>
+                  {where === 'snoozed' && (
+                    <button role="menuitem" onClick={() => void snooze(null)}
+                      className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-sm font-medium text-blue-600 hover:bg-surface-light dark:hover:bg-surface-dark">
+                      Unsnooze now
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           )}
           <IconButton label="Print" size="sm" onClick={() => window.print()} className="hidden sm:grid"><Printer size={16} /></IconButton>
         </div>

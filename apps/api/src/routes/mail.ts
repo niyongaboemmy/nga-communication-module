@@ -108,6 +108,15 @@ router.post('/threads/:id/move', authorizePermission('MAIL_READ'), wrap(async (r
   res.json(ok({ moved: true }));
 }));
 
+/** Snooze until a time, or `until: null` to bring it back now (U-10). */
+router.post('/threads/:id/snooze', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  const raw = req.body?.until;
+  const until = raw === null || raw === undefined ? null : new Date(String(raw));
+  await mail.snoozeThread(actor(req).id, req.params.id!, until);
+  countsChanged(actor(req).id);
+  res.json(ok({ snoozedUntil: until ? until.toISOString() : null }));
+}));
+
 router.post('/threads/:id/star', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.starThread(actor(req).id, req.params.id!, req.body?.starred !== false);
   countsChanged(actor(req).id);
