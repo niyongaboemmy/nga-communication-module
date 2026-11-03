@@ -125,7 +125,74 @@ export async function rateLimit(req: Request, res: Response, next: NextFunction)
   next();
 }
 
+/*
+ * Shared primitives for limits that live outside the bucket table (R-01).
+ *
+ * With more than one API process behind pm2, anything counted in a process's
+ * own memory is counted once per process: a limit of 10 becomes 20, and a
+ * token accepted "once" is accepted once per process. These keep the count in
+ * Redis, so every instance sees the same number, and fall back to this
+ * process's memory when Redis is unreachable (fail-open, as above).
+ */
+
+/** Bumped by the test resets, so a fresh suite never inherits Redis counts. */
+let epoch = `${process.pid}.0`;
+
+/**
+ * A sliding-window hit: how many times `subject` has hit `name` in the last
+ * `windowSec`, this one included. Sliding rather than fixed so a burst that
+ * straddles a window boundary is still one burst.
+ */
+export async function slidingHit(name: string, subject: string, windowSec: number): Promise<number> {
+  const key = `rls:${epoch}:${name}:${subject}`;
+  const now = Date.now();
+  try {
+    const r = await client();
+    if (!r) throw new Error('redis not ready');
+    const member = `${now}:${Math.random().toString(36).slice(2, 8)}`;
+    const res = await r.multi()
+      .zremrangebyscore(key, 0, now - windowSec * 1000)
+      .zadd(key, now, member)
+      .zcard(key)
+      .expire(key, windowSec + 5)
+      .exec();
+    return Number(res?.[2]?.[1] ?? 1);
+  } catch {
+    const times = (slidingLocal.get(key) ?? []).filter((t) => now - t < windowSec * 1000);
+    times.push(now);
+    slidingLocal.set(key, times);
+    if (slidingLocal.size > 10_000) {
+      for (const [k, v] of slidingLocal) if (v.every((t) => now - t >= windowSec * 1000)) slidingLocal.delete(k);
+    }
+    return times.length;
+  }
+}
+const slidingLocal = new Map<string, number[]>();
+
+/**
+ * True the first time `key` is claimed within `ttlSec`, across every instance:
+ * replay protection for one-time tokens (a logout token's jti, a sign-in code).
+ */
+export async function claimOnce(key: string, ttlSec: number): Promise<boolean> {
+  const k = `once:${epoch}:${key}`;
+  try {
+    const r = await client();
+    if (!r) throw new Error('redis not ready');
+    return (await r.set(k, '1', 'EX', Math.max(1, Math.ceil(ttlSec)), 'NX')) === 'OK';
+  } catch {
+    const now = Date.now();
+    for (const [x, exp] of onceLocal) if (exp < now) onceLocal.delete(x);
+    if (onceLocal.has(k)) return false;
+    onceLocal.set(k, now + ttlSec * 1000);
+    return true;
+  }
+}
+const onceLocal = new Map<string, number>();
+
 /** Tests only: forget every window. */
 export function __resetRateLimits(): void {
   local.clear();
+  slidingLocal.clear();
+  onceLocal.clear();
+  epoch = `${process.pid}.${Date.now()}`;
 }

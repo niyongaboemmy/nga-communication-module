@@ -17,6 +17,7 @@ import { getAccessSnapshot, noteAccessVersion } from '../access/snapshot.js';
 import { academicFromSnapshot, placementDiffers, syncAccessProfile } from '../access/profileSync.js';
 import { syncSubjectsFromMis } from '../services/subjectSync.js';
 import { recordShadowDiff } from '../access/shadow.js';
+import { slidingHit, claimOnce, __resetRateLimits } from '../middleware/rateLimit.js';
 import { upsertMisUser, audit, setUserAvatar, setUserCover, type MisAcademic } from '../services/userService.js';
 
 /**
@@ -83,30 +84,19 @@ const router = Router();
 
 /**
  * Sliding-window rate limiter on the token exchange, so authorization codes
- * cannot be brute-forced. In-memory is adequate because a code is only ever
- * valid at the one instance the user was redirected to; Redis-backed limiting
- * arrives with the rest of the rate-limit work in Phase 5.
+ * cannot be brute-forced. Counted in Redis (R-01): with two API instances an
+ * in-memory count would let each one allow its own 10.
  */
-const WINDOW_MS = 60_000;
+const WINDOW_SEC = 60;
 const MAX_ATTEMPTS = 10;
-const attempts = new Map<string, number[]>();
 
-function rateLimited(ip: string): boolean {
-  const now = Date.now();
-  const recent = (attempts.get(ip) ?? []).filter((t) => now - t < WINDOW_MS);
-  recent.push(now);
-  attempts.set(ip, recent);
-  if (attempts.size > 10_000) {
-    for (const [key, times] of attempts) {
-      if (times.every((t) => now - t >= WINDOW_MS)) attempts.delete(key);
-    }
-  }
-  return recent.length > MAX_ATTEMPTS;
+async function rateLimited(ip: string): Promise<boolean> {
+  return (await slidingHit('sso-exchange', `ip:${ip}`, WINDOW_SEC)) > MAX_ATTEMPTS;
 }
 
 /** Exposed for tests so one suite's attempts don't leak into the next. */
 export function __resetRateLimiter(): void {
-  attempts.clear();
+  __resetRateLimits();
 }
 
 /**
@@ -117,7 +107,7 @@ export function __resetRateLimiter(): void {
  * exactly as it does for TaskMentor and Discipline & Attendance.
  */
 router.post('/exchange', async (req: Request, res: Response) => {
-  if (rateLimited(req.ip ?? 'unknown')) {
+  if (await rateLimited(req.ip ?? 'unknown')) {
     return res.status(429).json(fail('Too many sign-in attempts. Please wait a minute and try again.'));
   }
 
@@ -283,10 +273,19 @@ export const __lastStatusRecheck = (): Promise<unknown> => lastStatusRecheck;
 router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: '20kb' }), async (req: Request, res: Response) => {
   res.set('Cache-Control', 'no-store');
   try {
-    const misUserId = await verifyLogoutToken((req.body || {}).logout_token, {
+    const logoutToken = (req.body || {}).logout_token;
+    const misUserId = await verifyLogoutToken(logoutToken, {
       misBaseUrl: config.misBaseUrl,
       clientId: config.ssoClientId,
     });
+    // The shared verifier remembers each jti in this process only. With more
+    // than one API instance a replay could reach the other one, so the token is
+    // also claimed once in Redis (R-01), until shortly after it expires.
+    const { jti, exp } = (jwt.decode(String(logoutToken)) ?? {}) as { jti?: string; exp?: number };
+    const ttl = Math.max(60, (Number(exp) || 0) - Math.floor(Date.now() / 1000) + 120);
+    if (!jti || !(await claimOnce(`logout-jti:${jti}`, ttl))) {
+      throw new LogoutTokenError('logout_token already used');
+    }
     const { rows } = await getPool().query<{ id: string }>(
       `INSERT INTO session_revocations (user_id, revoked_at)
          SELECT id, now() FROM users WHERE mis_user_id = $1

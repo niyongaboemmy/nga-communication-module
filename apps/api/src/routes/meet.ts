@@ -37,6 +37,7 @@ import { endMeetingEverywhere } from '../services/meetLifecycle.js';
 import { clearNotificationsAbout } from '../services/notificationSync.js';
 import { audit } from '../services/userService.js';
 import { activity } from '../activity/relay.js';
+import { slidingHit } from '../middleware/rateLimit.js';
 
 /**
  * Meet's REST surface (SRS §6.5).
@@ -60,20 +61,15 @@ const router = Router();
  * admitted from the lobby by a host. See middleware/meetAuth.ts.
  */
 
-/** Per-IP throttle. This route writes rows and is reachable by anyone. */
-const guestAttempts = new Map<string, { count: number; resetAt: number }>();
-const GUEST_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * Per-IP throttle. This route writes rows and is reachable by anyone. Counted
+ * in Redis so two API instances share one budget (R-01).
+ */
+const GUEST_WINDOW_SEC = 10 * 60;
 const GUEST_MAX_PER_WINDOW = 10;
 
-function guestRateLimited(ip: string): boolean {
-  const now = Date.now();
-  const entry = guestAttempts.get(ip);
-  if (!entry || entry.resetAt < now) {
-    guestAttempts.set(ip, { count: 1, resetAt: now + GUEST_WINDOW_MS });
-    return false;
-  }
-  entry.count += 1;
-  return entry.count > GUEST_MAX_PER_WINDOW;
+async function guestRateLimited(ip: string): Promise<boolean> {
+  return (await slidingHit('meet-guest-join', `ip:${ip}`, GUEST_WINDOW_SEC)) > GUEST_MAX_PER_WINDOW;
 }
 
 /** What a guest is told about a meeting *before* they commit to joining it. */
@@ -103,7 +99,7 @@ router.get('/:idOrCode/public', async (req: Request, res: Response) => {
 });
 
 router.post('/:idOrCode/guest', async (req: Request, res: Response) => {
-  if (guestRateLimited(req.ip ?? 'unknown')) {
+  if (await guestRateLimited(req.ip ?? 'unknown')) {
     return res.status(429).json(fail('Too many attempts. Please wait a few minutes.'));
   }
 
