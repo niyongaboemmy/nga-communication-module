@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { X, Search, Hash, MessageSquare, Paperclip, Filter } from 'lucide-react';
+import { X, Search, Hash, MessageSquare, Paperclip, Filter , CalendarDays } from 'lucide-react';
 import { Avatar, IconButton, Skeleton, EmptyState } from '../../components/ui';
 import { useChat } from './ChatProvider';
 import * as chatApi from './api';
@@ -30,6 +30,17 @@ export const SearchPanel: React.FC<{
   const [hits, setHits] = useState<chatApi.SearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [dateMiss, setDateMiss] = useState(false);
+  /** Local midnight of the picked day, then the existing jump to that message. */
+  const goToDate = async (day: string) => {
+    if (!scopedConversationId) return;
+    setDateMiss(false);
+    const [y, mo, d] = day.split('-').map(Number);
+    const id = await chatApi.messageAt(scopedConversationId, new Date(y!, mo! - 1, d!)).catch(() => null);
+    if (!id) { setDateMiss(true); return; }
+    onClose();
+    setTimeout(() => void jumpTo(id), 150);
+  };
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -96,6 +107,22 @@ export const SearchPanel: React.FC<{
             className="w-full rounded-lg border border-border-light bg-surface-light py-2 pl-9 pr-3 text-sm text-text-primary-light outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 dark:border-border-dark/50 dark:bg-elevated-dark/60 dark:text-text-primary-dark"
           />
         </div>
+
+        {/* Jump to a date in this conversation (FR-MSG-16). */}
+        {scopedConversationId && (
+          <label className="flex items-center gap-2 text-xs text-text-secondary-light dark:text-text-secondary-dark">
+            <CalendarDays size={14} aria-hidden="true" />
+            <span>Go to date</span>
+            <input
+              type="date"
+              aria-label="Go to date"
+              max={new Date().toISOString().slice(0, 10)}
+              onChange={(e) => { if (e.target.value) void goToDate(e.target.value); }}
+              className="rounded-md border border-border-light bg-surface-light px-2 py-1 text-xs dark:border-border-dark/50 dark:bg-elevated-dark/60"
+            />
+            {dateMiss && <span role="status" className="text-amber-600">Nothing on or after that day.</span>}
+          </label>
+        )}
 
         <div className="flex flex-wrap gap-1.5">
           {scopedConversationId && (

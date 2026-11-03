@@ -15,7 +15,7 @@ import { MentionAutocomplete, findMentionQuery } from './MentionAutocomplete';
 import type { MentionQuery } from './MentionAutocomplete';
 import * as chatApi from './api';
 import type { WireMember } from '@tupo/shared';
-import { VoiceRecorder, canRecordVoice } from './VoiceRecorder';
+import { VoiceRecorder, canRecordVoice, type VoiceRecorderControl } from './VoiceRecorder';
 import { formatBytes } from './data';
 import { parseSlashCommand, matchCommands } from './slashCommands';
 import { toDisplay, toWire, type MentionTarget } from './mentionText';
@@ -64,6 +64,51 @@ export const Composer: React.FC<{
   const [members, setMembers] = useState<WireMember[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const tray = useUploads();
+
+  /*
+   * Hold to record (U-02), as on WhatsApp — touch only; a click keeps the
+   * recorder bar. Hold the mic: it records. Release: it sends once uploaded.
+   * Slide left: discarded. Slide up: locked, and the bar's own buttons finish
+   * it. A tap too short to say anything is discarded with a hint.
+   */
+  const recorderControl = useRef<VoiceRecorderControl | null>(null);
+  const [holding, setHolding] = useState(false);
+  const holdGesture = useRef<{ x: number; y: number; id: number } | null>(null);
+  const holdSendRef = useRef(false);
+  const [sendWhenReady, setSendWhenReady] = useState(false);
+  const holdHandlers = {
+    onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
+      if (e.pointerType !== 'touch') return;
+      e.preventDefault();
+      // Keeps the slide on this button; refused for a pointer the browser no longer tracks.
+      try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch { /* the gesture still works */ }
+      holdGesture.current = { x: e.clientX, y: e.clientY, id: e.pointerId };
+      setHolding(true);
+      setRecording(true);
+      navigator.vibrate?.(10);
+    },
+    onPointerMove: (e: React.PointerEvent<HTMLButtonElement>) => {
+      const g = holdGesture.current;
+      if (!g || e.pointerId !== g.id) return;
+      if (e.clientX - g.x < -80) { holdGesture.current = null; setHolding(false); recorderControl.current?.cancel(); }
+      else if (e.clientY - g.y < -70) { holdGesture.current = null; setHolding(false); navigator.vibrate?.(8); }
+    },
+    onPointerUp: (e: React.PointerEvent<HTMLButtonElement>) => {
+      const g = holdGesture.current;
+      if (!g || e.pointerId !== g.id) return;
+      holdGesture.current = null;
+      setHolding(false);
+      if ((recorderControl.current?.elapsedMs() ?? 0) < 600) {
+        recorderControl.current?.cancel();
+        notify({ title: 'Hold to record, release to send', tone: 'info', durationMs: 2500, key: 'hold-to-record' });
+        return;
+      }
+      holdSendRef.current = true;
+      recorderControl.current?.stop();
+    },
+    onPointerCancel: () => { if (holdGesture.current) { holdGesture.current = null; setHolding(false); recorderControl.current?.cancel(); } },
+    onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
+  };
 
   /*
    * An upload in flight is worth announcing.
@@ -238,6 +283,14 @@ export const Composer: React.FC<{
         tray.clear();
     }
   }, [value, send, tray, conversation.id, setDraft, onOpenPanel, notify, navigate, members]);
+
+  // The held voice note goes as soon as its upload is done (U-02).
+  useEffect(() => {
+    if (!sendWhenReady || tray.busy) return;
+    if (tray.readyIds.length === 0) { setSendWhenReady(false); return; }
+    setSendWhenReady(false);
+    submit();
+  }, [sendWhenReady, tray.busy, tray.readyIds.length, submit]);
 
   /*
    * The slash list answers the keyboard (B-09): ↑/↓ move the highlight, Enter
@@ -480,9 +533,13 @@ export const Composer: React.FC<{
       {recording && (
         <div className="mb-1.5">
           <VoiceRecorder
-            onCancel={() => setRecording(false)}
+            controlRef={recorderControl}
+            holding={holding}
+            onCancel={() => { setRecording(false); setHolding(false); }}
             onDone={({ file, durationMs, waveform }) => {
               setRecording(false);
+              // Released after holding (U-02): it goes as soon as it has uploaded.
+              if (holdSendRef.current) { holdSendRef.current = false; setSendWhenReady(true); }
               // Straight into the tray, where it uploads like any attachment —
               // and is still cancellable before it is sent. The waveform comes
               // from the live analyser and cannot be recovered from the blob.
@@ -698,7 +755,9 @@ export const Composer: React.FC<{
             <Send size={17} />
           </button>
         ) : canRecordVoice() && can('FILE_UPLOAD') ? (
-          <IconButton label="Record a voice message" tooltipSide="top" onClick={() => setRecording(true)}>
+          <IconButton label="Record a voice message" tooltipSide="top"
+            onClick={() => { if (!holdGesture.current) setRecording(true); }}
+            {...holdHandlers}>
             <Mic size={18} />
           </IconButton>
         ) : null}

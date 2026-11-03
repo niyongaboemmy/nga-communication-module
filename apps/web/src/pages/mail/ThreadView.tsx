@@ -1,9 +1,9 @@
 import { SafeHtml, sanitizeHtml, escapeText } from '../../components/SafeHtml';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, Reply, ReplyAll, Forward, Archive, Trash2, Star, Tag, MoreVertical,
   Paperclip, Download, ChevronDown, ChevronRight, BarChart3, Clock, X, Send, Edit3, Loader2,
-  Sparkles, ListChecks, CheckCircle2, RotateCcw, Inbox, Mail as MailIcon, Printer,
+  Sparkles, ListChecks, CheckCircle2, RotateCcw, Inbox, Mail as MailIcon, Printer, AlarmClock,
 } from 'lucide-react';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useNotify } from '../../context/NotificationContext';
@@ -85,6 +85,8 @@ const MessageCard: React.FC<{
   message: MailMessageView; myUserId: string; expanded: boolean; onToggle: () => void;
   onReply: (k: MailMessageKind) => void; onDelivery: () => void; onEditDraft: () => void; onChanged: () => void;
 }> = ({ message, myUserId, expanded, onToggle, onReply, onDelivery, onEditDraft, onChanged }) => {
+  const [showQuoted, setShowQuoted] = useState(false);
+  const quote = useMemo(() => withoutTrailingQuote(message.bodyHtml), [message.bodyHtml]);
   const isMine = message.from.userId === myUserId;
   // Reply and forward only for those who can send (C-12): the buttons used to
   // show for everyone and fail on press.
@@ -120,9 +122,18 @@ const MessageCard: React.FC<{
         <div className="px-3 pb-3">
           <SafeHtml
             className="tupo-prose max-w-none border-t border-border-light pt-3 dark:border-border-dark/40"
-            html={message.bodyHtml}
+            html={showQuoted || !quote.hidden ? message.bodyHtml : quote.html}
             fallback='<p class="text-text-secondary-light">(no content)</p>'
           />
+          {/* Gmail's "•••" (U-13): the earlier messages a reply quotes are in
+              the thread already; hidden until asked for. */}
+          {quote.hidden && (
+            <button onClick={() => setShowQuoted((v) => !v)} aria-expanded={showQuoted}
+              aria-label={showQuoted ? 'Hide quoted text' : 'Show quoted text'}
+              className="mt-1 rounded-md bg-surface-light px-2 py-0.5 text-xs font-bold tracking-widest text-text-secondary-light hover:bg-slate-200 dark:bg-surface-dark dark:hover:bg-slate-700">
+              •••
+            </button>
+          )}
 
           {message.attachments.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
@@ -160,6 +171,53 @@ const MessageCard: React.FC<{
   );
 };
 
+/**
+ * A reply's quote of the messages before it (U-13): the trailing top-level
+ * <blockquote>s, and an "On … wrote:" line just above them. Returns the body
+ * without them, and whether anything was hidden. Never hides a whole message.
+ */
+/** Gmail's snooze choices, in local time. */
+function snoozeChoices(now = new Date()): Array<{ label: string; hint: string; at: Date }> {
+  const at = (days: number, hour: number) => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(hour, 0, 0, 0); return d; };
+  const fmt = (d: Date) => d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  const later = new Date(now.getTime() + 3 * 3_600_000);
+  const nextMonday = at(((8 - now.getDay()) % 7) || 7, 8);
+  return [
+    { label: 'Later today', hint: fmt(later), at: later },
+    { label: 'Tomorrow', hint: fmt(at(1, 8)), at: at(1, 8) },
+    { label: 'Next week', hint: fmt(nextMonday), at: nextMonday },
+  ];
+}
+
+function withoutTrailingQuote(html: string): { html: string; hidden: boolean } {
+  if (typeof DOMParser === 'undefined' || !/<blockquote/i.test(html)) return { html, hidden: false };
+  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, 'text/html');
+  const root = doc.body.firstElementChild as HTMLElement | null;
+  if (!root) return { html, hidden: false };
+  const isBlank = (n: ChildNode) => n.nodeType === 3 ? !n.textContent?.trim()
+    : n.nodeType === 1 && !(n as Element).textContent?.trim() && !(n as Element).querySelector('img');
+  // The quote may sit inside wrapper elements (an editor's <div>, a mail
+  // client's container): look in the last one that is not itself the quote.
+  let box: Element = root;
+  for (;;) {
+    let tail = box.lastElementChild;
+    while (box.lastChild && isBlank(box.lastChild)) box.lastChild.remove();
+    tail = box.lastElementChild;
+    if (tail && /^(DIV|SECTION|ARTICLE)$/.test(tail.tagName) && box.lastChild === tail) { box = tail; continue; }
+    break;
+  }
+  let removed = false;
+  for (;;) {
+    let last = box.lastChild;
+    while (last && isBlank(last)) { last.remove(); last = box.lastChild; }
+    if (last && last.nodeType === 1 && (last as Element).tagName === 'BLOCKQUOTE') { last.remove(); removed = true; continue; }
+    if (removed && last && /wrote:\s*$/i.test(last.textContent ?? '')) last.remove();
+    break;
+  }
+  if (!removed || !root.textContent?.trim()) return { html, hidden: false };
+  return { html: root.innerHTML, hidden: true };
+}
+
 export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack, onChanged, onCompose }) => {
   const [thread, setThread] = useState<MailThreadView | null>(null);
   const [starred, setStarred] = useState(false);
@@ -186,6 +244,11 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   };
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // A long thread folds its middle into one "N older messages" bar (U-13):
+  // the first message, then the bar, then the last two and anything open.
+  const [showOlder, setShowOlder] = useState(false);
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
+  useEffect(() => { setShowOlder(false); }, [threadId]);
   const [replyTo, setReplyTo] = useState<{ id: string; kind: MailMessageKind; initialBody?: string } | null>(null);
   const [delivery, setDelivery] = useState<string | null>(null);
   const [showLabels, setShowLabels] = useState(false);
@@ -241,6 +304,19 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
   if (loading) return <div className="grid h-full place-items-center"><Spinner /></div>;
   if (!thread) return <EmptyState title="Thread not found" hint="It may have been deleted." />;
 
+  const msgs = thread.messages;
+  const folded = !showOlder && msgs.length > 4
+    ? msgs.slice(1, -2).filter((m) => !expanded.has(m.id))
+    : [];
+  const hiddenCount = folded.length;
+  const visibleMessages: Array<(typeof msgs)[number] | 'older'> = hiddenCount < 2 ? msgs
+    : [msgs[0]!, 'older', ...msgs.slice(1).filter((m) => !folded.includes(m))];
+  /** Snooze (U-10): out of the Inbox until then; back unread, with a notification. */
+  const snooze = async (at: Date | null) => {
+    setSnoozeOpen(false);
+    await act(() => api.snoozeThread(threadId, at), true, undefined,
+      at ? `Snoozed until ${at.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : 'Back in the Inbox');
+  };
   const currentLabels = thread.labels;
   const where = thread.folder ?? 'inbox';
   // Optimistic (P-04): the tick changes at once. It used to wait, swallow a
@@ -330,6 +406,34 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
               <IconButton label="Delete" size="sm" onClick={() => void act(() => api.moveThread(threadId, 'trash'), true, undefined, 'Moved to Trash')}><Trash2 size={16} /></IconButton>
             </>
           )}
+          {(where === 'inbox' || where === 'snoozed') && (
+            <div className="relative">
+              <IconButton label={where === 'snoozed' ? 'Snoozed' : 'Snooze'} size="sm" active={where === 'snoozed'} aria-expanded={snoozeOpen}
+                onClick={() => setSnoozeOpen((v) => !v)}><AlarmClock size={16} /></IconButton>
+              {snoozeOpen && (
+                <div role="menu" aria-label="Snooze until" className="absolute right-0 top-full z-10 mt-1 w-56 rounded-xl border border-border-light bg-white p-1 shadow-lg dark:border-border-dark dark:bg-elevated-dark">
+                  {snoozeChoices().map((c) => (
+                    <button key={c.label} role="menuitem" onClick={() => void snooze(c.at)}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-surface-light dark:hover:bg-surface-dark">
+                      <span>{c.label}</span><span className="text-xs text-text-secondary-light">{c.hint}</span>
+                    </button>
+                  ))}
+                  <label className="mt-1 flex items-center gap-2 border-t border-border-light px-2 pt-2 text-xs dark:border-border-dark/50">
+                    <span>Pick:</span>
+                    <input type="datetime-local" aria-label="Snooze until a date and time"
+                      onChange={(e) => { if (e.target.value) void snooze(new Date(e.target.value)); }}
+                      className="min-w-0 flex-1 rounded border border-border-light px-1 py-0.5 dark:border-border-dark dark:bg-elevated-dark" />
+                  </label>
+                  {where === 'snoozed' && (
+                    <button role="menuitem" onClick={() => void snooze(null)}
+                      className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-sm font-medium text-blue-600 hover:bg-surface-light dark:hover:bg-surface-dark">
+                      Unsnooze now
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <IconButton label="Print" size="sm" onClick={() => window.print()} className="hidden sm:grid"><Printer size={16} /></IconButton>
         </div>
       </div>
@@ -388,7 +492,14 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
           </div>
         )}
 
-        {thread.messages.map((m) => (
+        {visibleMessages.map((m) => m === 'older' ? (
+          <button key="older" onClick={() => setShowOlder(true)}
+            className="flex w-full items-center gap-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-400">
+            <span className="h-px flex-1 bg-border-light dark:bg-border-dark/50" />
+            <span className="rounded-full border border-border-light px-3 py-1 dark:border-border-dark/60">{hiddenCount} older messages</span>
+            <span className="h-px flex-1 bg-border-light dark:bg-border-dark/50" />
+          </button>
+        ) : (
           <React.Fragment key={m.id}>
             <MessageCard
               message={m}

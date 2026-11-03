@@ -388,20 +388,20 @@ Found and fixed while testing M2: with local-first, "load older" could run on th
 | N-01 to N-04 | ✅ (`09828b2`) | Push respects Do not disturb; repeats stack into "N new messages"; "Mark as read" from the notification; read here or on another device clears it; app-icon badge from push. `verify:push-ui` 8/8 in full headless Chrome; push tests 6/6. |
 | N-06, N-07 | ✅ Already in place | Dead subscriptions removed (F-04); Settings explains "blocked" and the iPhone Home Screen requirement. |
 
-### M4: Feels familiar (in progress)
+### M4: Feels familiar (complete; first part live 3 Nov in PR #38, the rest in the next release)
 
 | ID | Status | Evidence |
 |---|---|---|
-| U-10 | ✅ (`90bcc7f`) | Undo send (6 s hold, reopen as written, sent anyway if Mail or the page is left) and Gmail keys (`c ? j k e # s u / r a f`). `verify:mail:power` 11/11: undone means nothing delivered, held means delivered exactly once. Snooze is not done; it needs a server-side folder rule. |
-| U-04 (part) | ✅ (`6c3e66f`) | **Bug fixed:** after jumping to an old message the log was a dead end, with newer messages unreachable without reopening the conversation. Now there is load-newer at the bottom, "Jump to latest" fetches the newest page, and live messages do not land in an old window. Still to do: message info (per-member read times) and jump-to-date. |
+| U-10 | ✅ (`90bcc7f`, `1143124`) | Undo send, Gmail keys and **snooze**: a Snoozed folder, Later today, Tomorrow, Next week or a picked time; it comes back unread with a notification (migration 0045). `verify:mail:power` 18/18. |
+| U-04 | ✅ (`6c3e66f`, `9a07f3c`, message info) | **Bug fixed:** after jumping to an old message the log was a dead end, with newer messages unreachable without reopening the conversation. Now there is load-newer at the bottom, "Jump to latest" fetches the newest page, and live messages do not land in an old window (the tail is no longer followed there). **Message info:** Read, Delivered and Not yet per member, with times, sender only, with reciprocity. **Go to date:** in the conversation's search panel. |
 | U-01 | ✅ (`6c3e66f`) | Swipe a message right to reply; long-press for the actions menu with quick reactions (phones had none). `verify:chat:touch` on a Pixel 7. Swiping a conversation row is not done; long-press already opens the same menu. |
 | U-03 | ✅ (`e6957df`) | Swipe between pictures and double-tap zoom in the chat viewer. `verify:chat:touch` 13/13. The full-screen multi-image send preview is not done. |
 | U-20, U-21, U-23 | ✅ (`7674c6f`) | Feed pull-to-refresh, in-view muted video autoplay (honours reduced motion and Save-Data), and the reaction picker by keyboard. `verify:feed:touch` 6/6. Also fixed an offline race where an error covered the device copy (mail and feed). |
 | N-05 | ✅ (`6e14496`) | Calls ring: incoming-call screen, Accept and Decline, missed-call notice, server-written ring flag. `verify:calls` 8/8 with two browsers. |
-| U-33 | ✅ (`8323448`) | Speaker view by default on phones; the grid is paged (4 on a phone, 16 elsewhere). The phone viewport is not browser-tested. Picture-in-picture is not done (browsers require a user gesture). |
+| U-33 | ✅ (`8323448`, `db8186f`) | Speaker view by default on phones; the grid is paged (4 on a phone, 16 elsewhere); a **Pop out the video** (picture-in-picture) control. `verify:calls` 10/10. The phone viewport is not browser-tested for the layout default. |
 | U-06 | ✅ Already in place | The DM header shows online, last seen and typing. |
-| U-02 | ⬜ Not started | Hold-to-record, slide-to-cancel and lock for voice notes. The waveform and playback speed already exist. |
-| U-13 | ⬜ Not started | Gmail-style collapsed conversation view. |
+| U-02 | ✅ (`e1c83ad`) | Hold to record, release to send, slide left to cancel, slide up to lock; a too-short tap shows a hint. `verify:chat:touch` 18/18 with a fake microphone. |
+| U-13 | ✅ (`42a8080`) | A long thread folds into "N older messages"; quoted text is hidden behind •••. `verify:mail:power`. |
 
 Also in M4 (`40996a1`): coming back online now reconnects the socket by hand at once. Before, Socket.IO's backoff (or a drop it had not noticed) left live updates frozen for seconds after the catch-up. Overlapping conversation-list refreshes now apply only the newest answer. Both were found by the full regression.
 

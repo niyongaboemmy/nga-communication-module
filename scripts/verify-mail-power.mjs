@@ -124,6 +124,43 @@ try {
   await sleep(1_500);
   const folders = (await pool.query(`SELECT array_agg(DISTINCT r.folder) AS f FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id WHERE r.user_id = $1 AND m.subject = ANY($2)`, [ben.id, [leaving, undone]])).rows[0].f;
   check('e archives it', (folders ?? []).includes('archive'), JSON.stringify(folders));
+
+  console.log('\nA long conversation, like Gmail');
+  const api = async (u, body) => (await fetch(`${API}/api/mail/compose`, { method: 'POST', headers: { authorization: `Bearer ${u.token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const subjectLong = `Long thread ${tag}`;
+  let r = await api(me, { to: [`userId:${ben.id}`], subject: subjectLong, bodyHtml: '<p>message 1</p>' });
+  const threadId = r.data.threadId; let parentId = r.data.messageId;
+  for (let i = 2; i <= 6; i++) {
+    const quoted = i === 6 ? `<p>On Monday, Mo wrote:</p><blockquote><p>the quoted words ${tag}</p></blockquote>` : '';
+    r = await api(me, { to: [`userId:${ben.id}`], subject: `Re: ${subjectLong}`, bodyHtml: `<p>message ${i}</p>${quoted}`, threadId, parentId, kind: 'reply' });
+    parentId = r.data.messageId;
+  }
+  await bp.goto(`${BASE}/app/mail/t/${threadId}`);
+  await bp.getByText('message 6').first().waitFor({ timeout: 15_000 });
+  check('the middle of a long thread folds into "older messages"', await bp.getByRole('button', { name: /3 older messages/ }).isVisible().catch(() => false));
+  // In the message bodies only: the mailbox list beside it previews the text.
+  const bodies = bp.locator('.tupo-prose');
+  check('the quoted earlier text is hidden behind •••', !(await bodies.getByText(`the quoted words ${tag}`).isVisible().catch(() => false))
+    && await bp.getByRole('button', { name: 'Show quoted text' }).isVisible().catch(() => false));
+  await bp.getByRole('button', { name: 'Show quoted text' }).click();
+  check('and shown when asked for', await bodies.getByText(`the quoted words ${tag}`).isVisible().catch(() => false));
+  await bp.getByRole('button', { name: /3 older messages/ }).click();
+  check('the folded messages open from the bar', await bp.getByText('message 3').first().isVisible().catch(() => false));
+
+  console.log('\nSnooze');
+  await bp.goto(`${BASE}/app/mail/t/${threadId}`);
+  await bp.getByRole('button', { name: 'Snooze', exact: true }).click();
+  await bp.getByRole('menuitem', { name: /^Tomorrow/ }).click();
+  const inboxRow = bp.locator('li').filter({ hasText: subjectLong });
+  await bp.waitForTimeout(1_500);
+  const folderOf = async () => (await pool.query(`SELECT array_agg(DISTINCT folder) AS f FROM mail_recipients WHERE thread_id = $1 AND user_id = $2`, [threadId, ben.id])).rows[0].f;
+  check('snoozing for tomorrow takes it out of the Inbox', JSON.stringify(await folderOf()) === '["snoozed"]', JSON.stringify(await folderOf()));
+  await bp.goto(`${BASE}/app/mail?folder=snoozed`);
+  check('it waits in Snoozed', await inboxRow.first().waitFor({ timeout: 8_000 }).then(() => true).catch(() => false));
+  await inboxRow.first().hover();
+  await inboxRow.first().getByRole('button', { name: 'Unsnooze' }).first().click();
+  await bp.waitForTimeout(1_500);
+  check('and Unsnooze brings it straight back', JSON.stringify(await folderOf()) === '["inbox"]', JSON.stringify(await folderOf()));
   await benCtx.close();
 } catch (err) {
   check('suite ran to completion', false, err?.message ?? String(err));

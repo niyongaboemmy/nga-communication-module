@@ -78,6 +78,20 @@ try {
   await ringScreen.getByRole('button', { name: 'Accept' }).click();
   check('Accept takes them into the same meeting', await calleePage.waitForURL(new RegExp(`/app/meet/${meetingId}`), { timeout: 8_000 }).then(() => true).catch(() => false));
 
+  console.log('\nPicture-in-picture');
+  // The caller passes the device check first.
+  await callerPage.getByRole('button', { name: 'Join now' }).click({ timeout: 15_000 }).catch(() => {});
+  const pop = callerPage.getByRole('button', { name: 'Pop out the video' });
+  if (await pop.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false)) {
+    await callerPage.waitForFunction(() => document.querySelector('video[data-meet-video]')?.readyState >= 2, null, { timeout: 15_000 }).catch(() => {});
+    await pop.click();
+    check('"Pop out the video" floats it over other apps', await callerPage.waitForFunction(() => Boolean(document.pictureInPictureElement), null, { timeout: 5_000 }).then(() => true).catch(() => false));
+    await callerPage.getByRole('button', { name: 'Return the video to the meeting' }).click();
+    check('and pressing again returns it', await callerPage.waitForFunction(() => !document.pictureInPictureElement, null, { timeout: 5_000 }).then(() => true).catch(() => false));
+  } else {
+    check('the meeting offers "Pop out the video"', false, 'control not found');
+  }
+
   console.log('\nDecline');
   await calleePage.goto(`${BASE}/app/feed`);
   await calleePage.waitForTimeout(1_500);

@@ -1418,6 +1418,63 @@ export async function receiptUpdatesFor(conversationId: string, messageIds: stri
   });
 }
 
+/**
+ * "Message info" (U-04): for the sender of one message, each other member and
+ * how far it got — read, delivered (on a device) or sent — with the time.
+ * Only the sender may ask, and only while their own read receipts are on
+ * (reciprocity, FR-MSG-13): someone who hides their reads sees no one else's.
+ */
+export interface MessageInfoEntry {
+  userId: string; name: string; avatarUrl: string | null;
+  state: 'read' | 'delivered' | 'sent'; at: string | null;
+}
+export async function messageInfo(viewerId: string, conversationId: string, messageId: string): Promise<MessageInfoEntry[]> {
+  const { rows: msg } = await getPool().query<{ sender_id: string; created_at: Date }>(
+    'SELECT sender_id, created_at FROM messages WHERE conversation_id = $1 AND id = $2 AND deleted_at IS NULL',
+    [conversationId, messageId]);
+  if (!msg[0]) throw new ChatError('Message not found.', 404);
+  if (msg[0].sender_id !== viewerId) throw new ChatError('Only the sender can see who has read a message.', 403);
+  if (!(await receiptsVisibleTo(viewerId))) {
+    throw new ChatError('Turn your own read receipts on to see who has read your messages.', 403);
+  }
+  const { rows } = await getPool().query<{
+    user_id: string; name: string; avatar_url: string | null; state: string | null; at: Date | null;
+  }>(
+    `SELECT m.user_id, u.name, u.avatar_url, r.state, r.at
+       FROM conversation_members m
+       JOIN users u ON u.id = m.user_id
+       LEFT JOIN message_receipts r ON r.message_id = $2 AND r.user_id = m.user_id
+      WHERE m.conversation_id = $1 AND m.user_id <> $3
+        AND m.left_at IS NULL AND m.joined_at <= $4
+      ORDER BY CASE r.state WHEN 'read' THEN 0 WHEN 'delivered' THEN 1 ELSE 2 END, r.at DESC NULLS LAST, u.name`,
+    [conversationId, messageId, viewerId, msg[0].created_at],
+  );
+  return rows.map((r) => ({
+    userId: r.user_id, name: r.name, avatarUrl: r.avatar_url,
+    state: r.state === 'read' ? 'read' : r.state === 'delivered' ? 'delivered' : 'sent',
+    at: r.at ? r.at.toISOString() : null,
+  }));
+}
+
+/**
+ * Jump to a date (FR-MSG-16): the first message of the main flow at or after
+ * `at`, or, if the conversation has nothing that late, the last one before it.
+ */
+export async function messageAt(conversationId: string, at: Date): Promise<string | null> {
+  const { rows } = await getPool().query<{ id: string }>(
+    `(SELECT id, 0 AS pref, seq FROM messages
+        WHERE conversation_id = $1 AND created_at >= $2 AND thread_root_id IS NULL AND deleted_at IS NULL
+        ORDER BY seq ASC LIMIT 1)
+     UNION ALL
+     (SELECT id, 1 AS pref, seq FROM messages
+        WHERE conversation_id = $1 AND created_at < $2 AND thread_root_id IS NULL AND deleted_at IS NULL
+        ORDER BY seq DESC LIMIT 1)
+     ORDER BY pref LIMIT 1`,
+    [conversationId, at],
+  );
+  return rows[0]?.id ?? null;
+}
+
 export async function receiptsVisibleTo(userId: string): Promise<boolean> {
   const { rows } = await getPool().query<{ read_receipts: boolean }>(
     'SELECT read_receipts FROM user_chat_prefs WHERE user_id = $1', [userId]);

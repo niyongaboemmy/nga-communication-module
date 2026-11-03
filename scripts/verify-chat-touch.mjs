@@ -59,7 +59,7 @@ try {
   for (let i = 0; i < 120; i++) {
     sent.push((await chat.sendMessage({ conversationId: convId, senderId: other.id, body: `line ${String(i).padStart(3, '0')}`, nonce: `t-${i}-${tag}` })).message);
   }
-  browser = prepareBrowser(await chromium.launch());
+  browser = prepareBrowser(await chromium.launch({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] }));
 
   console.log('\nAfter a jump into the past');
   const desk = await (await contextFor(browser, me, false)).newPage();
@@ -82,6 +82,32 @@ try {
   }
   check('scrolling down keeps loading what came after, to the end', await log.getByText('line 119').first().isVisible().catch(() => false));
   check('and then "Jump to latest" goes away', !(await latestBtn.isVisible().catch(() => false)));
+
+  console.log('\nGo to date');
+  await pool.query(`UPDATE messages SET created_at = '2026-09-01T08:00:00Z' WHERE conversation_id = $1 AND body = ANY($2)`,
+    [convId, Array.from({ length: 10 }, (_, i) => `line ${String(i).padStart(3, '0')}`)]);
+  await desk.goto(`${BASE}/app/chat?c=${convId}&panel=search`);
+  const dateInput = desk.getByLabel('Go to date');
+  await dateInput.waitFor({ timeout: 10_000 });
+  await dateInput.fill('2026-09-01');
+  check('picking a day opens the conversation at that day',
+    await log.getByText('line 000').first().waitFor({ timeout: 8_000 }).then(() => true).catch(() => false)
+    && !(await log.getByText('line 119').first().isVisible().catch(() => false)));
+
+  console.log('\nMessage info');
+  const mineMsg = (await (await fetch(`${API}/api/chat/conversations/${convId}/messages`, { method: 'POST', headers: { authorization: `Bearer ${me.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ body: `did you read this ${tag}`, nonce: `info-${tag}` }) })).json()).data.message;
+  await fetch(`${API}/api/chat/conversations/${convId}/read`, { method: 'POST', headers: { authorization: `Bearer ${other.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ seq: mineMsg.seq }) });
+  await desk.goto(`${BASE}/app/chat?c=${convId}`);
+  const mineRow = desk.locator('li[data-message-row]').filter({ hasText: `did you read this ${tag}` }).first();
+  await mineRow.waitFor({ timeout: 10_000 });
+  await mineRow.hover();
+  await mineRow.getByRole('button', { name: 'More actions' }).click();
+  await desk.getByRole('menuitem', { name: 'Message info' }).click();
+  const info = desk.getByRole('dialog', { name: 'Message info' });
+  check('"Message info" on my message shows who has read it',
+    await info.getByText('Read by 1 of 1').waitFor({ timeout: 5_000 }).then(() => true).catch(() => false)
+    && await info.getByText(/Uma Other/).isVisible().catch(() => false));
+  await desk.keyboard.press('Escape');
 
   console.log('\nOn a phone');
   const phone = await (await contextFor(browser, me, true)).newPage();
@@ -141,6 +167,34 @@ try {
   await img.click(); await img.click();
   check('and another zooms back out', (await img.getAttribute('data-zoomed')) === 'false');
   await pool.query('DELETE FROM files WHERE id = ANY($1)', [fileIds]).catch(() => {});
+  await phone.keyboard.press('Escape');
+
+  console.log('\nVoice notes on a phone');
+  await phone.context().grantPermissions(['microphone'], { origin: BASE });
+  await phone.goto(`${BASE}/app/chat?c=${convId}`);
+  const mic = phone.getByRole('button', { name: 'Record a voice message' });
+  await mic.waitFor({ timeout: 15_000 });
+  const voiceCount = async () => Number((await pool.query(
+    `SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1 AND sender_id = $2 AND attachments::text LIKE '%audio/%'`, [convId, me.id])).rows[0].n);
+  const hold = (ms, moves = []) => mic.evaluate(async (el, a) => {
+    const r = el.getBoundingClientRect(); const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    const ev = (type, dx = 0, dy = 0) => el.dispatchEvent(new PointerEvent(type, { clientX: x + dx, clientY: y + dy, pointerId: 11, pointerType: 'touch', bubbles: true, cancelable: true }));
+    ev('pointerdown');
+    await new Promise((res) => setTimeout(res, a.ms));
+    for (const [dx, dy] of a.moves) ev('pointermove', dx, dy);
+    ev('pointerup', a.moves.at(-1)?.[0] ?? 0, a.moves.at(-1)?.[1] ?? 0);
+  }, { ms, moves });
+  const before = await voiceCount();
+  await hold(1_800);
+  let voiceSent = before;
+  for (let i = 0; i < 20 && voiceSent === before; i++) { await sleep(500); voiceSent = await voiceCount(); }
+  check('holding the mic records, and releasing sends the voice note', voiceSent === before + 1, `${voiceSent - before} sent`);
+  await hold(1_200, [[-40, 0], [-120, 0]]);
+  await sleep(3_000);
+  check('sliding left discards it', (await voiceCount()) === voiceSent);
+  await hold(150);
+  check('a quick tap only explains how', await phone.getByText('Hold to record, release to send').first().waitFor({ timeout: 3_000 }).then(() => true).catch(() => false)
+    && (await voiceCount()) === voiceSent);
 } catch (err) {
   check('suite ran to completion', false, err?.message ?? String(err));
 } finally {

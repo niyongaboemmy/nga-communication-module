@@ -600,6 +600,24 @@ async function fanOutNewMessage(
   }
 }
 
+/** The message to open for a date (FR-MSG-16): ?at=<ISO time>, usually that day's local midnight. */
+router.get('/conversations/:id/messages/at', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  const id = req.params.id!;
+  await chat.requireMembership(me.id, id);
+  const at = new Date(String(req.query.at ?? ''));
+  if (Number.isNaN(at.getTime())) return res.status(400).json(fail('A valid date is required.'));
+  res.json(ok({ messageId: await chat.messageAt(id, at) }));
+}));
+
+/** Who has read one of my messages, and when (U-04). */
+router.get('/conversations/:id/messages/:messageId/info', authorizePermission('MESSAGE_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, messageId } = req.params as { id: string; messageId: string };
+  await chat.requireMembership(me.id, id);
+  res.json(ok({ members: await chat.messageInfo(me.id, id, messageId) }));
+}));
+
 router.post('/conversations/:id/read', wrap(async (req, res) => {
   const me = actor(req);
   const id = req.params.id!;

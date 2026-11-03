@@ -33,6 +33,7 @@ const ICONS: Record<string, { icon: typeof Bell; tone: string }> = {
   'chat.reaction': { icon: Heart, tone: 'bg-pink-100 text-pink-600 dark:bg-pink-500/15 dark:text-pink-300' },
   'chat.invited': { icon: MessagesSquare, tone: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300' },
   'mail.received': { icon: Mail, tone: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300' },
+  'mail.snoozed': { icon: Mail, tone: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300' },
   'mail.campaign': { icon: Mail, tone: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300' },
   'feed.announcement': { icon: Megaphone, tone: 'bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300' },
   'feed.published': { icon: Newspaper, tone: 'bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300' },

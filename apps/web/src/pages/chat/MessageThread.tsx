@@ -34,6 +34,7 @@ import { useVirtualWindow } from './useVirtualWindow';
 import type { MeetMessageMetadata } from './MeetCard';
 import { QUICK_REACTIONS, EDIT_WINDOW_MS, PRESENCE_REFRESH_MS } from '@tupo/shared';
 import { useTouchGestures } from '../../hooks/useTouchGestures';
+import { MessageInfoDialog } from './MessageInfoDialog';
 
 /**
  * The message pane: header, scrollback, composer slot.
@@ -240,6 +241,7 @@ const MessageRow: React.FC<{
   }, 'Could not copy', done);
   const newReplies = threadUnread[m.id] ?? 0;
   const [reporting, setReporting] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
   // The card behind every avatar: who this is, message them, block, report.
   const [profileOpen, setProfileOpen] = useState(false);
   // A message from someone you blocked is folded away until you ask (B-05).
@@ -734,6 +736,15 @@ const MessageRow: React.FC<{
                     <Mail size={13} /> Mark unread from here
                   </button>
                 )}
+                {mine && m.seq > 0 && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); setInfoOpen(true); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
+                  >
+                    <Info size={13} /> Message info
+                  </button>
+                )}
                 {!mine && (
                   <button
                     role="menuitem"
@@ -755,6 +766,7 @@ const MessageRow: React.FC<{
       )}
 
       {forwarding && <ForwardDialog message={m} onClose={() => setForwarding(false)} />}
+      {infoOpen && <MessageInfoDialog conversationId={m.conversationId} messageId={m.id} onClose={() => setInfoOpen(false)} />}
       {reporting && (
         <ReportDialog
           user={{ id: m.senderId, name: m.senderName }}
@@ -828,9 +840,12 @@ export const MessageThread: React.FC<{
     [messages, conversation.lastReadSeq, user?.id],
   );
 
-  // UX-2: only follow the tail when the reader is already at it.
+  // UX-2: only follow the tail when the reader is already at it — and it is
+  // the real tail. Reading an old window after a jump (U-04), the bottom is
+  // just where "load newer" appends; following it would chain every page in
+  // and lose the place the jump was for.
   useLayoutEffect(() => {
-    if (atBottom) bottomRef.current?.scrollIntoView({ block: 'end' });
+    if (atBottom && !hasNewer) bottomRef.current?.scrollIntoView({ block: 'end' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, conversation.id]);
 

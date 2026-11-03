@@ -188,6 +188,10 @@ export const MailList: React.FC<Props> = ({
       list.push({ key: 'trash', label: 'Delete', icon: <Trash2 size={15} />, run: (id) => api.moveThread(id, 'trash'), done: 'Moved to Trash', change: leaves });
       return list;
     }
+    if (folder === 'snoozed') {
+      list.push({ key: 'unsnooze', label: 'Unsnooze', icon: <Inbox size={15} />, run: (id) => api.snoozeThread(id, null), done: 'Back in the Inbox', change: 'leave' });
+      return list;
+    }
     if (folder === 'archive') list.push({ key: 'inbox', label: 'Move to Inbox', icon: <Inbox size={15} />, run: (id) => api.moveThread(id, 'inbox'), done: 'Moved to the Inbox', change: leaves });
     else if (!senderView) list.push({ key: 'archive', label: 'Archive', icon: <Archive size={15} />, run: (id) => api.moveThread(id, 'archive'), done: 'Archived', change: leaves });
     if (folder !== 'drafts' && folder !== 'scheduled') {

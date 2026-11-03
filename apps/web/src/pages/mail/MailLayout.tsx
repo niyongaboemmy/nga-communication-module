@@ -36,7 +36,7 @@ export const MailLayout: React.FC = () => {
   // Folder and label live in the address (C-11): a reload, a shared link or
   // Back lands on the same view.
   const [params] = useSearchParams();
-  const FOLDERS: MailFolder[] = ['inbox', 'starred', 'sent', 'drafts', 'scheduled', 'archive', 'spam', 'trash'];
+  const FOLDERS: MailFolder[] = ['inbox', 'starred', 'snoozed', 'sent', 'drafts', 'scheduled', 'archive', 'spam', 'trash'];
   const folder: MailFolder = FOLDERS.includes(params.get('folder') as MailFolder) ? params.get('folder') as MailFolder : 'inbox';
   const labelId = params.get('label');
   const setView = useCallback((next: { folder?: MailFolder | null; label?: string | null }) => {

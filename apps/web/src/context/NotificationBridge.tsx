@@ -55,6 +55,7 @@ const RULES: Record<string, Rule> = {
   'chat.reaction': { badge: '❤️', sound: null, system: false },
   'chat.invited': { badge: '👋', sound: 'message', system: true },
   'mail.received': { badge: '✉️', sound: 'message', system: true },
+  'mail.snoozed': { badge: '⏰', sound: 'message', system: true },
   'mail.campaign': { badge: '✉️', sound: null, system: false },
   'feed.announcement': { badge: '📣', sound: 'message', system: true },
   'feed.published': { badge: '📰', sound: null, system: false },
