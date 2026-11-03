@@ -569,11 +569,25 @@ server.listen(config.port, () => {
   console.log(`🔌 tupo-realtime listening on http://localhost:${config.port}  (env: ${config.env})`);
 });
 
+let stopping = false;
 const shutdown = async (signal: string) => {
+  if (stopping) return;
+  stopping = true;
   clearInterval(presenceHeartbeat);
   clearInterval(accessSweep);
-  console.log(`\n[realtime] ${signal} received — telling clients to reconnect elsewhere`);
-  io.emit('system:reconnect_required', { reason: 'server shutting down' });
+  console.log(`\n[realtime] ${signal} received — telling clients to reconnect`);
+  // Clients treat this as a planned restart: no session re-check, and each
+  // reconnects after its own random delay so they do not all return at once
+  // (R-02). A short pause lets the notice leave before the sockets close.
+  io.emit('system:reconnect_required', { reason: 'server restarting' });
+  await new Promise((r) => setTimeout(r, 250));
+  setTimeout(() => process.exit(0), 8_000).unref();
+  // A server-side disconnect, not a dropped transport: socket.io's own retry
+  // would bring every client back within a second; this way each one waits
+  // its own random delay.
+  io.disconnectSockets();
+  io.of('/meet').disconnectSockets();
+  await new Promise((r) => setTimeout(r, 150));
   io.close();
   await getMeetPool().end().catch(() => {});
   await stopActivity();

@@ -56,6 +56,7 @@
     "verify:oversight": "node scripts/verify-oversight.mjs",
     "activity:catalog": "node -e \"require('fs').copyFileSync('apps/api/src/activity/catalog.json','apps/web/src/activity/tupo.catalog.json')\"",
     "verify:realtime": "node scripts/verify-realtime-robustness.mjs",
+    "verify:realtime:restart": "node scripts/verify-realtime-restart.mjs",
     "verify:meet:reconnect": "node scripts/verify-meet-reconnect.mjs",
     "verify:chat:safety": "node scripts/verify-chat-safety.mjs",
     "verify:purge": "node scripts/purge-test-data.mjs",

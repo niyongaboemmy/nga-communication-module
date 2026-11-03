@@ -124,18 +124,36 @@ function endSession(reason: string) {
 async function recheckAndReconnect(s: AppSocket) {
   try {
     await apiGet('/api/roles-permissions/me');
-    setTimeout(() => { if (socket === s && s.disconnected) s.connect(); }, 1_500);
+    reconnectSpread(s, 1_000, 3_000);
   } catch {
     // apiGet has already redirected on 401 / suspension; a network failure
     // leaves the banner up and the next online event retries.
   }
 }
 
+/**
+ * Reconnect after a random delay in [min, min + spread] ms. When the gateway
+ * restarts, every open tab in the school loses its socket at the same instant;
+ * without the spread they would all come back in the same instant too (R-02).
+ */
+function reconnectSpread(s: AppSocket, min: number, spread: number) {
+  setTimeout(() => { if (socket === s && s.disconnected) s.connect(); }, min + Math.random() * spread);
+}
+
+/** Set when the gateway announces a planned restart (a deploy), for the disconnect that follows. */
+let plannedRestart = false;
+
 function wireLifecycle(s: AppSocket) {
-  s.on('connect', () => setState('connected'));
+  s.on('connect', () => { plannedRestart = false; setState('connected'); });
+  // A deploy: the gateway says so before it closes (R-02). The session is not
+  // in question, so skip the API re-check that a refused connection gets —
+  // a thousand of those at once would be a stampede of their own.
+  s.on('system:reconnect_required', () => { plannedRestart = true; });
   s.on('disconnect', (reason) => {
     setState('reconnecting');
-    if (reason === 'io server disconnect') void recheckAndReconnect(s);
+    if (reason !== 'io server disconnect') return;
+    if (plannedRestart) reconnectSpread(s, 500, 3_500);
+    else void recheckAndReconnect(s);
   });
   s.on('connect_error', (err) => {
     setState('reconnecting');
