@@ -92,7 +92,14 @@ jobs:
             # TaskMentor, Tupo needs devDependencies at deploy time — vite
             # builds the web bundle and the migration runner is tsx. Pruning
             # here is what breaks \`npm run db:migrate\` on the MIS box.
+            # R-06: keep what is running now, so scripts/release.sh rollback
+            # can put it back with one command if this release misbehaves.
+            bash scripts/release.sh snapshot
+
             npm run build
+
+            # Tabs opened before this deploy still load the chunks they know.
+            bash scripts/release.sh keep-assets
 
             # Migrations are idempotent (each file is recorded once applied),
             # so running them on every deploy is safe and means a schema change
