@@ -34,10 +34,16 @@ export interface RecordedVoiceNote {
   waveform: number[];
 }
 
+/** Lets the composer's hold-to-record gesture finish or discard a recording (U-02). */
+export interface VoiceRecorderControl { stop: () => void; cancel: () => void; elapsedMs: () => number }
+
 export const VoiceRecorder: React.FC<{
   onCancel: () => void;
   onDone: (note: RecordedVoiceNote) => void;
-}> = ({ onCancel, onDone }) => {
+  controlRef?: React.MutableRefObject<VoiceRecorderControl | null>;
+  /** While a finger holds the mic: say how to cancel and lock instead of showing buttons. */
+  holding?: boolean;
+}> = ({ onCancel, onDone, controlRef, holding = false }) => {
   const [elapsed, setElapsed] = useState(0);
   const [level, setLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -152,6 +158,8 @@ export const VoiceRecorder: React.FC<{
     onCancel();
   };
 
+  if (controlRef) controlRef.current = { stop, cancel, elapsedMs: () => (startedAt.current ? Date.now() - startedAt.current : 0) };
+
   const seconds = Math.floor(elapsed / 1000);
   const mmss = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
@@ -170,9 +178,13 @@ export const VoiceRecorder: React.FC<{
       aria-label="Recording a voice message"
       className="flex items-center gap-2 rounded-2xl border border-red-300 bg-red-50/70 px-2 py-1.5 dark:border-red-500/40 dark:bg-red-500/10"
     >
-      <IconButton label="Discard recording" onClick={cancel}>
-        <Trash2 size={17} className="text-red-600 dark:text-red-400" />
-      </IconButton>
+      {holding ? (
+        <span className="px-1 text-[11px] text-red-700 dark:text-red-300" aria-live="polite">‹ Slide to cancel · ↑ lock</span>
+      ) : (
+        <IconButton label="Discard recording" onClick={cancel}>
+          <Trash2 size={17} className="text-red-600 dark:text-red-400" />
+        </IconButton>
+      )}
 
       <span className="flex items-center gap-1.5">
         <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" aria-hidden="true" />

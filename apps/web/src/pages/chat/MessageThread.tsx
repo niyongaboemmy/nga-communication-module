@@ -840,9 +840,12 @@ export const MessageThread: React.FC<{
     [messages, conversation.lastReadSeq, user?.id],
   );
 
-  // UX-2: only follow the tail when the reader is already at it.
+  // UX-2: only follow the tail when the reader is already at it — and it is
+  // the real tail. Reading an old window after a jump (U-04), the bottom is
+  // just where "load newer" appends; following it would chain every page in
+  // and lose the place the jump was for.
   useLayoutEffect(() => {
-    if (atBottom) bottomRef.current?.scrollIntoView({ block: 'end' });
+    if (atBottom && !hasNewer) bottomRef.current?.scrollIntoView({ block: 'end' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, conversation.id]);
 
