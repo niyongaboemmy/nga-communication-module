@@ -522,9 +522,11 @@ export async function normaliseClientMessage(
     if (typeof meetingId !== 'string' || !meetingId) throw new ChatError('A meeting card needs a meeting.', 400);
     const { rows } = await getPool().query<{
       id: string; join_code: string; title: string; scheduled_start: string | null; scheduled_end: string | null;
-      host_id: string; conversation_id: string | null;
+      host_id: string; conversation_id: string | null; just_started: boolean; audio_only: boolean;
     }>(
-      `SELECT id, join_code, title, scheduled_start, scheduled_end, host_id, conversation_id
+      `SELECT id, join_code, title, scheduled_start, scheduled_end, host_id, conversation_id,
+              (status = 'live' AND started_at > now() - interval '2 minutes') AS just_started,
+              COALESCE((settings->>'audioOnly')::boolean, false) AS audio_only
          FROM meetings WHERE id = $1`, [meetingId],
     );
     const m = rows[0];
@@ -537,6 +539,11 @@ export async function normaliseClientMessage(
         meet: {
           meetingId: m.id, joinCode: m.join_code, title: m.title,
           scheduledStart: m.scheduled_start, scheduledEnd: m.scheduled_end,
+          // Written by the server, never trusted from the client (N-05): a
+          // call the sender just started rings the others; a shared meeting
+          // card does not.
+          ring: m.host_id === senderId && m.just_started,
+          audioOnly: m.audio_only,
         },
       },
     };
@@ -868,6 +875,18 @@ async function resolveAttachments(
     });
   }
   return out;
+}
+
+/** The ring for a call card a sender just started (N-05), or null for any other message. */
+export function callRingOf(message: WireMessage): {
+  meetingId: string; title: string; callerId: string; callerName: string; audioOnly: boolean; at: string;
+} | null {
+  const meet = (message.metadata as { meet?: { meetingId?: string; title?: string; ring?: boolean; audioOnly?: boolean } } | null)?.meet;
+  if (message.type !== 'call_event' || !meet?.ring || !meet.meetingId) return null;
+  return {
+    meetingId: meet.meetingId, title: meet.title ?? 'Call', callerId: message.senderId,
+    callerName: message.senderName, audioOnly: Boolean(meet.audioOnly), at: message.createdAt,
+  };
 }
 
 export function attachmentKind(mime: string): WireAttachment['kind'] {

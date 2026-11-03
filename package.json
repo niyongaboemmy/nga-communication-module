@@ -74,6 +74,7 @@
     "verify:mail:power": "node scripts/verify-mail-power.mjs",
     "verify:chat:touch": "node scripts/verify-chat-touch.mjs",
     "verify:feed:touch": "node scripts/verify-feed-touch.mjs",
+    "verify:calls": "node scripts/verify-calls.mjs",
     "verify:errors": "node scripts/verify-load-errors.mjs",
     "verify:access:ui": "node scripts/verify-access-ux.mjs",
     "verify:admin:ui": "node scripts/verify-admin-ui.mjs",

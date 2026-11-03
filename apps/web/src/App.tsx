@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { MeetCallProvider } from './context/MeetCallContext';
 import { NotificationProvider } from './context/NotificationContext';
 import { MiniCall } from './components/meet/MiniCall';
+import { IncomingCall } from './components/IncomingCall';
 import { ChatProvider } from './pages/chat/ChatProvider';
 import { ChatDock } from './pages/chat/ChatDock';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -234,6 +235,11 @@ export const App: React.FC = () => (
             able to take the sidebar and the conversation down with it. */}
         <ErrorBoundary fallback={null}>
           <MiniCall />
+        </ErrorBoundary>
+
+        {/* Calls ring wherever the person is (N-05). */}
+        <ErrorBoundary fallback={null}>
+          <IncomingCall />
         </ErrorBoundary>
 
         {/* Above <Routes> so a message reaches you while you are in Meet, Mail,

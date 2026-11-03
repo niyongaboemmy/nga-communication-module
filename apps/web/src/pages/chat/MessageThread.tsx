@@ -184,7 +184,7 @@ const ThreadHeader: React.FC<{
         </IconButton>
         {can('MEET_START') && (
           <>
-            <IconButton label="Start an audio call" className="hidden sm:grid" disabled={starting} onClick={() => void startCall(true)}><Phone size={17} /></IconButton>
+            <IconButton label="Start an audio call" disabled={starting} onClick={() => void startCall(true)}><Phone size={17} /></IconButton>
             <IconButton label="Start a video meeting" disabled={starting} onClick={() => void startCall(false)}><Video size={17} /></IconButton>
           </>
         )}

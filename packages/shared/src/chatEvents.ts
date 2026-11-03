@@ -114,6 +114,12 @@ export interface ChatClientToServerEvents {
  * ────────────────────────────────────────────────────────────────────────── */
 
 export interface ChatServerToClientEvents {
+  /** Someone in a conversation started a call: ring (N-05). To each member's user room but the caller's. */
+  'call:ring': (p: {
+    conversationId: string; meetingId: string; title: string;
+    callerId: string; callerName: string; audioOnly: boolean; at: string;
+  }) => void;
+
   /** A new message in a conversation this socket is subscribed to. */
   'message:new': (p: { conversationId: string; message: WireMessage }) => void;
 

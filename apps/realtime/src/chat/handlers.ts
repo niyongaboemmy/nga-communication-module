@@ -445,6 +445,13 @@ export async function fanOutMessage(
   io.to(conversationRoom(conversationId)).emit('message:new', {
     conversationId, message: result.message,
   });
+  // A call just started here: ring everyone else, wherever they are (N-05).
+  const ring = chat.callRingOf(result.message);
+  if (ring) {
+    for (const id of await chat.memberIdsOf(conversationId)) {
+      if (id !== ring.callerId) io.to(userRoom(id)).emit('call:ring', { conversationId, ...ring });
+    }
+  }
   await pushUnread(io, conversationId, result.message.senderId);
 }
 

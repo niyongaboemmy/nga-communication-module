@@ -559,6 +559,12 @@ async function fanOutNewMessage(
   emitToConversation(conversationId, 'message:new', {
     conversationId, message: result.message,
   });
+  // A call just started here: ring everyone else, wherever they are (N-05).
+  const ring = chat.callRingOf(result.message);
+  if (ring) {
+    const members = (await chat.memberIdsOf(conversationId)).filter((id) => id !== ring.callerId);
+    emitToUsers(members, 'call:ring', { conversationId, ...ring });
+  }
 
   // Queued, not awaited: fetching somebody else's server is not allowed to be
   // in the way of the message appearing.
