@@ -10,6 +10,7 @@ import {
 import { beginSsoState } from '../lib/ssoState';
 import { endActivity } from '../activity';
 import { setCacheOwner } from '../lib/localStore';
+import { setSwSessionToken } from '../lib/swSession';
 
 type Theme = 'light' | 'dark';
 
@@ -51,6 +52,8 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [token, setToken] = useState<string | null>(null);
+  // The service worker acts on notifications with this session (N-03).
+  useEffect(() => { void setSwSessionToken(token); }, [token]);
   const [user, setUser] = useState<SessionUser | null>(null);
   // The on-device cache is per account (P-02). Set during render, not in an
   // effect, so providers' first reads already go to the right database.

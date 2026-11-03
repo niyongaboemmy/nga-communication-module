@@ -70,6 +70,7 @@
     "verify:media": "node scripts/verify-media.mjs",
     "verify:optimistic": "node scripts/verify-optimistic.mjs",
     "verify:sync": "node scripts/verify-sync.mjs",
+    "verify:push-ui": "node scripts/verify-push-ui.mjs",
     "verify:errors": "node scripts/verify-load-errors.mjs",
     "verify:access:ui": "node scripts/verify-access-ux.mjs",
     "verify:admin:ui": "node scripts/verify-admin-ui.mjs",

@@ -166,6 +166,35 @@ self.addEventListener("fetch", (event) => {
  * on click go to exactly where it happened: focus an existing Tupo window if
  * there is one (and send it there), otherwise open one.
  */
+/* Push (F-04, N-02..N-04). Repeats from one conversation become one notification
+ * that counts ("3 new messages") and shows the newest line, instead of
+ * replacing each other silently. Chat ones offer "Mark as read". The app icon
+ * takes the unread number the server sent. */
+async function showPush(data) {
+  const title = data.title || "Tupo";
+  let count = 1;
+  if (data.tag) {
+    const open = await self.registration.getNotifications({ tag: data.tag });
+    for (const n of open) count = Math.max(count, ((n.data && n.data.count) || 1) + 1);
+  }
+  const isChat = typeof data.kind === "string" && data.kind.startsWith("chat.");
+  const body = count > 1 && isChat ? `${count} new messages · ${data.body || ""}` : (data.body || "");
+  await self.registration.showNotification(title, {
+    body,
+    icon: "/icon-192.png",
+    badge: "/icon-maskable-192.png",
+    tag: data.tag || undefined,
+    renotify: Boolean(data.tag),
+    data: { link: data.link || "/app", count, conversationId: data.conversationId || null },
+    actions: isChat && data.conversationId ? [{ action: "read", title: "Mark as read" }] : [],
+  });
+  if (typeof data.badge === "number" && "setAppBadge" in self.navigator) {
+    await (data.badge > 0 ? self.navigator.setAppBadge(data.badge) : self.navigator.clearAppBadge()).catch(() => undefined);
+  }
+}
+// For the browser suites: the same path a real push takes, without a push service.
+self.__tupoShowPush = showPush;
+
 self.addEventListener("push", (event) => {
   let data = {};
   try {
@@ -173,21 +202,48 @@ self.addEventListener("push", (event) => {
   } catch (e) {
     data = { title: "Tupo", body: event.data ? event.data.text() : "" };
   }
-  const title = data.title || "Tupo";
-  event.waitUntil(
-    self.registration.showNotification(title, {
-      body: data.body || "",
-      icon: "/icon-192.png",
-      badge: "/icon-maskable-192.png",
-      tag: data.tag || undefined,
-      renotify: Boolean(data.tag),
-      data: { link: data.link || "/app" },
-    }),
-  );
+  event.waitUntil(showPush(data));
 });
+
+/* The session token, put here by the page for actions taken from a
+ * notification while no tab is open (lib/swSession.ts). Removed on sign-out. */
+function swSessionToken() {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open("tupo-sw", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("kv");
+      req.onerror = () => resolve(null);
+      req.onsuccess = () => {
+        try {
+          const get = req.result.transaction("kv", "readonly").objectStore("kv").get("token");
+          get.onsuccess = () => resolve(get.result || null);
+          get.onerror = () => resolve(null);
+        } catch (e) { resolve(null); }
+      };
+    } catch (e) { resolve(null); }
+  });
+}
+
+async function markReadFromNotification(conversationId) {
+  const token = await swSessionToken();
+  if (!token || !conversationId) return false;
+  const res = await fetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}/read`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ latest: true }),
+  }).catch(() => null);
+  return Boolean(res && res.ok);
+}
+self.__tupoMarkRead = markReadFromNotification;
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  // "Mark as read" (N-03): done here, no window opened.
+  if (event.action === "read") {
+    const id = event.notification.data && event.notification.data.conversationId;
+    event.waitUntil(markReadFromNotification(id));
+    return;
+  }
   const link = (event.notification.data && event.notification.data.link) || "/app";
   const target = new URL(link, self.location.origin).href;
   event.waitUntil(

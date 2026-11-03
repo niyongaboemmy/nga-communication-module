@@ -11,6 +11,7 @@ import { apiGet } from '../../lib/api';
 import * as chatApi from './api';
 import * as outbox from './outbox';
 import { cacheGet, cacheSet, debouncedWriter } from '../../lib/localStore';
+import { closeConversationNotifications } from '../../lib/swSession';
 
 /** Newest messages kept on the device per conversation (P-02). */
 const CACHED_MESSAGES = 100;
@@ -719,6 +720,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const onUnread = (
       p: { conversationId: string; unread: number; unreadMentions: number; lastReadSeq: number; lastSeq?: number },
     ) => {
+      // Read on another device: this device's notifications for it go too (N-03).
+      if (p.unread === 0) void closeConversationNotifications(p.conversationId);
       setConversations((prev) => {
         // Told about a conversation we have never seen — added to a channel, or
         // someone opened a DM with us. Refetch rather than drop it on the
@@ -1342,6 +1345,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const socket = getSocket();
     if (socket?.connected) socket.emit('read:advance', { conversationId: id, seq });
     else void chatApi.markRead(id, seq).catch(() => {});
+    // Read here: its notifications on this device go (N-03).
+    void closeConversationNotifications(id);
   }, [conversations]);
 
   const toggleStar = useCallback(async (id: string) => {
@@ -1416,6 +1421,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       ? { ...x, unread: 0, unreadMentions: 0, lastReadSeq: Math.max(x.lastReadSeq, x.lastSeq) } : x)));
     // To the end as the server knows it: this client may never have seen the
     // newest seq of a conversation it is not looking at.
+    void closeConversationNotifications(conversationId);
     void chatApi.markReadLatest(conversationId).then((r) => {
       setConversations((prev) => prev.map((x) => (x.id === conversationId
         ? { ...x, unread: r.unread, unreadMentions: r.unreadMentions, lastReadSeq: r.lastReadSeq } : x)));

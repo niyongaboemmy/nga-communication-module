@@ -13,7 +13,7 @@
 import webpush from 'web-push';
 import type { Redis } from 'ioredis';
 import { getPool, snowflake } from '@tupo/db';
-import { connectedKey, presenceKey } from '@tupo/shared';
+import { connectedKey, presenceKey, presenceChoiceKey } from '@tupo/shared';
 
 export interface PushConfig { publicKey: string; privateKey: string; subject: string }
 
@@ -76,6 +76,32 @@ function inQuiet(from: number | null, to: number | null, minutes: number): boole
  * Send these notifications as web push to whoever is offline. Best effort:
  * never throws, never slows the caller beyond the sends themselves.
  */
+/**
+ * What the app-icon badge shows (N-04): unread conversations' messages (muted
+ * ones left out, as in the app) plus unread mail conversations. One query each
+ * for everyone in this batch.
+ */
+export async function unreadBadges(userIds: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (!userIds.length) return out;
+  try {
+    const [chat, mail] = await Promise.all([
+      getPool().query<{ user_id: string; n: number }>(
+        `SELECT m.user_id, COALESCE(sum(m.unread_count), 0)::int AS n
+           FROM conversation_members m JOIN conversations c ON c.id = m.conversation_id
+          WHERE m.user_id = ANY($1::text[]) AND m.left_at IS NULL AND NOT m.is_hidden AND c.deleted_at IS NULL
+            AND (m.muted_until IS NULL OR m.muted_until < now())
+          GROUP BY m.user_id`, [userIds]),
+      getPool().query<{ user_id: string; n: number }>(
+        `SELECT user_id, count(DISTINCT thread_id)::int AS n FROM mail_recipients
+          WHERE user_id = ANY($1::text[]) AND NOT is_read AND folder = 'inbox' AND NOT is_hidden AND NOT pending
+          GROUP BY user_id`, [userIds]),
+    ]);
+    for (const r of [...chat.rows, ...mail.rows]) out.set(r.user_id, (out.get(r.user_id) ?? 0) + r.n);
+  } catch { /* no badge is better than no push */ }
+  return out;
+}
+
 export async function sendWebPush(
   rows: PushRow[], presence: Redis | null, config: PushConfig | null = pushConfigFromEnv(),
 ): Promise<{ sent: number; skipped: number }> {
@@ -92,8 +118,17 @@ export async function sendWebPush(
       online = new Set(userIds.filter((_, i) => vals[i] || vals[i + userIds.length]));
     } catch { /* treat as offline */ }
   }
-  const offline = userIds.filter((id) => !online.has(id));
+  let offline = userIds.filter((id) => !online.has(id));
   if (!offline.length) return { sent: 0, skipped: rows.length };
+  // "Do not disturb" means it (N-01): chosen in the status picker, it holds on
+  // every device, not only in an open tab.
+  if (presence) {
+    try {
+      const choices = await presence.mget(offline.map(presenceChoiceKey));
+      offline = offline.filter((_, i) => choices[i] !== 'dnd');
+    } catch { /* unknown: deliver */ }
+    if (!offline.length) return { sent: 0, skipped: rows.length };
+  }
 
   const { rows: prefs } = await getPool().query<{
     user_id: string; desktop_notifications: boolean; quiet_from_minute: number | null; quiet_to_minute: number | null; timezone: string | null;
@@ -109,13 +144,20 @@ export async function sendWebPush(
 
   const { rows: subs } = await getPool().query<{ id: string; user_id: string; endpoint: string; p256dh: string; auth: string }>(
     'SELECT id, user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ANY($1::text[])', [[...allowed]]);
+  const badges = await unreadBadges([...allowed]);
   let sent = 0;
   await Promise.all(rows.filter((r) => allowed.has(r.user_id)).flatMap((r) =>
     subs.filter((s) => s.user_id === r.user_id).map(async (s) => {
       const payload = JSON.stringify({
         title: r.title, body: r.body ?? '', link: r.link ?? '/app',
-        // Same tag = the OS replaces rather than stacks (a busy conversation).
-        tag: `${r.kind}:${r.subject_id ?? r.id}`, id: r.id,
+        // Same tag = the OS replaces rather than stacks (a busy conversation);
+        // the service worker turns repeats into "3 new messages" (N-02).
+        tag: `${r.kind}:${r.subject_id ?? r.id}`, id: r.id, kind: r.kind,
+        // Chat: which conversation, for "Mark as read" and for closing it
+        // once read on another device (N-03).
+        conversationId: r.kind.startsWith('chat.') ? r.subject_id : null,
+        // The app icon's number while no tab is open (N-04).
+        badge: badges.get(r.user_id) ?? null,
       });
       try {
         await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, { TTL: 3600, urgency: r.kind === 'chat.dm' || r.kind === 'chat.mention' ? 'high' : 'normal' });

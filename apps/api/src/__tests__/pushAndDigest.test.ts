@@ -5,7 +5,7 @@ import net from 'node:net';
 import webpush from 'web-push';
 import { Redis } from 'ioredis';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
-import { notify, sendWebPush } from '@tupo/notify';
+import { notify, sendWebPush, unreadBadges } from '@tupo/notify';
 import { app } from '../app.js';
 import { config } from '../config.js';
 import { runEmailDigest } from '@tupo/mail';
@@ -84,6 +84,30 @@ describe('who gets a push', () => {
     expect(await failures(away.id)).toBe(1);
     expect(await failures(here.id)).toBe(0);
     expect(await failures(muted.id)).toBe(0);
+  });
+
+  it('"Do not disturb" holds for push too (N-01)', async () => {
+    process.env.VAPID_PUBLIC_KEY = keys.publicKey; process.env.VAPID_PRIVATE_KEY = keys.privateKey;
+    const dnd = await user('Dnd');
+    await as(dnd.token).post('/api/push/subscriptions', { subscription: sub(5) });
+    await redis.set(`presence:choice:${dnd.id}`, 'dnd');
+    try {
+      await sendWebPush(await notify([dnd.id], { kind: 'chat.dm', title: 'x', subjectType: 't', subjectId: 'd' }), redis);
+      expect((await getPool().query('SELECT failures FROM push_subscriptions WHERE user_id = $1', [dnd.id])).rows[0].failures).toBe(0);
+      await redis.del(`presence:choice:${dnd.id}`);
+      await sendWebPush(await notify([dnd.id], { kind: 'chat.dm', title: 'y', subjectType: 't', subjectId: 'd' }), redis);
+      expect((await getPool().query('SELECT failures FROM push_subscriptions WHERE user_id = $1', [dnd.id])).rows[0].failures).toBe(1);
+    } finally { await redis.del(`presence:choice:${dnd.id}`); }
+  });
+
+  it('the app-icon badge counts unread chat and unread mail conversations, not muted ones (N-04)', async () => {
+    const a = await user('Badge A'); const b = await user('Badge B');
+    const loud = (await as(b.token).post('/api/chat/conversations', { type: 'group', name: `badge-${snowflake()}`, memberIds: [a.id] })).body.data.conversation.id;
+    const quiet = (await as(b.token).post('/api/chat/conversations', { type: 'group', name: `badge-${snowflake()}`, memberIds: [a.id] })).body.data.conversation.id;
+    await getPool().query(`UPDATE conversation_members SET unread_count = 3 WHERE conversation_id = $1 AND user_id = $2`, [loud, a.id]);
+    await getPool().query(`UPDATE conversation_members SET unread_count = 7, muted_until = now() + interval '1 hour' WHERE conversation_id = $1 AND user_id = $2`, [quiet, a.id]);
+    expect((await unreadBadges([a.id])).get(a.id)).toBe(3);
+    await getPool().query('DELETE FROM conversations WHERE id = ANY($1::text[])', [[loud, quiet]]);
   });
 });
 
