@@ -333,9 +333,17 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   }, []);
 
+  /*
+   * Refreshes can overlap (coming back online starts one, the socket's
+   * reconnect another a moment later). Only the newest request's answer is
+   * applied: an older one finishing last would put back a stale list.
+   */
+  const refreshSeq = useRef(0);
   const refresh = useCallback(async () => {
+    const mine = ++refreshSeq.current;
     try {
       const list = await chatApi.listConversations();
+      if (mine !== refreshSeq.current) return;
       listFromNetwork.current = true;
       setConversations(list);
       prefetchUnread(list);

@@ -143,6 +143,24 @@ function reconnectSpread(s: AppSocket, min: number, spread: number) {
 /** Set when the gateway announces a planned restart (a deploy), for the disconnect that follows. */
 let plannedRestart = false;
 
+/**
+ * The network is back: reconnect now (S-11). Two cases. Socket.IO noticed the
+ * drop and is waiting out its backoff (up to 5 s); or it did not notice at all
+ * (a short outage inside its ping window) and would keep a dead connection
+ * until the ping times out, 20 s or more. Either way live updates — sidebar,
+ * badges, typing — stay frozen though the catch-up already ran. Reconnecting
+ * by hand starts at once; a healthy connection is back in a moment.
+ */
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    if (!socket) return;
+    // A manual reconnect, not the automatic one: attempts made while offline
+    // have pushed Socket.IO's backoff to its 5 s ceiling, and closing the
+    // transport would still wait that long.
+    socket.disconnect().connect();
+  });
+}
+
 function wireLifecycle(s: AppSocket) {
   s.on('connect', () => { plannedRestart = false; setState('connected'); });
   // A deploy: the gateway says so before it closes (R-02). The session is not

@@ -154,6 +154,8 @@ try {
   {
     const { ctx, page } = await pageFor(browser, ann, { colorScheme: 'light' });
     await page.goto(`${BASE}/app/settings`, { waitUntil: 'networkidle' });
+    // Screens load their code on first visit (P-01): wait for the page itself.
+    await page.getByRole('radio', { name: 'System' }).waitFor({ timeout: 10_000 }).catch(() => {});
     const isDark = () => page.evaluate(() => document.documentElement.classList.contains('dark'));
     check('settings page offers System / Light / Dark', await page.getByRole('radio', { name: 'System' }).isVisible()
       && await page.getByRole('radio', { name: 'Dark' }).isVisible());
