@@ -5,44 +5,78 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { MeetCallProvider } from './context/MeetCallContext';
 import { NotificationProvider } from './context/NotificationContext';
 import { MiniCall } from './components/meet/MiniCall';
+import { IncomingCall } from './components/IncomingCall';
 import { ChatProvider } from './pages/chat/ChatProvider';
 import { ChatDock } from './pages/chat/ChatDock';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { ChatNotificationBridge } from './context/ChatNotificationBridge';
+import { NotificationBridge } from './context/NotificationBridge';
+import { NotificationCenterProvider } from './context/NotificationCenterContext';
 import { usePermissions } from './hooks/usePermissions';
 import { SignIn } from './pages/SignIn';
 import { SsoCallback } from './pages/SsoCallback';
 import { PendingAccess } from './pages/PendingAccess';
+import { Suspended } from './pages/Suspended';
+import { NotFound } from './pages/NotFound';
+import { AccessDenied } from './pages/AccessDenied';
+import { MODULES, ADMIN } from './components/shell/navigation';
 import { AppShell, ComingSoon } from './pages/AppShell';
-import { ChatLayout } from './pages/chat/ChatLayout';
-import { ChannelsLayout } from './pages/channels/ChannelsLayout';
-import { MeetHome } from './pages/meet/MeetHome';
-import { Scheduler } from './pages/meet/Scheduler';
-import { MeetHistory } from './pages/meet/MeetHistory';
-import { MeetingRoom } from './pages/meet/MeetingRoom';
-import { MeetingSummary } from './pages/meet/MeetingSummary';
-import { GuestMeeting } from './pages/meet/GuestMeeting';
-import { SystemStatus } from './pages/SystemStatus';
-import { RolesPermissions } from './pages/admin/RolesPermissions';
-import { Users } from './pages/admin/Users';
-import { AuditLog } from './pages/admin/AuditLog';
-import { Oversight } from './pages/admin/Oversight';
-import { Dashboard } from './pages/admin/Dashboard';
-import { MailLayout } from './pages/mail/MailLayout';
-import { MailTemplates } from './pages/mail/MailTemplates';
-import { MailLists } from './pages/mail/MailLists';
-import { MailCampaigns } from './pages/mail/MailCampaigns';
-import { MailSettings } from './pages/mail/MailSettings';
-import { EmptyState } from './components/ui';
 import { FeedProvider } from './pages/feed/FeedProvider';
-import { FeedHome } from './pages/feed/FeedHome';
-import { Reels } from './pages/feed/Reels';
-import { PageProfile, PageDirectory, PageInsights } from './pages/feed/PageScreens';
-import { SavedPosts, PostPermalink, ModerationQueue } from './pages/feed/Screens';
+import { lazyNamed, registerPreload } from './lib/lazyPage';
+
+/*
+ * Every screen is its own chunk (P-01): the first visit downloads the shell and
+ * the module the person lands on, not all of Tupo. The rail preloads the rest
+ * on idle and on hover (see lib/lazyPage). The shell, the providers and the
+ * chat dock stay in the main bundle: they are on every page.
+ */
+const Settings = lazyNamed(() => import('./pages/Settings'), 'Settings');
+const ChatLayout = lazyNamed(() => import('./pages/chat/ChatLayout'), 'ChatLayout');
+const ChatPermalink = lazyNamed(() => import('./pages/chat/ChatLinks'), 'ChatPermalink');
+const ChatInvite = lazyNamed(() => import('./pages/chat/ChatLinks'), 'ChatInvite');
+const ChannelsLayout = lazyNamed(() => import('./pages/channels/ChannelsLayout'), 'ChannelsLayout');
+const MeetHome = lazyNamed(() => import('./pages/meet/MeetHome'), 'MeetHome');
+const Scheduler = lazyNamed(() => import('./pages/meet/Scheduler'), 'Scheduler');
+const MeetHistory = lazyNamed(() => import('./pages/meet/MeetHistory'), 'MeetHistory');
+const MeetingRoom = lazyNamed(() => import('./pages/meet/MeetingRoom'), 'MeetingRoom');
+const MeetingSummary = lazyNamed(() => import('./pages/meet/MeetingSummary'), 'MeetingSummary');
+const GuestMeeting = lazyNamed(() => import('./pages/meet/GuestMeeting'), 'GuestMeeting');
+const SystemStatus = lazyNamed(() => import('./pages/SystemStatus'), 'SystemStatus');
+const RolesPermissions = lazyNamed(() => import('./pages/admin/RolesPermissions'), 'RolesPermissions');
+const Users = lazyNamed(() => import('./pages/admin/Users'), 'Users');
+const AuditLog = lazyNamed(() => import('./pages/admin/AuditLog'), 'AuditLog');
+const Oversight = lazyNamed(() => import('./pages/admin/Oversight'), 'Oversight');
+const Dashboard = lazyNamed(() => import('./pages/admin/Dashboard'), 'Dashboard');
+const MailLayout = lazyNamed(() => import('./pages/mail/MailLayout'), 'MailLayout');
+const MailTemplates = lazyNamed(() => import('./pages/mail/MailTemplates'), 'MailTemplates');
+const MailLists = lazyNamed(() => import('./pages/mail/MailLists'), 'MailLists');
+const MailCampaigns = lazyNamed(() => import('./pages/mail/MailCampaigns'), 'MailCampaigns');
+const MailSettings = lazyNamed(() => import('./pages/mail/MailSettings'), 'MailSettings');
+const FeedHome = lazyNamed(() => import('./pages/feed/FeedHome'), 'FeedHome');
+const Reels = lazyNamed(() => import('./pages/feed/Reels'), 'Reels');
+const PageProfile = lazyNamed(() => import('./pages/feed/PageScreens'), 'PageProfile');
+const PageDirectory = lazyNamed(() => import('./pages/feed/PageScreens'), 'PageDirectory');
+const PageInsights = lazyNamed(() => import('./pages/feed/PageScreens'), 'PageInsights');
+const SavedPosts = lazyNamed(() => import('./pages/feed/Screens'), 'SavedPosts');
+const PostPermalink = lazyNamed(() => import('./pages/feed/Screens'), 'PostPermalink');
+const ModerationQueue = lazyNamed(() => import('./pages/feed/Screens'), 'ModerationQueue');
+
+for (const [route, page] of [
+  ['/app/feed', FeedHome], ['/app/chat', ChatLayout], ['/app/channels', ChannelsLayout],
+  ['/app/meet', MeetHome], ['/app/mail', MailLayout], ['/app/settings', Settings],
+  ['/app/admin/dashboard', Dashboard], ['/app/admin/users', Users], ['/app/admin/roles', RolesPermissions],
+  ['/app/admin/audit', AuditLog], ['/app/admin/oversight', Oversight], ['/app/system', SystemStatus],
+] as const) registerPreload(route, page.preload);
 
 const FeedProviderLayout: React.FC = () => (
   <FeedProvider><Outlet /></FeedProvider>
 );
+
+/** An unknown address outside /app: the 404 for someone signed in, sign-in otherwise. */
+const OutsideNotFound: React.FC = () => {
+  const { isAuthenticated, loading } = useAuth();
+  if (loading) return null;
+  return isAuthenticated ? <NotFound /> : <Navigate to="/" replace />;
+};
 
 /** Requires a Tupo session, which requires MIS sign-in. */
 const Protected: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -59,20 +93,35 @@ const Protected: React.FC<{ children: React.ReactNode }> = ({ children }) => {
  * Route-level permission gate. Purely cosmetic: the API independently
  * authorises every request, so this only spares the user a page of 403s.
  */
-const RequirePermission: React.FC<{ anyOf: string[]; children: React.ReactNode }> = ({ anyOf, children }) => {
+const RequirePermission: React.FC<{ anyOf: string[]; children: React.ReactNode; area?: string }> = ({ anyOf, children, area }) => {
   const { can } = usePermissions();
-  if (!can(anyOf)) {
-    return (
-      <EmptyState
-        title="You do not have access to this area"
-        hint={`Requires one of: ${anyOf.join(', ')}. Ask an administrator if you need it.`}
-      />
-    );
-  }
+  if (!can(anyOf)) return <AccessDenied area={area} />;
   return <>{children}</>;
 };
 
+/**
+ * `/app` lands on the first module this person can actually open (F-07) —
+ * not always the feed, which a role without FEED_VIEW could only be refused.
+ */
+const FirstModule: React.FC = () => {
+  const { can } = usePermissions();
+  const first = [...MODULES.filter((m) => m.to !== '/app/files'), ...ADMIN].find((m) => can(m.perm));
+  return first ? <Navigate to={first.to} replace /> : <AccessDenied />;
+};
+
+/** The last line of defence: a failure above every screen still leaves a way back (F-06). */
+const RootFallback: React.FC = () => (
+  <div role="alert" className="grid min-h-screen place-items-center bg-surface-light p-6 text-center dark:bg-background-dark">
+    <div className="max-w-sm">
+      <h1 className="text-lg font-bold text-text-primary-light dark:text-text-primary-dark">Tupo hit a problem</h1>
+      <p className="mt-2 text-sm text-text-secondary-light dark:text-text-secondary-dark">Nothing you sent was lost. Reloading usually fixes it.</p>
+      <button onClick={() => window.location.reload()} className="mt-4 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">Reload Tupo</button>
+    </div>
+  </div>
+);
+
 export const App: React.FC = () => (
+  <ErrorBoundary fallback={<RootFallback />}>
   <AuthProvider>
     <BrowserRouter>
       {/* Usage analytics: one page view per route change, on every route --
@@ -82,6 +131,7 @@ export const App: React.FC = () => (
       {/* Notifications wrap the call, not the other way round: the call raises
           them, and the toast stack must outlive any route that triggered it. */}
       <NotificationProvider>
+      <NotificationCenterProvider>
       {/*
         The active call lives ABOVE <Routes>. React Router unmounts a route
         component when you leave it, and unmounting the meeting would close the
@@ -98,14 +148,21 @@ export const App: React.FC = () => (
         the sign-in route costs nothing.
       */}
       <ChatProvider>
+        {/* Public routes (sign-in, guest meeting) load lazily too; inside /app the
+            shell holds its own boundary so the rail stays up while a module loads. */}
+        <React.Suspense fallback={null}>
         <Routes>
           <Route path="/" element={<SignIn />} />
           <Route path="/sso/callback" element={<SsoCallback />} />
+          <Route path="/suspended" element={<Suspended />} />
           {/* The one route a person with no NGA account can reach. */}
           <Route path="/meet/:idOrCode" element={<GuestMeeting />} />
           <Route path="/app" element={<Protected><AppShell /></Protected>}>
-            <Route index element={<Navigate to="/app/feed" replace />} />
+            <Route index element={<FirstModule />} />
             <Route path="chat" element={<ChatLayout />} />
+            {/* Links produced by notifications, "copy link" and invites. */}
+            <Route path="chat/invite/:code" element={<ChatInvite />} />
+            <Route path="chat/:conversationId/:messageId?" element={<ChatPermalink />} />
             <Route path="channels" element={<ChannelsLayout />} />
             <Route path="feed" element={
               <RequirePermission anyOf={['FEED_VIEW']}><FeedProviderLayout /></RequirePermission>}>
@@ -140,7 +197,7 @@ export const App: React.FC = () => (
               <RequirePermission anyOf={['MAIL_READ']}><MailLayout /></RequirePermission>} />
             <Route path="mail/t/:threadId" element={
               <RequirePermission anyOf={['MAIL_READ']}><MailLayout /></RequirePermission>} />
-            <Route path="mail/campaigns" element={
+            <Route path="mail/campaigns/:campaignId?" element={
               <RequirePermission anyOf={['MAIL_BULK_SEND', 'MAIL_APPROVE']}><MailCampaigns /></RequirePermission>} />
             <Route path="mail/lists" element={
               <RequirePermission anyOf={['MAIL_LIST_MANAGE']}><MailLists /></RequirePermission>} />
@@ -159,11 +216,16 @@ export const App: React.FC = () => (
               <RequirePermission anyOf={['OVERSIGHT_VIEW_ALL', 'OVERSIGHT_MESSAGE_DELETE']}><Oversight /></RequirePermission>} />
             <Route path="admin/dashboard" element={
               <RequirePermission anyOf={['DASHBOARD_VIEW']}><Dashboard /></RequirePermission>} />
+            {/* Everyone's own profile and settings (F-10): no permission needed. */}
+            <Route path="settings" element={<Settings />} />
             <Route path="system" element={
               <RequirePermission anyOf={['SYSTEM_HEALTH_VIEW']}><SystemStatus /></RequirePermission>} />
+            {/* Anything else under /app: a real "not found", inside the shell. */}
+            <Route path="*" element={<NotFound />} />
           </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<OutsideNotFound />} />
         </Routes>
+        </React.Suspense>
 
         {/* Rendered outside <Routes> on purpose: it must survive every
             navigation, and it portals to document.body so no page can clip it.
@@ -175,11 +237,16 @@ export const App: React.FC = () => (
           <MiniCall />
         </ErrorBoundary>
 
+        {/* Calls ring wherever the person is (N-05). */}
+        <ErrorBoundary fallback={null}>
+          <IncomingCall />
+        </ErrorBoundary>
+
         {/* Above <Routes> so a message reaches you while you are in Meet, Mail,
             or anywhere else — a notification that only fires on the page it
             came from is not a notification. */}
         <ErrorBoundary fallback={null}>
-          <ChatNotificationBridge />
+          <NotificationBridge />
         </ErrorBoundary>
 
         {/* The launcher, on every page but chat itself and Meet. Inside the
@@ -188,7 +255,9 @@ export const App: React.FC = () => (
         <ChatDock />
       </ChatProvider>
       </MeetCallProvider>
+      </NotificationCenterProvider>
       </NotificationProvider>
     </BrowserRouter>
   </AuthProvider>
+  </ErrorBoundary>
 );

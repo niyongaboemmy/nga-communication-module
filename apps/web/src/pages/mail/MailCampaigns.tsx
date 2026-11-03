@@ -1,5 +1,6 @@
+import { SafeHtml } from '../../components/SafeHtml';
 import React, { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Megaphone, Send, Eye, Check, X, Loader2, Clock, AlertTriangle, Trash2, Sparkles,
 } from 'lucide-react';
@@ -212,7 +213,7 @@ const PreviewModal: React.FC<{ campaignId: string; onClose: () => void; onSubmit
                 <div key={i} className="rounded-lg border border-border-light p-3 dark:border-border-dark/50">
                   <p className="text-xs text-text-secondary-light">To: {s.to}</p>
                   <p className="mb-1 text-sm font-semibold">{s.subject}</p>
-                  <div className="tupo-prose max-w-none text-sm" dangerouslySetInnerHTML={{ __html: s.bodyHtml }} />
+                  <SafeHtml className="tupo-prose max-w-none text-sm" html={s.bodyHtml} />
                 </div>
               ))}
               {preview.samples.length === 0 && <p className="text-sm text-text-secondary-light">No deliverable recipients.</p>}
@@ -237,6 +238,7 @@ const PreviewModal: React.FC<{ campaignId: string; onClose: () => void; onSubmit
 
 export const MailCampaigns: React.FC = () => {
   const navigate = useNavigate();
+  const { campaignId } = useParams<{ campaignId?: string }>();
   const { can } = usePermissions();
   const { user } = useAuth();
   const canApprove = can('MAIL_APPROVE');
@@ -264,6 +266,12 @@ export const MailCampaigns: React.FC = () => {
     () => campaigns?.filter((c) => c.status === 'pending_approval' && c.from.userId !== user?.id) ?? [],
     [campaigns, user?.id],
   );
+
+  // A link to one campaign (its notifications point here): bring it into view.
+  useEffect(() => {
+    if (!campaignId || !campaigns) return;
+    document.getElementById(`campaign-${campaignId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [campaignId, campaigns]);
 
   if (campaigns === null) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
@@ -299,7 +307,10 @@ export const MailCampaigns: React.FC = () => {
       ) : (
         <ul className="space-y-2">
           {campaigns.map((c) => (
-            <li key={c.id} className="rounded-xl border border-border-light p-4 dark:border-border-dark/50">
+            <li key={c.id} id={`campaign-${c.id}`} aria-current={c.id === campaignId ? 'true' : undefined}
+              className={`rounded-xl border p-4 ${c.id === campaignId
+                ? 'border-blue-400 ring-2 ring-blue-200 dark:border-blue-500 dark:ring-blue-500/20'
+                : 'border-border-light dark:border-border-dark/50'}`}>
               <div className="flex items-start gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">

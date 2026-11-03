@@ -2,16 +2,25 @@ import 'dotenv/config';
 import express from 'express';
 import { Queue, Worker, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
-import { pingDb } from '@tupo/db';
+import { pingDb, installProcessGuards, startProcessMetrics, recordError, RELEASE } from '@tupo/db';
 import { runMeetWrapUp, type MeetWrapUpData } from './jobs/meetWrapUp.js';
 import { runScheduledMessages } from './jobs/scheduledMessages.js';
 import { runChatSweeps } from './jobs/chatSweeps.js';
 import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
 import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './jobs/mail.js';
 import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
+import { announcePost } from '@tupo/feed';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
+import { runPartitionMaintenance, partitionsAhead } from './jobs/partitions.js';
+import { collectHostSamples, evaluateAlerts, pruneMonitoring } from './jobs/monitor.js';
+import { runEmailDigest } from '@tupo/mail';
 import { reminders, profileMedia } from '@tupo/notify';
+import * as mailDelivery from '@tupo/mail';
 import * as chat from '@tupo/chat';
+
+// Last-resort guards, shared by every service: logged, recorded on the
+// System page, and an uncaught exception exits so pm2 restarts the worker.
+installProcessGuards('worker');
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -23,6 +32,10 @@ const connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
 // BullMQ reserves ':' as its internal Redis key separator and rejects it in names.
 export const QUEUE_NAME = 'tupo-jobs';
 export const queue = new Queue(QUEUE_NAME, { connection });
+
+// The worker's own numbers (R-04): jobs done and failed, and the backlog.
+const metrics = startProcessMetrics('worker');
+metrics.gauge('queue_waiting', () => queue.getWaitingCount());
 
 let processed = 0;
 let lastJobAt: string | null = null;
@@ -118,6 +131,12 @@ const worker = new Worker(
         return runMailSweeps();
       }
 
+      // Feed — notify followers and update open feeds for a published post.
+      case 'feed:announce': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return announcePost((job.data as { postId: string }).postId);
+      }
       // Feed — publish scheduled posts whose time has come (FR-FEED-4).
       case 'feed:sweep': {
         processed++;
@@ -139,6 +158,26 @@ const worker = new Worker(
         return runReminderSync();
       }
 
+      // Monthly partitions for messages and meeting_events (SRS §7.3).
+      case 'notify:digest': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runEmailDigest();
+      }
+      case 'partitions:ensure': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runPartitionMaintenance();
+      }
+
+      // The watchman (R-03, R-04, R-07): host numbers, then the alert rules.
+      case 'monitor:tick': {
+        await collectHostSamples(connection);
+        return { firing: await evaluateAlerts() };
+      }
+      case 'monitor:prune':
+        return pruneMonitoring();
+
       default:
         // Fail loudly rather than silently dropping work we don't recognise.
         throw new Error(`Unknown job type: ${job.name}`);
@@ -147,7 +186,12 @@ const worker = new Worker(
   { connection, concurrency: 5 }
 );
 
-worker.on('failed', (job, err) => console.error(`[worker] job ${job?.id} (${job?.name}) failed:`, err.message));
+worker.on('failed', (job, err) => {
+  console.error(`[worker] job ${job?.id} (${job?.name}) failed:`, err.message);
+  metrics.count('jobs_failed');
+  void recordError({ source: 'worker', message: err.message, stack: err.stack, route: `job ${job?.name ?? 'unknown'}`, release: RELEASE });
+});
+worker.on('completed', () => metrics.count('jobs_done'));
 
 /**
  * The scheduled-message clock.
@@ -260,6 +304,44 @@ if (reminderCfg.clientId && reminderCfg.clientSecret && process.env.NODE_ENV !==
   }).catch((err) => console.error('[worker] could not queue the boot avatars sync:', err.message));
 }
 
+/**
+ * Partition maintenance, every six hours plus once shortly after boot. Daily
+ * would do; six-hourly means a missed run or a long outage is caught the same
+ * day, and the work is a no-op when the months already exist.
+ */
+/** Hourly: email unseen mentions and DMs to people who are away (F-04). */
+queue.add('notify:digest', {}, {
+  jobId: 'notify-digest',
+  repeat: { every: 60 * 60_000 },
+  removeOnComplete: 10,
+  removeOnFail: 10,
+}).catch((err) => console.error('[worker] could not register the email digest:', err.message));
+
+queue.add('partitions:ensure', {}, {
+  jobId: 'partitions-ensure',
+  repeat: { every: 6 * 60 * 60_000 },
+  removeOnComplete: 10,
+  removeOnFail: 10,
+}).catch((err) => console.error('[worker] could not register partition maintenance:', err.message));
+queue.add('partitions:ensure', { boot: true }, {
+  delay: 10_000,
+  removeOnComplete: true,
+  removeOnFail: 10,
+}).catch((err) => console.error('[worker] could not queue boot partition maintenance:', err.message));
+
+queue.add('monitor:tick', {}, {
+  jobId: 'monitor-tick',
+  repeat: { every: 60_000 },
+  removeOnComplete: 10,
+  removeOnFail: 20,
+}).catch((err) => console.error('[worker] could not register the monitor:', err.message));
+queue.add('monitor:prune', {}, {
+  jobId: 'monitor-prune',
+  repeat: { every: 60 * 60_000 },
+  removeOnComplete: 5,
+  removeOnFail: 5,
+}).catch((err) => console.error('[worker] could not register monitor pruning:', err.message));
+
 worker.on('ready', () => console.log('[worker] connected to redis, waiting for jobs'));
 
 const app = express();
@@ -276,6 +358,19 @@ app.get('/health', async (_req, res) => {
 
   try { checks.queueDepth = String(await queue.getWaitingCount()); }
   catch { checks.queueDepth = 'unknown'; }
+
+  // Months of partitions in hand. Under 2 means partitions:ensure has stopped
+  // running, and writes will start landing in the default partitions.
+  const ahead = await partitionsAhead();
+  checks.partitionsAheadMonths = ahead === null ? 'unknown' : String(ahead);
+  if (ahead !== null && ahead < 2) healthy = false;
+
+  // A relay failure in the last hour (wrong password, relay down) is reported,
+  // not turned into a 503: mail is queued and retried, and a deploy health
+  // check must not fail over the school's mail relay.
+  const smtpError = mailDelivery.lastTransportError;
+  const smtpRecent = smtpError && Date.now() - Date.parse(smtpError.at) < 3_600_000;
+  checks.smtp = smtpRecent ? `relay failing since ${smtpError!.at}: ${smtpError!.error.slice(0, 120)}` : 'ok';
 
   res.status(healthy ? 200 : 503).json({
     service: 'tupo-worker',
@@ -302,6 +397,7 @@ const server = app.listen(port, () => {
 const shutdown = async () => {
   console.log('\n[worker] draining — finishing in-flight jobs');
   await worker.close();
+  await metrics.stop();
   await queue.close();
   await connection.quit();
   server.close(() => process.exit(0));

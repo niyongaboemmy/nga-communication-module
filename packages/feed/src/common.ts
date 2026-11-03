@@ -42,6 +42,25 @@ export function visibleAudiences(level: RoleLevel): FeedAudience[] {
   }
 }
 
+/**
+ * The role levels that can see a given audience — the inverse of
+ * `visibleAudiences`, for choosing who a post may be pushed to.
+ * `null` (no role) appears only for 'everyone'.
+ */
+export function levelsThatSee(audience: FeedAudience): RoleLevel[] {
+  const all: RoleLevel[] = ['STUDENT', 'PARENT', 'STAFF', 'ADMIN', null];
+  return all.filter((level) => visibleAudiences(level).includes(audience));
+}
+
+/** The narrower of a post's own audience and its page's (the page always caps). */
+export function effectiveAudience(post: FeedAudience, page: FeedAudience): FeedAudience {
+  if (post === 'everyone') return page;
+  if (page === 'everyone' || page === post) return post;
+  // Two different restricted bands (e.g. a 'students' post on a 'parents'
+  // page) leave only staff, who see every band.
+  return 'staff';
+}
+
 /** Can this role level *address* a given audience when posting? */
 export function canTargetAudience(level: RoleLevel, audience: FeedAudience): boolean {
   if (audience === 'everyone') return true;
@@ -134,3 +153,18 @@ export function rankScore(input: {
 }
 
 export { FEED_LIMITS };
+
+/**
+ * Lock a parent row (post, comment, reel, page) for the rest of the
+ * transaction, *before* inserting or deleting its children. Counters here are
+ * recounted (`SET n = (SELECT count(*) …)`), and under READ COMMITTED a
+ * concurrent transaction blocked on the UPDATE would otherwise recount from a
+ * snapshot that misses the other's row — a stale total (FEED-B10). Taken
+ * first, the lock makes every later statement see the other's committed rows.
+ */
+export async function lockRow(
+  client: { query: (sql: string, params: unknown[]) => Promise<unknown> },
+  table: 'feed_posts' | 'feed_comments' | 'feed_reels' | 'feed_pages', id: string,
+): Promise<void> {
+  await client.query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [id]);
+}

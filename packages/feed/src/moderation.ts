@@ -77,26 +77,40 @@ export async function listQueue(
     [status, limit],
   );
 
+  // Previews in two queries, not one per report (D-11 / FEED-P2).
+  const postIds = rows.filter((r) => r.target_type === 'post').map((r) => r.target_id);
+  const commentIds = rows.filter((r) => r.target_type !== 'post').map((r) => r.target_id);
+  const { rows: posts } = postIds.length ? await getPool().query<{
+    id: string; body: string; media: FeedMediaItem[]; created_at: string; deleted_at: string | null;
+    author_name: string; author_avatar: string | null; page_name: string;
+  }>(
+    `SELECT p.id, p.body, p.media, p.created_at, p.deleted_at, u.name AS author_name,
+            u.avatar_url AS author_avatar, pg.name AS page_name
+       FROM feed_posts p JOIN users u ON u.id = p.author_id JOIN feed_pages pg ON pg.id = p.page_id
+      WHERE p.id = ANY($1::text[])`, [postIds],
+  ) : { rows: [] };
+  const { rows: comments } = commentIds.length ? await getPool().query<{
+    id: string; body: string; media: FeedMediaItem[] | null; created_at: string;
+    author_id: string; author_name: string; author_avatar: string | null;
+  }>(
+    `SELECT c.id, c.body, c.media, c.created_at, c.author_id, u.name AS author_name, u.avatar_url AS author_avatar
+       FROM feed_comments c JOIN users u ON u.id = c.author_id WHERE c.id = ANY($1::text[])`, [commentIds],
+  ) : { rows: [] };
+  const postById = new Map(posts.map((p) => [p.id, p]));
+  const commentById = new Map(comments.map((c) => [c.id, c]));
+
   const out: FeedReportView[] = [];
   for (const r of rows) {
     let preview: FeedReportView['preview'] = null;
     if (r.target_type === 'post') {
-      const { rows: pr } = await getPool().query<{
-        body: string; media: FeedMediaItem[]; created_at: string; deleted_at: string | null;
-        author_name: string; author_avatar: string | null; page_name: string;
-      }>(
-        `SELECT p.body, p.media, p.created_at, p.deleted_at, u.name AS author_name,
-                u.avatar_url AS author_avatar, pg.name AS page_name
-           FROM feed_posts p JOIN users u ON u.id = p.author_id JOIN feed_pages pg ON pg.id = p.page_id
-          WHERE p.id = $1`, [r.target_id],
-      );
-      if (pr[0]) preview = {
-        kind: 'post', body: pr[0].body, media: pr[0].media ?? [], createdAt: pr[0].created_at,
-        removed: pr[0].deleted_at !== null, pageName: pr[0].page_name,
-        author: { id: '', name: pr[0].author_name, avatarUrl: pr[0].author_avatar },
+      const pr = postById.get(r.target_id);
+      if (pr) preview = {
+        kind: 'post', body: pr.body, media: pr.media ?? [], createdAt: pr.created_at,
+        removed: pr.deleted_at !== null, pageName: pr.page_name,
+        author: { id: '', name: pr.author_name, avatarUrl: pr.author_avatar },
       };
     } else {
-      const c = await getCommentPreview(r.target_id);
+      const c = commentById.get(r.target_id);
       if (c) preview = {
         kind: 'comment', body: c.body, media: c.media ?? [], createdAt: c.created_at,
         removed: false,
@@ -147,9 +161,20 @@ export async function act(
   }>('SELECT target_type, target_id, post_id, status FROM feed_reports WHERE id = $1', [reportId]);
   const report = rows[0];
   if (!report) throw new FeedError('Report not found.', 404);
+  // Two moderators on the same report: the second is told (D-10).
+  if (report.status !== 'open') throw new FeedError('This report has already been handled.', 409);
 
   let authorId: string | null = null;
   let parentId: string | null = null;
+
+  // The author is told about a warning too — it used to be looked up only
+  // for a removal, so "Warn author" warned nobody (D-10).
+  if (action === 'warn') {
+    const { rows: a } = await getPool().query<{ author_id: string }>(
+      report.target_type === 'post' ? 'SELECT author_id FROM feed_posts WHERE id = $1' : 'SELECT author_id FROM feed_comments WHERE id = $1',
+      [report.target_id]);
+    authorId = a[0]?.author_id ?? null;
+  }
 
   if (action === 'remove') {
     if (report.target_type === 'post') {

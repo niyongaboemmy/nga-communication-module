@@ -5,6 +5,7 @@ import {
 import { IconButton, Spinner } from '../../components/ui';
 import { formatBytes } from './data';
 import { downloadFile, useMediaUrl } from './uploads';
+import { blurhashUrl } from '../../lib/blurhash';
 import type { Attachment } from './types';
 
 /**
@@ -64,29 +65,67 @@ export const Lightbox: React.FC<{
   onClose: () => void;
 }> = ({ items, index, onIndex, onClose }) => {
   const current = items[index];
-  const { url, failed } = useMediaUrl(current?.fileId ?? '', Boolean(current));
+  const { url, failed, refresh } = useMediaUrl(current?.fileId ?? '', Boolean(current));
+  const videoResume = useRef<number | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      // The viewer is on top, so its Escape closes only the viewer (B-08): it
+      // runs first (capture) and goes no further, or the details panel behind
+      // it closed too.
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); }
       if (e.key === 'ArrowRight' && index < items.length - 1) onIndex(index + 1);
       if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1);
     };
-    document.addEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
     // The page behind must not scroll while a full-screen viewer is open.
     const previous = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onKey, true);
       document.body.style.overflow = previous;
     };
   }, [index, items.length, onIndex, onClose]);
+
+  // Phones (U-03): swipe sideways between pictures; double-tap zooms 2x where
+  // tapped, double-tap again to fit. A swipe never counts as a backdrop tap.
+  const swipe = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const lastTap = useRef(0);
+  const swipedAt = useRef(0);
+  const [zoom, setZoom] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => { setZoom(null); }, [index]);
+  const touch = {
+    onPointerDown: (e: React.PointerEvent) => { if (e.pointerType === 'touch') swipe.current = { x: e.clientX, y: e.clientY, moved: false }; },
+    onPointerUp: (e: React.PointerEvent) => {
+      const st = swipe.current; swipe.current = null;
+      if (!st || e.pointerType !== 'touch' || zoom) return;
+      const dx = e.clientX - st.x, dy = e.clientY - st.y;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        st.moved = true;
+        if (dx < 0 && index < items.length - 1) onIndex(index + 1);
+        if (dx > 0 && index > 0) onIndex(index - 1);
+        // A browser may still send a click for the lifted finger: ignore only that one.
+        swipedAt.current = Date.now();
+      }
+    },
+  };
+  const onImageTap = (e: React.MouseEvent<HTMLImageElement>) => {
+    e.stopPropagation();
+    const now = Date.now();
+    if (now - swipedAt.current < 80) return;
+    if (now - lastTap.current < 300) {
+      const r = e.currentTarget.getBoundingClientRect();
+      setZoom((z) => (z ? null : { x: ((e.clientX - r.left) / r.width) * 100, y: ((e.clientY - r.top) / r.height) * 100 }));
+      lastTap.current = 0;
+    } else lastTap.current = now;
+  };
 
   if (!current) return null;
 
   return (
     <div
       role="dialog"
+      data-lightbox
       aria-modal="true"
       aria-label={`${current.name}, ${index + 1} of ${items.length}`}
       className="fixed inset-0 z-100 flex flex-col bg-black/92"
@@ -114,7 +153,7 @@ export const Lightbox: React.FC<{
 
       {/* Clicking the backdrop closes; clicking the image itself does not, so a
           mis-aimed tap while panning a large picture is not a dismissal. */}
-      <div className="grid min-h-0 flex-1 place-items-center p-4" onClick={onClose}>
+      <div className="grid min-h-0 flex-1 place-items-center overflow-hidden p-4 [touch-action:pan-y_pinch-zoom]" onClick={onClose} {...touch}>
         {failed ? (
           <p className="flex flex-col items-center gap-2 text-sm text-white/70">
             <ImageOff size={28} /> This file could not be loaded.
@@ -126,6 +165,12 @@ export const Lightbox: React.FC<{
             src={url}
             controls
             autoPlay
+            onError={(e) => { videoResume.current = (e.target as HTMLVideoElement).currentTime; refresh(); }}
+            onLoadedMetadata={(e) => {
+              if (videoResume.current == null) return;
+              (e.target as HTMLVideoElement).currentTime = videoResume.current;
+              videoResume.current = null;
+            }}
             onClick={(e) => e.stopPropagation()}
             className="max-h-full max-w-full rounded-lg"
           />
@@ -133,8 +178,10 @@ export const Lightbox: React.FC<{
           <img
             src={url}
             alt={current.name}
-            onClick={(e) => e.stopPropagation()}
-            className="max-h-full max-w-full rounded-lg object-contain"
+            onClick={onImageTap}
+            data-zoomed={zoom ? 'true' : 'false'}
+            style={zoom ? { transform: 'scale(2)', transformOrigin: `${zoom.x}% ${zoom.y}%` } : undefined}
+            className="max-h-full max-w-full rounded-lg object-contain transition-transform duration-200"
           />
         )}
       </div>
@@ -179,8 +226,10 @@ const SPEEDS = [1, 1.5, 2] as const;
 export const VoiceNote: React.FC<{ attachment: Attachment; onDark: boolean }> = (
   { attachment: a, onDark },
 ) => {
-  const { url } = useMediaUrl(a.fileId, true);
+  const { url, refresh } = useMediaUrl(a.fileId, true);
   const audioRef = useRef<HTMLAudioElement>(null);
+  /** Where to pick up after a ticket refresh swaps the source mid-play. */
+  const resumeAt = useRef<{ time: number; play: boolean } | null>(null);
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
@@ -221,6 +270,22 @@ export const VoiceNote: React.FC<{ attachment: Attachment; onDark: boolean }> = 
           onPause={() => setPlaying(false)}
           onEnded={() => { setPlaying(false); setPosition(0); }}
           onTimeUpdate={(e) => setPosition((e.target as HTMLAudioElement).currentTime)}
+          // A failed load (expired ticket, dropped connection) gets a fresh
+          // ticket and carries on from the same place.
+          onError={(e) => {
+            const el = e.target as HTMLAudioElement;
+            resumeAt.current = { time: el.currentTime || position, play: playing };
+            if (!refresh()) setPlaying(false);
+          }}
+          onLoadedMetadata={(e) => {
+            const r = resumeAt.current;
+            if (!r) return;
+            resumeAt.current = null;
+            const el = e.target as HTMLAudioElement;
+            el.currentTime = r.time;
+            el.playbackRate = speed;
+            if (r.play) void el.play();
+          }}
         />
       )}
 
@@ -295,30 +360,52 @@ const ImageTile: React.FC<{
 const ImageTileInner: React.FC<{
   attachment: Attachment; onOpen: () => void; visible: boolean;
 }> = ({ attachment: a, onOpen, visible }) => {
-  const { url, failed } = useMediaUrl(a.fileId, visible);
+  // Images load their 640 px thumbnail (P-05); the lightbox opens the original.
+  const { url, failed } = useMediaUrl(a.fileId, visible, { thumb: a.kind === 'image' });
+  const [loaded, setLoaded] = useState(false);
   // The box is reserved from the dimensions the sender's browser measured, so
-  // the log does not jump as pictures decode.
+  // the log does not jump as pictures decode; the blurhash fills it meanwhile.
   const ratio = a.width && a.height ? a.width / a.height : 4 / 3;
+  const placeholder = a.kind === 'image' ? blurhashUrl(a.blurhash) : null;
 
   return (
     <button
       onClick={onOpen}
       aria-label={`Open ${a.name}`}
-      style={{ aspectRatio: String(Math.min(Math.max(ratio, 0.5), 2.5)) }}
+      style={{
+        aspectRatio: String(Math.min(Math.max(ratio, 0.5), 2.5)),
+        ...(placeholder ? { backgroundImage: `url(${placeholder})`, backgroundSize: 'cover' } : {}),
+      }}
       className="group/img relative w-full overflow-hidden rounded-xl bg-slate-200 dark:bg-slate-700"
     >
       {failed ? (
         <span className="grid h-full w-full place-items-center text-slate-500">
           <ImageOff size={20} />
         </span>
+      ) : url && a.kind === 'video' ? (
+        // A video's own first frame is its thumbnail (B-10): an <img> pointed
+        // at an mp4 drew a broken picture. `#t=0.1` asks for a frame just in,
+        // past the black that many recordings start on; only metadata and that
+        // frame are fetched until it is opened.
+        <video
+          src={`${url}#t=0.1`}
+          preload="metadata"
+          muted
+          playsInline
+          aria-label={a.name}
+          className="pointer-events-none h-full w-full object-cover"
+        />
       ) : url ? (
         <img
           src={url}
           alt={a.name}
           loading="lazy"
-          className="h-full w-full object-cover transition-transform duration-200 group-hover/img:scale-[1.02]"
+          decoding="async"
+          onLoad={() => setLoaded(true)}
+          className={`h-full w-full object-cover transition-[transform,opacity] duration-200 group-hover/img:scale-[1.02] ${
+            placeholder && !loaded ? 'opacity-0' : 'opacity-100'}`}
         />
-      ) : (
+      ) : placeholder ? null : (
         <span className="grid h-full w-full place-items-center"><Spinner className="h-4 w-4" /></span>
       )}
     </button>

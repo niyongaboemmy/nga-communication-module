@@ -35,6 +35,8 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   const { confirm: toastConfirm, notify } = useNotify();
   const [showComments, setShowComments] = useState(openComments);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerByKey, setPickerByKey] = useState(false);
+  useEffect(() => { if (!pickerOpen) setPickerByKey(false); }, [pickerOpen]);
   const [burst, setBurst] = useState<{ reaction: FeedReaction; seed: number } | null>(null);
   const [thumbPop, setThumbPop] = useState(0);
   const [expanded, setExpanded] = useState(false);
@@ -44,7 +46,7 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   const menuRef = useDismiss(menu, closeMenu);
   const cardRef = useRef<HTMLElement>(null);
   const viewed = useRef(false);
-  const avatarUrl = useMediaUrl(post.page.avatarFileId);
+  const avatarUrl = useMediaUrl(post.page.avatarFileId, true, 0, undefined, true);
 
   useEffect(() => {
     const el = cardRef.current;
@@ -196,11 +198,16 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
       {/* Action bar — 3 equal buttons, exactly like Facebook. */}
       <div className="mx-3 mt-1 flex items-stretch border-t border-black/[0.08] py-1 sm:mx-4 dark:border-white/[0.06]">
         <div className="relative flex-1" {...press}>
-          {pickerOpen && <ReactionPicker onPick={doReact} onClose={() => setPickerOpen(false)} />}
+          {pickerOpen && <ReactionPicker onPick={doReact} onClose={() => setPickerOpen(false)} autoFocus={pickerByKey} />}
           <button
             onClick={() => doReact(primaryReaction)}
+            // The keyboard way to the other reactions (U-23): hover and
+            // long-press are not available to everyone.
+            onKeyDown={(e) => { if (e.key === 'ArrowUp') { e.preventDefault(); setPickerByKey(true); setPickerOpen(true); } }}
+            aria-haspopup="menu"
+            aria-keyshortcuts="ArrowUp"
             aria-pressed={post.reactions.mine !== null}
-            aria-label={post.reactions.mine ? `${FEED_REACTION_META[post.reactions.mine].label} — click to remove, hold for more reactions` : 'Like — hold for more reactions'}
+            aria-label={post.reactions.mine ? `${FEED_REACTION_META[post.reactions.mine].label} — click to remove, hold for more reactions` : 'Like — hold, or press Up, for more reactions'}
             className={actionButton}
             style={mineTint ? { color: mineTint } : undefined}
           >

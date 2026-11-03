@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import { io } from 'socket.io-client';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const env = Object.fromEntries(
   readFileSync('apps/api/.env', 'utf8').split('\n')
@@ -104,6 +105,10 @@ try {
 
   const outsiderToken2 = (await makeUser('Verify SFU Outsider', 'Staff')).token;
   const caps = await api('/api/meet/capabilities', hostUser.token);
+  // AI runs only with a provider configured AND the school's switch on in NGA
+  // MIS (aiPolicy; off by default). Either missing: the AI checks are skipped.
+  const aiOn = Boolean(caps.body.data?.ai) && caps.body.data?.aiPolicy?.enabled !== false;
+  const aiOffWhy = !caps.body.data?.ai ? 'no provider key configured' : 'AI is switched off for the school (MIS ai_policy)';
   check('capabilities endpoint answers', caps.status === 200,
     `sfu=${caps.body.data?.sfu} turn=${caps.body.data?.turn} ai=${caps.body.data?.ai}`);
   check('capabilities leak no credential',
@@ -350,13 +355,14 @@ try {
   const pupilTranscript = await api(`/api/meet/${meeting.id}/transcript`, pupilUser.token);
   check('a participant may read the transcript', pupilTranscript.status === 200);
   const stranger = await makeUser('Verify Stranger', 'Staff');
+  // Refused as not found: to someone with no part in it the meeting does not exist.
   check('someone who was never there may not',
-    (await api(`/api/meet/${meeting.id}/transcript`, stranger.token)).status === 403);
+    [403, 404].includes((await api(`/api/meet/${meeting.id}/transcript`, stranger.token)).status));
 
   /* ---- M12: the AI chain ----------------------------------------------- */
   console.log('\nAI — the four-provider fallback chain');
-  if (!caps.body.data?.ai) {
-    skip('AI generation', 'no provider key configured');
+  if (!aiOn) {
+    skip('AI generation', aiOffWhy);
   } else {
     const summary = await api(`/api/meet/${meeting.id}/ai/summary`, hostUser.token,
       { method: 'POST', body: '{}' });
@@ -517,7 +523,7 @@ try {
   check('a capture is labelled as such, not passed off as typed',
     captured.body.data?.source === 'capture');
 
-  if (caps.body.data?.ai) {
+  if (aiOn) {
     const tidied = await api(`/api/meet/${meeting.id}/notes/${noteId}/tidy`, hostUser.token,
       { method: 'POST' });
     if (tidied.status === 200) {
@@ -877,8 +883,8 @@ try {
 
   /* ---- M13: the post-meeting wrap-up job, end to end -------------------- */
   console.log('\nPost-meeting wrap-up (worker)');
-  if (!caps.body.data?.ai) {
-    skip('wrap-up job', 'no AI provider configured');
+  if (!aiOn) {
+    skip('wrap-up job', aiOffWhy);
   } else {
     // A second meeting, so the assertion is about what the *worker* produced
     // rather than about artifacts the AI checks above already generated.
@@ -957,7 +963,7 @@ try {
   await new Promise((r) => setTimeout(r, 3000));
   // Clean up after ourselves: meetings cascade to every child table.
   if (meeting) await pool.query('DELETE FROM meetings WHERE id = $1', [meeting.id]).catch(() => {});
-  await pool.query(`DELETE FROM users WHERE id LIKE 'meetverify-%'`).catch(() => {});
+  await purgeUsersLike(pool, 'meetverify-');
   await pool.end();
 }
 

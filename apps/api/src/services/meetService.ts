@@ -1,4 +1,4 @@
-import { getPool, snowflake, activeUserSql, filterActiveUserIds } from '@tupo/db';
+import { getPool, snowflake, closeAttendanceLegs, activeUserSql, filterActiveUserIds } from '@tupo/db';
 import {
   DEFAULT_MEET_SETTINGS, MESH_MAX_PARTICIPANTS, capacityFor,
   generateJoinCode, parseMeetSettings, severityFor,
@@ -422,9 +422,28 @@ export interface UpsertParticipantParams {
  * export would otherwise report for anyone whose wifi hiccupped.
  */
 export async function upsertParticipant(p: UpsertParticipantParams): Promise<ParticipantRow> {
-  const pool = getPool();
+  if (!p.userId) return insertParticipant(getPool(), p);
+  // One row per person per meeting (MEET-BUG2): two tabs joining at the same
+  // moment must find-or-create the same row, not one each.
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))`, [p.meetingId, p.userId]);
+    const row = await findOrCreateParticipant(client, p);
+    await client.query('COMMIT');
+    return row;
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
 
-  if (p.userId) {
+async function findOrCreateParticipant(
+  pool: import('pg').PoolClient, p: UpsertParticipantParams,
+): Promise<ParticipantRow> {
+  {
     const { rows: existing } = await pool.query<ParticipantRow>(
       `SELECT * FROM meeting_participants WHERE meeting_id = $1 AND user_id = $2 LIMIT 1`,
       [p.meetingId, p.userId],
@@ -438,7 +457,9 @@ export async function upsertParticipant(p: UpsertParticipantParams): Promise<Par
         `UPDATE meeting_participants
             SET state = $3, role = $4, display_name = $5, device_label = COALESCE($6, device_label),
                 joined_at = COALESCE(joined_at, CASE WHEN $3 = 'active' THEN now() END),
-                left_at = NULL
+                left_at = NULL,
+                -- A new attendance leg starts now; an already-open one carries on.
+                segment_started_at = CASE WHEN $3 = 'active' THEN COALESCE(segment_started_at, now()) END
           WHERE id = $1 AND meeting_id = $2
           RETURNING *`,
         [prior.id, p.meetingId, p.state, role, p.displayName, p.deviceLabel ?? null],
@@ -446,13 +467,18 @@ export async function upsertParticipant(p: UpsertParticipantParams): Promise<Par
       return rows[0]!;
     }
   }
+  return insertParticipant(pool, p);
+}
 
+async function insertParticipant(
+  pool: import('pg').PoolClient | ReturnType<typeof getPool>, p: UpsertParticipantParams,
+): Promise<ParticipantRow> {
   const id = snowflake();
   const { rows } = await pool.query<ParticipantRow>(
     `INSERT INTO meeting_participants
        (id, meeting_id, user_id, display_name, is_guest, role, state,
-        audio_enabled, video_enabled, device_label, ip_address, knocked_at, joined_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        audio_enabled, video_enabled, device_label, ip_address, knocked_at, joined_at, segment_started_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)
      RETURNING *`,
     [
       id, p.meetingId, p.userId, p.displayName, p.isGuest, p.role, p.state,
@@ -519,15 +545,7 @@ export function toWireParticipant(r: ParticipantRow): MeetParticipant {
  * against a clock that moved backwards mid-call.
  */
 export async function markParticipantLeft(participantId: string, state: ParticipantState = 'left'): Promise<void> {
-  await getPool().query(
-    `UPDATE meeting_participants
-        SET state = $2,
-            left_at = now(),
-            duration_seconds = duration_seconds + GREATEST(
-              EXTRACT(EPOCH FROM (now() - COALESCE(joined_at, now())))::int, 0)
-      WHERE id = $1 AND left_at IS NULL`,
-    [participantId, state],
-  );
+  await closeAttendanceLegs(getPool(), { participantId }, state);
 }
 
 /* ------------------------------------------------------------------ *
@@ -558,6 +576,22 @@ export async function audienceFor(
   meetingId: string, settings: MeetSettings,
 ): Promise<{ userIds: string[]; truncated: boolean }> {
   const pool = getPool();
+
+  // A call started from a conversation is for that conversation: its members
+  // and anyone invited — never the whole institution (MEET-SEC4).
+  const { rows: conv } = await pool.query<{ conversation_id: string | null }>(
+    'SELECT conversation_id FROM meetings WHERE id = $1', [meetingId]);
+  if (conv[0]?.conversation_id) {
+    const { rows } = await pool.query<{ user_id: string }>(
+      `SELECT i.user_id FROM meeting_invites i JOIN users u ON u.id = i.user_id AND u.status = 'active'
+        WHERE i.meeting_id = $1
+       UNION
+       SELECT cm.user_id FROM conversation_members cm JOIN users u ON u.id = cm.user_id AND u.status = 'active'
+        WHERE cm.conversation_id = $2`,
+      [meetingId, conv[0].conversation_id],
+    );
+    return { userIds: rows.map((r) => r.user_id).slice(0, NOTIFY_BROADCAST_CAP), truncated: false };
+  }
 
   if (settings.admissionPolicy === 'invited') {
     const { rows } = await pool.query<{ user_id: string }>(
@@ -595,16 +629,10 @@ export async function endMeeting(meetingId: string, actorId: string): Promise<vo
   const pool = getPool();
   // Close every open leg before the meeting itself, so nobody is left with a
   // NULL left_at that the attendance export would have to guess about.
+  await closeAttendanceLegs(pool, { meetingId });
   await pool.query(
-    `UPDATE meeting_participants
-        SET state = 'left', left_at = now(),
-            duration_seconds = duration_seconds + GREATEST(
-              EXTRACT(EPOCH FROM (now() - COALESCE(joined_at, now())))::int, 0)
-      WHERE meeting_id = $1 AND left_at IS NULL`,
-    [meetingId],
-  );
-  await pool.query(
-    `UPDATE meetings SET status = 'ended', ended_at = now(), updated_at = now() WHERE id = $1`,
+    `UPDATE meetings SET status = 'ended', ended_at = COALESCE(ended_at, now()), updated_at = now()
+      WHERE id = $1 AND status <> 'ended'`,
     [meetingId],
   );
   await logMeetEvent(meetingId, 'meeting.ended', { actorId });

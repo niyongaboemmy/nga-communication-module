@@ -1,4 +1,6 @@
 import * as chat from '@tupo/chat';
+import { relay } from '@tupo/notify';
+import { conversationRoom } from '@tupo/shared';
 
 /**
  * Housekeeping for chat.
@@ -22,7 +24,8 @@ export interface ChatSweepResult {
 }
 
 export async function runChatSweeps(): Promise<ChatSweepResult> {
-  const messagesDeleted = await chat.sweepExpiredMessages(500);
+  const messagesDeleted = await chat.sweepExpiredMessages(500, (conversationId, messageIds) =>
+    relay([conversationRoom(conversationId)], 'messages:expired', { conversationId, messageIds }));
   const statusesCleared = await chat.sweepExpiredStatuses();
   const inactiveRemovedFromSubjects = await chat.leaveSubjectChannelsForInactive();
   return { messagesDeleted, statusesCleared, inactiveRemovedFromSubjects };

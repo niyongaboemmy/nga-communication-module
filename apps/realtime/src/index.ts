@@ -5,19 +5,22 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import { Redis } from 'ioredis';
 import type { AppNotification } from '@tupo/shared';
 import jwt from 'jsonwebtoken';
-import { PRESENCE_TTL_SECONDS, PRESENCE_HEARTBEAT_SECONDS } from '@tupo/shared';
+import { PRESENCE_TTL_SECONDS, PRESENCE_HEARTBEAT_SECONDS, connectedKey, presenceKey } from '@tupo/shared';
 import type { ClientToServerEvents, ServerToClientEvents, SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
 import { registerMeetNamespace } from './meet/namespace.js';
 import { ping as pingMeetDb, getPool as getMeetPool } from './meet/db.js';
-import { rooms as meetRooms } from './meet/state.js';
+import { rooms as meetRooms, roomKey as meetRoomKey } from './meet/state.js';
 import * as chat from '@tupo/chat';
 import { registerChatHandlers } from './chat/handlers.js';
+import { hardenSocket, installProcessGuards } from './utils/safeSocket.js';
 import { registerFeedHandlers } from './feed/handlers.js';
-import { createAccessCache, findInactiveUsers, sessionEnded } from './access.js';
+import { createAccessCache, findInactiveUsers, revocationsFor, sessionEnded } from './access.js';
+import { issuedBeforeRevocation } from './utils/ssoLogout.js';
 import { stopActivity } from './activity.js';
+import { startProcessMetrics } from '@tupo/db';
 import {
-  broadcastPresence, markOffline, markOnline, readPresence, toStatus,
+  broadcastPresence, markOffline, readPresence, recomputePresence, toChoice, toStatus, writeChoice,
 } from './presence.js';
 
 const app = express();
@@ -71,13 +74,19 @@ const LOGOUT_CHANNEL = 'tupo:logout';
 const logoutSub = pubClient.duplicate();
 const SESSION_ENDED = 'unauthorized: you signed out of NGA MIS, please sign in again';
 
-async function connectRedis(): Promise<void> {
-  try {
-    await Promise.all([pubClient.connect(), subClient.connect(), presence.connect()]);
-    io.adapter(createAdapter(pubClient, subClient));
+/*
+ * Relay listeners are attached once, at load. Every instance subscribes to the
+ * same channels, so each delivers to its OWN sockets only (`io.local`): with
+ * the Redis adapter attached, a plain `io.to` would also broadcast to every
+ * other instance, and N instances would each deliver N copies (RT-03).
+ */
+for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub]) {
+  // ioredis reconnects by itself once connected; an unhandled 'error' event
+  // would otherwise crash the process on the first blip.
+  c.on('error', () => {});
+}
 
-    await notifySub.connect();
-    await notifySub.subscribe(NOTIFY_CHANNEL);
+{
     notifySub.on('message', (_channel, payload) => {
       try {
         const { userIds, notification } = JSON.parse(payload) as {
@@ -86,22 +95,38 @@ async function connectRedis(): Promise<void> {
         // Delivery is per-user-room, so a notification reaches every device
         // that person has open and nobody else's.
         for (const id of userIds ?? []) {
-          io.to(`user:${id}`).emit('notification:new', notification);
+          io.local.to(`user:${id}`).emit('notification:new', notification);
         }
       } catch {
         // A malformed message must not take the gateway down with it.
       }
     });
 
-    await chatSub.connect();
-    await chatSub.subscribe(CHAT_CHANNEL);
     chatSub.on('message', (_channel, payload) => {
       try {
-        const { rooms, event, payload: data, exceptSocketId } = JSON.parse(payload) as {
+        const parsed = JSON.parse(payload) as {
           rooms: string[]; event: string; payload: unknown; exceptSocketId?: string;
+          leave?: { userIds: string[]; rooms: string[] };
         };
+        // A meeting ended outside the room: tell whoever is still in it here,
+        // and drop this node's in-memory state for it (E-04).
+        const ended = (parsed as { meetEnded?: { meetingId?: string; by?: string | null } }).meetEnded;
+        if (ended?.meetingId) {
+          meetNsp.local.to(meetRoomKey(ended.meetingId)).emit('meet:ended' as never, {
+            by: ended.by ?? null, at: new Date().toISOString(),
+            summaryUrl: `/app/meet/${ended.meetingId}/summary`,
+          } as never);
+          meetRooms.delete(ended.meetingId);
+          return;
+        }
+        // Eviction: these people's sockets leave these rooms, everywhere.
+        if (parsed.leave && Array.isArray(parsed.leave.userIds) && Array.isArray(parsed.leave.rooms)) {
+          io.local.in(parsed.leave.userIds.map((id) => `user:${id}`)).socketsLeave(parsed.leave.rooms);
+          return;
+        }
+        const { rooms, event, payload: data, exceptSocketId } = parsed;
         if (!Array.isArray(rooms) || !event) return;
-        const target = exceptSocketId ? io.except(exceptSocketId) : io;
+        const target = exceptSocketId ? io.local.except(exceptSocketId) : io.local;
         // Rooms are named by the publisher, which is our own API — the payload
         // is not client-controlled, so relaying it verbatim is safe.
         (target.to(rooms) as unknown as { emit: (e: string, d: unknown) => void })
@@ -111,8 +136,6 @@ async function connectRedis(): Promise<void> {
       }
     });
 
-    await logoutSub.connect();
-    await logoutSub.subscribe(LOGOUT_CHANNEL);
     logoutSub.on('message', (_channel, payload) => {
       void (async () => {
         try {
@@ -133,12 +156,44 @@ async function connectRedis(): Promise<void> {
         }
       })();
     });
+}
 
+/**
+ * Connect, attach the adapter and subscribe. If Redis is down at boot the
+ * gateway still serves (single-instance, no relay) while ioredis keeps
+ * reconnecting, and this attaches as soon as every client is up — before, one
+ * failed attempt left notifications and the chat relay dead until someone
+ * restarted the process (RT-02). After that ioredis resubscribes on its own.
+ */
+const redisClients = [pubClient, subClient, presence, notifySub, chatSub, logoutSub];
+
+/** Resolve once this client is connected; ioredis keeps retrying underneath. */
+async function ensureReady(c: Redis): Promise<void> {
+  if (c.status === 'ready') return;
+  if (c.status === 'wait' || c.status === 'end') {
+    await c.connect();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const ok = () => { clearTimeout(t); resolve(); };
+    const t = setTimeout(() => { c.off('ready', ok); reject(new Error(`redis ${c.status}`)); }, 5_000);
+    c.once('ready', ok);
+  });
+}
+
+async function connectRedis(): Promise<void> {
+  try {
+    await Promise.all(redisClients.map(ensureReady));
+    io.adapter(createAdapter(pubClient, subClient));
+    await notifySub.subscribe(NOTIFY_CHANNEL);
+    await chatSub.subscribe(CHAT_CHANNEL);
+    await logoutSub.subscribe(LOGOUT_CHANNEL);
     redisReady = true;
     console.log('[realtime] redis adapter attached');
   } catch (err) {
-    console.warn('[realtime] redis unavailable — running single-instance:',
+    console.warn('[realtime] redis unavailable — single-instance for now, retrying:',
       err instanceof Error ? err.message : err);
+    setTimeout(() => void connectRedis(), 2_000).unref();
   }
 }
 
@@ -201,7 +256,10 @@ io.use((socket, next) => {
  * SDP — and keeping it separate means none of it is broadcast to sockets that
  * only asked for chat presence.
  */
-const meetNsp = registerMeetNamespace(io);
+const meetNsp = registerMeetNamespace(io, {
+  // Joining or leaving a call moves "in a meeting" (F-10).
+  onMeetingPresence: (userId) => { void recomputePresence(io, redisReady ? presence : null, userId).catch(() => {}); },
+});
 
 // Runs after the namespace's own JWT middleware has set `socket.data.user`.
 // Guests hold a meeting ticket, not an account, so they have no row to check.
@@ -235,14 +293,24 @@ function startAccessSweep(): NodeJS.Timeout {
           if (u?.id && !s.data.guest) ids.add(u.id);
         }
         const inactive = await findInactiveUsers([...ids]);
+        const revokedAt = await revocationsFor([...ids]);
+        const nowSec = Date.now() / 1000;
         for (const s of sockets) {
-          const u = s.data.user as SessionClaims | undefined;
-          if (u?.id && inactive.has(u.id)) {
-            accessCache.invalidate(u.id);
-            // A server-side disconnect: the client does not auto-reconnect,
-            // and if it tries, the handshake check refuses it.
-            s.disconnect(true);
-          }
+          const u = s.data.user as (SessionClaims & { iat?: number; exp?: number }) | undefined;
+          if (!u?.id || s.data.guest) continue;
+          // The JWT is checked at the handshake; a socket lives for hours, so
+          // the sweep also ends sessions that expired or were revoked since
+          // (single sign-out, suspension) — RT-04.
+          const reason = inactive.has(u.id) ? 'suspended'
+            : issuedBeforeRevocation(u.iat, revokedAt.get(u.id) ?? null) ? 'signed_out'
+            : u.exp && u.exp < nowSec ? 'expired'
+            : null;
+          if (!reason) continue;
+          accessCache.invalidate(u.id);
+          s.emit('session:ended', { reason });
+          // A server-side disconnect: the client does not auto-reconnect,
+          // and if it tries, the handshake check refuses it.
+          s.disconnect(true);
         }
         accessCache.prune();
       } catch {
@@ -283,7 +351,10 @@ function startPresenceHeartbeat(): NodeJS.Timeout {
         // key has already gone, EXPIRE is a no-op and the next connect or
         // presence:set puts it back.
         const pipeline = presence.pipeline();
-        for (const id of ids) pipeline.expire(`presence:${id}`, PRESENCE_TTL_SECONDS);
+        for (const id of ids) {
+          pipeline.expire(`presence:${id}`, PRESENCE_TTL_SECONDS);
+          pipeline.set(connectedKey(id), '1', 'EX', PRESENCE_TTL_SECONDS);
+        }
         await pipeline.exec();
       } catch {
         // Presence is decoration; a failed refresh costs a grey dot, not a
@@ -295,7 +366,17 @@ function startPresenceHeartbeat(): NodeJS.Timeout {
 
 const presenceHeartbeat = startPresenceHeartbeat();
 
+installProcessGuards('realtime');
+
+// The gateway's own numbers (R-04): connected sockets, and new connections per
+// minute — a burst of the latter after a deploy is the reconnect wave.
+const metrics = startProcessMetrics('realtime');
+metrics.gauge('sockets', () => io.engine.clientsCount);
+metrics.gauge('meet_sockets', () => meetNsp.sockets.size);
+
 io.on('connection', (socket) => {
+  metrics.count('connections');
+  hardenSocket(socket);
   const user = socket.data.user as SessionClaims;
 
   /*
@@ -348,16 +429,16 @@ io.on('connection', (socket) => {
    * instead would mean one forgotten call site quietly leaking the thing the
    * setting was flicked to hide.
    */
-  void (async () => {
+  socket.data.presenceReady = (async () => {
     await socket.join(`user:${user.id}`);
     const visible = await chat.showsPresence(user.id).catch(() => true);
     socket.data.presenceVisible = visible;
-    if (!visible || socket.disconnected) return;
-    await markOnline(redisReady ? presence : null, user.id, 'online');
+    if (socket.disconnected) return;
     // Coming online is worth telling the people who can see it — otherwise the
-    // green dot only ever appears on a reload.
-    void broadcastPresence(io, user.id, 'online');
-  })();
+    // green dot only ever appears on a reload. A status picked on another
+    // device (busy, do not disturb) holds; this tab only adds its activity.
+    await recomputePresence(io, redisReady ? presence : null, user.id).catch(() => {});
+  })().catch(() => { /* presence is decoration */ });
 
   socket.emit('connection:ready', {
     userId: user.id,
@@ -386,8 +467,12 @@ io.on('connection', (socket) => {
   let lastSeenWrittenAt = Date.now();
   socket.on('presence:heartbeat', async (ack) => {
     if (socket.data.presenceVisible) {
-      const status = toStatus(socket.data.presenceStatus);
-      await markOnline(redisReady ? presence : null, user.id, status);
+      // Keep the key alive as it is; only when it has gone (a Redis restart)
+      // is the status worked out again and rewritten.
+      const alive = redisReady
+        ? await presence.expire(presenceKey(user.id), PRESENCE_TTL_SECONDS).catch(() => 1)
+        : 1;
+      if (!alive) await recomputePresence(io, presence, user.id).catch(() => {});
       if (Date.now() - lastSeenWrittenAt > chat.LAST_SEEN_WRITE_INTERVAL_MS) {
         lastSeenWrittenAt = Date.now();
         void chat.touchLastSeen(user.id).catch(() => {});
@@ -404,27 +489,41 @@ io.on('connection', (socket) => {
    */
   socket.on('presence:query', async ({ userIds }, ack) => {
     if (typeof ack !== 'function') return;
-    const wanted = [...new Set(userIds ?? [])].slice(0, 500);
+    const decision = await accessCache.get(user.id).catch(() => null);
+    if (!decision?.ok || !decision.access.permissions.has('PRESENCE_VIEW')) return ack({ presence: {} });
+    const wanted = [...new Set(Array.isArray(userIds) ? userIds : [])]
+      .filter((id): id is string => typeof id === 'string' && id.length <= 32).slice(0, 200);
+    // A block hides presence both ways (B-05): those people read as offline.
+    const hidden = await chat.separatedFrom(user.id, wanted).catch(() => new Set<string>());
+    if (hidden.size) {
+      const shown = await readPresence(redisReady ? presence : null, wanted.filter((id) => !hidden.has(id)));
+      for (const id of hidden) shown[id] = { status: 'offline', lastSeenAt: null } as (typeof shown)[string];
+      return ack({ presence: shown });
+    }
     ack({ presence: await readPresence(redisReady ? presence : null, wanted) });
   });
 
+  /*
+   * This tab's activity. Older clients also sent picks through here, so those
+   * are honoured as picks rather than read as activity.
+   */
   socket.on('presence:set', async ({ status }, ack) => {
     const next = toStatus(status);
-    socket.data.presenceStatus = next;
-
-    if (socket.data.presenceVisible) {
-      if (next === 'offline') {
-        // Appearing offline on purpose. The key goes, exactly as it would on a
-        // disconnect, so every reader agrees without needing to know this was
-        // a choice rather than a closed laptop.
-        await markOffline(redisReady ? presence : null, user.id);
-        void broadcastPresence(io, user.id, 'offline', new Date().toISOString());
-      } else {
-        await markOnline(redisReady ? presence : null, user.id, next);
-        void broadcastPresence(io, user.id, next);
-      }
+    if (next === 'online' || next === 'away') {
+      socket.data.presenceStatus = next;
+    } else if (next === 'busy' || next === 'dnd' || next === 'offline') {
+      await writeChoice(redisReady ? presence : null, user.id, next === 'offline' ? 'invisible' : next);
     }
+    await recomputePresence(io, redisReady ? presence : null, user.id).catch(() => {});
     if (typeof ack === 'function') ack({ ok: true });
+  });
+
+  /** A status the person picked, for all their devices (F-10). */
+  socket.on('presence:choose', async ({ choice }, ack) => {
+    await writeChoice(redisReady ? presence : null, user.id, toChoice(choice));
+    const outcome = await recomputePresence(io, redisReady ? presence : null, user.id)
+      .catch(() => ({ choice: toChoice(choice), status: 'online' as const }));
+    if (typeof ack === 'function') ack({ ok: true, ...outcome });
   });
 
   socket.on('disconnect', async () => {
@@ -433,6 +532,7 @@ io.on('connection', (socket) => {
     const remaining = await io.in(`user:${user.id}`).fetchSockets();
     if (remaining.length === 0) {
       const at = new Date();
+      if (redisReady) await presence.del(connectedKey(user.id)).catch(() => 0);
       await markOffline(redisReady ? presence : null, user.id);
       // The last-seen goes out with the status change: the moment a dot turns
       // grey is exactly when the UI needs the line that replaces it.
@@ -440,6 +540,9 @@ io.on('connection', (socket) => {
         io, user.id, 'offline',
         socket.data.presenceVisible ? at.toISOString() : null,
       );
+    } else {
+      // The tab in use closed beside an idle one: the person may now be away.
+      await recomputePresence(io, redisReady ? presence : null, user.id).catch(() => {});
     }
   });
 });
@@ -474,11 +577,26 @@ server.listen(config.port, () => {
   console.log(`🔌 tupo-realtime listening on http://localhost:${config.port}  (env: ${config.env})`);
 });
 
+let stopping = false;
 const shutdown = async (signal: string) => {
+  if (stopping) return;
+  stopping = true;
   clearInterval(presenceHeartbeat);
   clearInterval(accessSweep);
-  console.log(`\n[realtime] ${signal} received — telling clients to reconnect elsewhere`);
-  io.emit('system:reconnect_required', { reason: 'server shutting down' });
+  void metrics.stop();
+  console.log(`\n[realtime] ${signal} received — telling clients to reconnect`);
+  // Clients treat this as a planned restart: no session re-check, and each
+  // reconnects after its own random delay so they do not all return at once
+  // (R-02). A short pause lets the notice leave before the sockets close.
+  io.emit('system:reconnect_required', { reason: 'server restarting' });
+  await new Promise((r) => setTimeout(r, 250));
+  setTimeout(() => process.exit(0), 8_000).unref();
+  // A server-side disconnect, not a dropped transport: socket.io's own retry
+  // would bring every client back within a second; this way each one waits
+  // its own random delay.
+  io.disconnectSockets();
+  io.of('/meet').disconnectSockets();
+  await new Promise((r) => setTimeout(r, 150));
   io.close();
   await getMeetPool().end().catch(() => {});
   await stopActivity();

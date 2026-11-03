@@ -1,8 +1,12 @@
 import type { Envelope } from '@tupo/shared';
 import { getDeviceId } from '../vendor/nga-activity';
+import { cacheClearAll } from './localStore';
+import { setSwSessionToken } from './swSession';
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  /** `body`: the server's whole answer, for a refusal that carries more than a message (a code, the newer record). */
+  constructor(message: string, readonly status: number, readonly body?: unknown) { super(message); }
+  get code(): string | undefined { return (this.body as { code?: string } | undefined)?.code; }
 }
 
 export const SESSION_KEY = 'tupo_token';
@@ -13,6 +17,10 @@ export const PERMISSIONS_KEY = 'tupo_permissions';
 export const ROLE_PERMISSIONS_KEY = 'tupo_role_permissions';
 
 export function clearSession(): void {
+  // What this person saw must not render for whoever signs in next (P-02, P-05).
+  void cacheClearAll();
+  void setSwSessionToken(null);
+  try { void caches?.delete('tupo-media-v1').catch(() => {}); } catch { /* no Cache API */ }
   localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(USER_KEY);
   localStorage.removeItem(PERMISSIONS_KEY);
@@ -54,8 +62,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<Envelop
   try { body = await res.json(); }
   catch { throw new ApiError(`Unexpected response (${res.status})`, res.status); }
 
+  // Suspended mid-session: one clear screen, not an app where every request
+  // quietly fails and every page shows an empty state (A-11).
+  if (res.status === 403 && (body as { code?: string }).code === 'ACCOUNT_SUSPENDED' && token) {
+    clearSession();
+    window.location.href = '/suspended';
+  }
+
   if (!res.ok || body.success === false) {
-    throw new ApiError(body.message ?? `Request failed (${res.status})`, res.status);
+    throw new ApiError(body.message ?? `Request failed (${res.status})`, res.status, body);
   }
   return body;
 }
@@ -67,7 +82,8 @@ export const apiPut = <T>(path: string, data?: unknown) =>
   request<T>(path, { method: 'PUT', body: data !== undefined ? JSON.stringify(data) : undefined });
 export const apiPatch = <T>(path: string, data?: unknown) =>
   request<T>(path, { method: 'PATCH', body: data !== undefined ? JSON.stringify(data) : undefined });
-export const apiDelete = <T>(path: string) => request<T>(path, { method: 'DELETE' });
+export const apiDelete = <T>(path: string, data?: unknown) =>
+  request<T>(path, { method: 'DELETE', body: data !== undefined ? JSON.stringify(data) : undefined });
 
 /**
  * Download an authenticated endpoint as a file.

@@ -11,12 +11,16 @@ import type {
 import { FEED_PAGE_KINDS, FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
 import { Avatar, Badge, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
+import { useAuth } from '../../context/AuthContext';
 import { useNotify } from '../../context/NotificationContext';
-import { apiGet } from '../../lib/api';
+import { apiGet, ApiError } from '../../lib/api';
+import { LoadError } from '../../components/LoadError';
+import { useConfirmDialog } from '../../components/ConfirmDialog';
 import { uploadFile, validateFile } from '../chat/uploads';
 import { useFeed, useFeedList } from './FeedProvider';
-import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount } from './Frame';
+import { FeedFrame, useFeedRails, PostSkeleton, PostCard, ReportDialog, EditPostMount, announcePage, usePageUpdates , toggleFollowPage } from './Frame';
 import { Composer } from './Composer';
+import { SchedulePicker, toLocalInput } from './SchedulePicker';
 import { useDismiss, useMediaUrl, relativeTime } from './lib';
 import * as api from './api';
 
@@ -72,10 +76,81 @@ const BrandingImageButton: React.FC<{
 
 const PAGE_TABS = [
   { id: 'posts', label: 'Posts' },
+  { id: 'drafts', label: 'Drafts & scheduled' },
   { id: 'about', label: 'About' },
   { id: 'team', label: 'Team' },
 ] as const;
 type PageTab = (typeof PAGE_TABS)[number]['id'];
+
+/**
+ * Drafts and scheduled posts (D-05), for the people who run the page: edit,
+ * publish now, move in time, turn back into a draft, delete.
+ */
+const DraftsTab: React.FC<{ pageId: string }> = ({ pageId }) => {
+  const { notify, confirm: confirmed } = useNotify();
+  const [ask, dialog] = useConfirmDialog();
+  const [posts, setPosts] = useState<FeedPostView[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [picking, setPicking] = useState<string | null>(null);
+  const load = useCallback(() => {
+    setFailed(false);
+    api.listDrafts(pageId).then(setPosts).catch(() => setFailed(true));
+  }, [pageId]);
+  useEffect(load, [load]);
+  // An edit made in the shared editor shows here when it closes.
+  useEffect(() => {
+    const on = () => window.setTimeout(load, 600);
+    window.addEventListener('feed:edited', on);
+    return () => window.removeEventListener('feed:edited', on);
+  }, [load]);
+  const run = async (fn: () => Promise<unknown>, done: string) => {
+    try { await fn(); confirmed(done); load(); }
+    catch (e) { notify({ title: e instanceof Error ? e.message : 'That did not work', tone: 'error' }); }
+  };
+  if (failed) return <div className="mt-4"><LoadError what="drafts" onRetry={load} /></div>;
+  if (!posts) return <div className="mt-4 space-y-3"><PostSkeleton /></div>;
+  if (!posts.length) return <EmptyState title="No drafts or scheduled posts" hint="Use “Save draft” or the schedule button in the composer." />;
+  return (
+    <>
+    <ul className="mt-4 space-y-3">
+      {posts.map((p) => (
+        <li key={p.id} className="feed-card p-4">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {p.status === 'scheduled'
+              ? <Badge tone="blue">Scheduled · {p.scheduledAt ? new Date(p.scheduledAt).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}</Badge>
+              : <Badge tone="amber">Draft</Badge>}
+            <span className="text-text-secondary-light dark:text-text-secondary-dark">by {p.author.name}</span>
+          </div>
+          <p className="mt-2 line-clamp-3 whitespace-pre-line text-sm text-text-primary-light dark:text-text-primary-dark">
+            {p.body || (p.poll ? `Poll: ${p.poll.question}` : p.event ? `Event: ${p.event.title}` : p.media.length ? `${p.media.length} attachment(s)` : '(empty)')}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs font-medium">
+            <button onClick={() => window.dispatchEvent(new CustomEvent('feed:edit', { detail: p.id }))} className="rounded-full border border-border-light px-3 py-1 dark:border-border-dark/60">Edit</button>
+            <button onClick={() => void run(() => api.publishPost(p.id), 'Published')} className="rounded-full bg-blue-600 px-3 py-1 text-white">Publish now</button>
+            <button onClick={() => setPicking((v) => (v === p.id ? null : p.id))} className="rounded-full border border-border-light px-3 py-1 dark:border-border-dark/60">
+              {p.status === 'scheduled' ? 'Reschedule' : 'Schedule'}
+            </button>
+            {p.status === 'scheduled' && (
+              <button onClick={() => void run(() => api.schedulePost(p.id, null), 'Moved back to drafts')} className="rounded-full border border-border-light px-3 py-1 dark:border-border-dark/60">Make draft</button>
+            )}
+            <button onClick={async () => {
+              if (await ask({ title: 'Delete this post?', body: <p>It has not been published; deleting it cannot be undone.</p>, confirmLabel: 'Delete', tone: 'danger' })) {
+                await run(() => api.deletePost(p.id), 'Deleted');
+              }
+            }}
+              className="rounded-full px-3 py-1 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20">Delete</button>
+          </div>
+          {picking === p.id && (
+            <SchedulePicker value={p.scheduledAt ? toLocalInput(new Date(p.scheduledAt)) : ''}
+              onChange={(local) => { setPicking(null); void run(() => api.schedulePost(p.id, new Date(local).toISOString()), 'Scheduled'); }} />
+          )}
+        </li>
+      ))}
+    </ul>
+    {dialog}
+    </>
+  );
+};
 
 const MenuPanel: React.FC<{ children: React.ReactNode; align?: 'left' | 'right' }> = ({ children, align = 'right' }) => (
   <div role="menu" className={`animate-pop absolute top-full z-30 mt-1.5 w-60 rounded-xl bg-white p-1 shadow-[0_12px_28px_rgba(0,0,0,0.2)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10 ${align === 'right' ? 'right-0' : 'left-0'}`}>
@@ -212,10 +287,20 @@ export const PageProfile: React.FC = () => {
   const [editing, setEditing] = useState(false);
   const [followersOpen, setFollowersOpen] = useState(false);
   const cover = useMediaUrl(page?.coverFileId);
-  const avatar = useMediaUrl(page?.avatarFileId);
+  const avatar = useMediaUrl(page?.avatarFileId, true, 0, undefined, true);
 
-  const reload = useCallback(() => { void api.getPage(slug).then(setPage); }, [slug]);
-  useEffect(() => { reload(); void api.listPages().then(setAllPages); }, [reload]);
+  // Not found, not visible to this person, or the request failed (D-07): each
+  // says so, where a page that cannot load used to spin forever.
+  const [pageError, setPageError] = useState<{ status: number; message: string } | null>(null);
+  const reload = useCallback(() => {
+    setPageError(null);
+    void api.getPage(slug).then(setPage).catch((e: unknown) => {
+      const status = e instanceof ApiError ? e.status : 0;
+      setPageError({ status, message: e instanceof Error ? e.message : 'Could not load this page.' });
+    });
+  }, [slug]);
+  useEffect(() => { reload(); void api.listPages().then(setAllPages).catch(() => {}); }, [reload]);
+  usePageUpdates((u) => setPage((p) => (p && p.id === u.id ? { ...p, ...u } : p)));
 
   const loader = useCallback((cursor?: string) => api.getPagePosts(page?.id ?? slug, { cursor }), [page?.id, slug]);
   const list = useFeedList(loader, [page?.id ?? slug]);
@@ -228,6 +313,22 @@ export const PageProfile: React.FC = () => {
   [list.ids, posts]);
   const { left, right } = useFeedRails();
 
+  if (!page && pageError) {
+    const missing = pageError.status === 404 || pageError.status === 403;
+    return (
+      <div className="grid h-full place-items-center p-6">
+        {missing ? (
+          <EmptyState
+            title="This page isn’t available"
+            hint="It may have been removed, or it is only for a group you are not in."
+            action={<Link to="/app/feed/pages" className="text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">Browse pages</Link>}
+          />
+        ) : (
+          <LoadError what="this page" onRetry={reload} />
+        )}
+      </div>
+    );
+  }
   if (!page) return <div className="grid h-full place-items-center"><Spinner /></div>;
 
   /*
@@ -242,10 +343,13 @@ export const PageProfile: React.FC = () => {
   const canManage = page.myRole === 'owner';
 
   const toggleFollow = async () => {
+    const before = page;
+    setPage({ ...page, following: !page.following, followerCount: Math.max(0, page.followerCount + (page.following ? -1 : 1)) });
     try {
-      const updated = page.following ? await api.unfollowPage(page.id) : await api.followPage(page.id);
-      setPage({ ...page, ...updated });
+      const updated = await toggleFollowPage(before);
+      setPage((p) => (p ? { ...p, ...updated } : p));
     } catch (e) {
+      setPage(before);
       notify({ title: e instanceof Error ? e.message : 'Could not update your follow', tone: 'error' });
     }
   };
@@ -360,7 +464,7 @@ export const PageProfile: React.FC = () => {
           </section>
 
           <div role="tablist" aria-label="Page sections" className="mt-4 flex border-b border-border-light dark:border-border-dark/40">
-            {PAGE_TABS.map((t) => {
+            {PAGE_TABS.filter((t) => t.id !== 'drafts' || page.myRole !== null).map((t) => {
               const active = tab === t.id;
               return (
                 <button
@@ -376,7 +480,9 @@ export const PageProfile: React.FC = () => {
             })}
           </div>
 
+          {tab === 'drafts' && page.myRole !== null && <DraftsTab pageId={page.id} />}
           {tab === 'about' && <AboutTab page={page} canManage={canManage} onEdit={() => setEditing(true)} />}
+          {tab === 'about' && <GovernanceCard page={page} onChanged={setPage} />}
           {tab === 'team' && <TeamTab page={page} canManage={canManage} onChanged={setPage} />}
           {tab === 'posts' && (
             <div className="mt-4 space-y-4">
@@ -394,6 +500,64 @@ export const PageProfile: React.FC = () => {
       {followersOpen && canManage && <FollowersDialog page={page} onClose={() => setFollowersOpen(false)} />}
       {editing && <EditPageDialog page={page} onClose={() => setEditing(false)} onSaved={(p) => { setPage(p); setEditing(false); }} />}
     </>
+  );
+};
+
+/**
+ * Running the page (D-10): leave it, delete it, and — for administrators —
+ * the institutional flags (verified, required for everyone). These had API
+ * support and no screen.
+ */
+const GovernanceCard: React.FC<{ page: FeedPageDetail; onChanged: (p: FeedPageDetail) => void }> = ({ page, onChanged }) => {
+  const { user } = useAuth();
+  const { can } = usePermissions();
+  const { notify, confirm: confirmed } = useNotify();
+  const [ask, dialog] = useConfirmDialog();
+  const navigate = useNavigate();
+  const owners = page.editors.filter((e) => e.role === 'owner');
+  const iAmOwner = page.myRole === 'owner';
+  const mayGovern = can('FEED_PAGE_MANAGE');
+  if (!page.myRole && !mayGovern) return null;
+
+  const fail = (e: unknown) => notify({ title: e instanceof Error ? e.message : 'That did not work', tone: 'error' });
+  const leave = async () => {
+    if (!user) return;
+    if (iAmOwner && owners.length < 2) { notify({ title: 'Make someone else an owner first', body: 'A page always needs an owner.', tone: 'warning' }); return; }
+    if (!(await ask({ title: `Leave ${page.name}?`, body: <p>You will no longer post as this page or see its drafts. An owner can add you back.</p>, confirmLabel: 'Leave page', tone: 'danger' }))) return;
+    try { await api.removeEditor(page.id, user.id); confirmed(`You left ${page.name}`); onChanged({ ...page, myRole: null, editors: page.editors.filter((e) => e.id !== user.id) }); }
+    catch (e) { fail(e); }
+  };
+  const remove = async () => {
+    if (!(await ask({ title: `Delete ${page.name}?`, body: <p>The page and its posts disappear for everyone, and followers stop seeing it. This cannot be undone here.</p>, confirmLabel: 'Delete page', tone: 'danger' }))) return;
+    try { await api.deletePage(page.id); confirmed(`${page.name} was deleted`); navigate('/app/feed/pages'); }
+    catch (e) { fail(e); }
+  };
+  const flag = async (patch: { verified?: boolean; mandatory?: boolean }, done: string) => {
+    if (patch.mandatory && !(await ask({ title: 'Make this page required for everyone?', body: <p>Everyone in its audience follows it automatically and cannot unfollow.</p>, confirmLabel: 'Make required' }))) return;
+    try { onChanged({ ...page, ...(await api.updatePage(page.id, patch)) }); confirmed(done); }
+    catch (e) { fail(e); }
+  };
+  return (
+    <div className="mt-4 space-y-3 rounded-2xl border border-border-light bg-card-light p-4 text-sm dark:border-border-dark/40 dark:bg-elevated-dark/40 sm:p-5">
+      <p className="text-xs font-semibold uppercase tracking-wide text-text-secondary-light dark:text-text-secondary-dark">Page settings</p>
+      {mayGovern && (
+        <div className="space-y-2">
+          <label className="flex items-center justify-between gap-3">
+            <span><span className="font-medium">Verified</span><span className="block text-xs text-text-secondary-light dark:text-text-secondary-dark">An official page of the school.</span></span>
+            <input type="checkbox" checked={page.verified} onChange={(e) => void flag({ verified: e.target.checked }, e.target.checked ? 'Page verified' : 'Verification removed')} className="h-4 w-4 accent-blue-600" />
+          </label>
+          <label className="flex items-center justify-between gap-3">
+            <span><span className="font-medium">Required for everyone</span><span className="block text-xs text-text-secondary-light dark:text-text-secondary-dark">Everyone in its audience follows it.</span></span>
+            <input type="checkbox" checked={page.mandatory} onChange={(e) => void flag({ mandatory: e.target.checked }, e.target.checked ? 'Page is now required' : 'Page is no longer required')} className="h-4 w-4 accent-blue-600" />
+          </label>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2 pt-1">
+        {page.myRole && <button onClick={() => void leave()} className="rounded-full border border-border-light px-3 py-1.5 text-xs font-semibold dark:border-border-dark/60">Leave page</button>}
+        {(iAmOwner || mayGovern) && <button onClick={() => void remove()} className="rounded-full border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 dark:border-red-900/50 dark:text-red-400 dark:hover:bg-red-900/20">Delete page</button>}
+      </div>
+      {dialog}
+    </div>
   );
 };
 
@@ -458,8 +622,9 @@ const TeamTab: React.FC<{ page: FeedPageDetail; canManage: boolean; onChanged: (
     catch (e) { notify({ title: e instanceof Error ? e.message : 'That did not work', tone: 'error' }); return false; }
   };
 
-  const remove = (member: FeedPageEditor) => {
-    if (!window.confirm(`Remove ${member.name} from the page team?`)) return;
+  const [ask, dialog] = useConfirmDialog();
+  const remove = async (member: FeedPageEditor) => {
+    if (!(await ask({ title: `Remove ${member.name} from the team?`, body: <p>They stop posting as this page.</p>, confirmLabel: 'Remove', tone: 'danger' }))) return;
     void run(() => api.removeEditor(page.id, member.id), `${member.name} removed`);
   };
 
@@ -512,6 +677,7 @@ const TeamTab: React.FC<{ page: FeedPageDetail; canManage: boolean; onChanged: (
           onAdd={async (userId, role, title) => { if (await run(() => api.addEditor(page.id, userId, role, title), 'Added to the team')) setAdding(false); }}
         />
       )}
+    {dialog}
     </div>
   );
 };
@@ -756,6 +922,7 @@ const EditPageDialog: React.FC<{ page: FeedPageDetail; onClose: () => void; onSa
 export const PageDirectory: React.FC = () => {
   const { can } = usePermissions();
   const [pages, setPages] = useState<FeedPageSummary[]>([]);
+  const { notify } = useNotify();
   const [q, setQ] = useState('');
   const [kind, setKind] = useState<FeedPageKind | 'all'>('all');
   const [creating, setCreating] = useState(false);
@@ -765,10 +932,13 @@ export const PageDirectory: React.FC = () => {
   }, [q, kind]);
   useEffect(() => { const t = setTimeout(reload, 200); return () => clearTimeout(t); }, [reload]);
 
-  const follow = async (id: string, following: boolean) => {
-    const updated = following ? await api.unfollowPage(id) : await api.followPage(id);
-    setPages((p) => p.map((x) => (x.id === id ? updated : x)));
+  const follow = async (id: string) => {
+    const page = pages.find((p) => p.id === id);
+    if (!page) return;
+    try { await toggleFollowPage(page); }
+    catch (e) { notify({ title: e instanceof Error ? e.message : 'Could not update your follow', tone: 'error' }); }
   };
+  usePageUpdates((u) => setPages((p) => p.map((x) => (x.id === u.id ? { ...x, ...u } : x))));
   const { left, right } = useFeedRails();
 
   return (
@@ -796,7 +966,7 @@ export const PageDirectory: React.FC = () => {
           </select>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
-          {pages.map((p) => <PageDirCard key={p.id} page={p} onFollow={() => follow(p.id, p.following)} />)}
+          {pages.map((p) => <PageDirCard key={p.id} page={p} onFollow={() => void follow(p.id)} />)}
         </div>
         {pages.length === 0 && <EmptyState title="No pages found" hint="Try a different search." />}
       </div>
@@ -806,9 +976,9 @@ export const PageDirectory: React.FC = () => {
 };
 
 const PageDirCard: React.FC<{ page: FeedPageSummary; onFollow: () => void }> = ({ page, onFollow }) => {
-  const avatar = useMediaUrl(page.avatarFileId);
+  const avatar = useMediaUrl(page.avatarFileId, true, 0, undefined, true);
   return (
-    <div className="flex items-center gap-3 rounded-2xl border border-border-light bg-card-light p-3 dark:border-border-dark/40 dark:bg-elevated-dark/40">
+    <div data-page-id={page.id} className="flex items-center gap-3 rounded-2xl border border-border-light bg-card-light p-3 dark:border-border-dark/40 dark:bg-elevated-dark/40">
       <Link to={`/app/feed/p/${page.slug}`}><Avatar name={page.name} src={avatar} size={44} /></Link>
       <div className="min-w-0 flex-1">
         <Link to={`/app/feed/p/${page.slug}`} className="flex items-center gap-1 text-sm font-semibold text-text-primary-light hover:underline dark:text-text-primary-dark">

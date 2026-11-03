@@ -1,0 +1,15 @@
+import jwt from 'jsonwebtoken'; import pg from 'pg'; import { readFileSync } from 'node:fs';
+const ROOT=process.argv[2];
+const env = Object.fromEntries(readFileSync(`${ROOT}/apps/api/.env`,'utf8').split('\n').filter(l=>l.includes('=')&&!l.startsWith('#')).map(l=>[l.slice(0,l.indexOf('=')).trim(),l.slice(l.indexOf('=')+1).trim().replace(/^["']|["']$/g,'')]));
+const pool=new pg.Pool({connectionString:env.DATABASE_URL});
+const {rows:[r]}=await pool.query(`SELECT id FROM roles WHERE name='Staff'`);
+const mk=async n=>{const id='gapx-'+n+Date.now();await pool.query(`INSERT INTO users (id,mis_user_id,name,email,role,role_id) VALUES ($1,$1,$2,$3,'staff',$4)`,[id,n,id+'@amashuri.com',r.id]);return {id,token:jwt.sign({id,misUserId:id,name:n,email:id+'@amashuri.com',role:'staff'},env.JWT_SECRET)}};
+const A=await mk('a'),B=await mk('b');
+const call=async(u,m,p,b)=>{const x=await fetch('http://localhost:5190'+p,{method:m,headers:{authorization:'Bearer '+u.token,'content-type':'application/json'},body:b&&JSON.stringify(b)});return x.json()};
+const c=await call(A,'POST','/api/mail/compose',{to:[B.id+'@amashuri.com'],subject:'xss',bodyHtml:'<p>hi</p><img src=x onerror="alert(document.cookie)"><a href="javascript:alert(1)">x</a><script>alert(2)</script>'});
+const t=await call(B,'GET','/api/mail/threads/'+c.data.threadId);
+console.log(JSON.stringify(t.data.thread.messages[0].bodyHtml).slice(0,300));
+const rows=await pool.query(`SELECT channel, count(*) FROM mail_recipients WHERE message_id=$1 GROUP BY channel`,[c.data.messageId]);console.log('recipient rows',rows.rows);
+console.log('counts',JSON.stringify((await call(B,'GET','/api/mail/counts')).data));
+await pool.query(`DELETE FROM mail_recipients WHERE user_id IN ($1,$2)`,[A.id,B.id]).catch(e=>console.log(e.message));
+await pool.end();

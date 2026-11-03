@@ -44,6 +44,11 @@ export const Stage: React.FC<StageProps> = ({
   layout, participants, you, media, localStream, videoTileIds, speakingIds,
   activeSpeakerId, spotlightId, pinnedId, reactions, presenterId, onPin, onVisible,
 }) => {
+  const perPage = typeof window !== 'undefined' && window.matchMedia?.('(max-width: 640px)').matches ? 4 : 16;
+  const pages = Math.max(1, Math.ceil(participants.length / perPage));
+  const [page, setPage] = React.useState(0);
+  React.useEffect(() => { if (page > pages - 1) setPage(pages - 1); }, [page, pages]);
+  const pageItems = participants.slice(page * perPage, page * perPage + perPage);
   /* Visibility reports are coalesced: a resize storm during a layout change
    * would otherwise fire one subscription update per tile per frame. */
   const visibleRef = useRef(new Map<string, number>());
@@ -111,8 +116,21 @@ export const Stage: React.FC<StageProps> = ({
           Waiting for others to join…
         </div>
       ) : layout === 'grid' ? (
-        <div className={`grid h-full auto-rows-fr gap-2 ${gridColumns(participants.length)}`}>
-          {participants.map((p) => tileFor(p))}
+        // Paged (U-33): at most a page of tiles is on screen — and decoding —
+        // at once: 4 on a phone, 16 elsewhere.
+        <div className="flex h-full flex-col gap-2">
+          <div className={`grid min-h-0 flex-1 auto-rows-fr gap-2 ${gridColumns(pageItems.length)}`}>
+            {pageItems.map((p) => tileFor(p))}
+          </div>
+          {pages > 1 && (
+            <div className="flex shrink-0 items-center justify-center gap-3 text-xs text-white/80">
+              <button onClick={() => setPage((n) => Math.max(0, n - 1))} disabled={page === 0} aria-label="Previous participants"
+                className="rounded-full bg-white/10 px-3 py-1 disabled:opacity-40">‹</button>
+              <span aria-live="polite">{page + 1} / {pages}</span>
+              <button onClick={() => setPage((n) => Math.min(pages - 1, n + 1))} disabled={page >= pages - 1} aria-label="Next participants"
+                className="rounded-full bg-white/10 px-3 py-1 disabled:opacity-40">›</button>
+            </div>
+          )}
         </div>
       ) : layout === 'sidebar' ? (
         <div className="flex h-full gap-2">

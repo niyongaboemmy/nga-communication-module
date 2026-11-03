@@ -20,6 +20,7 @@ import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
 import { startSmtpSink } from './lib/smtp-sink.mjs';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
@@ -63,7 +64,7 @@ const api = async (path, token, init = {}) => {
 
 const cleanup = async () => {
   await pool.query(`DELETE FROM files WHERE owner_id LIKE 'mailtest-%'`);
-  await pool.query(`DELETE FROM users WHERE id LIKE 'mailtest-%'`);
+  await purgeUsersLike(pool, 'mailtest-');
   await pool.query(`DELETE FROM mail_distribution_lists WHERE slug LIKE 'verify-%'`);
   await pool.query(`DELETE FROM mail_suppressions WHERE address LIKE 'mailtest-%' OR address LIKE '%@nowhere.invalid'`);
 };
@@ -251,7 +252,11 @@ try {
     const draft = await api('/api/mail/ai/compose', ada.token, {
       method: 'POST', body: { action: 'draft', instruction: 'hello' },
     });
-    check('AI endpoint returns 503 when no provider is configured', draft.status === 503);
+    // Unavailable means one of two answers: no provider configured (503), or
+    // the school's AI switch is off in NGA MIS (403 AI_DISABLED, the default).
+    check('AI endpoint refuses when AI is unavailable (no provider, or switched off)',
+      draft.status === 503 || (draft.status === 403 && draft.body?.code === 'AI_DISABLED'),
+      `${draft.status} ${draft.body?.code ?? ''}`);
   }
 
   /* ── 7. distribution list + campaign preview + approval gate ─────────── */

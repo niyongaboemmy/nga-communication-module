@@ -101,6 +101,11 @@ export const StoriesBar: React.FC = () => {
           startAt={viewerAt}
           onClose={() => setViewerAuthor(null)}
           onChanged={reload}
+          onViewed={(id) => setGroups((prev) => prev.map((g) => {
+            if (!g.stories.some((st) => st.id === id && !st.viewed)) return g;
+            const stories = g.stories.map((st) => (st.id === id ? { ...st, viewed: true } : st));
+            return { ...g, stories, allViewed: stories.every((st) => st.viewed) };
+          }))}
         />
       )}
     </ScrollRow>
@@ -376,8 +381,12 @@ interface Cursor { g: number; s: number }
  * ? shortcuts · Esc close. Touch: hold to pause, swipe left/right for the
  * next/previous author, swipe down to close.
  */
-const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose: () => void; onChanged: () => void }> = ({
-  groups, startAt, onClose, onChanged,
+const StoryViewer: React.FC<{
+  groups: FeedStoryGroup[]; startAt: number; onClose: () => void; onChanged: () => void;
+  /** A story was seen: the bar greys its ring. */
+  onViewed?: (storyId: string) => void;
+}> = ({
+  groups, startAt, onClose, onChanged, onViewed,
 }) => {
   const { user } = useAuth();
   const { notify } = useNotify();
@@ -447,6 +456,10 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
     if (!group) return;
     const s = cursor.s + dir;
     if (s >= 0 && s < group.stories.length) { go({ g: cursor.g, s }, dir); return; }
+    // Past the last story of the last author: done (D-09). It used to loop
+    // back to the first and play on forever.
+    if (dir === 1 && cursor.g + 1 >= groups.length) { onClose(); return; }
+    if (dir === -1 && cursor.g === 0) { go({ g: 0, s: 0 }, dir); return; }
     const g = (cursor.g + dir + groups.length) % groups.length;
     go({ g, s: dir === 1 ? 0 : groups[g]!.stories.length - 1 }, dir);
   }, [group, cursor, groups, go]);
@@ -477,6 +490,8 @@ const StoryViewer: React.FC<{ groups: FeedStoryGroup[]; startAt: number; onClose
     if (!seenRef.current.has(story.id)) {
       seenRef.current.add(story.id);
       void api.recordStoryView(story.id);
+      // The bar's ring turns grey now, not after a reload (D-09).
+      onViewed?.(story.id);
     }
   }, [story?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 

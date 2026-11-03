@@ -5,6 +5,7 @@
  * meeting: one hosts, one knocks and is admitted. Screenshots at each step.
  */
 import { readFileSync } from 'node:fs';
+import { prepareBrowser } from './lib/uiHarness.mjs';
 let chromium;
 try {
   ({ chromium } = await import('playwright'));
@@ -16,6 +17,7 @@ try {
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import { randomBytes } from 'node:crypto';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const ROOT = process.cwd();
 const SHOTS = process.argv[2] ?? `${ROOT}/.meet-ui-shots`;
@@ -75,6 +77,7 @@ const browser = await chromium.launch({
     '--disable-features=CalculateNativeWinOcclusion',
   ],
 });
+prepareBrowser(browser);
 
 const errors = [];
 async function newPage(user) {
@@ -441,8 +444,11 @@ try {
   await hostP.page.getByRole('button', { name: /AI notes|Invite the AI notetaker/i }).click();
   await hostP.page.waitForTimeout(1200);
   await hostP.page.screenshot({ path: `${SHOTS}/17-ai-panel.png` });
-  check('the AI panel opens on a consent screen, not a spinner',
-    await hostP.page.getByText(/Invite Tupo AI to this meeting/i).isVisible());
+  // With the school's AI switched off in NGA MIS (the default), the panel
+  // says so instead of offering the notetaker.
+  const aiOff = await hostP.page.getByText(/turned off/i).first().isVisible().catch(() => false);
+  check(aiOff ? 'the AI panel says AI is turned off for the school' : 'the AI panel opens on a consent screen, not a spinner',
+    aiOff || await hostP.page.getByText(/Invite Tupo AI to this meeting/i).isVisible());
 
   console.log('  ℹ  host peer state:',
     JSON.stringify(await hostP.page.evaluate(() => window.__meshState ?? {})));
@@ -615,9 +621,12 @@ try {
   await hostP.page.waitForTimeout(2500);
   await hostP.page.screenshot({ path: `${SHOTS}/24b-sharing-host.png` });
 
+  // Waited for, not sampled: on a loaded machine the banner can land after a
+  // fixed sleep, which made this check fail one run in three.
   check('the room shows the host as presenting',
-    await pupilP.page.getByText(/presenting|is sharing/i).first().isVisible().catch(() => false)
-    || await pupilP.page.locator('video.object-contain').first().isVisible().catch(() => false));
+    await pupilP.page.getByText(/presenting|is sharing/i).first()
+      .or(pupilP.page.locator('video.object-contain').first())
+      .first().waitFor({ state: 'visible', timeout: 10_000 }).then(() => true).catch(() => false));
 
   await pupilP.page.bringToFront();
   // The shared surface renders letterboxed — object-contain — which is set only
@@ -646,10 +655,12 @@ try {
   await hostP.page.bringToFront();
   await hostP.page.getByRole('button', { name: /Stop presenting|Stop sharing/i }).first()
     .click().catch(() => {});
-  await pupilP.page.waitForTimeout(2500);
+  // Waited for: the stop travels host → gateway → pupil, then a re-render.
   check('stopping the share removes it from the other side',
-    await pupilP.page.locator('video.object-contain').count() === 0
-    || !await pupilP.page.locator('video.object-contain').first().isVisible().catch(() => true));
+    await pupilP.page.waitForFunction(
+      () => ![...document.querySelectorAll('video.object-contain')].some((v) => v.offsetParent !== null),
+      undefined, { timeout: 10_000 },
+    ).then(() => true).catch(() => false));
   await hostP.page.waitForTimeout(400);
 
   // ---- the mini call: navigate away, stay in the meeting ----
@@ -771,7 +782,7 @@ try {
 } finally {
   await browser.close();
   await pool.query(`DELETE FROM meetings WHERE host_id LIKE 'uiverify-%'`).catch(() => {});
-  await pool.query(`DELETE FROM users WHERE id LIKE 'uiverify-%'`).catch(() => {});
+  await purgeUsersLike(pool, 'uiverify-');
   await pool.end();
 }
 

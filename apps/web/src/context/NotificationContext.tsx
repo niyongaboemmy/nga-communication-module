@@ -125,15 +125,8 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
         return [...withoutSame, next].slice(-MAX_VISIBLE);
       });
 
-      const duration = options.durationMs ?? (options.confirmation ? CONFIRM_DURATION : DEFAULT_DURATION);
-      const existing = timers.get(id);
-      if (existing) clearTimeout(existing);
-      if (duration > 0) {
-        timers.set(
-          id,
-          setTimeout(() => dismiss(id), duration),
-        );
-      }
+      // The card itself times out (F-10), so a toast being read — hovered,
+      // focused, or in a tab nobody is looking at — is never pulled away.
 
       // Only when they are not looking. A system notification for something
       // already on screen is noise, and noise is why people disable them.
@@ -304,14 +297,44 @@ const ToastStack: React.FC<{ toasts: Toast[]; onDismiss: (id: string) => void }>
 const ToastCard: React.FC<{ toast: Toast; onDismiss: (id: string) => void }> = ({ toast, onDismiss }) => {
   const { Icon, accent, ring } = TONE_STYLE[toast.tone];
   const duration = toast.durationMs ?? (toast.confirmation ? CONFIRM_DURATION : DEFAULT_DURATION);
-  const [paused, setPaused] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [tabHidden, setTabHidden] = useState(() => document.hidden);
+  const paused = hovered || focused || tabHidden;
+
+  useEffect(() => {
+    const onVisibility = () => setTabHidden(document.hidden);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  /*
+   * The countdown. It used to run in the provider while hovering only froze
+   * the progress bar, so a toast still vanished under the pointer. Now it
+   * stops while the toast is hovered, focused from the keyboard, or the tab is
+   * hidden, and carries on with what was left. A replacement under the same
+   * key starts it afresh.
+   */
+  const remaining = useRef(duration);
+  useEffect(() => { remaining.current = duration; }, [toast.createdAt, duration]);
+  useEffect(() => {
+    if (duration <= 0 || toast.leaving || paused) return;
+    const started = Date.now();
+    const timer = setTimeout(() => onDismiss(toast.id), Math.max(0, remaining.current));
+    return () => {
+      clearTimeout(timer);
+      remaining.current -= Date.now() - started;
+    };
+  }, [paused, toast.createdAt, toast.leaving, toast.id, duration, onDismiss]);
 
   return (
     <div
-      // Hovering holds it. Reading a notification that vanishes mid-sentence is
-      // the most common complaint about toasts, and it costs nothing to fix.
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
+      // Hovering or focusing holds it. Reading a notification that vanishes
+      // mid-sentence is the most common complaint about toasts.
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false); }}
       className={
         'pointer-events-auto relative overflow-hidden rounded-xl border ' +
         ' backdrop-blur-md transition-transform duration-150 hover:-translate-x-0.5 ' +
@@ -371,6 +394,7 @@ const ToastCard: React.FC<{ toast: Toast; onDismiss: (id: string) => void }> = (
  never moves on a sticky notification reads as broken. */}
       {duration > 0 && !toast.leaving && (
         <span
+          key={toast.createdAt}
           aria-hidden="true"
           className={`absolute inset-x-0 bottom-0 h-0.5 origin-left ${
             toast.tone === 'error'

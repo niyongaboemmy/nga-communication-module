@@ -12,6 +12,7 @@ import { useAuth } from '../../context/AuthContext';
 import { uploadFile, probeMedia, validateFile } from '../chat/uploads';
 import { useMediaUrl, firstName, useDismiss } from './lib';
 import * as api from './api';
+import { SchedulePicker } from './SchedulePicker';
 
 interface PendingMedia {
   localId: string;
@@ -53,6 +54,7 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
   });
   const [isAnnouncement, setIsAnnouncement] = useState(editing?.type === 'announcement');
   const [scheduleAt, setScheduleAt] = useState('');
+  const [schedulePanel, setSchedulePanel] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -60,6 +62,24 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
   const dragFrom = useRef<number | null>(null);
 
   const page = pages.find((p) => p.id === pageId);
+  /*
+   * Only the audiences this page can reach (D-06): a staff page's post is for
+   * staff whatever the picker said, so offering "Everyone" there was a
+   * promise the server would quietly break. The page's own audience is the
+   * starting choice.
+   */
+  const allowedAudiences = useMemo<FeedAudience[]>(
+    () => (!page || page.audience === 'everyone' ? [...FEED_AUDIENCES] : [page.audience]),
+    [page],
+  );
+  useEffect(() => {
+    if (editing) return;
+    if (page) setAudience(page.audience);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page?.id]);
+  useEffect(() => {
+    if (!allowedAudiences.includes(audience)) setAudience(allowedAudiences[0] ?? 'everyone');
+  }, [allowedAudiences, audience]);
 
   // Pages load after mount, so adopt the first postable one once it arrives.
   useEffect(() => {
@@ -120,8 +140,9 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
         media: media.filter((m) => m.fileId).map((m) => ({ fileId: m.fileId!, kind: m.kind, name: m.name, w: m.w ?? null, h: m.h ?? null })),
         audience,
         type: isAnnouncement ? 'announcement' : 'standard',
-        status: validSchedule ? 'scheduled' : mode,
-        scheduledAt: validSchedule ? scheduleDate!.toISOString() : null,
+        // "Save draft" saves a draft, whatever time was picked (D-05).
+        status: mode === 'draft' ? 'draft' : validSchedule ? 'scheduled' : 'published',
+        scheduledAt: mode !== 'draft' && validSchedule ? scheduleDate!.toISOString() : null,
       };
       // A half-filled poll/event the user abandoned in favour of plain text
       // must not be sent — an incomplete one would either 400 on the server
@@ -130,8 +151,11 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
       if (validEvent) payload.event = { title: evt.title.trim(), startsAt: eventDate!.toISOString(), location: evt.location.trim() || null };
 
       if (editing) {
+        // Poll and event changes are kept (D-06); clearing a tool clears it.
         const updated = await api.editPost(editing.id, {
           body: payload.body, media: payload.media, audience: payload.audience,
+          poll: validPoll ? payload.poll : (editing.poll && tool !== 'poll' ? null : undefined),
+          event: validEvent ? payload.event : (editing.event && tool !== 'event' ? null : undefined),
         });
         onPublished?.(updated);
         onClose?.();
@@ -165,11 +189,14 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
           </button>
         </div>
         <div className="mt-1.5 flex items-stretch border-t border-black/[0.08] pt-1 dark:border-white/[0.06]">
-          <PillButton onClick={() => { fileInput.current?.click(); setOpen(true); }} icon={<ImageIcon size={20} className="text-emerald-500" />} label="Photo/video" />
+          {/* Opens once a file is chosen (D-06): opening first swapped this
+              input out from under the picker and the file was lost. */}
+          <PillButton onClick={() => fileInput.current?.click()} icon={<ImageIcon size={20} className="text-emerald-500" />} label="Photo/video" />
           <PillButton onClick={() => { setTool('poll'); setOpen(true); }} icon={<BarChart3 size={20} className="text-purple-500" />} label="Poll" />
           <PillButton onClick={() => { setTool('event'); setOpen(true); }} icon={<CalendarDays size={20} className="text-orange-500" />} label="Event" />
         </div>
-        <input ref={fileInput} type="file" hidden multiple accept="image/*,video/*,.pdf,.doc,.docx" onChange={(e) => e.target.files && addFiles(e.target.files)} />
+        <input ref={fileInput} type="file" hidden multiple accept="image/*,video/*,.pdf,.doc,.docx"
+          onChange={(e) => { if (e.target.files?.length) { const files = e.target.files; void addFiles(files); setOpen(true); } }} />
       </div>
     );
   }
@@ -192,7 +219,7 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
           <label className="flex items-center gap-1.5 rounded-full border border-border-light px-2.5 py-1 text-xs font-medium text-text-secondary-light dark:border-border-dark/60 dark:text-text-secondary-dark">
             <Globe size={12} />
             <select value={audience} onChange={(e) => setAudience(e.target.value as FeedAudience)} className="bg-transparent outline-none">
-              {FEED_AUDIENCES.map((a) => <option key={a} value={a} className="capitalize dark:bg-elevated-dark">{a[0]!.toUpperCase() + a.slice(1)}</option>)}
+              {allowedAudiences.map((a) => <option key={a} value={a} className="capitalize dark:bg-elevated-dark">{a[0]!.toUpperCase() + a.slice(1)}</option>)}
             </select>
           </label>
           {page?.myRole === 'owner' && (
@@ -277,6 +304,9 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
           </div>
         )}
 
+        {schedulePanel && !editing && (
+          <SchedulePicker value={scheduleAt} onChange={setScheduleAt} onClose={() => setSchedulePanel(false)} />
+        )}
         {scheduleAt && (
           <p className="mt-2 flex items-center gap-1.5 text-xs font-medium text-blue-600 dark:text-blue-400">
             <CalendarClock size={13} /> Scheduled for {new Date(scheduleAt).toLocaleString()}
@@ -292,10 +322,8 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
           <ToolBtn active={tool === 'poll'} onClick={() => setTool((t) => t === 'poll' ? 'none' : 'poll')} icon={<BarChart3 size={18} className="text-purple-500" />} label="Poll" />
           <ToolBtn active={tool === 'event'} onClick={() => setTool((t) => t === 'event' ? 'none' : 'event')} icon={<CalendarDays size={18} className="text-orange-500" />} label="Event" />
           {!editing && (
-            <label className="grid h-9 w-9 cursor-pointer place-items-center rounded-full text-blue-500 hover:bg-surface-light dark:hover:bg-card-dark" title="Schedule">
-              <CalendarClock size={18} />
-              <input type="datetime-local" hidden onChange={(e) => setScheduleAt(e.target.value)} />
-            </label>
+            <ToolBtn active={schedulePanel || Boolean(scheduleAt)} onClick={() => setSchedulePanel((v) => !v)}
+              icon={<CalendarClock size={18} className="text-blue-500" />} label="Schedule" />
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -343,7 +371,7 @@ const PagePicker: React.FC<{ pages: FeedPageSummary[]; value: string; onChange: 
   const close = useCallback(() => setOpen(false), []);
   const ref = useDismiss(open, close);
   const current = pages.find((p) => p.id === value);
-  const avatarUrl = useMediaUrl(current?.avatarFileId);
+  const avatarUrl = useMediaUrl(current?.avatarFileId, true, 0, undefined, true);
   return (
     <div ref={ref} className="relative">
       <button onClick={() => !disabled && setOpen((v) => !v)} disabled={disabled} aria-haspopup="listbox" aria-expanded={open}

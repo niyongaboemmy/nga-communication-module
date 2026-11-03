@@ -6,6 +6,7 @@
  * (unnested) comments — see the migration header (0025) for why this isn't
  * bolted onto the page-centric post model instead.
  */
+import { loadVisibleReel } from './visibility.js';
 import type { PoolClient } from 'pg';
 import { getPool, snowflake } from '@tupo/db';
 import type {
@@ -13,8 +14,8 @@ import type {
 } from '@tupo/shared';
 import { FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
 import { FeedError } from './errors.js';
-import { type FeedActor, assertVisible, can, canTargetAudience, clampLimit, decodeCursor, encodeCursor, visibleAudiences } from './common.js';
-import { resolveMedia } from './posts.js';
+import { type FeedActor, assertVisible, can, canTargetAudience, clampLimit, decodeCursor, encodeCursor, visibleAudiences, lockRow } from './common.js';
+import { assertOwnImage, resolveMedia } from './posts.js';
 
 interface ReelRow {
   id: string;
@@ -46,6 +47,18 @@ export async function createReel(actor: FeedActor, payload: ComposeReelPayload):
     await client.query('BEGIN');
     const [media] = await resolveMedia(client, [payload.media], actor.id, 1);
     if (!media || media.kind !== 'video') throw new FeedError('A reel needs a video file.', 400);
+    // The 90 s limit is the server's, not just the composer's (FEED-V3): the
+    // length the client declares and the one recorded at upload both count.
+    const { rows: meta } = await client.query<{ duration_ms: string | null }>(
+      `SELECT metadata->>'durationMs' AS duration_ms FROM files WHERE id = $1`, [media.fileId]);
+    const declared = Number(payload.media.durationSeconds);
+    const recorded = meta[0]?.duration_ms ? Number(meta[0].duration_ms) / 1000 : NaN;
+    const seconds = [declared, recorded].filter((n) => Number.isFinite(n) && n > 0);
+    if (seconds.some((n) => n > FEED_LIMITS.REEL_MAX_DURATION_SECONDS + 0.5)) {
+      throw new FeedError(`Reels can be at most ${FEED_LIMITS.REEL_MAX_DURATION_SECONDS} seconds.`, 400);
+    }
+    media.durationSeconds = seconds.length ? Math.round(Math.max(...seconds)) : null;
+    media.posterFileId = await assertOwnImage(client, payload.media.posterFileId, actor.id);
     const id = snowflake();
     await client.query(
       `INSERT INTO feed_reels (id, author_id, caption, media, audience) VALUES ($1,$2,$3,$4,$5)`,
@@ -80,17 +93,14 @@ export async function deleteReel(actor: FeedActor, reelId: string): Promise<void
 export interface ReelLikeResult { liked: boolean; likeCount: number; authorId: string; }
 
 export async function toggleLike(actor: FeedActor, reelId: string): Promise<ReelLikeResult> {
-  const { rows } = await getPool().query<{ author_id: string }>(
-    `SELECT author_id FROM feed_reels WHERE id = $1 AND deleted_at IS NULL`, [reelId],
-  );
-  const reel = rows[0];
-  if (!reel) throw new FeedError('Reel not found.', 404);
+  const reel = await loadVisibleReel(actor, reelId);
   if (!can(actor, 'FEED_COMMENT')) throw new FeedError('You cannot react.', 403);
 
   const client = await getPool().connect();
   let liked = false;
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_reels', reelId);
     const { rowCount } = await client.query(
       'DELETE FROM feed_reel_likes WHERE reel_id = $1 AND user_id = $2', [reelId, actor.id],
     );
@@ -119,15 +129,14 @@ export async function addComment(actor: FeedActor, reelId: string, body: string)
   if (!can(actor, 'FEED_COMMENT')) throw new FeedError('You cannot comment.', 403);
   const text = (body ?? '').trim().slice(0, FEED_LIMITS.REEL_COMMENT_BODY_MAX);
   if (!text) throw new FeedError('A comment needs some text.', 400);
-  const { rows } = await getPool().query<{ author_id: string }>(
-    'SELECT author_id FROM feed_reels WHERE id = $1 AND deleted_at IS NULL', [reelId],
-  );
-  if (!rows[0]) throw new FeedError('Reel not found.', 404);
+  const visibleReel = await loadVisibleReel(actor, reelId);
+  const rows = [{ author_id: visibleReel.author_id }];
 
   const client = await getPool().connect();
   const id = snowflake();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_reels', reelId);
     await client.query(
       'INSERT INTO feed_reel_comments (id, reel_id, author_id, body) VALUES ($1,$2,$3,$4)',
       [id, reelId, actor.id, text],
@@ -154,6 +163,7 @@ export async function addComment(actor: FeedActor, reelId: string, body: string)
 }
 
 export async function listComments(actor: FeedActor, reelId: string): Promise<FeedReelCommentView[]> {
+  await loadVisibleReel(actor, reelId);
   const { rows } = await getPool().query<{
     id: string; reel_id: string; author_id: string; body: string; created_at: string;
     author_name: string; author_avatar: string | null;
@@ -161,9 +171,11 @@ export async function listComments(actor: FeedActor, reelId: string): Promise<Fe
     `SELECT c.id, c.reel_id, c.author_id, c.body, c.created_at, u.name AS author_name, u.avatar_url AS author_avatar
        FROM feed_reel_comments c JOIN users u ON u.id = c.author_id
       WHERE c.reel_id = $1 AND c.deleted_at IS NULL
-      ORDER BY c.created_at ASC`,
+      -- The latest 200, shown oldest first (D-11: was every comment).
+      ORDER BY c.created_at DESC LIMIT 200`,
     [reelId],
   );
+  rows.reverse();
   return rows.map((r) => ({
     id: r.id,
     reelId: r.reel_id,
@@ -200,18 +212,21 @@ export async function deleteComment(actor: FeedActor, commentId: string): Promis
 export async function recordView(
   actor: FeedActor, reelId: string,
 ): Promise<{ viewCount: number; uniqueReach: number } | null> {
+  const visible = await loadVisibleReel(actor, reelId).catch(() => null);
+  if (!visible) return null;
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
-    const { rows: exists } = await client.query(
-      'SELECT 1 FROM feed_reels WHERE id = $1 AND deleted_at IS NULL', [reelId],
-    );
-    if (!exists[0]) { await client.query('ROLLBACK'); return null; }
-    await client.query(
+    // One impression per person per half hour, as for posts.
+    const { rows: counted } = await client.query(
       `INSERT INTO feed_reel_views (reel_id, user_id) VALUES ($1,$2)
-       ON CONFLICT (reel_id, user_id) DO UPDATE SET views = feed_reel_views.views + 1, last_at = now()`,
+       ON CONFLICT (reel_id, user_id) DO UPDATE
+         SET views = feed_reel_views.views + 1, last_at = now()
+         WHERE feed_reel_views.last_at < now() - interval '30 minutes'
+       RETURNING 1`,
       [reelId, actor.id],
     );
+    if (!counted[0]) { await client.query('ROLLBACK'); return null; }
     const { rows } = await client.query<{ views: string; reach: string }>(
       `SELECT COALESCE(sum(views),0)::text AS views, count(*)::text AS reach FROM feed_reel_views WHERE reel_id = $1`,
       [reelId],

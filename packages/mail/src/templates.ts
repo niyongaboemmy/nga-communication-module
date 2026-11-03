@@ -6,6 +6,7 @@
  * subject and body actually reference so the campaign preview knows what to ask
  * for.
  */
+import { sanitizeMailHtml } from './sanitize.js';
 import { getPool, snowflake } from '@tupo/db';
 import type { MailTemplate } from '@tupo/shared';
 import { MailError } from './errors.js';
@@ -49,13 +50,14 @@ export async function createTemplate(userId: string, input: TemplateInput): Prom
   const name = input.name.trim();
   if (!name) throw new MailError('A template needs a name.');
   const id = snowflake();
-  const vars = extractMergeFields(input.subject, input.bodyHtml);
+  const bodyHtml = sanitizeMailHtml(input.bodyHtml);
+  const vars = extractMergeFields(input.subject, bodyHtml);
   await getPool().query(
     `INSERT INTO mail_templates
        (id, name, description, category, subject, body_html, body_text, variables, is_shared, created_by, updated_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$10)`,
     [id, name, input.description ?? '', input.category ?? 'general', input.subject.slice(0, 300),
-     input.bodyHtml, htmlToText(input.bodyHtml), JSON.stringify(vars), input.isShared ?? true, userId],
+     bodyHtml, htmlToText(bodyHtml), JSON.stringify(vars), input.isShared ?? true, userId],
   );
   return getTemplate(userId, id);
 }
@@ -68,7 +70,7 @@ export async function updateTemplate(
     throw new MailError('You can only edit templates you created.', 403);
   }
   const subject = input.subject ?? cur.subject;
-  const bodyHtml = input.bodyHtml ?? cur.bodyHtml;
+  const bodyHtml = sanitizeMailHtml(input.bodyHtml ?? cur.bodyHtml);
   const vars = extractMergeFields(subject, bodyHtml);
   await getPool().query(
     `UPDATE mail_templates SET name = $2, description = $3, category = $4, subject = $5,

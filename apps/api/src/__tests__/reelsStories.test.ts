@@ -134,8 +134,11 @@ describe('reels', () => {
     const reelId = create.body.data.reelId as string;
 
     await api(staff.token).post(`/api/feed/reels/${reelId}/view`);
-    await api(staff.token).post(`/api/feed/reels/${reelId}/view`); // same viewer again
+    await api(staff.token).post(`/api/feed/reels/${reelId}/view`); // same viewer straight away: not counted
     await api(parent.token).post(`/api/feed/reels/${reelId}/view`);
+    // …but the same viewer half an hour later is a new impression.
+    await getPool().query(`UPDATE feed_reel_views SET last_at = now() - interval '31 minutes' WHERE reel_id = $1`, [reelId]);
+    await api(staff.token).post(`/api/feed/reels/${reelId}/view`);
 
     const { rows } = await getPool().query('SELECT view_count, unique_reach FROM feed_reels WHERE id = $1', [reelId]);
     expect(rows[0].view_count).toBe(3);

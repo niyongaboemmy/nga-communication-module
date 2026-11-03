@@ -5,17 +5,14 @@
  */
 import { getPool } from '@tupo/db';
 import type { FeedPollView } from '@tupo/shared';
+import { loadVisiblePost } from './visibility.js';
 import { FeedError } from './errors.js';
 import type { FeedActor } from './common.js';
 
 export interface PollVoteResult { postId: string; poll: FeedPollView; }
 
 export async function votePoll(actor: FeedActor, postId: string, choices: number[]): Promise<PollVoteResult> {
-  const { rows } = await getPool().query<{
-    poll: { question: string; options: string[]; multi: boolean; closesAt: string | null } | null;
-    status: string;
-  }>(`SELECT poll, status FROM feed_posts WHERE id = $1 AND deleted_at IS NULL`, [postId]);
-  const row = rows[0];
+  const row = await loadVisiblePost(actor, postId).catch(() => null);
   if (!row || !row.poll || row.status !== 'published') throw new FeedError('Poll not found.', 404);
   if (row.poll.closesAt && Date.parse(row.poll.closesAt) <= Date.now()) {
     throw new FeedError('This poll has closed.', 409);
@@ -28,6 +25,10 @@ export async function votePoll(actor: FeedActor, postId: string, choices: number
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    // One vote change per person per poll at a time: delete-then-insert from
+    // two quick clicks could otherwise leave two answers on a single-choice
+    // poll (FEED-B4).
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))`, [postId, actor.id]);
     await client.query('DELETE FROM feed_poll_votes WHERE post_id = $1 AND user_id = $2', [postId, actor.id]);
     for (const i of picks) {
       await client.query(

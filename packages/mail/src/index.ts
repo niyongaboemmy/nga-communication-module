@@ -8,14 +8,16 @@
 export * from './errors.js';
 export * from './config.js';
 export * from './render.js';
+export * from './sanitize.js';
 export * from './smtp.js';
 export * from './delivery.js';
 export * from './service.js';
 export * from './lists.js';
 export * from './templates.js';
 export * from './campaigns.js';
+export * from './digest.js';
 
-import { deliverSmtp } from './delivery.js';
+import { deliverSmtp, MAX_SMTP_ATTEMPTS } from './delivery.js';
 import { getPool } from '@tupo/db';
 
 /**
@@ -28,7 +30,10 @@ export async function dispatchPendingSmtp(env: NodeJS.ProcessEnv = process.env):
     `SELECT DISTINCT r.message_id
        FROM mail_recipients r
        JOIN mail_messages m ON m.id = r.message_id
-      WHERE r.channel = 'smtp' AND r.delivery_status IN ('queued', 'failed') AND r.attempts < 4
+      WHERE r.channel = 'smtp'
+        AND ((r.delivery_status IN ('queued', 'failed') AND r.attempts < ${MAX_SMTP_ATTEMPTS}
+              AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= now()))
+          OR (r.delivery_status = 'sending' AND (r.claimed_at IS NULL OR r.claimed_at < now() - interval '10 minutes')))
         AND NOT m.is_draft
         AND (m.scheduled_at IS NULL OR m.scheduled_at <= now())
       LIMIT 200`,
@@ -47,14 +52,32 @@ export async function dispatchPendingSmtp(env: NodeJS.ProcessEnv = process.env):
  */
 export async function sendDueScheduled(): Promise<{ sent: number }> {
   const { deliverInApp } = await import('./delivery.js');
-  const { rows } = await getPool().query<{ id: string }>(
-    `UPDATE mail_messages SET sent_at = now(), updated_at = now()
-      WHERE scheduled_at IS NOT NULL AND sent_at IS NULL AND NOT is_draft AND scheduled_at <= now()
-      RETURNING id`,
-  );
-  for (const r of rows) {
-    try { await deliverInApp(r.id); }
-    catch (e) { console.error(`[mail] scheduled send ${r.id} failed:`, e); }
+  const { releaseMessage } = await import('./service.js');
+  const pool = getPool();
+  const client = await pool.connect();
+  let ids: string[] = [];
+  try {
+    await client.query('BEGIN');
+    // SKIP LOCKED: two overlapping sweeps never release the same message twice.
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT id FROM mail_messages
+        WHERE scheduled_at IS NOT NULL AND sent_at IS NULL AND NOT is_draft AND scheduled_at <= now()
+        ORDER BY scheduled_at
+        LIMIT 200
+        FOR UPDATE SKIP LOCKED`,
+    );
+    ids = rows.map((r) => r.id);
+    for (const id of ids) await releaseMessage(client, id);
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
   }
-  return { sent: rows.length };
+  for (const id of ids) {
+    try { await deliverInApp(id); }
+    catch (e) { console.error(`[mail] scheduled send ${id} failed:`, e); }
+  }
+  return { sent: ids.length };
 }

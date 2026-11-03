@@ -37,6 +37,8 @@ export interface FloatingReaction {
 export interface MeetRoomState {
   phase: RoomPhase;
   error: string | null;
+  /** The live connection dropped mid-call and is being restored (MEET-RT1). */
+  reconnecting: boolean;
   settings: MeetSettings;
   you: MeetParticipant | null;
   participants: MeetParticipant[];
@@ -127,6 +129,15 @@ export interface MeetRoomActions {
 const CAPTION_WINDOW = 60;
 const CHAT_WINDOW = 500;
 
+/**
+ * Speaker view on a phone (U-33): one face large enough to see, the others in
+ * a strip, as WhatsApp and Meet do on a small screen. A grid of nine on a
+ * 360 px screen is nine thumbnails nobody can read, and nine video decodes.
+ */
+function defaultLayout(): 'grid' | 'speaker' {
+  return typeof window !== 'undefined' && window.matchMedia?.('(max-width: 640px)').matches ? 'speaker' : 'grid';
+}
+
 export function useMeetRoom(
   ticket: MeetJoinTicket | null,
   initialStream: MediaStream | null,
@@ -134,6 +145,7 @@ export function useMeetRoom(
   const [state, setState] = useState<MeetRoomState>(() => ({
     phase: 'connecting',
     error: null,
+    reconnecting: false,
     settings: ticket ? ticket.meeting.settings : DEFAULT_MEET_SETTINGS,
     you: null,
     participants: [],
@@ -162,7 +174,7 @@ export function useMeetRoom(
     presenterName: null,
     notes: [],
     handRaised: false,
-    layout: 'grid',
+    layout: defaultLayout(),
     layoutPinned: false,
     quality: 'good',
     publishQuality: 'high',
@@ -307,7 +319,12 @@ export function useMeetRoom(
     });
     socketRef.current = socket;
 
+    let connectedOnce = false;
     socket.on('connect', () => {
+      connectedOnce = true;
+      patch(() => ({ reconnecting: false }));
+      // Also on every reconnect: the gateway restores an admitted participant
+      // straight into the call (a fresh meet:state follows).
       socket.emit('meet:join', {
         meetingId: ticket.meeting.meetingId,
         participantId: ticket.participantId,
@@ -317,7 +334,16 @@ export function useMeetRoom(
     });
 
     socket.on('connect_error', (err: Error) => {
+      // Mid-call, a failed reconnect attempt is just "still reconnecting" —
+      // socket.io keeps trying. Only a first connection that fails is fatal.
+      if (connectedOnce && !/^(unauthorized|forbidden)/.test(err.message)) {
+        patch(() => ({ reconnecting: true }));
+        return;
+      }
       patch(() => ({ phase: 'error', error: err.message || 'Could not reach the meeting server.' }));
+    });
+    socket.on('disconnect', (reason) => {
+      if (reason !== 'io client disconnect') patch(() => ({ reconnecting: true }));
     });
 
     socket.on('meet:state', (p: {
@@ -490,7 +516,7 @@ export function useMeetRoom(
         return {
           presenterId: null,
           presenterName: null,
-          layout: s.layoutPinned ? s.layout : 'grid',
+          layout: s.layoutPinned ? s.layout : defaultLayout(),
         };
       });
     });
@@ -540,15 +566,16 @@ export function useMeetRoom(
     });
 
     socket.on('meet:poll', (p: { poll: MeetPoll }) => {
+      // Broadcasts carry no one's vote; keep this participant's own.
       patch((s) => ({
         polls: s.polls.some((x) => x.id === p.poll.id)
-          ? s.polls.map((x) => (x.id === p.poll.id ? p.poll : x))
+          ? s.polls.map((x) => (x.id === p.poll.id ? { ...p.poll, myVote: x.myVote } : x))
           : [...s.polls, p.poll],
       }));
     });
 
     socket.on('meet:poll_closed', (p: { poll: MeetPoll }) => {
-      patch((s) => ({ polls: s.polls.map((x) => (x.id === p.poll.id ? p.poll : x)) }));
+      patch((s) => ({ polls: s.polls.map((x) => (x.id === p.poll.id ? { ...p.poll, myVote: x.myVote } : x)) }));
     });
 
     socket.on('meet:question', (p: { question: MeetQuestion }) => {
@@ -1013,7 +1040,13 @@ export function useMeetRoom(
   }) => { socketRef.current?.emit('meet:poll_create', p); }, []);
 
   const votePoll = useCallback((pollId: string, optionIndexes: number[]) => {
-    socketRef.current?.emit('meet:poll_vote', { pollId, optionIndexes });
+    socketRef.current?.emit('meet:poll_vote', { pollId, optionIndexes }, (r?: { ok: boolean; poll?: MeetPoll }) => {
+      // The ack carries this participant's own view, vote included.
+      if (r?.ok && r.poll) {
+        const mine = r.poll;
+        patch((s) => ({ polls: s.polls.map((x) => (x.id === mine.id ? mine : x)) }));
+      }
+    });
   }, []);
 
   const closePoll = useCallback((pollId: string) => {

@@ -3,6 +3,7 @@ import type { Redis } from 'ioredis';
 import * as chat from '@tupo/chat';
 import { enqueueUnfurl } from './queue.js';
 import { ChatError } from '@tupo/chat';
+import * as notify from '@tupo/notify';
 import {
   TYPING_TTL_SECONDS, conversationRoom, typingKey, userRoom,
 } from '@tupo/shared';
@@ -59,6 +60,13 @@ export function registerChatHandlers(
   const deny = () => new ChatError('Forbidden. You do not have permission to perform this action.', 403);
   /** What this socket has been *authorised* for — never what it claims. */
   const subscribed = new Set<string>();
+  /**
+   * Still in the conversation's room — not merely subscribed once. An eviction
+   * (removed from the conversation) takes the socket out of the room, and from
+   * then on it may neither read nor signal into it.
+   */
+  const inRoom = (conversationId: string): boolean =>
+    subscribed.has(conversationId) && socket.rooms.has(conversationRoom(conversationId));
 
   /* ── Subscribe ────────────────────────────────────────────────────────── */
 
@@ -86,7 +94,12 @@ export function registerChatHandlers(
     // Opening a conversation changes who is in the room, so everyone already
     // there needs the new roster — and the arriving socket needs its first
     // copy. One broadcast serves both.
-    for (const id of granted) void emitConversationPresence(io, redis, id);
+    // The roster says who is online, so it waits for this socket's own
+    // presence to be written: a client subscribes the instant it connects,
+    // and a roster built before then showed its owner as offline.
+    void Promise.resolve((socket.data as { presenceReady?: Promise<unknown> }).presenceReady)
+      .catch(() => {})
+      .then(() => { for (const id of granted) void emitConversationPresence(io, redis, id); });
   });
 
   socket.on('conversation:unsubscribe', async ({ conversationIds }) => {
@@ -109,7 +122,7 @@ export function registerChatHandlers(
    * this it would start grey and stay grey until somebody happened to connect.
    */
   socket.on('conversation:presence:query', async ({ conversationId }, ack) => {
-    if (!subscribed.has(conversationId)) { ack?.({ online: [], viewing: [] }); return; }
+    if (!inRoom(conversationId)) { ack?.({ online: [], viewing: [] }); return; }
     await emitConversationPresence(io, redis, conversationId);
     ack?.({ online: [], viewing: [] });
   });
@@ -122,25 +135,23 @@ export function registerChatHandlers(
       // platform permission first, then membership, archive and announcers.
       const perms = await permissions();
       if (perms && !perms.has('MESSAGE_SEND')) throw deny();
-      const membership = await chat.requireMembership(user.id, p.conversationId);
-      if (membership.isArchived) throw new ChatError('This conversation is archived.', 409);
-      if (membership.type === 'announcement'
-          && !perms?.has('CHANNEL_ANNOUNCE')
-          && !chat.canManage(membership.role)) {
-        throw new ChatError('Only announcers can post in this channel.', 403);
-      }
+      const membership = await chat.assertCanPost(user.id, p.conversationId, {
+        mayAnnounce: Boolean(perms?.has('CHANNEL_ANNOUNCE')),
+      });
       if (!p.nonce) throw new ChatError('A nonce is required.', 400);
 
+      // The client picks the kind of message, never its authority (B-01).
+      const safe = await chat.normaliseClientMessage(user.id, p.conversationId, p.type, p.metadata);
       const result = await chat.sendMessage({
         conversationId: p.conversationId,
         senderId: user.id,
         body: String(p.body ?? ''),
         nonce: p.nonce,
-        type: p.type,
+        type: safe.type,
         threadRootId: p.threadRootId ?? null,
         replyToId: p.replyToId ?? null,
         attachments: p.attachments ?? [],
-        metadata: p.metadata ?? {},
+        metadata: safe.metadata,
       });
 
       // Ack before fan-out. The sender's own bubble settling is the thing they
@@ -166,13 +177,23 @@ export function registerChatHandlers(
         // The socket is the normal send path, so it is the path that has to
         // raise notifications. Fail-soft: a notification that did not fire is a
         // missed buzz, whereas throwing here would lose a delivered message.
-        await chat.notifyNewMessage(result.message, {
-          conversationName: membership.name ?? 'a conversation',
-          conversationType: membership.type,
-          mentionedUserIds: result.mentionedUserIds,
-          broadcast: result.broadcast,
-          senderMayBroadcast: chat.canManage(membership.role),
-        }).catch(() => {});
+        const rootId = result.message.threadRootId;
+        if (rootId) {
+          await chat.notifyThreadReply(result.message, {
+            conversationName: membership.name ?? 'a conversation',
+            rootId,
+            followerIds: await chat.threadFollowers(p.conversationId, rootId),
+            mentionedUserIds: result.mentionedUserIds,
+          }).catch(() => {});
+        } else {
+          await chat.notifyNewMessage(result.message, {
+            conversationName: membership.name ?? 'a conversation',
+            conversationType: membership.type,
+            mentionedUserIds: result.mentionedUserIds,
+            broadcast: result.broadcast,
+            senderMayBroadcast: chat.canManage(membership.role),
+          }).catch(() => {});
+        }
       }
     } catch (err) {
       ack?.({ ok: false, error: err instanceof ChatError ? err.message : 'Message could not be sent.' });
@@ -274,6 +295,20 @@ export function registerChatHandlers(
     if (!redis) return;
     try {
       const raw = await redis.hgetall(typingKey(conversationId));
+      // Each person's entry expires on its own (B-04). The hash shares one TTL,
+      // refreshed by anyone's typing, so without this a person who stopped
+      // stayed "typing…" for as long as someone else kept going.
+      const now = Date.now();
+      const stale = Object.entries(raw).filter(([, value]) => {
+        try {
+          const at = (JSON.parse(value) as { at?: number }).at;
+          return typeof at === 'number' && now - at > TYPING_TTL_SECONDS * 1000;
+        } catch { return false; }
+      }).map(([userId]) => userId);
+      if (stale.length) {
+        await redis.hdel(typingKey(conversationId), ...stale);
+        for (const id of stale) delete raw[id];
+      }
       const users: TypingUser[] = Object.entries(raw).map(([userId, value]) => {
         // The field used to be a bare name. A hash written by an older gateway
         // during a rolling deploy is still readable — it degrades to a name
@@ -299,7 +334,7 @@ export function registerChatHandlers(
   const ACTIVITY_KINDS = new Set<ActivityKind>(['typing', 'recording', 'uploading']);
 
   socket.on('typing:start', async ({ conversationId, kind }) => {
-    if (!subscribed.has(conversationId) || !redis) return;
+    if (!inRoom(conversationId) || !redis) return;
     try {
       const key = typingKey(conversationId);
       await redis.hset(key, user.id, JSON.stringify({
@@ -309,6 +344,7 @@ export function registerChatHandlers(
         // socket supply it would let anyone wear anyone else's.
         avatarUrl: user.avatarUrl ?? null,
         kind: ACTIVITY_KINDS.has(kind as ActivityKind) ? kind : 'typing',
+        at: Date.now(),
       }));
       // Refreshed on every keystroke burst, so the key outlives a pause in
       // typing but not a closed tab.
@@ -325,7 +361,7 @@ export function registerChatHandlers(
     try {
       await chat.requireMembership(user.id, conversationId);
       const result = await chat.advanceRead(user.id, conversationId, seq);
-      await chat.markRead(user.id, conversationId, seq);
+      const newlyRead = await chat.markRead(user.id, conversationId, seq, result.previousSeq);
 
       ack?.({ ok: true, unread: result.unread, unreadMentions: result.unreadMentions });
 
@@ -336,25 +372,37 @@ export function registerChatHandlers(
         unreadMentions: result.unreadMentions,
         lastReadSeq: result.lastReadSeq,
       });
-      // …and everyone in the room repaints their read marker.
-      io.to(conversationRoom(conversationId)).emit('read:update', {
-        conversationId, userId: user.id, seq: result.lastReadSeq, at: new Date().toISOString(),
-      });
+      // …and everyone in the room repaints their read marker — unless this
+      // person keeps their reads private (B-11): then nobody is told.
+      if (await chat.receiptsVisibleTo(user.id)) {
+        io.to(conversationRoom(conversationId)).emit('read:update', {
+          conversationId, userId: user.id, seq: result.lastReadSeq, at: new Date().toISOString(),
+        });
+      }
+      // Senders' ticks move live, on their own devices only.
+      for (const u of await chat.receiptUpdatesFor(conversationId, newlyRead)) {
+        io.to(userRoom(u.senderId)).emit('receipt:update', u.payload);
+      }
+      // Read to the end: the bell's notifications about it are read too (F-01).
+      if (result.unread === 0) {
+        void notify.markConversationNotificationsRead(user.id, conversationId).then(async (ids) => {
+          if (ids.length) io.to(userRoom(user.id)).emit('notification:read', { ids, unread: await notify.unreadCount(user.id) });
+        }).catch(() => {});
+      }
     } catch {
       ack?.({ ok: false, unread: 0, unreadMentions: 0 });
     }
   });
 
   socket.on('receipt:delivered', async ({ conversationId, messageIds }) => {
-    if (!subscribed.has(conversationId) || !messageIds?.length) return;
+    if (!inRoom(conversationId) || !messageIds?.length) return;
     try {
-      await chat.markDelivered(user.id, conversationId, messageIds.slice(0, 200));
-      // The sender's ticks are the only thing that changes; the room is the
-      // cheapest way to reach them without looking up who they are.
-      io.to(conversationRoom(conversationId)).emit('receipt:update', {
-        conversationId, messageId: messageIds[messageIds.length - 1]!,
-        delivery: 'delivered', readCount: 0,
-      });
+      const reached = await chat.markDelivered(user.id, conversationId, messageIds.slice(0, 200));
+      // Only the senders' ticks change, so only their devices are told, with
+      // each message's real state rather than a blanket "delivered" (B-11).
+      for (const u of await chat.receiptUpdatesFor(conversationId, reached)) {
+        io.to(userRoom(u.senderId)).emit('receipt:update', u.payload);
+      }
     } catch { /* ignore */ }
   });
 
@@ -381,9 +429,29 @@ export function registerChatHandlers(
 export async function fanOutMessage(
   io: ChatServer, conversationId: string, result: chat.SendResult,
 ): Promise<void> {
+  const rootId = result.message.threadRootId;
+  if (rootId) {
+    // A thread reply belongs in the thread pane, not the main flow — and it
+    // moves followers' thread counters, never anyone's conversation badge.
+    io.to(conversationRoom(conversationId)).emit('thread:reply', {
+      conversationId, rootId, message: result.message,
+    });
+    const counts = await chat.threadUnreadFor(conversationId, rootId).catch(() => []);
+    for (const c of counts) {
+      io.to(userRoom(c.userId)).emit('thread:unread', { conversationId, rootId, unread: c.unread });
+    }
+    return;
+  }
   io.to(conversationRoom(conversationId)).emit('message:new', {
     conversationId, message: result.message,
   });
+  // A call just started here: ring everyone else, wherever they are (N-05).
+  const ring = chat.callRingOf(result.message);
+  if (ring) {
+    for (const id of await chat.memberIdsOf(conversationId)) {
+      if (id !== ring.callerId) io.to(userRoom(id)).emit('call:ring', { conversationId, ...ring });
+    }
+  }
   await pushUnread(io, conversationId, result.message.senderId);
 }
 
@@ -406,7 +474,7 @@ async function pushUnread(
   for (const [userId, c] of Object.entries(counts)) {
     io.to(userRoom(userId)).emit('conversation:unread', {
       conversationId, unread: c.unread, unreadMentions: c.unreadMentions,
-      lastReadSeq: c.lastReadSeq,
+      lastReadSeq: c.lastReadSeq, lastSeq: c.lastSeq,
     });
   }
 }

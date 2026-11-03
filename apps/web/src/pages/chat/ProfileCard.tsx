@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { X, MessageSquare, Clock, Briefcase } from 'lucide-react';
+import { X, MessageSquare, Clock, Briefcase, Ban, Flag } from 'lucide-react';
 import { Avatar, IconButton, Spinner } from '../../components/ui';
 import { avatarPreviewOpen } from '../../components/AvatarPreview';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -7,6 +7,8 @@ import { useNotify } from '../../context/NotificationContext';
 import { useChat } from './ChatProvider';
 import * as chatApi from './api';
 import { toPresence } from './types';
+import { ReportDialog } from './ReportDialog';
+import { useAuth } from '../../context/AuthContext';
 
 /**
  * The card behind every avatar (FR-USR-2).
@@ -39,7 +41,28 @@ export const ProfileCard: React.FC<{
 }> = ({ userId, onClose, anchor = 'left' }) => {
   const { can } = usePermissions();
   const { notify } = useNotify();
-  const { setActiveId, refresh } = useChat();
+  const { setActiveId, refresh, blockedIds, setBlocked } = useChat();
+  const { user: me } = useAuth();
+  const [reporting, setReporting] = useState(false);
+  const [blocking, setBlocking] = useState(false);
+  const blocked = blockedIds.has(userId);
+
+  const toggleBlock = async () => {
+    if (!profile || blocking) return;
+    setBlocking(true);
+    try {
+      await setBlocked(profile.id, !blocked);
+      notify({
+        title: blocked ? `${profile.name} is unblocked` : `${profile.name} is blocked`,
+        body: blocked ? undefined : 'They can’t message you, and won’t see when you’re online. They aren’t told.',
+        tone: 'success',
+      });
+    } catch (err) {
+      notify({ title: 'That did not work', body: err instanceof Error ? err.message : undefined, tone: 'error' });
+    } finally {
+      setBlocking(false);
+    }
+  };
 
   const [profile, setProfile] = useState<chatApi.UserProfile | null>(null);
   const [failed, setFailed] = useState(false);
@@ -186,7 +209,7 @@ export const ProfileCard: React.FC<{
 
           {/* The reason the card exists. Hidden rather than shown-and-403 for
               someone without DM_START and no existing conversation. */}
-          {(profile.directConversationId || can('DM_START')) && (
+          {!blocked && (profile.directConversationId || can('DM_START')) && (
             <button
               onClick={() => void message()}
               disabled={opening}
@@ -195,6 +218,32 @@ export const ProfileCard: React.FC<{
               {opening ? <Spinner className="h-3 w-3" /> : <MessageSquare size={13} />}
               Message {profile.name.split(' ')[0]}
             </button>
+          )}
+
+          {/* Safety (B-05): quiet, but always one tap away. */}
+          {me && me.id !== profile.id && (
+            <div className="flex border-t border-border-light text-[11px] dark:border-border-dark/40">
+              <button
+                onClick={() => void toggleBlock()}
+                disabled={blocking}
+                className="flex flex-1 items-center justify-center gap-1.5 py-2 text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light disabled:opacity-50 dark:text-text-secondary-dark dark:hover:bg-surface-dark dark:hover:text-text-primary-dark"
+              >
+                <Ban size={12} /> {blocked ? 'Unblock' : 'Block'}
+              </button>
+              <button
+                onClick={() => setReporting(true)}
+                className="flex flex-1 items-center justify-center gap-1.5 border-l border-border-light py-2 text-red-600 hover:bg-red-50 dark:border-border-dark/40 dark:text-red-400 dark:hover:bg-red-500/10"
+              >
+                <Flag size={12} /> Report
+              </button>
+            </div>
+          )}
+          {reporting && (
+            <ReportDialog
+              user={{ id: profile.id, name: profile.name }}
+              alreadyBlocked={blocked}
+              onClose={() => setReporting(false)}
+            />
           )}
         </>
       )}

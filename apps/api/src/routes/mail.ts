@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { getPool, activeUserSql } from '@tupo/db';
-import { ok, fail } from '@tupo/shared';
+import { ok, fail, MAIL_FOLDERS } from '@tupo/shared';
+import type { MailFolder } from '@tupo/shared';
 import * as mail from '@tupo/mail';
 import { MailError } from '@tupo/mail';
 import * as mailAi from '../services/mailAiService.js';
@@ -10,10 +11,15 @@ import { aiWhoOf, isPersonalAiError, personalAiBody } from '../services/myAiGate
 import { handoffResponse } from '../services/externalAi.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
+import { emitToUsers } from '../services/chatRealtime.js';
+
+/** Tell every device of this person that their mailbox counts moved. */
+const countsChanged = (userId: string) => emitToUsers([userId], 'mail:counts', { at: new Date().toISOString() });
 import { hasPermission } from '../access/gate.js';
 import { routeCampaignForApproval } from '../access/approvers.js';
 import { audit } from '../services/userService.js';
 import { enqueueMailSend, enqueueMailCampaign, enqueueMailListSync } from '../services/queue.js';
+import { clearMailThreadNotifications } from '../services/notificationSync.js';
 import { activity } from '../activity/relay.js';
 
 /**
@@ -60,6 +66,14 @@ router.post('/labels', authorizePermission('MAIL_READ'), wrap(async (req, res) =
   res.status(201).json(ok({ label }));
 }));
 
+router.patch('/labels/:id', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  const label = await mail.updateLabel(actor(req).id, req.params.id!, {
+    name: typeof req.body?.name === 'string' ? req.body.name : undefined,
+    color: typeof req.body?.color === 'string' ? req.body.color : undefined,
+  });
+  res.json(ok({ label }));
+}));
+
 router.delete('/labels/:id', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.deleteLabel(actor(req).id, req.params.id!);
   res.json(ok({ deleted: true }));
@@ -67,8 +81,11 @@ router.delete('/labels/:id', authorizePermission('MAIL_READ'), wrap(async (req, 
 
 router.get('/threads', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   const folder = str(req.query.folder) || 'inbox';
+  if (!(MAIL_FOLDERS as readonly string[]).includes(folder)) {
+    return res.status(400).json(fail('Unknown mail folder.'));
+  }
   const result = await mail.listThreads(actor(req).id, {
-    folder: folder as never,
+    folder: folder as MailFolder,
     labelId: str(req.query.label) || undefined,
     q: str(req.query.q, 200) || undefined,
     cursor: str(req.query.cursor) || undefined,
@@ -78,27 +95,46 @@ router.get('/threads', authorizePermission('MAIL_READ'), wrap(async (req, res) =
 }));
 
 router.get('/threads/:id', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
-  res.json(ok({ thread: await mail.getThread(actor(req).id, req.params.id!) }));
+  const thread = await mail.getThread(actor(req).id, req.params.id!);
+  // Opening marks it read; every other device of this person updates its counts.
+  countsChanged(actor(req).id);
+  void clearMailThreadNotifications(actor(req).id, req.params.id!);
+  res.json(ok({ thread }));
 }));
 
 router.post('/threads/:id/move', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.moveThread(actor(req).id, req.params.id!, str(req.body?.folder) as never);
+  countsChanged(actor(req).id);
   res.json(ok({ moved: true }));
 }));
 
 router.post('/threads/:id/star', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.starThread(actor(req).id, req.params.id!, req.body?.starred !== false);
+  countsChanged(actor(req).id);
   res.json(ok({ starred: req.body?.starred !== false }));
 }));
 
 router.post('/threads/:id/read', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.markThread(actor(req).id, req.params.id!, req.body?.read !== false);
+  countsChanged(actor(req).id);
   res.json(ok({ read: req.body?.read !== false }));
 }));
 
 router.post('/threads/:id/labels', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   await mail.setThreadLabels(actor(req).id, req.params.id!, arr(req.body?.labels));
   res.json(ok({ labels: arr(req.body?.labels) }));
+}));
+
+router.post('/threads/:id/restore', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  await mail.restoreThread(actor(req).id, req.params.id!);
+  countsChanged(actor(req).id);
+  res.json(ok({ restored: true }));
+}));
+
+router.post('/trash/empty', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  const removed = await mail.emptyTrash(actor(req).id);
+  countsChanged(actor(req).id);
+  res.json(ok({ removed }));
 }));
 
 router.delete('/threads/:id', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
@@ -134,6 +170,9 @@ router.post('/compose', wrap(async (req, res) => {
     draft: isDraft,
     scheduledAt: body.scheduledAt ?? null,
     draftId: body.draftId ? str(body.draftId) : undefined,
+  }, {
+    // Bulk senders are reviewed through campaigns instead (MAIL-H6).
+    recipientCaps: hasPermission(req, 'MAIL_BULK_SEND') ? null : mail.defaultRecipientCaps(),
   });
 
   if (!result.draft) {
@@ -177,7 +216,12 @@ router.get('/prefs', authorizePermission('MAIL_READ'), wrap(async (req, res) => 
 router.put('/prefs', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   const b = req.body ?? {};
   const patch: Record<string, unknown> = {};
-  if (typeof b.displayName === 'string' || b.displayName === null) patch.displayName = b.displayName;
+  // A display name is a name, not a notice: one line, at most 60 characters.
+  // Recipients always see the real address beside it (ThreadView).
+  if (typeof b.displayName === 'string') {
+    const clean = b.displayName.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+    patch.displayName = clean || null;
+  } else if (b.displayName === null) patch.displayName = null;
   if (typeof b.signatureHtml === 'string') patch.signatureHtml = b.signatureHtml.slice(0, 20_000);
   if (typeof b.signatureEnabled === 'boolean') patch.signatureEnabled = b.signatureEnabled;
   if (typeof b.emailCopies === 'boolean') patch.emailCopies = b.emailCopies;
@@ -232,8 +276,12 @@ router.delete('/lists/:id', authorizePermission('MAIL_LIST_MANAGE'), wrap(async 
   res.json(ok({ deleted: true }));
 }));
 
-router.get('/lists/:id/members', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
-  res.json(ok({ members: await mail.listMembers(req.params.id!) }));
+// Member addresses (and any merge values) are for the people who manage or
+// send to lists, not for everyone with a mailbox.
+router.get('/lists/:id/members', authorizePermission('MAIL_LIST_MANAGE', 'MAIL_BULK_SEND'), wrap(async (req, res) => {
+  const members = await mail.listMembers(req.params.id!);
+  const manager = hasPermission(req, 'MAIL_LIST_MANAGE');
+  res.json(ok({ members: manager ? members : members.map((m) => ({ ...m, mergeVars: {} })) }));
 }));
 
 router.post('/lists/:id/members', authorizePermission('MAIL_LIST_MANAGE'), wrap(async (req, res) => {
@@ -326,7 +374,8 @@ router.delete('/campaigns/:id', authorizePermission('MAIL_BULK_SEND'), wrap(asyn
 }));
 
 router.get('/campaigns/:id/preview', authorizePermission('MAIL_BULK_SEND', 'MAIL_APPROVE'), wrap(async (req, res) => {
-  res.json(ok({ preview: await mail.previewCampaign(actor(req).id, req.params.id!) }));
+  // Its author, or an approver deciding on it — not every bulk sender.
+  res.json(ok({ preview: await mail.previewCampaign(actor(req).id, req.params.id!, hasPermission(req, 'MAIL_APPROVE')) }));
 }));
 
 router.post('/campaigns/:id/submit', authorizePermission('MAIL_BULK_SEND'), wrap(async (req, res) => {

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ChevronLeft, Maximize2, MessageSquare, X } from 'lucide-react';
@@ -8,6 +8,7 @@ import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { useChat } from './ChatProvider';
 import { ConversationList } from './ConversationList';
 import { MessageThread } from './MessageThread';
+import { ThreadPanel } from './ThreadPanel';
 import { Composer } from './Composer';
 
 /**
@@ -47,7 +48,8 @@ const DockInner: React.FC = () => {
   const navigate = useNavigate();
   const { shouldShowMini } = useMeetCall();
   const {
-    conversations, activeId, setActiveId, active: activeAny, connected,
+    activeId, setActiveId, active: activeAny, connected,
+    totalUnread, totalMentions, threadsUnreadTotal, threadRootId, openThread,
   } = useChat();
   // A subject channel opened on the Channels page does not follow you into the dock.
   const active = activeAny?.subjectId ? null : activeAny;
@@ -58,13 +60,9 @@ const DockInner: React.FC = () => {
   const panelRef = useRef<HTMLDivElement>(null);
   const launcherRef = useRef<HTMLButtonElement>(null);
 
-  const { unread, mentions } = useMemo(() => conversations.filter((c) => !c.subjectId).reduce(
-    (acc, c) => ({
-      unread: acc.unread + c.unread,
-      mentions: acc.mentions + c.unreadMentions,
-    }),
-    { unread: 0, mentions: 0 },
-  ), [conversations]);
+  // The same numbers as the rail, tab bar and tab title — see useModuleBadges.
+  const unread = totalUnread + threadsUnreadTotal;
+  const mentions = totalMentions;
 
   /*
    * Pulse when the count *rises*, not whenever it is non-zero. A badge that
@@ -131,10 +129,21 @@ const DockInner: React.FC = () => {
   // never left hanging over a page that suppresses it.
   useEffect(() => { if (suppressedOn(pathname)) setOpen(false); }, [pathname]);
 
-  const openFullPage = () => {
+  /**
+   * Hand off to the full page — on the same conversation, with the panel that
+   * was asked for (B-08). It used to land on a bare /app/chat, so "/saved" or
+   * "Details" from the dock opened neither.
+   */
+  const openFullPage = (panel?: string) => {
     setOpen(false);
-    navigate('/app/chat');
+    // A named panel replaces a thread open in the dock.
+    if (panel && threadRootId) openThread(null);
+    const q = new URLSearchParams();
+    if (activeId) q.set('c', activeId);
+    if (panel && panel !== 'shortcuts') q.set('panel', panel);
+    navigate(`/app/chat${q.size ? `?${q}` : ''}`);
   };
+
 
   if (!user || suppressedOn(pathname)) return null;
 
@@ -207,7 +216,7 @@ const DockInner: React.FC = () => {
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${connected ? 'bg-emerald-500' : 'bg-amber-500'}`}
             />
             <button
-              onClick={openFullPage}
+              onClick={() => openFullPage()}
               aria-label="Open the full chat page"
               title="Open the full chat page"
               className="grid h-8 w-8 place-items-center rounded-lg text-text-secondary-light transition-colors hover:bg-surface-light dark:text-text-secondary-dark dark:hover:bg-surface-dark"
@@ -223,7 +232,15 @@ const DockInner: React.FC = () => {
             </button>
           </header>
 
-          <div className="min-h-0 flex-1">
+          <div className="relative min-h-0 flex-1">
+            {/* A thread opens over the conversation, inside the dock (B-08):
+                "Reply in thread" used to set a thread nothing here showed. Its
+                own close button (or Escape) returns to the conversation. */}
+            {active && threadRootId && (
+              <div className="absolute inset-0 z-10 flex bg-white dark:bg-chrome-dark">
+                <ThreadPanel conversation={active} />
+              </div>
+            )}
             {active ? (
               /* The same thread and composer the full page renders, so every
                  feature behaves identically here. The side panels it can ask
@@ -232,19 +249,20 @@ const DockInner: React.FC = () => {
               <MessageThread
                 conversation={active}
                 onBack={() => setActiveId(null)}
-                onToggleContext={openFullPage}
+                onToggleContext={() => openFullPage('details')}
                 contextOpen={false}
-                onOpenSearch={openFullPage}
-                onOpenChannelSettings={openFullPage}
+                onOpenSearch={() => openFullPage('search')}
+                onOpenChannelSettings={() => openFullPage('channel')}
+                onOpenPinned={() => openFullPage('pinned')}
               >
-                <Composer conversation={active} onOpenPanel={openFullPage} />
+                <Composer conversation={active} onOpenPanel={(p) => openFullPage(p)} />
               </MessageThread>
             ) : (
               <ConversationList
-                onOpenSaved={openFullPage}
-                onOpenSettings={openFullPage}
-                onOpenSearch={openFullPage}
-                onOpenBrowse={openFullPage}
+                onOpenSaved={() => openFullPage('saved')}
+                onOpenSettings={() => openFullPage('settings')}
+                onOpenSearch={() => openFullPage('search')}
+                onOpenBrowse={() => openFullPage()}
               />
             )}
           </div>

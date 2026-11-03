@@ -5,9 +5,10 @@
 import { getPool } from '@tupo/db';
 import type { FeedPostReactor, FeedReaction, FeedReactionSummary } from '@tupo/shared';
 import { FEED_REACTIONS } from '@tupo/shared';
+import { loadVisiblePost, loadVisibleComment } from './visibility.js';
 import { FeedError } from './errors.js';
 import { getPostView } from './posts.js';
-import { type FeedActor, can, normalizeReaction } from './common.js';
+import { type FeedActor, can, normalizeReaction, lockRow } from './common.js';
 
 async function assertReactable(actor: FeedActor): Promise<void> {
   if (!can(actor, 'FEED_COMMENT')) throw new FeedError('You cannot react.', 403);
@@ -20,20 +21,26 @@ export interface PostReactionResult {
   added: FeedReaction | null;
 }
 
+/** Reactions are a fixed set (FEED_REACTIONS); null clears. */
+function assertReaction(emoji: unknown): asserts emoji is FeedReaction | null {
+  if (emoji !== null && !(FEED_REACTIONS as readonly unknown[]).includes(emoji)) {
+    throw new FeedError(`Reaction must be one of: ${FEED_REACTIONS.join(', ')}.`, 400);
+  }
+}
+
 export async function reactToPost(
   actor: FeedActor, postId: string, emoji: string | null,
 ): Promise<PostReactionResult> {
+  assertReaction(emoji);
   await assertReactable(actor);
-  const { rows: postRows } = await getPool().query<{ author_id: string; page_id: string; status: string }>(
-    `SELECT author_id, page_id, status FROM feed_posts WHERE id = $1 AND deleted_at IS NULL`, [postId],
-  );
-  const post = postRows[0];
-  if (!post || post.status !== 'published') throw new FeedError('Post not found.', 404);
+  const post = await loadVisiblePost(actor, postId);
+  if (post.status !== 'published') throw new FeedError('Post not found.', 404);
 
   const client = await getPool().connect();
   let added: FeedReaction | null = null;
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_posts', postId);
     const { rows: existing } = await client.query<{ emoji: string }>(
       'SELECT emoji FROM feed_reactions WHERE post_id = $1 AND user_id = $2', [postId, actor.id],
     );
@@ -95,16 +102,15 @@ export interface CommentReactionResult { postId: string; reactionCount: number; 
 export async function reactToComment(
   actor: FeedActor, commentId: string, emoji: string | null,
 ): Promise<CommentReactionResult> {
+  assertReaction(emoji);
   await assertReactable(actor);
-  const { rows: cRows } = await getPool().query<{ post_id: string; author_id: string }>(
-    'SELECT post_id, author_id FROM feed_comments WHERE id = $1 AND deleted_at IS NULL', [commentId],
-  );
-  const comment = cRows[0];
-  if (!comment) throw new FeedError('Comment not found.', 404);
+  const { comment, post: parentPost } = await loadVisibleComment(actor, commentId);
+  if (parentPost.status !== 'published') throw new FeedError('Comment not found.', 404);
 
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_comments', commentId);
     const { rows: existing } = await client.query<{ emoji: string }>(
       'SELECT emoji FROM feed_comment_reactions WHERE comment_id = $1 AND user_id = $2', [commentId, actor.id],
     );

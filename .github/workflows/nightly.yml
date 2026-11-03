@@ -1,0 +1,129 @@
+name: Nightly
+
+# The live and browser suites (G-03), against the whole stack booted on the
+# runner: API, realtime gateway, files service, worker and web, on their own
+# Postgres and Redis. They are too slow for every push, and catch what unit
+# tests cannot — sockets, uploads, the browser. Runs at 03:00 Kigali time, or
+# on demand from the Actions tab.
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/tupo_dev
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      JWT_SECRET: nightly-only-secret-not-used-anywhere-else
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Use npm 11
+        run: npm install -g npm@11.6.2
+
+      - name: Install
+        run: npm ci
+
+      - name: Build the shared packages
+        run: npm run build:packages
+
+      - name: Create, migrate and seed the database
+        run: |
+          psql -c 'CREATE DATABASE tupo_dev'
+          npm run db:migrate
+          npm run db:seed
+
+      # Each service reads its own .env; the verify suites read the API's for
+      # the database and the session secret.
+      - name: Write the service env files
+        run: |
+          common="NODE_ENV=development
+          DATABASE_URL=$DATABASE_URL
+          JWT_SECRET=$JWT_SECRET
+          REDIS_URL=redis://127.0.0.1:6379/0
+          REDIS_QUEUE_URL=redis://127.0.0.1:6379/1
+          CORS_ORIGINS=http://localhost:5194,http://127.0.0.1:5194"
+          for app in api realtime files worker; do printf '%s\n' "$common" | sed 's/^ *//' > apps/$app/.env; done
+          printf 'PORT=5190\n' >> apps/api/.env
+          printf 'PORT=5191\n' >> apps/realtime/.env
+          printf 'PORT=5192\nSTORAGE_DRIVER=local\nLOCAL_STORAGE_PATH=./storage\n' >> apps/files/.env
+          printf 'PORT=5193\nSMTP_HOST=127.0.0.1\nSMTP_PORT=5195\nSMTP_SECURE=false\nMAIL_FROM=tupo@example.test\n' >> apps/worker/.env
+
+      - name: Install the browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Start the stack
+        run: |
+          nohup npm run dev > dev.log 2>&1 &
+          for i in $(seq 1 90); do
+            ok=0
+            for port in 5190 5191 5192 5193 5194; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://localhost:$port/health" || true)
+              [ "$port" = 5194 ] && code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://localhost:5194/" || true)
+              [ "$code" = 200 ] && ok=$((ok+1))
+            done
+            [ "$ok" = 5 ] && echo "stack up after ${i}s" && exit 0
+            sleep 1
+          done
+          echo "stack did not come up"; tail -n 200 dev.log; exit 1
+
+      # Every suite runs even if an earlier one fails; the step fails at the end
+      # if any did, naming them.
+      - name: Live and browser suites
+        run: |
+          failed=""
+          for s in verify verify:security verify:realtime:journeys verify:ui:journeys \
+                   verify:chat verify:chat:live verify:presence verify:chat:threads verify:chat:files \
+                   verify:chat:notifications verify:chat:power verify:chat:admin verify:chat:unread \
+                   verify:chat:links verify:chat:liveness verify:chat:sending verify:chat:safety verify:chat:ui \
+                   verify:mail verify:mail:ui verify:feed verify:feed:ui verify:feed:media \
+                   verify:files:auth verify:oversight verify:notifications \
+                   verify:meet verify:meet:ui verify:meet:history verify:meet:prejoin verify:meet:reconnect \
+                   verify:realtime; do
+            echo "::group::$s"
+            if ! timeout 900 npm run -s "$s"; then failed="$failed $s"; fi
+            echo "::endgroup::"
+          done
+          node scripts/purge-test-data.mjs
+          if [ -n "$failed" ]; then echo "Failed:$failed"; exit 1; fi
+
+      - name: Keep the logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            dev.log
+            .chat-ui-shots/
+            .feed-ui-shots/
+            .meet-ui-shots/
+            /tmp/verify-*/

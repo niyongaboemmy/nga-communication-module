@@ -92,14 +92,26 @@ export async function meetAuth(req: Request, res: Response, next: NextFunction) 
 
     // The ticket is only as good as the row it points at. If the participant
     // was removed, or the meeting ended and was cleaned up, the ticket is dead.
-    const { rows } = await getPool().query<{ state: string; display_name: string }>(
-      `SELECT state, display_name FROM meeting_participants
-        WHERE id = $1 AND meeting_id = $2 AND is_guest = true`,
+    const { rows } = await getPool().query<{
+      state: string; display_name: string; guest_token_id: string | null; meeting_status: string;
+    }>(
+      `SELECT p.state, p.display_name, p.guest_token_id, m.status AS meeting_status
+         FROM meeting_participants p JOIN meetings m ON m.id = p.meeting_id
+        WHERE p.id = $1 AND p.meeting_id = $2 AND p.is_guest = true`,
       [claims.participantId, claims.meetingId],
     );
     const participant = rows[0];
     if (!participant) {
       return res.status(401).json(fail('This guest link is no longer valid.'));
+    }
+    // Only the ticket most recently issued for this seat is honoured, and only
+    // while the meeting is still on: a copied or old ticket is not a key.
+    const jti = (decoded as { jti?: string }).jti;
+    if (participant.guest_token_id && jti !== participant.guest_token_id) {
+      return res.status(401).json(fail('This guest link is no longer valid.'));
+    }
+    if (participant.meeting_status === 'ended' || participant.meeting_status === 'cancelled') {
+      return res.status(401).json(fail('This meeting has ended.'));
     }
     if (participant.state === 'removed' || participant.state === 'denied') {
       return res.status(403).json(fail('You are no longer in this meeting.'));

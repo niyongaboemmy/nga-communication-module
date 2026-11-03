@@ -1,5 +1,6 @@
 import { getPool, snowflake } from '@tupo/db';
 import { Redis } from 'ioredis';
+import { sendWebPush } from './webPush.js';
 import type { AppNotification } from '@tupo/shared';
 
 /**
@@ -45,7 +46,9 @@ export type NotificationKind =
   | 'feed.comment'     // someone commented on your post
   | 'feed.reply'       // someone replied to your comment
   | 'feed.reaction'    // someone reacted to your post or comment
-  | 'feed.mention';    // you were @-mentioned in a post or comment
+  | 'feed.mention'     // you were @-mentioned in a post or comment
+  | 'feed.moderation'  // a moderator removed or warned about something you posted
+  | 'moderation.report'; // a report you made was reviewed
 
 export interface NotificationRow {
   id: string;
@@ -58,6 +61,8 @@ export interface NotificationRow {
   subject_id: string | null;
   read_at: string | null;
   created_at: string;
+  /** Not a column: whether this write added one to the person's unread count. */
+  fresh?: boolean;
 }
 
 export interface NewNotification {
@@ -67,6 +72,13 @@ export interface NewNotification {
   link?: string | null;
   subjectType?: string | null;
   subjectId?: string | null;
+  /**
+   * A new event about the same subject makes it unread again (the default):
+   * a fresh DM in a conversation whose last notification was read must show.
+   * False for things that can flap — a meeting going live twice must not nag
+   * someone who already dismissed it.
+   */
+  reopen?: boolean;
 }
 
 /**
@@ -87,6 +99,15 @@ export async function notify(
 
   const rows: NotificationRow[] = [];
   for (const userId of recipients) {
+    // Was it already there, and unread? Then this refresh adds nothing to the
+    // unread count — the bell must not count the same thing twice.
+    const { rows: prior } = n.subjectId
+      ? await getPool().query<{ read_at: string | null }>(
+          `SELECT read_at FROM notifications WHERE user_id = $1 AND kind = $2
+             AND subject_type IS NOT DISTINCT FROM $3 AND subject_id = $4`,
+          [userId, n.kind, n.subjectType ?? null, n.subjectId])
+      : { rows: [] as Array<{ read_at: string | null }> };
+    const fresh = !prior[0] || (prior[0].read_at !== null && n.reopen !== false);
     const { rows: written } = await getPool().query<NotificationRow>(
       `INSERT INTO notifications
          (id, user_id, kind, title, body, link, subject_type, subject_id)
@@ -97,32 +118,71 @@ export async function notify(
                        body = EXCLUDED.body,
                        link = EXCLUDED.link,
                        created_at = now(),
-                       -- Refreshing an unread notification leaves it unread;
-                       -- one already dismissed stays dismissed, so a meeting
-                       -- that flaps cannot nag.
-                       read_at = notifications.read_at
+                       -- A new event re-opens it, unless the kind can flap
+                       -- (reopen: false), where a dismissal sticks.
+                       read_at = CASE WHEN $9 THEN NULL ELSE notifications.read_at END
        RETURNING *`,
       [snowflake(), userId, n.kind, n.title, n.body ?? null, n.link ?? null,
-       n.subjectType ?? null, n.subjectId ?? null],
+       n.subjectType ?? null, n.subjectId ?? null, n.reopen !== false],
     );
-    if (written[0]) rows.push(written[0]);
+    if (written[0]) rows.push({ ...written[0], fresh });
   }
   return rows;
 }
 
 /** Everything for one person, newest first. */
+/** The modules a notification can belong to, by its kind's prefix. */
+export const NOTIFICATION_MODULES = ['chat', 'mail', 'feed', 'meet'] as const;
+export type NotificationModule = (typeof NOTIFICATION_MODULES)[number] | 'other';
+
 export async function listFor(
-  userId: string, opts: { unreadOnly?: boolean; limit?: number } = {},
+  userId: string,
+  opts: { unreadOnly?: boolean; limit?: number; before?: string | null; module?: NotificationModule | null } = {},
 ): Promise<NotificationRow[]> {
   const limit = Math.min(Math.max(opts.limit ?? 30, 1), 100);
+  const before = opts.before && !Number.isNaN(Date.parse(opts.before)) ? new Date(opts.before).toISOString() : null;
+  const module = opts.module && (NOTIFICATION_MODULES as readonly string[]).includes(opts.module) ? opts.module : null;
   const { rows } = await getPool().query<NotificationRow>(
     `SELECT * FROM notifications
       WHERE user_id = $1 ${opts.unreadOnly ? 'AND read_at IS NULL' : ''}
+        AND ($3::timestamptz IS NULL OR created_at < $3::timestamptz)
+        AND ($4::text IS NULL OR kind LIKE $4 || '.%')
       ORDER BY created_at DESC
       LIMIT $2`,
-    [userId, limit],
+    [userId, limit, before, module],
   );
   return rows;
+}
+
+/**
+ * Mark read everything about one subject — the conversation the person just
+ * read, the mail thread they opened, the post they looked at (F-01). Returns
+ * the ids it changed, so the person's other devices can be told.
+ */
+export async function markSubjectRead(
+  userId: string, subjectType: string, subjectIds: string[],
+): Promise<string[]> {
+  if (!subjectIds.length) return [];
+  const { rows } = await getPool().query<{ id: string }>(
+    `UPDATE notifications SET read_at = now()
+      WHERE user_id = $1 AND read_at IS NULL AND subject_type = $2 AND subject_id = ANY($3::text[])
+      RETURNING id`,
+    [userId, subjectType, subjectIds],
+  );
+  return rows.map((r) => r.id);
+}
+
+/** Unread notifications per module (by kind prefix), for the shell's badges (F-03). */
+export async function unreadByModule(userId: string): Promise<Record<NotificationModule, number>> {
+  const { rows } = await getPool().query<{ module: string; n: number }>(
+    `SELECT split_part(kind, '.', 1) AS module, count(*)::int AS n
+       FROM notifications WHERE user_id = $1 AND read_at IS NULL GROUP BY 1`, [userId]);
+  const out: Record<NotificationModule, number> = { chat: 0, mail: 0, feed: 0, meet: 0, other: 0 };
+  for (const r of rows) {
+    const key = (NOTIFICATION_MODULES as readonly string[]).includes(r.module) ? r.module as NotificationModule : 'other';
+    out[key] += r.n;
+  }
+  return out;
 }
 
 export async function unreadCount(userId: string): Promise<number> {
@@ -138,6 +198,35 @@ export async function markRead(userId: string, id: string): Promise<boolean> {
     `UPDATE notifications SET read_at = COALESCE(read_at, now())
       WHERE id = $1 AND user_id = $2`, [id, userId]);
   return (rowCount ?? 0) > 0;
+}
+
+/**
+ * A conversation was read to its end: its own notifications (DMs, mentions,
+ * new messages) and reactions to messages in it. One statement, shared by the
+ * REST read and the socket read.
+ */
+export async function markConversationNotificationsRead(userId: string, conversationId: string): Promise<string[]> {
+  const { rows } = await getPool().query<{ id: string }>(
+    `UPDATE notifications n SET read_at = now()
+      WHERE n.user_id = $1 AND n.read_at IS NULL
+        AND ((n.subject_type = 'conversation' AND n.subject_id = $2)
+          OR (n.subject_type = 'message'
+              AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = $2 AND m.id = n.subject_id)))
+      RETURNING n.id`,
+    [userId, conversationId],
+  );
+  return rows.map((r) => r.id);
+}
+
+/** Mark several read at once (the panel's visible page, a group). */
+export async function markManyRead(userId: string, ids: string[]): Promise<string[]> {
+  if (!ids.length) return [];
+  const { rows } = await getPool().query<{ id: string }>(
+    `UPDATE notifications SET read_at = now()
+      WHERE user_id = $1 AND read_at IS NULL AND id = ANY($2::text[]) RETURNING id`,
+    [userId, ids.slice(0, 500)],
+  );
+  return rows.map((r) => r.id);
 }
 
 export async function markAllRead(userId: string): Promise<number> {
@@ -200,6 +289,28 @@ function getPublisher(): Redis | null {
   return publisher;
 }
 
+/**
+ * Publish, giving a just-created connection a moment to come up. The
+ * publisher is lazy and has no offline queue (so an outage never stalls a
+ * request), which meant the first publishes after a restart — sent while it
+ * was still connecting — were silently lost (RT-02). Only that start-up window
+ * waits, and for at most a second; once a connection has been up, a publish
+ * while Redis is down fails fast exactly as before.
+ */
+const everReady = new WeakSet<Redis>();
+async function publishWhenReady(client: Redis, channel: string, message: string): Promise<void> {
+  if (client.status === 'ready') everReady.add(client);
+  else if (!everReady.has(client) && (client.status === 'connecting' || client.status === 'connect' || client.status === 'wait')) {
+    await new Promise<void>((resolve) => {
+      const done = () => { clearTimeout(t); client.off('ready', done); resolve(); };
+      const t = setTimeout(done, 1000);
+      client.once('ready', done);
+    });
+    if ((client.status as string) === 'ready') everReady.add(client);
+  }
+  await client.publish(channel, message);
+}
+
 export function toWire(row: NotificationRow): AppNotification {
   return {
     id: row.id,
@@ -211,6 +322,7 @@ export function toWire(row: NotificationRow): AppNotification {
     subjectId: row.subject_id,
     readAt: row.read_at,
     createdAt: row.created_at,
+    fresh: row.fresh,
   };
 }
 
@@ -224,7 +336,9 @@ export async function push(rows: NotificationRow[]): Promise<void> {
   // would be 500 round trips to Redis.
   const byKey = new Map<string, { userIds: string[]; row: NotificationRow }>();
   for (const row of rows) {
-    const key = `${row.kind}:${row.subject_type}:${row.subject_id}:${row.title}`;
+    // `fresh` differs per person (new to one, a refresh to another), so it
+    // is part of the grouping.
+    const key = `${row.kind}:${row.subject_type}:${row.subject_id}:${row.title}:${row.fresh ? 1 : 0}`;
     const entry = byKey.get(key);
     if (entry) entry.userIds.push(row.user_id);
     else byKey.set(key, { userIds: [row.user_id], row });
@@ -232,13 +346,18 @@ export async function push(rows: NotificationRow[]): Promise<void> {
 
   for (const { userIds, row } of byKey.values()) {
     try {
-      await client.publish(NOTIFY_CHANNEL, JSON.stringify({
+      await publishWhenReady(client, NOTIFY_CHANNEL, JSON.stringify({
         userIds, notification: toWire(row),
       }));
     } catch {
       // Stored but not pushed: the client picks it up on its next fetch.
     }
   }
+
+  // Closed tabs and the installed app (F-04): web push to whoever is offline.
+  // Not awaited — the request that raised the notification must not wait on
+  // a push service.
+  void sendWebPush(rows.filter((r) => !r.read_at), client).catch(() => {});
 }
 
 /** Store and deliver in one call — what every caller actually wants. */
@@ -254,6 +373,23 @@ export async function notifyAndPush(
  * Meeting reminders via the NGA MIS Reminder Hub. Namespaced, because
  * `syncMeeting` means nothing next to `notify` without it.
  */
+/**
+ * Deliver a socket event to rooms through the gateway's relay channel — the
+ * same `{rooms,event,payload}` message the API's chat relay publishes, for
+ * code that runs outside the API (the worker announcing a scheduled post).
+ */
+export async function relay(rooms: string[], event: string, payload: unknown): Promise<void> {
+  if (!rooms.length) return;
+  const client = getPublisher();
+  if (!client) return;
+  try {
+    await publishWhenReady(client, 'tupo:chat', JSON.stringify({ rooms, event, payload }));
+  } catch {
+    // Live delivery is best effort; the feed is read from the database anyway.
+  }
+}
+
+export * from './webPush.js';
 export * as reminders from './reminders.js';
 
 /** Everyone's NGA profile photo + cover, refreshed from MIS by the worker. */

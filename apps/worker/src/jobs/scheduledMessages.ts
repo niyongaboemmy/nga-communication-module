@@ -50,10 +50,18 @@ export async function runScheduledMessages(redisUrl: string): Promise<ScheduledS
   for (const item of due) {
     try {
       /*
-       * Membership is re-checked by `sendMessage` at send time, not at schedule
-       * time. Someone who scheduled a message to a channel and then left it
-       * must not have it posted on their behalf a week later.
+       * Re-checked at send time, not just at schedule time (B-03): someone who
+       * scheduled a message and has since left the channel, been suspended or
+       * lost the right to post, or whose channel was archived, must not have it
+       * posted on their behalf a week later. A refusal fails the row with the
+       * reason, which the sender sees in their scheduled list.
        */
+      if (!(await chat.userHasPermission(item.senderId, 'MESSAGE_SEND'))) {
+        throw new Error('You can no longer send messages.');
+      }
+      await chat.assertCanPost(item.senderId, item.conversationId, {
+        mayAnnounce: await chat.userHasPermission(item.senderId, 'CHANNEL_ANNOUNCE'),
+      });
       const result = await chat.sendMessage({
         conversationId: item.conversationId,
         senderId: item.senderId,

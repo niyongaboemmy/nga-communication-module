@@ -2,13 +2,16 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { ok, fail } from '@tupo/shared';
 import { feedAudienceRoom, feedPostRoom, feedReelRoom } from '@tupo/shared';
 import type { FeedActor } from '@tupo/feed';
+import type { FeedPostView } from '@tupo/shared';
 import * as feed from '@tupo/feed';
 import { FeedError } from '@tupo/feed';
 import { notifyAndPush } from '@tupo/notify';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
-import { emitToRooms, emitToUsers } from '../services/chatRealtime.js';
+import { emitToRooms } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
+import { enqueueFeedAnnounce } from '../services/queue.js';
+import { clearNotificationsAbout } from '../services/notificationSync.js';
 import { activity } from '../activity/relay.js';
 
 /**
@@ -36,10 +39,17 @@ const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
     }
   };
 
+/**
+ * A post as broadcast to a room (X-01): the shared facts only. Edit, pin and
+ * moderation rights, bookmarks, reactions, votes, RSVPs and page relationship
+ * are each reader's own; clients keep what they already know about those.
+ */
+const neutralPost = (post: FeedPostView): FeedPostView => feed.neutralPost(post);
+
 /** Push a post's current view to everyone watching it. */
 async function broadcastPost(actor: FeedActor, postId: string): Promise<void> {
   try {
-    const post = await feed.getPostView(actor, postId);
+    const post = neutralPost(await feed.getPostView(actor, postId));
     emitToRooms([feedPostRoom(postId)], 'feed:post_updated', { postId, post });
   } catch { /* deleted or now invisible — the delete event already went out */ }
 }
@@ -175,6 +185,11 @@ router.get('/pages/:id/posts', authorizePermission('FEED_VIEW'), wrap(async (req
  * administrator compares pages they do not run — so it is checked there, not
  * here.
  */
+/** Drafts and scheduled posts of a page, for its editors (D-05). */
+router.get('/pages/:id/drafts', authorizePermission('FEED_POST'), wrap(async (req, res) => {
+  res.json(ok({ posts: await feed.posts.listUnpublished(actorOf(req), req.params.id!) }));
+}));
+
 router.get('/pages/:id/analytics', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
   const range = (['7d', '30d', 'all'] as const).find((r) => r === req.query.range) ?? '30d';
   res.json(ok({ analytics: await feed.analytics.pageAnalytics(actorOf(req), req.params.id!, range) }));
@@ -193,16 +208,8 @@ router.post('/pages/:id/posts', authorizePermission('FEED_POST'), wrap(async (re
     activity().trackFor(req, 'tupo.feed.post', { post_id: result.postId, page_id: req.params.id!, status: result.status });
   }
 
-  if (result.status === 'published') {
-    const post = await feed.getPostView(actor, result.postId);
-    // The author's timeline row exists; tell everyone whose timeline it hit.
-    const followers = await notifyFollowersOfPost(result.postId, actor.id, post.page.name, post.type);
-    emitToUsers([actor.id, ...followers.emitIds], 'feed:post_new', { post });
-    // The home feed now shows every audience-visible post, not just followed
-    // pages (FR-FEED-7) — broadcast to the audience band so it appears live
-    // for everyone who can see it, not only this page's followers.
-    emitToRooms([feedAudienceRoom(post.audience)], 'feed:post_new', { post });
-  }
+  // Followers notified and open feeds updated by the worker (FEED-P4).
+  if (result.status === 'published') await announceSoon(result.postId);
   res.status(201).json(ok(result));
 }));
 
@@ -228,10 +235,15 @@ router.post('/posts/:id/publish', authorizePermission('FEED_POST'), wrap(async (
   await feed.posts.publishPost(actor, req.params.id!);
   const post = await feed.getPostView(actor, req.params.id!);
   activity().trackFor(req, 'tupo.feed.post', { post_id: req.params.id!, page_id: post.page.id, status: 'published' });
-  const followers = await notifyFollowersOfPost(req.params.id!, actor.id, post.page.name, post.type);
-  emitToUsers([actor.id, ...followers.emitIds], 'feed:post_new', { post });
-  emitToRooms([feedAudienceRoom(post.audience)], 'feed:post_new', { post });
+  await announceSoon(req.params.id!);
   res.json(ok({ post }));
+}));
+
+router.post('/posts/:id/schedule', authorizePermission('FEED_POST'), wrap(async (req, res) => {
+  const actor = actorOf(req);
+  const at = req.body?.scheduledAt;
+  await feed.posts.schedulePost(actor, req.params.id!, typeof at === 'string' && at ? at : null);
+  res.json(ok({ post: await feed.getPostView(actor, req.params.id!) }));
 }));
 
 router.post('/posts/:id/unpublish', authorizePermission('FEED_POST'), wrap(async (req, res) => {
@@ -273,7 +285,9 @@ router.delete('/posts/:id/bookmark', authorizePermission('FEED_VIEW'), wrap(asyn
 }));
 
 router.get('/posts/:id', authorizePermission('FEED_VIEW'), wrap(async (req, res) => {
-  res.json(ok({ post: await feed.getPostView(actorOf(req), req.params.id!) }));
+  const post = await feed.getPostView(actorOf(req), req.params.id!);
+  void clearNotificationsAbout(actorOf(req).id, 'feed_post', [req.params.id!]);
+  res.json(ok({ post }));
 }));
 
 /* ── Reactions ─────────────────────────────────────────────────────────── */
@@ -290,7 +304,7 @@ router.post('/posts/:id/reactions', authorizePermission('FEED_COMMENT'), wrap(as
   const actor = actorOf(req);
   const emoji = req.body?.emoji ?? null;
   const r = await feed.reactions.reactToPost(actor, req.params.id!, emoji);
-  emitToRooms([feedPostRoom(req.params.id!)], 'feed:reaction', { postId: req.params.id!, reactions: r.summary });
+  emitToRooms([feedPostRoom(req.params.id!)], 'feed:reaction', { postId: req.params.id!, reactions: { ...r.summary, mine: null }, actorId: actor.id });
   if (r.added && r.postAuthorId !== actor.id) {
     await notifyAndPush([r.postAuthorId], {
       kind: 'feed.reaction', title: 'New reaction',
@@ -303,7 +317,7 @@ router.post('/posts/:id/reactions', authorizePermission('FEED_COMMENT'), wrap(as
 
 router.delete('/posts/:id/reactions', authorizePermission('FEED_COMMENT'), wrap(async (req, res) => {
   const r = await feed.reactions.reactToPost(actorOf(req), req.params.id!, null);
-  emitToRooms([feedPostRoom(req.params.id!)], 'feed:reaction', { postId: req.params.id!, reactions: r.summary });
+  emitToRooms([feedPostRoom(req.params.id!)], 'feed:reaction', { postId: req.params.id!, reactions: { ...r.summary, mine: null }, actorId: actorOf(req).id });
   res.json(ok({ reactions: r.summary }));
 }));
 
@@ -342,7 +356,7 @@ router.get('/comments/:id/replies', authorizePermission('FEED_VIEW'), wrap(async
 router.post('/posts/:id/comments', authorizePermission('FEED_COMMENT'), wrap(async (req, res) => {
   const actor = actorOf(req);
   const result = await feed.comments.addComment(actor, req.params.id!, req.body ?? {});
-  emitToRooms([feedPostRoom(req.params.id!)], 'feed:comment_new', { postId: req.params.id!, comment: result.comment });
+  emitToRooms([feedPostRoom(req.params.id!)], 'feed:comment_new', { postId: req.params.id!, comment: neutralComment(result.comment) });
 
   const targets = new Set<string>();
   if (result.postAuthorId !== actor.id) targets.add(result.postAuthorId);
@@ -361,7 +375,7 @@ router.post('/posts/:id/comments', authorizePermission('FEED_COMMENT'), wrap(asy
 
 router.patch('/comments/:id', authorizePermission('FEED_COMMENT'), wrap(async (req, res) => {
   const comment = await feed.comments.editComment(actorOf(req), req.params.id!, String(req.body?.body ?? ''));
-  emitToRooms([feedPostRoom(comment.postId)], 'feed:comment_updated', { postId: comment.postId, comment });
+  emitToRooms([feedPostRoom(comment.postId)], 'feed:comment_updated', { postId: comment.postId, comment: neutralComment(comment) });
   res.json(ok({ comment }));
 }));
 
@@ -380,7 +394,7 @@ router.delete('/comments/:id', authorizePermission('FEED_COMMENT', 'MODERATION_A
 router.post('/posts/:id/vote', authorizePermission('FEED_COMMENT'), wrap(async (req, res) => {
   const choices = Array.isArray(req.body?.choices) ? req.body.choices.map(Number) : [];
   const r = await feed.polls.votePoll(actorOf(req), req.params.id!, choices);
-  emitToRooms([feedPostRoom(req.params.id!)], 'feed:poll_updated', { postId: req.params.id!, poll: r.poll });
+  emitToRooms([feedPostRoom(req.params.id!)], 'feed:poll_updated', { postId: req.params.id!, poll: { ...r.poll, myVotes: [] }, actorId: actorOf(req).id });
   res.json(ok({ poll: r.poll }));
 }));
 
@@ -429,13 +443,17 @@ router.post('/moderation/:id/act', authorizePermission('MODERATION_ACT'), wrap(a
     }
   }
   if ((action === 'remove' || action === 'warn') && r.authorId) {
+    // Says what it was about — a post or a comment — under its own kind
+    // (D-10: it always said "post" and arrived as a mention).
+    const what = r.targetType === 'post' ? 'post' : 'comment';
     await notifyAndPush([r.authorId], {
-      kind: 'feed.mention',
-      title: action === 'remove' ? 'A post was removed' : 'A moderator reviewed your content',
+      kind: 'feed.moderation',
+      title: action === 'remove' ? `Your ${what} was removed` : `A moderator reviewed your ${what}`,
       body: action === 'remove'
-        ? 'One of your posts was removed by a moderator for breaching the community rules.'
-        : 'A moderator has reviewed content you posted. Please keep to the community rules.',
-      link: '/app/feed', subjectType: 'feed_moderation', subjectId: r.targetId,
+        ? `A moderator removed your ${what} for breaching the community rules.`
+        : `A moderator looked at a ${what} you posted. Please keep to the community rules.`,
+      link: r.postId && action !== 'remove' ? `/app/feed/post/${r.postId}` : '/app/feed',
+      subjectType: 'feed_moderation', subjectId: r.targetId,
     }).catch(() => {});
   }
   res.json(ok({ acted: true }));
@@ -549,32 +567,20 @@ function nameOf(req: Request): string {
   return (req as AuthenticatedRequest).user?.name ?? 'Someone';
 }
 
+/** A comment as broadcast to a room: no one's personal rights or reaction in it. */
+function neutralComment<C extends { canEdit: boolean; canModerate: boolean; myReaction: unknown }>(c: C): C {
+  return { ...c, canEdit: false, canModerate: false, myReaction: null };
+}
+
 /**
- * Notify the followers of a page who asked for it, and hand back the ids to
- * emit `feed:post_new` to (their timelines already have the row).
+ * Announce a just-published post: followers allowed to see it are notified
+ * and every open feed gets it live. Done by the worker, because for a
+ * mandatory page that is the whole school (FEED-P4); if the queue is down it
+ * runs here in the background instead, never in the request's critical path.
  */
-async function notifyFollowersOfPost(
-  postId: string, authorId: string, pageName: string, type: string,
-): Promise<{ emitIds: string[] }> {
-  const { getPool } = await import('@tupo/db');
-  const { rows } = await getPool().query<{ user_id: string; notify: boolean }>(
-    `SELECT f.user_id, f.notify
-       FROM feed_page_followers f
-       JOIN feed_posts p ON p.page_id = f.page_id
-      WHERE p.id = $1`,
-    [postId],
-  );
-  const emitIds = rows.map((r) => r.user_id).filter((id) => id !== authorId);
-  const notifyIds = rows.filter((r) => r.notify && r.user_id !== authorId).map((r) => r.user_id);
-  if (notifyIds.length) {
-    await notifyAndPush(notifyIds, {
-      kind: type === 'announcement' ? 'feed.announcement' : 'feed.published',
-      title: type === 'announcement' ? `📣 ${pageName}` : pageName,
-      body: type === 'announcement' ? 'posted an announcement' : 'shared a new post',
-      link: `/app/feed/post/${postId}`, subjectType: 'feed_post', subjectId: postId,
-    }).catch(() => {});
-  }
-  return { emitIds };
+async function announceSoon(postId: string): Promise<void> {
+  if (await enqueueFeedAnnounce(postId)) return;
+  void feed.announcePost(postId).catch((e) => console.error('[feed] announce failed:', e));
 }
 
 export default router;

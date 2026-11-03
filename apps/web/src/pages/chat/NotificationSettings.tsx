@@ -1,6 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { X, Bell, Volume2, Moon, Eye, CornerDownLeft, Check } from 'lucide-react';
-import { IconButton, Spinner } from '../../components/ui';
+import { X, Bell, Volume2, Moon, Eye, CornerDownLeft, Check, Ban, Smartphone, Mail as MailIcon } from 'lucide-react';
+import { disablePush, enablePush, getPushState, type PushState } from '../../lib/push';
+import { Avatar, IconButton, Spinner } from '../../components/ui';
+import { useChat } from './ChatProvider';
+import * as chatApi from './api';
 import { useNotify } from '../../context/NotificationContext';
 import { apiGet, apiPatch } from '../../lib/api';
 import type { NotificationLevel } from '@tupo/shared';
@@ -24,6 +27,7 @@ interface Prefs {
   quietToMinute: number | null;
   timezone: string | null;
   showPresence: boolean;
+  emailDigest?: boolean;
 }
 
 const toTime = (minutes: number | null) =>
@@ -67,7 +71,11 @@ const Toggle: React.FC<{
   </label>
 );
 
-export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+/**
+ * `embedded`: drawn inside the Settings page (F-10) rather than as chat's side
+ * panel — no close button, no Escape, no side border.
+ */
+export const NotificationSettings: React.FC<{ onClose?: () => void; embedded?: boolean }> = ({ onClose, embedded = false }) => {
   const { notify, requestSystemPermission, systemPermission } = useNotify();
   const [prefs, setPrefs] = useState<Prefs | null>(null);
   const [saving, setSaving] = useState(false);
@@ -79,10 +87,11 @@ export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClos
   }, [notify]);
 
   useEffect(() => {
+    if (embedded || !onClose) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, embedded]);
 
   const update = async (patch: Partial<Prefs>) => {
     if (!prefs) return;
@@ -109,22 +118,26 @@ export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClos
   return (
     <aside
       aria-label="Notification settings"
-      className="flex h-full min-h-0 w-full flex-col border-l border-border-light bg-white dark:border-border-dark/30 dark:bg-chrome-dark"
+      className={embedded
+        ? 'flex w-full flex-col'
+        : 'flex h-full min-h-0 w-full flex-col border-l border-border-light bg-white dark:border-border-dark/30 dark:bg-chrome-dark'}
     >
       <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border-light px-3 dark:border-border-dark/30">
         <h2 className="flex items-center gap-2 text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
           <Bell size={15} /> Notifications
           {saving && <Spinner className="h-3 w-3" />}
         </h2>
-        <IconButton label="Close notification settings" onClick={onClose}>
-          <X size={18} />
-        </IconButton>
+        {!embedded && onClose && (
+          <IconButton label="Close notification settings" onClick={onClose}>
+            <X size={18} />
+          </IconButton>
+        )}
       </header>
 
       {!prefs ? (
         <div className="grid flex-1 place-items-center"><Spinner /></div>
       ) : (
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
+        <div className={embedded ? 'space-y-4 p-3' : 'min-h-0 flex-1 space-y-4 overflow-y-auto p-3'}>
           <section>
             <h3 className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wider text-text-secondary-light/80 dark:text-text-secondary-dark/70">
               Notify me about
@@ -183,6 +196,14 @@ export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClos
               hint="A short cue on a new message, and a different one for a mention."
               checked={prefs.sound}
               onChange={(v) => void update({ sound: v })}
+            />
+            <PushToggle />
+            <Toggle
+              icon={<MailIcon size={15} />}
+              label="Email me what I missed"
+              hint="An hourly email with mentions and direct messages you have not seen — only when there are some."
+              checked={prefs.emailDigest !== false}
+              onChange={(v) => void update({ emailDigest: v })}
             />
           </section>
 
@@ -252,8 +273,94 @@ export const NotificationSettings: React.FC<{ onClose: () => void }> = ({ onClos
               onChange={(v) => void update({ enterToSend: v })}
             />
           </section>
+
+          <BlockedPeople />
         </div>
       )}
     </aside>
+  );
+};
+
+/**
+ * Notifications on this device when Tupo is closed (F-04). Honest about what
+ * the browser and the server allow: unsupported, blocked, or not set up.
+ */
+const PushToggle: React.FC = () => {
+  const { notify } = useNotify();
+  const [state, setState] = useState<PushState | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { void getPushState().then(setState); }, []);
+  if (state === null || state === 'unavailable') return null;
+
+  const hint = state === 'unsupported'
+    ? 'This browser cannot receive notifications while closed. On iPhone, add Tupo to the Home Screen first.'
+    : state === 'denied'
+      ? 'Blocked by the browser. Allow notifications for this site, then switch this on.'
+      : 'Mentions, messages, mail and meetings, even when every Tupo tab is closed.';
+  return (
+    <Toggle
+      icon={<Smartphone size={15} />}
+      label="Notifications when Tupo is closed"
+      hint={hint}
+      checked={state === 'on'}
+      onChange={async (v) => {
+        if (busy || state === 'unsupported' || state === 'denied') return;
+        setBusy(true);
+        try {
+          const next = v ? await enablePush() : await disablePush();
+          setState(next);
+          if (v && next !== 'on') notify({ title: 'Notifications were not allowed', tone: 'warning' });
+        } catch (err) {
+          notify({ title: 'Could not change that', body: err instanceof Error ? err.message : undefined, tone: 'error' });
+        } finally {
+          setBusy(false);
+        }
+      }}
+    />
+  );
+};
+
+/** The people you have blocked, with the way back (B-05). */
+const BlockedPeople: React.FC = () => {
+  const { blockedIds, setBlocked } = useChat();
+  const { notify } = useNotify();
+  const [people, setPeople] = useState<chatApi.BlockedPerson[] | null>(null);
+
+  // Re-read whenever the set changes (a block from a profile card, another device).
+  useEffect(() => {
+    let cancelled = false;
+    chatApi.listBlocks().then((p) => { if (!cancelled) setPeople(p); }).catch(() => { if (!cancelled) setPeople([]); });
+    return () => { cancelled = true; };
+  }, [blockedIds]);
+
+  return (
+    <section>
+      <h3 className="mb-1 flex items-center gap-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-text-secondary-light/80 dark:text-text-secondary-dark/70">
+        <Ban size={11} /> Blocked people
+      </h3>
+      {people === null ? (
+        <div className="px-2 py-2"><Spinner className="h-4 w-4" /></div>
+      ) : people.length === 0 ? (
+        <p className="px-2 py-1.5 text-xs text-text-secondary-light dark:text-text-secondary-dark">
+          Nobody. Block someone from their profile card — they won’t be told.
+        </p>
+      ) : (
+        <ul className="space-y-0.5">
+          {people.map((p) => (
+            <li key={p.id} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-surface-light dark:hover:bg-surface-dark">
+              <Avatar name={p.name} src={p.avatarUrl ?? undefined} size={28} />
+              <span className="min-w-0 flex-1 truncate text-sm text-text-primary-light dark:text-text-primary-dark">{p.name}</span>
+              <button
+                onClick={() => void setBlocked(p.id, false).catch((err) =>
+                  notify({ title: 'Could not unblock', body: err instanceof Error ? err.message : undefined, tone: 'error' }))}
+                className="rounded-full px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-500/10"
+              >
+                Unblock
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 };

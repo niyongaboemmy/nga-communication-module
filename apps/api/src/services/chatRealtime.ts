@@ -49,6 +49,28 @@ function getPublisher(): Redis | null {
 }
 
 /**
+ * Publish, giving a just-created connection a moment to come up. The
+ * publisher is lazy and has no offline queue (so an outage never stalls a
+ * request), which meant the first publishes after a restart — sent while it
+ * was still connecting — were silently lost (RT-02). Only that start-up window
+ * waits, and for at most a second; once a connection has been up, a publish
+ * while Redis is down fails fast exactly as before.
+ */
+const everReady = new WeakSet<Redis>();
+async function publishWhenReady(client: Redis, channel: string, message: string): Promise<void> {
+  if (client.status === 'ready') everReady.add(client);
+  else if (!everReady.has(client) && (client.status === 'connecting' || client.status === 'connect' || client.status === 'wait')) {
+    await new Promise<void>((resolve) => {
+      const done = () => { clearTimeout(t); client.off('ready', done); resolve(); };
+      const t = setTimeout(done, 1000);
+      client.once('ready', done);
+    });
+    if ((client.status as string) === 'ready') everReady.add(client);
+  }
+  await client.publish(channel, message);
+}
+
+/**
  * Single sign-out: tell the realtime gateway to drop every socket of these
  * users (their sessions just ended via MIS back-channel logout).
  */
@@ -57,7 +79,7 @@ export function publishSessionEnd(userIds: string[]): void {
   if (!userIds.length) return;
   const client = getPublisher();
   if (!client) return;
-  void client.publish(LOGOUT_CHANNEL, JSON.stringify({ userIds })).catch(() => {});
+  void publishWhenReady(client, LOGOUT_CHANNEL, JSON.stringify({ userIds })).catch(() => {});
 }
 
 function relay(msg: ChatRelayMessage): void {
@@ -66,7 +88,7 @@ function relay(msg: ChatRelayMessage): void {
   if (!client) return;
   // Deliberately not awaited: an emit is best-effort and must not add latency
   // to the request that triggered it.
-  void client.publish(CHAT_CHANNEL, JSON.stringify(msg)).catch(() => {});
+  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify(msg)).catch(() => {});
 }
 
 /** Everyone with this conversation open. */
@@ -88,6 +110,30 @@ export function emitToUsers(userIds: string[], event: string, payload: unknown):
  */
 export function emitToRooms(rooms: string[], event: string, payload: unknown, exceptSocketId?: string): void {
   relay({ rooms, event, payload, exceptSocketId });
+}
+
+/**
+ * Take these people's sockets out of these rooms, on every gateway node (X-02).
+ *
+ * Membership is checked when a socket joins a room, so a person removed from a
+ * conversation kept receiving it — messages, typing, reactions — until they
+ * happened to reconnect. This closes that window at the moment of removal.
+ */
+export function evictFromRooms(userIds: string[], rooms: string[]): void {
+  if (!userIds.length || !rooms.length) return;
+  const client = getPublisher();
+  if (!client) return;
+  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ leave: { userIds, rooms } })).catch(() => {});
+}
+
+/**
+ * A meeting ended outside the room (REST, auto-close): every gateway node
+ * tells the people still in it and drops its in-memory room (E-04).
+ */
+export function publishMeetEnded(meetingId: string, by: string | null): void {
+  const client = getPublisher();
+  if (!client) return;
+  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ meetEnded: { meetingId, by } })).catch(() => {});
 }
 
 export async function closeChatRealtime(): Promise<void> {

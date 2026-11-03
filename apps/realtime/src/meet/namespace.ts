@@ -1,4 +1,6 @@
 import type { Namespace, Server, Socket } from 'socket.io';
+import { meetUserRoom } from '../presence.js';
+import { hardenSocket } from '../utils/safeSocket.js';
 import jwt from 'jsonwebtoken';
 import {
   parseMeetSettings, severityFor, meetRoleAtLeast, MEET_REACTIONS,
@@ -11,6 +13,7 @@ import type {
 } from '@tupo/shared';
 import { config } from '../config.js';
 import * as db from './db.js';
+import { getPool as getDbPool, resolveUserPermissions } from '@tupo/db';
 import { MeetRoom, canHost, getRoom, dropRoomIfEmpty, roomKey, rooms } from './state.js';
 import type { LiveParticipant } from './state.js';
 
@@ -51,7 +54,10 @@ const SPEAKING_FLUSH_MS = 30_000;
 /** Interim captions are dropped above this rate per participant. */
 const CAPTION_MIN_INTERVAL_MS = 250;
 
-export function registerMeetNamespace(io: Server): Namespace {
+export function registerMeetNamespace(
+  io: Server,
+  hooks: { onMeetingPresence?: (userId: string) => void } = {},
+): Namespace {
   const nsp = io.of('/meet');
 
   /* ---------------- handshake ---------------- */
@@ -147,7 +153,7 @@ export function registerMeetNamespace(io: Server): Namespace {
    * Poll rows carry a raw vote tally; the wire shape carries per-option counts.
    * Folding happens here so the client never has to know how votes are stored.
    */
-  const toWirePoll = (row: Record<string, unknown>): MeetPoll => {
+  const toWirePoll = (row: Record<string, unknown>, opts: { revealAnswer?: boolean } = {}): MeetPoll => {
     const options = (row.options as string[]) ?? [];
     const tally = (row.tally as number[][] | null) ?? [];
     const counts = options.map(() => 0);
@@ -160,7 +166,10 @@ export function registerMeetNamespace(io: Server): Namespace {
       kind: (row.kind as 'poll' | 'quiz') ?? 'poll',
       question: String(row.question),
       options: options.map((text, index) => ({ index, text, votes: counts[index] ?? 0 })),
-      correctOptionIndex: (row.correct_option_index as number | null) ?? null,
+      // A quiz's answer is revealed when the poll closes, and before that only
+      // to whoever is allowed to know it (the host's own state).
+      correctOptionIndex: row.status === 'closed' || opts.revealAnswer
+        ? (row.correct_option_index as number | null) ?? null : null,
       anonymous: !!row.anonymous,
       multipleChoice: !!row.multiple_choice,
       status: (row.status as 'open' | 'closed') ?? 'open',
@@ -185,7 +194,7 @@ export function registerMeetNamespace(io: Server): Namespace {
   /* ---------------- connection ---------------- */
 
   nsp.on('connection', (raw) => {
-    const socket = raw as MeetSocket;
+    const socket = hardenSocket(raw, 'realtime/meet') as MeetSocket;
     const user = socket.data.user;
 
     /* -------- join -------- */
@@ -217,6 +226,22 @@ export function registerMeetNamespace(io: Server): Namespace {
         : await db.loadParticipant(meetingId, participantId, user.id);
       if (!record) return reply(false, 'You are not a participant in this meeting.');
 
+      // Reconnecting after a drop (MEET-RT1): the disconnect closed the row,
+      // so it reads 'left'. Someone who had been in the call goes straight
+      // back in, on a new attendance leg; someone who was still knocking
+      // knocks again so the host actually sees them.
+      if (record.state === 'left') {   // live or scheduled: ended/cancelled were refused above
+        if (record.joined_at) {
+          const back = await db.rejoinParticipant(participantId);
+          if (back) Object.assign(record, { state: back.state });
+        } else {
+          db.setParticipantState(participantId, 'knocking');
+          record.state = 'knocking';
+        }
+      } else if (record.state === 'left' || record.state === 'removed' || record.state === 'denied') {
+        return reply(false, 'You are no longer in this meeting. Join again from the meeting page.');
+      }
+
       const settings = parseMeetSettings(meeting.settings);
       const room = getRoom(meetingId);
       room.startedAt ??= meeting.started_at ? meeting.started_at.toISOString() : null;
@@ -233,6 +258,11 @@ export function registerMeetNamespace(io: Server): Namespace {
       socket.data.role = record.role as MeetRole;
       socket.data.breakoutRoomId = null;
       await socket.join(roomKey(meetingId));
+      // "In a meeting" for everyone who can see this person's status (F-10).
+      if (!socket.data.guest && socket.data.user?.id) {
+        await socket.join(meetUserRoom(socket.data.user.id));
+        hooks.onMeetingPresence?.(socket.data.user.id);
+      }
 
       // A second tab is another socket for the same participant, not a second
       // participant — otherwise a reload shows the room a phantom attendee.
@@ -268,7 +298,7 @@ export function registerMeetNamespace(io: Server): Namespace {
         lobby: canHost(participant.role) ? room.lobby() : [],
         settings,
         chat: chat.map(toWireChat),
-        polls: polls.map(toWirePoll),
+        polls: polls.map((row) => toWirePoll(row, { revealAnswer: canHost(participant.role) })),
         questions: questions.map(toWireQuestion),
         breakouts: breakouts.map((b) => ({
           id: String(b.id), meetingId, name: String(b.name),
@@ -720,13 +750,29 @@ export function registerMeetNamespace(io: Server): Namespace {
 
     /* -------- settings -------- */
 
-    socket.on('meet:settings', (patch: Partial<MeetSettings>, ack) => {
+    socket.on('meet:settings', async (patch: Partial<MeetSettings>, ack) => {
       const ctx = context(socket);
       if (!ctx) return;
       const { room, participant, meetingId } = ctx;
       if (!canHost(participant.role)) {
         if (typeof ack === 'function') ack({ ok: false, message: 'Only the host can change settings.' });
         return;
+      }
+      // Same rule as the REST settings endpoint (MEET-SEC8): a co-host may run
+      // the room, but switching on recording, transcription or the AI
+      // notetaker needs the permission for it.
+      const wants = [
+        (patch?.recordingEnabled || patch?.autoRecord) && 'MEET_RECORD',
+        patch?.transcriptionEnabled && 'MEET_TRANSCRIBE',
+        patch?.aiAssistantEnabled && 'MEET_AI_USE',
+      ].filter(Boolean) as string[];
+      if (wants.length) {
+        const access = socket.data.guest ? null : await resolveUserPermissions(getDbPool(), user.id).catch(() => null);
+        const missing = wants.filter((k) => !access?.permissions.has(k));
+        if (missing.length) {
+          if (typeof ack === 'function') ack({ ok: false, message: 'You do not have permission to switch that on.' });
+          return;
+        }
       }
 
       const before = room.settings;
@@ -789,8 +835,8 @@ export function registerMeetNamespace(io: Server): Namespace {
         return;
       }
       const question = String(p?.question ?? '').trim().slice(0, 500);
-      const options = (p?.options ?? []).map((o) => String(o).trim().slice(0, 200)).filter(Boolean);
-      if (!question || options.length < 2) {
+      const options = (Array.isArray(p?.options) ? p!.options : []).map((o) => String(o).trim().slice(0, 200)).filter(Boolean);
+      if (!question || options.length < 2 || options.length > 10) {
         if (typeof ack === 'function') ack({ ok: false });
         return;
       }
@@ -799,7 +845,9 @@ export function registerMeetNamespace(io: Server): Namespace {
         meetingId, participantId: participant.id,
         kind: p?.kind === 'quiz' ? 'quiz' : 'poll',
         question, options,
-        correctOptionIndex: p?.correctOptionIndex ?? null,
+        correctOptionIndex: Number.isInteger(p?.correctOptionIndex)
+          && (p!.correctOptionIndex as number) >= 0 && (p!.correctOptionIndex as number) < options.length
+          ? p!.correctOptionIndex as number : null,
         anonymous: !!p?.anonymous,
         multipleChoice: !!p?.multipleChoice,
       });
@@ -831,9 +879,19 @@ export function registerMeetNamespace(io: Server): Namespace {
         return;
       }
       try {
-        await db.castVote(pollId, participant.id, indexes);
+        if (!(await db.castVote(meetingId, pollId, participant.id, indexes))) {
+          if (typeof ack === 'function') ack({ ok: false });
+          return;
+        }
         const row = await db.pollWithTally(pollId, participant.id);
-        if (row) emitToRoom(meetingId, 'meet:poll', { poll: toWirePoll(row) });
+        if (row) {
+          const mine = toWirePoll(row);
+          // The room sees the tallies; whose vote this was stays with the voter
+          // (an anonymous poll is anonymous), who gets it back in the ack.
+          emitToRoom(meetingId, 'meet:poll', { poll: { ...mine, myVote: null } });
+          if (typeof ack === 'function') ack({ ok: true, poll: mine });
+          return;
+        }
         if (typeof ack === 'function') ack({ ok: true });
       } catch {
         if (typeof ack === 'function') ack({ ok: false });
@@ -848,7 +906,7 @@ export function registerMeetNamespace(io: Server): Namespace {
       const pollId = String(p?.pollId ?? '');
       if (!pollId) return;
 
-      await db.closePoll(pollId);
+      if (!(await db.closePoll(meetingId, pollId))) return;
       const row = await db.pollWithTally(pollId, participant.id);
       if (row) {
         const poll = toWirePoll(row);
@@ -856,7 +914,7 @@ export function registerMeetNamespace(io: Server): Namespace {
         // nothing.
         poll.correctOptionIndex = (row.correct_option_index as number | null) ?? null;
         poll.status = 'closed';
-        emitToRoom(meetingId, 'meet:poll_closed', { poll });
+        emitToRoom(meetingId, 'meet:poll_closed', { poll: { ...poll, myVote: null } });
       }
       db.logEvent(meetingId, 'poll.closed', 'info', { actorId: user.id });
     });
@@ -889,7 +947,7 @@ export function registerMeetNamespace(io: Server): Namespace {
       const ctx = context(socket);
       if (!ctx) return;
       const { participant, meetingId } = ctx;
-      const row = await db.upvoteQuestion(String(p?.questionId ?? ''), participant.id);
+      const row = await db.upvoteQuestion(meetingId, String(p?.questionId ?? ''), participant.id);
       // null means this participant had already upvoted — silently ignored, so
       // a double click is not an error the user has to see.
       if (row) emitToRoom(meetingId, 'meet:question_updated', { question: toWireQuestion(row) });
@@ -901,7 +959,7 @@ export function registerMeetNamespace(io: Server): Namespace {
       const { participant, meetingId } = ctx;
       if (!canHost(participant.role)) return;
       const row = await db.answerQuestion(
-        String(p?.questionId ?? ''), p?.answerText ? String(p.answerText).slice(0, 2000) : null);
+        meetingId, String(p?.questionId ?? ''), p?.answerText ? String(p.answerText).slice(0, 2000) : null);
       if (row) emitToRoom(meetingId, 'meet:question_updated', { question: toWireQuestion(row) });
     });
 
@@ -1042,18 +1100,19 @@ export function registerMeetNamespace(io: Server): Namespace {
      * Only shared notes ever cross the wire — a private note is never sent to
      * anyone, which is why the API filters in SQL rather than trusting this.
      */
-    socket.on('meet:note_share', (p: { note?: unknown; shared?: boolean }) => {
+    socket.on('meet:note_share', async (p: { note?: unknown; shared?: boolean }) => {
       const ctx = context(socket);
       if (!ctx) return;
       const { participant, meetingId } = ctx;
-      const note = p?.note as { id?: string; participantId?: string } | undefined;
-      if (!note?.id) return;
-      // Only the author may share their own note.
-      if (note.participantId !== participant.id) return;
-
-      if (p?.shared) {
+      const noteId = (p?.note as { id?: unknown } | undefined)?.id;
+      if (typeof noteId !== 'string' || !noteId) return;
+      // What goes out is the stored note, and only the author's own: the
+      // client names a note, it never supplies its text or author.
+      const note = await db.noteForShare(meetingId, participant.id, noteId);
+      if (!note) return;
+      if (p?.shared && note.isShared) {
         socket.to(roomKey(meetingId)).emit('meet:note_shared', { note });
-      } else {
+      } else if (!p?.shared && !note.isShared) {
         socket.to(roomKey(meetingId)).emit('meet:note_unshared', { noteId: note.id });
       }
     });
@@ -1204,6 +1263,11 @@ export function registerMeetNamespace(io: Server): Namespace {
   }
 
   async function departure(socket: MeetSocket, reason: string): Promise<void> {
+    const userId = socket.data.guest ? undefined : socket.data.user?.id;
+    if (userId) {
+      await socket.leave(meetUserRoom(userId));
+      hooks.onMeetingPresence?.(userId);
+    }
     const { meetingId, participantId } = socket.data;
     if (!meetingId || !participantId) return;
     const room = rooms.get(meetingId);

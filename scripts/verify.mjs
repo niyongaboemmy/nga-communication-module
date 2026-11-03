@@ -13,6 +13,7 @@ import pg from 'pg';
 import { io } from 'socket.io-client';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const env = Object.fromEntries(
   readFileSync('apps/api/.env', 'utf8').split('\n')
@@ -30,7 +31,10 @@ const check = (name, passed, detail = '') => {
 // A throwaway user so the auth middleware's DB lookup succeeds.
 const userId = `verify-${randomBytes(4).toString('hex')}`;
 await pool.query(
-  `INSERT INTO users (id, mis_user_id, name, email, role) VALUES ($1, $1, 'Verify Bot', 'verify@amashuri.com', 'staff')`,
+  // A real role, so the bot holds the permissions a staff member does (the
+  // files service checks FILE_UPLOAD / FILE_DOWNLOAD on the live role).
+  `INSERT INTO users (id, mis_user_id, name, email, role, role_id)
+   VALUES ($1, $1, 'Verify Bot', 'verify@amashuri.com', 'staff', (SELECT id FROM roles WHERE name = 'Staff'))`,
   [userId]
 );
 const token = jwt.sign(
@@ -108,7 +112,7 @@ try {
   check('files rejects reuse of a spent upload ticket', replay.status === 409, `HTTP ${replay.status}`);
 } finally {
   await pool.query('DELETE FROM files WHERE owner_id = $1', [userId]);
-  await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+  await purgeUsers(pool, [userId]);
   await pool.end();
 }
 

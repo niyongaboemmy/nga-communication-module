@@ -14,6 +14,7 @@ import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const env = Object.fromEntries(readFileSync('apps/api/.env','utf8').split('\n')
   .filter(l => l.includes('=') && !l.trimStart().startsWith('#'))
@@ -105,7 +106,7 @@ check('ending the meeting withdraws the invitation',
   fail.push(`❌ threw: ${err instanceof Error ? err.stack : err}`);
 } finally {
   await pool.query(`DELETE FROM meetings WHERE host_id LIKE 'ntest-%'`).catch(()=>{});
-  await pool.query(`DELETE FROM users WHERE id LIKE 'ntest-%'`).catch(()=>{});
+  await purgeUsersLike(pool, 'ntest-').catch(()=>{});
   await pool.end();
 }
 console.log([...pass, ...fail].join('\n'));

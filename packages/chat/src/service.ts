@@ -4,7 +4,7 @@ import { previewsForMessages } from './unfurl.js';
 import type { PoolClient } from 'pg';
 import {
   DEFAULT_PAGE_SIZE, EDIT_WINDOW_MS, MAX_MESSAGE_LENGTH, MAX_PAGE_SIZE,
-  MENTION_PATTERN, BROADCAST_MENTION_PATTERN,
+  MENTION_PATTERN, BROADCAST_MENTION_PATTERN, isEmoji,
 } from '@tupo/shared';
 import type {
   ConversationSummary, ConversationType, DeliveryState, MemberRole, MessagePage,
@@ -58,6 +58,51 @@ export interface Membership {
  * a former member must not keep reading. Every read and every write goes
  * through here.
  */
+/**
+ * May this person post in this conversation? The one rule (B-03).
+ *
+ * A member, of a conversation that is not archived, and — in an announcement
+ * channel — an announcer (platform CHANNEL_ANNOUNCE or a channel owner/admin).
+ * Every path that puts words into a conversation calls this: sending (REST and
+ * socket), thread replies (including "also send to the channel"), forwarding
+ * into it, polls, scheduling a message and the scheduler posting it later.
+ * Before this each path carried its own copy, and three of them had none.
+ */
+export async function assertCanPost(
+  userId: string, conversationId: string, opts: { mayAnnounce: boolean },
+): Promise<Membership> {
+  const membership = await requireMembership(userId, conversationId);
+  if (membership.isArchived) throw new ChatError('This conversation is archived.', 409);
+  if (membership.type === 'announcement' && !opts.mayAnnounce && !canManage(membership.role)) {
+    throw new ChatError('Only announcers can post in this channel.', 403);
+  }
+  // A block, either way, closes a direct conversation (B-05). Checked here so
+  // the REST send, the socket send and scheduled sends all honour it.
+  if (membership.type === 'dm') {
+    const { rows } = await getPool().query(
+      `SELECT 1 FROM conversation_members cm
+         JOIN user_blocks b ON (b.blocker_id = $2 AND b.blocked_id = cm.user_id)
+                            OR (b.blocker_id = cm.user_id AND b.blocked_id = $2)
+        WHERE cm.conversation_id = $1 AND cm.user_id <> $2 LIMIT 1`,
+      [conversationId, userId]);
+    if (rows.length) throw new ChatError('You can’t message this person.', 403);
+  }
+  return membership;
+}
+
+/** Whether a user's role grants a platform permission (for jobs with no request). */
+export async function userHasPermission(userId: string, key: string): Promise<boolean> {
+  const { rows } = await getPool().query(
+    `SELECT 1 FROM users u
+       JOIN role_permissions rp ON rp.role_id = u.role_id
+       JOIN permissions p ON p.id = rp.permission_id
+      WHERE u.id = $1 AND u.status = 'active' AND p.key = $2
+      LIMIT 1`,
+    [userId, key],
+  );
+  return rows.length > 0;
+}
+
 export async function requireMembership(
   userId: string, conversationId: string, client?: PoolClient,
 ): Promise<Membership> {
@@ -105,7 +150,7 @@ export const canManage = (role: MemberRole) => ROLE_RANK[role] >= ROLE_RANK.admi
 interface ConversationRow {
   id: string; type: ConversationType; slug: string | null; name: string | null;
   topic: string | null; description: string | null; is_private: boolean;
-  is_archived: boolean; icon_emoji: string | null; avatar_color: string | null;
+  is_archived: boolean; retention_days: number | null; icon_emoji: string | null; avatar_color: string | null;
   avatar_file_id: string | null;
   member_count: number; last_seq: string;
   last_message_at: string | null; last_message_preview: string | null;
@@ -128,7 +173,7 @@ interface ConversationRow {
  */
 const CONVERSATION_SELECT = `
   SELECT c.id, c.type, c.slug, c.name, c.topic, c.description, c.is_private,
-         c.is_archived, c.icon_emoji, c.avatar_color, c.avatar_file_id,
+         c.is_archived, c.retention_days, c.icon_emoji, c.avatar_color, c.avatar_file_id,
          c.member_count, c.last_seq,
          c.last_message_at, c.last_message_preview, c.last_message_sender,
          ls.name AS last_sender_name,
@@ -163,6 +208,7 @@ function toConversation(r: ConversationRow): ConversationSummary {
     description: r.description,
     isPrivate: r.is_private,
     isArchived: r.is_archived,
+    retentionDays: r.retention_days ?? null,
     iconEmoji: r.icon_emoji,
     avatarColor: r.avatar_color,
     avatarUrl: isDm ? r.peer_avatar : null,
@@ -393,6 +439,12 @@ export interface SendMessageInput {
   metadata?: Record<string, unknown>;
   /** Set by the system-message helpers; skips permission and policy checks. */
   system?: boolean;
+  /**
+   * Files the sender may attach although someone else uploaded them: the
+   * attachments of a message being forwarded, which the forwarder can already
+   * read (B-10 / CHAT-H10).
+   */
+  reshareFileIds?: string[];
 }
 
 export interface SendResult {
@@ -436,6 +488,116 @@ interface WriteResult {
   broadcast: 'channel' | 'here' | null;
 }
 
+/** The message kinds a client may send itself. System notices and polls are server-written. */
+export const CLIENT_MESSAGE_TYPES: readonly MessageType[] = [
+  'text', 'rich_text', 'file', 'image', 'video', 'voice_note', 'call_event', 'post_share',
+];
+const MAX_CLIENT_METADATA = 4096;
+
+/**
+ * Normalise what a client asked to send (B-01).
+ *
+ * The client chooses the kind of message, never its authority: a `system`
+ * notice renders as official and cannot be deleted, a `poll` without a poll
+ * row is a broken card, so neither may come from a client. A meeting card's
+ * details are rebuilt from the meeting itself — and only its host, or a member
+ * of the conversation it was started from, may post one — so a card can never
+ * point somewhere else than it says. Anything else carries at most 4 KB of
+ * metadata, without the keys only the server writes.
+ */
+export async function normaliseClientMessage(
+  senderId: string, conversationId: string, type: unknown, metadata: unknown,
+): Promise<{ type?: MessageType; metadata: Record<string, unknown> }> {
+  if (type !== undefined && type !== null && !(CLIENT_MESSAGE_TYPES as readonly unknown[]).includes(type)) {
+    throw new ChatError('That kind of message cannot be sent directly.', 400);
+  }
+  const meta = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? { ...(metadata as Record<string, unknown>) } : {};
+  if (JSON.stringify(meta).length > MAX_CLIENT_METADATA) {
+    throw new ChatError('Message details are too large.', 400);
+  }
+
+  if (type === 'call_event') {
+    const meetingId = (meta.meet as { meetingId?: unknown } | undefined)?.meetingId;
+    if (typeof meetingId !== 'string' || !meetingId) throw new ChatError('A meeting card needs a meeting.', 400);
+    const { rows } = await getPool().query<{
+      id: string; join_code: string; title: string; scheduled_start: string | null; scheduled_end: string | null;
+      host_id: string; conversation_id: string | null; just_started: boolean; audio_only: boolean;
+    }>(
+      `SELECT id, join_code, title, scheduled_start, scheduled_end, host_id, conversation_id,
+              (status = 'live' AND started_at > now() - interval '2 minutes') AS just_started,
+              COALESCE((settings->>'audioOnly')::boolean, false) AS audio_only
+         FROM meetings WHERE id = $1`, [meetingId],
+    );
+    const m = rows[0];
+    if (!m || (m.host_id !== senderId && m.conversation_id !== conversationId)) {
+      throw new ChatError('That meeting cannot be shared here.', 403);
+    }
+    return {
+      type: 'call_event',
+      metadata: {
+        meet: {
+          meetingId: m.id, joinCode: m.join_code, title: m.title,
+          scheduledStart: m.scheduled_start, scheduledEnd: m.scheduled_end,
+          // Written by the server, never trusted from the client (N-05): a
+          // call the sender just started rings the others; a shared meeting
+          // card does not.
+          ring: m.host_id === senderId && m.just_started,
+          audioOnly: m.audio_only,
+        },
+      },
+    };
+  }
+
+  // Keys only the server ever writes.
+  delete meta.meet; delete meta.fromThread; delete meta.event; delete meta.system;
+  return { type: (type ?? undefined) as MessageType | undefined, metadata: meta };
+}
+
+const MAX_ATTACHMENTS = 10;
+
+/**
+ * A client-supplied timestamp: null/undefined pass through, anything else
+ * must be a real date (and in the future, when it schedules something) —
+ * never a string handed to Postgres to fail on with a 500.
+ */
+export function parseClientDate(
+  value: unknown, field: string, opts: { future?: boolean } = {},
+): string | null | undefined {
+  if (value === undefined || value === null) return value as null | undefined;
+  const ms = typeof value === 'string' || typeof value === 'number' ? new Date(value).getTime() : NaN;
+  if (!Number.isFinite(ms) || ms < Date.UTC(2000, 0, 1) || ms > Date.UTC(2100, 0, 1)) {
+    throw new ChatError(`${field} is not a valid date.`, 400);
+  }
+  if (opts.future && ms <= Date.now()) throw new ChatError(`${field} must be in the future.`, 400);
+  return new Date(ms).toISOString();
+}
+const ID_RE = /^\d{1,20}$/;
+
+/**
+ * A reply or thread reply must point at a message in *this* conversation —
+ * otherwise a reply lands in a thread nobody can open, or quotes a message
+ * from a conversation the sender cannot see. Threads are one level deep, so
+ * the root must itself be a main-flow message.
+ */
+async function assertReferences(conversationId: string, threadRootId: string | null, replyToId: string | null) {
+  for (const id of [threadRootId, replyToId]) {
+    if (id !== null && (typeof id !== 'string' || !ID_RE.test(id))) throw new ChatError('That message id is not valid.', 400);
+  }
+  const ids = [threadRootId, replyToId].filter((x): x is string => Boolean(x));
+  if (!ids.length) return;
+  const { rows } = await getPool().query<{ id: string; thread_root_id: string | null }>(
+    'SELECT id, thread_root_id FROM messages WHERE conversation_id = $1 AND id = ANY($2::text[])',
+    [conversationId, ids]);
+  const found = new Map(rows.map((r) => [r.id, r]));
+  if (threadRootId) {
+    const root = found.get(threadRootId);
+    if (!root) throw new ChatError('That thread is not in this conversation.', 404);
+    if (root.thread_root_id) throw new ChatError('Threads are one level deep — reply to the thread instead.', 400);
+  }
+  if (replyToId && !found.get(replyToId)) throw new ChatError('The message you replied to is not in this conversation.', 404);
+}
+
 /**
  * The transactional half of a send: everything that must be atomic, and
  * nothing that is not.
@@ -454,6 +616,11 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
       throw new ChatError(`A message may not exceed ${MAX_MESSAGE_LENGTH} characters.`, 400);
     }
     if (!input.nonce) throw new ChatError('A nonce is required.', 400);
+    if (input.nonce.length > 100) throw new ChatError('That nonce is too long.', 400);
+    if (attachments.length > MAX_ATTACHMENTS) {
+      throw new ChatError(`A message may carry at most ${MAX_ATTACHMENTS} attachments.`, 400);
+    }
+    await assertReferences(input.conversationId, input.threadRootId ?? null, input.replyToId ?? null);
   }
 
   const client = await getPool().connect();
@@ -502,21 +669,26 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
     // the sidebar with no chance to resolve anything later. "@mention" in a
     // conversation list tells the reader nothing about who was addressed.
     const preview = previewOf(await renderMentionsAsText(body), attachments.length, input.type);
+    // A thread reply takes a sequence number like any message, but it is not
+    // the channel's latest line: the sidebar preview and ordering belong to the
+    // main flow. Otherwise "Ada: thread reply" sits on the row of a channel
+    // whose newest visible message is something else entirely.
+    const inThread = Boolean(input.threadRootId);
     const { rows: seqRows } = await client.query<{ last_seq: string }>(
       `UPDATE conversations
           SET last_seq = last_seq + 1,
-              last_message_at = now(),
-              last_message_preview = $2,
-              last_message_sender = $3
+              last_message_at = CASE WHEN $4 THEN last_message_at ELSE now() END,
+              last_message_preview = CASE WHEN $4 THEN last_message_preview ELSE $2 END,
+              last_message_sender = CASE WHEN $4 THEN last_message_sender ELSE $3 END
         WHERE id = $1 AND deleted_at IS NULL
         RETURNING last_seq`,
-      [input.conversationId, preview, input.senderId],
+      [input.conversationId, preview, input.senderId, inThread],
     );
     if (!seqRows[0]) throw new ChatError('Conversation not found.', 404);
     const seq = Number(seqRows[0].last_seq);
 
     const attachmentJson = attachments.length
-      ? await resolveAttachments(client, attachments, input.senderId)
+      ? await resolveAttachments(client, attachments, input.senderId, input.reshareFileIds ?? [])
       : [];
 
     const messageType: MessageType =
@@ -598,11 +770,14 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
     await client.query(
       `UPDATE conversation_members
           SET unread_count = unread_count + $4,
-              unread_mentions = unread_mentions + CASE WHEN user_id = ANY($3::text[]) THEN 1 ELSE 0 END,
+              -- Thread replies (a $4 of 0) badge nobody's conversation: they
+              -- are tracked per thread instead — see threadUnreadFor().
+              unread_mentions = unread_mentions + CASE WHEN $4 = 1 AND user_id = ANY($3::text[]) THEN 1 ELSE 0 END,
               -- A hidden DM comes back the moment the other person writes.
               is_hidden = false
         WHERE conversation_id = $1 AND user_id <> $2 AND left_at IS NULL`,
-      [input.conversationId, input.senderId, mentioned, messageType === 'system' ? 0 : 1],
+      [input.conversationId, input.senderId, mentioned,
+        messageType === 'system' || input.threadRootId ? 0 : 1],
     );
 
     /*
@@ -614,12 +789,27 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
      * came back to everything marked read instead of to where they left off.
      * A system notice is not something anyone read.
      */
-    if (messageType !== 'system') {
+    if (messageType !== 'system' && !input.threadRootId) {
       await client.query(
         `UPDATE conversation_members
             SET last_read_seq = $3, unread_count = 0, unread_mentions = 0, last_read_at = now()
           WHERE conversation_id = $1 AND user_id = $2`,
         [input.conversationId, input.senderId, seq],
+      );
+    }
+    /*
+     * A thread reply advances the sender's place *in that thread* only. Moving
+     * their channel watermark to the reply's seq would silently mark every
+     * channel message they had not read yet as read.
+     */
+    if (input.threadRootId) {
+      await client.query(
+        `INSERT INTO thread_reads (user_id, conversation_id, root_id, last_read_seq)
+         VALUES ($2, $1, $3, $4)
+         ON CONFLICT (user_id, root_id)
+         DO UPDATE SET last_read_seq = GREATEST(thread_reads.last_read_seq, EXCLUDED.last_read_seq),
+                       updated_at = now()`,
+        [input.conversationId, input.senderId, input.threadRootId, seq],
       );
     }
 
@@ -652,7 +842,7 @@ function previewOf(body: string, attachmentCount: number, type?: MessageType): s
  * thereby republish someone else's upload into a conversation of their own.
  */
 async function resolveAttachments(
-  client: PoolClient, fileIds: string[], senderId: string,
+  client: PoolClient, fileIds: string[], senderId: string, reshare: string[] = [],
 ): Promise<WireAttachment[]> {
   const { rows } = await client.query<{
     id: string; original_name: string; mime_type: string; size_bytes: string;
@@ -668,9 +858,9 @@ async function resolveAttachments(
   for (const id of fileIds) {
     const f = byId.get(id);
     if (!f) throw new ChatError('Attachment not found.', 404);
-    if (f.owner_id !== senderId) throw new ChatError('That attachment is not yours to send.', 403);
+    if (f.owner_id !== senderId && !reshare.includes(id)) throw new ChatError('That attachment is not yours to send.', 403);
     if (f.status !== 'ready') throw new ChatError('An attachment is still uploading.', 409);
-    const meta = (f.metadata ?? {}) as Record<string, number | number[] | undefined>;
+    const meta = (f.metadata ?? {}) as Record<string, number | number[] | string | undefined>;
     out.push({
       fileId: f.id,
       name: f.original_name,
@@ -681,9 +871,22 @@ async function resolveAttachments(
       height: meta.height as number | undefined,
       durationMs: meta.durationMs as number | undefined,
       waveform: meta.waveform as number[] | undefined,
+      blurhash: typeof meta.blurhash === 'string' ? meta.blurhash : undefined,
     });
   }
   return out;
+}
+
+/** The ring for a call card a sender just started (N-05), or null for any other message. */
+export function callRingOf(message: WireMessage): {
+  meetingId: string; title: string; callerId: string; callerName: string; audioOnly: boolean; at: string;
+} | null {
+  const meet = (message.metadata as { meet?: { meetingId?: string; title?: string; ring?: boolean; audioOnly?: boolean } } | null)?.meet;
+  if (message.type !== 'call_event' || !meet?.ring || !meet.meetingId) return null;
+  return {
+    meetingId: meet.meetingId, title: meet.title ?? 'Call', callerId: message.senderId,
+    callerName: message.senderName, audioOnly: Boolean(meet.audioOnly), at: message.createdAt,
+  };
 }
 
 export function attachmentKind(mime: string): WireAttachment['kind'] {
@@ -779,6 +982,7 @@ interface MessageRow {
   reply_body: string | null; reply_sender_id: string | null;
   reply_sender_name: string | null; reply_deleted: boolean | null;
   mentions_me: boolean; saved: boolean; read_count: string;
+  delivered_count?: string; viewer_receipts?: boolean;
 }
 
 /**
@@ -805,7 +1009,10 @@ const MESSAGE_SELECT = `
          EXISTS (SELECT 1 FROM message_saves ms
                   WHERE ms.message_id = m.id AND ms.user_id = $1) AS saved,
          (SELECT count(*) FROM message_receipts mr
-           WHERE mr.message_id = m.id AND mr.state = 'read')::text AS read_count
+           WHERE mr.message_id = m.id AND mr.state = 'read')::text AS read_count,
+         (SELECT count(*) FROM message_receipts mr
+           WHERE mr.message_id = m.id)::text AS delivered_count,
+         COALESCE((SELECT p.read_receipts FROM user_chat_prefs p WHERE p.user_id = $1), true) AS viewer_receipts
     FROM messages m
     LEFT JOIN users u ON u.id = m.sender_id
     LEFT JOIN messages rp ON rp.id = m.reply_to_id AND rp.conversation_id = m.conversation_id
@@ -819,6 +1026,19 @@ const MESSAGE_SELECT = `
  *   academic-conduct review can read what was said. Never pass it on an
  *   ordinary read path.
  */
+/**
+ * The sender's ticks (B-11 / CHAT-H7), as the *weakest* state across
+ * recipients: "read" on a 40-person channel means everyone read it, and
+ * "delivered" that it reached every one of them — not that somebody did.
+ * It used to call a message delivered once one person had read it.
+ */
+export function deliveryState(memberCount: number, deliveredCount: number, readCount: number): DeliveryState {
+  const others = Math.max(memberCount - 1, 1);
+  if (readCount >= others) return 'read';
+  if (Math.max(deliveredCount, readCount) >= others) return 'delivered';
+  return 'sent';
+}
+
 function toWireMessage(
   r: MessageRow, viewerId: string, memberCount = 2, revealDeleted = false,
 ): WireMessage {
@@ -837,20 +1057,14 @@ function toWireMessage(
     .map(([emoji, g]) => ({ emoji, ...g }))
     .sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji));
 
-  const readCount = Number(r.read_count ?? 0);
   const isMine = r.sender_id === viewerId;
-
-  /*
-   * Delivery is only meaningful to the sender, and only as the *weakest* state
-   * across recipients: "read" on a 40-person channel means everyone read it, not
-   * that somebody did. Anything else and the second tick becomes a lie.
-   */
-  let delivery: DeliveryState = 'sent';
-  if (isMine) {
-    const others = Math.max(memberCount - 1, 1);
-    if (readCount >= others) delivery = 'read';
-    else if (readCount > 0) delivery = 'delivered';
-  }
+  // Reciprocity (FR-MSG-13): someone who keeps their own reads private does
+  // not see anyone else's either — "read" is shown to them as "delivered".
+  const seesReads = r.viewer_receipts !== false;
+  const readCount = seesReads ? Number(r.read_count ?? 0) : 0;
+  const delivery: DeliveryState = isMine
+    ? deliveryState(memberCount, Number(r.delivered_count ?? r.read_count ?? 0), readCount)
+    : 'sent';
 
   const reveal = Boolean(r.deleted_at) && revealDeleted;
 
@@ -998,6 +1212,8 @@ export interface ReadResult {
   unread: number;
   unreadMentions: number;
   changed: boolean;
+  /** The watermark before this change, for `markRead`'s lower bound (S-12). */
+  previousSeq?: number;
 }
 
 /**
@@ -1008,6 +1224,37 @@ export interface ReadResult {
  * from the log rather than decremented, so they self-heal — a counter that only
  * ever drifts one way is a counter that eventually shows 3 on an empty channel.
  */
+/*
+ * The one definition of "unread" for a conversation member, used by every
+ * recount (read, delete, migration). Kept in one place because three slightly
+ * different copies is how a badge ends up disagreeing with itself.
+ *
+ * Counts main-flow messages only. Thread replies are tracked per thread
+ * (thread_reads) and never badge the conversation; a reply that is also sent
+ * to the channel arrives as its own main-flow message and counts as that.
+ * `w` is the SQL expression for the member's read watermark.
+ */
+export function unreadCountSql(w: string): string {
+  return `(SELECT count(*) FROM messages x
+            WHERE x.conversation_id = m.conversation_id
+              AND x.seq > ${w}
+              AND x.sender_id <> m.user_id
+              AND x.deleted_at IS NULL
+              AND x.type <> 'system'
+              AND x.thread_root_id IS NULL)`;
+}
+
+export function unreadMentionsSql(w: string): string {
+  return `(SELECT count(*) FROM message_mentions mm
+            WHERE mm.conversation_id = m.conversation_id
+              AND mm.user_id = m.user_id
+              AND mm.seq > ${w}
+              AND NOT EXISTS (
+                SELECT 1 FROM messages t
+                 WHERE t.conversation_id = mm.conversation_id
+                   AND t.seq = mm.seq AND t.thread_root_id IS NOT NULL))`;
+}
+
 export async function advanceRead(
   userId: string, conversationId: string, seq: number,
 ): Promise<ReadResult> {
@@ -1028,7 +1275,7 @@ export async function advanceRead(
    * value explicit in all four places it is needed.
    */
   const { rows } = await getPool().query<{
-    last_read_seq: string; unread_count: number; unread_mentions: number; changed: boolean;
+    last_read_seq: string; unread_count: number; unread_mentions: number; changed: boolean; old_seq: string;
   }>(
     `WITH prev AS (
        SELECT last_read_seq AS old_seq,
@@ -1041,25 +1288,13 @@ export async function advanceRead(
             last_read_at  = now(),
             -- Recomputed from the log, never decremented. A counter that only
             -- drifts one way is a counter that eventually shows 3 unread on an
-            -- empty channel.
-            unread_count = (
-              SELECT count(*) FROM messages x
-               WHERE x.conversation_id = m.conversation_id
-                 AND x.seq > prev.next_seq
-                 AND x.sender_id <> m.user_id
-                 AND x.deleted_at IS NULL
-                 -- Same rule as the send path, or the counter and the
-                 -- recount would disagree and the badge would flicker.
-                 AND x.type <> 'system'),
-            unread_mentions = (
-              SELECT count(*) FROM message_mentions mm
-               WHERE mm.conversation_id = m.conversation_id
-                 AND mm.user_id = m.user_id
-                 AND mm.seq > prev.next_seq)
+            -- empty channel. The rule itself lives in unreadCountSql().
+            unread_count = ${unreadCountSql('prev.next_seq')},
+            unread_mentions = ${unreadMentionsSql('prev.next_seq')}
        FROM prev
       WHERE m.conversation_id = $1 AND m.user_id = $2 AND m.left_at IS NULL
       RETURNING m.last_read_seq, m.unread_count, m.unread_mentions,
-                (prev.next_seq > prev.old_seq) AS changed`,
+                (prev.next_seq > prev.old_seq) AS changed, prev.old_seq`,
     [conversationId, userId, seq],
   );
 
@@ -1070,20 +1305,26 @@ export async function advanceRead(
     unread: r.unread_count,
     unreadMentions: r.unread_mentions,
     changed: r.changed,
+    previousSeq: Number(r.old_seq),
   };
 }
 
 /** Record that messages reached a device (the second tick). */
 export async function markDelivered(
   userId: string, conversationId: string, messageIds: string[],
-): Promise<void> {
-  if (!messageIds.length) return;
-  await getPool().query(
+): Promise<string[]> {
+  if (!messageIds.length) return [];
+  // Only messages of this conversation, from someone else.
+  const { rows } = await getPool().query<{ message_id: string }>(
     `INSERT INTO message_receipts (message_id, conversation_id, user_id, state)
-     SELECT unnest($3::text[]), $1, $2, 'delivered'
-     ON CONFLICT (message_id, user_id) DO NOTHING`,
+     SELECT m.id, $1, $2, 'delivered'
+       FROM messages m
+      WHERE m.conversation_id = $1 AND m.id = ANY($3::text[]) AND m.sender_id <> $2
+     ON CONFLICT (message_id, user_id) DO NOTHING
+     RETURNING message_id`,
     [conversationId, userId, messageIds],
   );
+  return rows.map((r) => r.message_id);
 }
 
 /**
@@ -1096,23 +1337,85 @@ export async function markDelivered(
  */
 export async function markRead(
   userId: string, conversationId: string, upToSeq: number,
-): Promise<number> {
+  /**
+   * Only messages after this sequence (S-12 / CHAT-M8): the watermark before
+   * this read, from `advanceRead`. Without it every read walked the whole
+   * history up to `upToSeq`, a cost that grew with the conversation's age.
+   */
+  afterSeq = 0,
+): Promise<string[]> {
   const { rows: prefs } = await getPool().query<{ read_receipts: boolean }>(
     'SELECT read_receipts FROM user_chat_prefs WHERE user_id = $1', [userId]);
-  if (prefs[0] && prefs[0].read_receipts === false) return 0;
+  if (prefs[0] && prefs[0].read_receipts === false) return [];
 
-  const { rowCount } = await getPool().query(
+  const { rows } = await getPool().query<{ message_id: string }>(
     `INSERT INTO message_receipts (message_id, conversation_id, user_id, state)
      SELECT m.id, m.conversation_id, $2, 'read'
        FROM messages m
-      WHERE m.conversation_id = $1 AND m.seq <= $3 AND m.sender_id <> $2
+      WHERE m.conversation_id = $1 AND m.seq <= $3 AND m.seq > $4 AND m.sender_id <> $2
             AND m.deleted_at IS NULL
      ON CONFLICT (message_id, user_id)
        DO UPDATE SET state = 'read', at = now()
-       WHERE message_receipts.state <> 'read'`,
-    [conversationId, userId, upToSeq],
+       WHERE message_receipts.state <> 'read'
+     RETURNING message_id`,
+    [conversationId, userId, upToSeq, Math.max(0, afterSeq)],
   );
-  return rowCount ?? 0;
+  return rows.map((r) => r.message_id);
+}
+
+export interface ReceiptState {
+  messageId: string; conversationId: string; senderId: string;
+  delivery: DeliveryState; readCount: number;
+}
+
+/**
+ * Fresh tick states for messages whose receipts just changed, for telling
+ * their senders — newest first, at most `limit` (a first read of a long
+ * backlog changes hundreds; only the recent ones are on anyone's screen).
+ */
+export async function receiptStates(conversationId: string, messageIds: string[], limit = 50): Promise<ReceiptState[]> {
+  if (!messageIds.length) return [];
+  const { rows } = await getPool().query<{
+    id: string; sender_id: string; member_count: number; delivered: string; read: string;
+  }>(
+    `SELECT m.id, m.sender_id, c.member_count,
+            (SELECT count(*) FROM message_receipts r WHERE r.message_id = m.id)::text AS delivered,
+            (SELECT count(*) FROM message_receipts r WHERE r.message_id = m.id AND r.state = 'read')::text AS read
+       FROM messages m JOIN conversations c ON c.id = m.conversation_id
+      WHERE m.conversation_id = $1 AND m.id = ANY($2::text[])
+      ORDER BY m.seq DESC LIMIT $3`,
+    [conversationId, messageIds, limit],
+  );
+  return rows.map((r) => ({
+    messageId: r.id, conversationId, senderId: r.sender_id,
+    delivery: deliveryState(r.member_count, Number(r.delivered), Number(r.read)),
+    readCount: Number(r.read),
+  }));
+}
+
+/**
+ * What to tell each sender after receipts changed: their own devices only,
+ * and with reciprocity applied — a sender who keeps their reads private sees
+ * "delivered", never "read".
+ */
+export async function receiptUpdatesFor(conversationId: string, messageIds: string[]): Promise<Array<{
+  senderId: string;
+  payload: { conversationId: string; messageId: string; delivery: DeliveryState; readCount: number };
+}>> {
+  const states = await receiptStates(conversationId, messageIds);
+  const sees = new Map<string, boolean>();
+  for (const st of states) if (!sees.has(st.senderId)) sees.set(st.senderId, await receiptsVisibleTo(st.senderId));
+  return states.map((st) => {
+    const visible = sees.get(st.senderId) !== false;
+    return {
+      senderId: st.senderId,
+      payload: {
+        conversationId, messageId: st.messageId,
+        delivery: !visible && st.delivery === 'read' ? 'delivered' : st.delivery,
+        readCount: visible ? st.readCount : 0,
+      },
+    };
+  });
 }
 
 export async function receiptsVisibleTo(userId: string): Promise<boolean> {
@@ -1177,13 +1480,20 @@ export async function memberIdsOf(conversationId: string): Promise<string[]> {
 
 export async function setMemberPrefs(
   userId: string, conversationId: string,
-  prefs: { isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null },
+  prefs: { isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null; hidden?: boolean },
 ): Promise<void> {
   const sets: string[] = [];
   const params: unknown[] = [conversationId, userId];
+  // Hiding is for direct messages (B-13): a group or channel is left, not
+  // hidden. It comes back by itself when the other person writes.
+  if (prefs.hidden !== undefined) {
+    const { rows } = await getPool().query<{ type: string }>('SELECT type FROM conversations WHERE id = $1', [conversationId]);
+    if (rows[0]?.type !== 'dm') throw new ChatError('Only a direct message can be hidden — leave a group instead.', 400);
+    params.push(prefs.hidden); sets.push(`is_hidden = $${params.length}`);
+  }
   if (prefs.isStarred !== undefined) { params.push(prefs.isStarred); sets.push(`is_starred = $${params.length}`); }
   if (prefs.notification !== undefined) { params.push(prefs.notification); sets.push(`notification = $${params.length}`); }
-  if (prefs.mutedUntil !== undefined) { params.push(prefs.mutedUntil); sets.push(`muted_until = $${params.length}`); }
+  if (prefs.mutedUntil !== undefined) { params.push(parseClientDate(prefs.mutedUntil, 'mutedUntil')); sets.push(`muted_until = $${params.length}`); }
   if (!sets.length) return;
 
   await getPool().query(
@@ -1196,6 +1506,7 @@ export async function setMemberPrefs(
 export async function saveDraft(
   userId: string, conversationId: string, draft: string | null,
 ): Promise<void> {
+  if (draft && draft.length > MAX_MESSAGE_LENGTH * 2) throw new ChatError('That draft is too long to save.', 400);
   await getPool().query(
     `UPDATE conversation_members
         SET draft = $3, draft_updated_at = now()
@@ -1290,6 +1601,7 @@ export interface UnreadCounts {
   unread: number;
   unreadMentions: number;
   lastReadSeq: number;
+  lastSeq: number;
 }
 
 /**
@@ -1303,18 +1615,28 @@ export async function unreadFor(
 ): Promise<Record<string, UnreadCounts>> {
   if (!userIds.length) return {};
   const { rows } = await getPool().query<{
-    user_id: string; unread_count: number; unread_mentions: number; last_read_seq: string;
+    user_id: string; unread_count: number; unread_mentions: number; last_read_seq: string; last_seq: string;
   }>(
-    `SELECT user_id, unread_count, unread_mentions, last_read_seq
-       FROM conversation_members
-      WHERE conversation_id = $1 AND user_id = ANY($2::text[]) AND left_at IS NULL`,
+    `SELECT m.user_id, m.unread_count, m.unread_mentions, m.last_read_seq, c.last_seq
+       FROM conversation_members m
+       JOIN conversations c ON c.id = m.conversation_id
+      WHERE m.conversation_id = $1 AND m.user_id = ANY($2::text[]) AND m.left_at IS NULL`,
     [conversationId, userIds],
   );
   return Object.fromEntries(rows.map((r) => [r.user_id, {
     unread: r.unread_count,
     unreadMentions: r.unread_mentions,
     lastReadSeq: Number(r.last_read_seq),
+    lastSeq: Number(r.last_seq),
   }]));
+}
+
+/** The conversation's newest seq — what "mark read to the end" reads up to. */
+export async function lastSeqOf(conversationId: string): Promise<number> {
+  const { rows } = await getPool().query<{ last_seq: string }>(
+    'SELECT last_seq FROM conversations WHERE id = $1', [conversationId],
+  );
+  return Number(rows[0]?.last_seq ?? 0);
 }
 
 /** The badge on the Chat icon in the rail: everything, everywhere, for one person. */
@@ -1364,7 +1686,7 @@ export async function toggleReaction(
 ): Promise<ReactionResult> {
   const clean = (emoji ?? '').trim();
   if (!clean) throw new ChatError('An emoji is required.', 400);
-  if (clean.length > MAX_EMOJI_LENGTH) throw new ChatError('That is not an emoji.', 400);
+  if (clean.length > MAX_EMOJI_LENGTH || !isEmoji(clean)) throw new ChatError('That is not an emoji.', 400);
 
   // Reacting to a tombstone is meaningless, and letting it through would leave
   // reactions hanging off a message with nothing to hang from.
@@ -1413,13 +1735,14 @@ export async function reactionsFor(messageId: string, viewerId: string): Promise
 }
 
 /** Names behind a reaction pill — "Ada, Bosco and 3 others". */
-export async function reactorNames(messageId: string, emoji: string): Promise<string[]> {
+export async function reactorNames(conversationId: string, messageId: string, emoji: string): Promise<string[]> {
+  // Scoped to the conversation the caller is a member of, not just the id.
   const { rows } = await getPool().query<{ name: string }>(
     `SELECT u.name FROM message_reactions r
        JOIN users u ON u.id = r.user_id
-      WHERE r.message_id = $1 AND r.emoji = $2
+      WHERE r.conversation_id = $1 AND r.message_id = $2 AND r.emoji = $3
       ORDER BY r.created_at LIMIT 50`,
-    [messageId, emoji],
+    [conversationId, messageId, emoji],
   );
   return rows.map((r) => r.name);
 }
@@ -1531,10 +1854,15 @@ export async function editHistory(
   const { rows } = await getPool().query<{
     previous_body: string | null; edited_at: string; name: string;
   }>(
+    // Only for a live message in the conversation the caller is a member of:
+    // the id alone is not proof of access, and a deleted message's earlier
+    // versions are the oversight view's, not anyone else's.
     `SELECT e.previous_body, e.edited_at, u.name
-       FROM message_edits e JOIN users u ON u.id = e.editor_id
-      WHERE e.message_id = $1 ORDER BY e.edited_at DESC`,
-    [messageId],
+       FROM message_edits e
+       JOIN users u ON u.id = e.editor_id
+       JOIN messages m ON m.id = e.message_id AND m.conversation_id = $1 AND m.deleted_at IS NULL
+      WHERE e.message_id = $2 ORDER BY e.edited_at DESC`,
+    [conversationId, messageId],
   );
   return rows.map((r) => ({ body: r.previous_body, at: r.edited_at, editorName: r.name }));
 }
@@ -1573,7 +1901,12 @@ export async function deleteMessage(
   const row = rows[0];
   if (!row) throw new ChatError('Message not found.', 404);
   if (row.deleted_at) throw new ChatError('That message is already deleted.', 409);
-  if (row.type === 'system') throw new ChatError('System messages cannot be deleted.', 400);
+  // A system notice is the server's, but a moderator must still be able to
+  // remove one — including any written before clients were stopped from
+  // sending them.
+  if (row.type === 'system' && !opts.canDeleteAny && opts.memberRole !== 'owner' && opts.memberRole !== 'admin') {
+    throw new ChatError('System messages cannot be deleted.', 400);
+  }
 
   const mine = row.sender_id === userId;
   const asModerator = !mine
@@ -1602,15 +1935,8 @@ export async function deleteMessage(
   await getPool().query('DELETE FROM message_reactions WHERE message_id = $1', [messageId]);
   await getPool().query(
     `UPDATE conversation_members m
-        SET unread_count = (
-              SELECT count(*) FROM messages x
-               WHERE x.conversation_id = m.conversation_id
-                 AND x.seq > m.last_read_seq AND x.sender_id <> m.user_id
-                 AND x.deleted_at IS NULL AND x.type <> 'system'),
-            unread_mentions = (
-              SELECT count(*) FROM message_mentions mm
-               WHERE mm.conversation_id = m.conversation_id
-                 AND mm.user_id = m.user_id AND mm.seq > m.last_read_seq)
+        SET unread_count = ${unreadCountSql('m.last_read_seq')},
+            unread_mentions = ${unreadMentionsSql('m.last_read_seq')}
       WHERE m.conversation_id = $1 AND m.left_at IS NULL`,
     [conversationId],
   );
@@ -1635,6 +1961,7 @@ export async function refreshPreview(conversationId: string): Promise<void> {
                      ELSE '' END AS preview
            FROM messages m
           WHERE m.conversation_id = $1 AND m.deleted_at IS NULL
+            AND m.thread_root_id IS NULL
           ORDER BY m.seq DESC LIMIT 1
        ) latest
       WHERE c.id = $1`,
@@ -1751,6 +2078,201 @@ export async function threadParticipants(
     [conversationId, rootId],
   );
   return rows.map((r) => r.sender_id);
+}
+
+/*
+ * Thread read state.
+ *
+ * A thread reply is new only for the people following that thread: the
+ * root's author, everyone who has replied, and everyone who has opened it
+ * (opening writes a thread_reads row). For them, "unread" is replies by
+ * someone else past their place in the thread. Everyone else sees the reply
+ * count and nothing more — a channel of 400 does not light up because two
+ * people are talking in a side thread.
+ */
+
+/**
+ * Who follows a thread: the root's author, everyone who has replied, and
+ * everyone who has opened it (a thread_reads row).
+ */
+export async function threadFollowers(conversationId: string, rootId: string): Promise<string[]> {
+  const { rows } = await getPool().query<{ user_id: string }>(
+    `SELECT sender_id AS user_id FROM messages
+      WHERE conversation_id = $1 AND (id = $2 OR thread_root_id = $2)
+        AND deleted_at IS NULL AND type <> 'system'
+     UNION
+     SELECT user_id FROM thread_reads WHERE conversation_id = $1 AND root_id = $2`,
+    [conversationId, rootId],
+  );
+  return rows.map((r) => r.user_id);
+}
+
+/** The reader's place in one thread. Never moves backwards. */
+export async function markThreadRead(
+  userId: string, conversationId: string, rootId: string, seq: number,
+): Promise<number> {
+  const { rows } = await getPool().query<{ last_read_seq: string }>(
+    `INSERT INTO thread_reads (user_id, conversation_id, root_id, last_read_seq)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, root_id)
+     DO UPDATE SET last_read_seq = GREATEST(thread_reads.last_read_seq, EXCLUDED.last_read_seq),
+                   updated_at = now()
+     RETURNING last_read_seq`,
+    [userId, conversationId, rootId, seq],
+  );
+  return Number(rows[0]?.last_read_seq ?? seq);
+}
+
+const THREAD_UNREAD_SQL = `
+  SELECT r.id AS root_id, f.user_id,
+         (SELECT count(*) FROM messages x
+           WHERE x.conversation_id = r.conversation_id
+             AND x.thread_root_id = r.id
+             AND x.deleted_at IS NULL
+             AND x.sender_id <> f.user_id
+             AND x.seq > GREATEST(COALESCE(tr.last_read_seq, 0),
+                                  CASE WHEN r.sender_id = f.user_id THEN r.seq ELSE 0 END)
+         )::int AS unread
+    FROM messages r
+    JOIN followers f ON TRUE
+    LEFT JOIN thread_reads tr ON tr.user_id = f.user_id AND tr.root_id = r.id
+   WHERE r.conversation_id = $1 AND r.deleted_at IS NULL AND r.reply_count > 0
+     AND (r.sender_id = f.user_id OR tr.user_id IS NOT NULL)`;
+
+/**
+ * New-reply counts per follower of one thread — pushed to each of them after
+ * a reply so their "N new replies" marker moves live.
+ */
+export async function threadUnreadFor(
+  conversationId: string, rootId: string,
+): Promise<Array<{ userId: string; unread: number }>> {
+  const { rows } = await getPool().query<{ user_id: string; unread: number }>(
+    `WITH followers AS (
+       SELECT sender_id AS user_id FROM messages WHERE conversation_id = $1 AND id = $2
+       UNION SELECT user_id FROM thread_reads WHERE root_id = $2
+     )
+     ${THREAD_UNREAD_SQL} AND r.id = $2`,
+    [conversationId, rootId],
+  );
+  return rows.map((r) => ({ userId: r.user_id, unread: r.unread }));
+}
+
+/** Threads in one conversation that have replies the reader has not seen. */
+export async function threadUnreadIn(
+  userId: string, conversationId: string,
+): Promise<Record<string, number>> {
+  const { rows } = await getPool().query<{ root_id: string; unread: number }>(
+    `WITH followers AS (SELECT $2::text AS user_id)
+     ${THREAD_UNREAD_SQL}`,
+    [conversationId, userId],
+  );
+  return Object.fromEntries(rows.filter((r) => r.unread > 0).map((r) => [r.root_id, r.unread]));
+}
+
+export interface FollowedThread {
+  conversationId: string;
+  conversationName: string | null;
+  conversationType: string;
+  rootId: string;
+  rootPreview: string;
+  rootSenderName: string | null;
+  replyCount: number;
+  lastReplyAt: string | null;
+  unread: number;
+}
+
+/**
+ * The Threads inbox: every thread this person follows, most recently active
+ * first, with what is new in each.
+ */
+export async function followedThreads(userId: string, limit = 50): Promise<FollowedThread[]> {
+  const { rows } = await getPool().query<{
+    conversation_id: string; conversation_name: string | null; conversation_type: string;
+    root_id: string; body: string | null; sender_name: string | null; reply_count: number;
+    last_reply_at: Date | null; unread: number;
+  }>(
+    `WITH mine AS (
+       SELECT r.id, r.conversation_id, r.seq, r.sender_id, r.body, r.reply_count,
+              COALESCE(tr.last_read_seq, 0) AS read_seq
+         FROM messages r
+         JOIN conversation_members cm ON cm.conversation_id = r.conversation_id
+                                     AND cm.user_id = $1 AND cm.left_at IS NULL
+         LEFT JOIN thread_reads tr ON tr.root_id = r.id AND tr.user_id = $1
+        WHERE r.deleted_at IS NULL AND r.reply_count > 0 AND r.thread_root_id IS NULL
+          AND (r.sender_id = $1 OR tr.user_id IS NOT NULL)
+     )
+     SELECT m.conversation_id, c.name AS conversation_name, c.type AS conversation_type,
+            m.id AS root_id, m.body, u.name AS sender_name, m.reply_count,
+            last.created_at AS last_reply_at,
+            (SELECT count(*) FROM messages x
+              WHERE x.conversation_id = m.conversation_id AND x.thread_root_id = m.id
+                AND x.deleted_at IS NULL AND x.sender_id <> $1
+                AND x.seq > GREATEST(m.read_seq, CASE WHEN m.sender_id = $1 THEN m.seq ELSE 0 END)
+            )::int AS unread
+       FROM mine m
+       JOIN conversations c ON c.id = m.conversation_id AND c.deleted_at IS NULL
+       LEFT JOIN users u ON u.id = m.sender_id
+       LEFT JOIN LATERAL (
+         SELECT created_at FROM messages x
+          WHERE x.conversation_id = m.conversation_id AND x.thread_root_id = m.id AND x.deleted_at IS NULL
+          ORDER BY x.seq DESC LIMIT 1
+       ) last ON TRUE
+      ORDER BY last.created_at DESC NULLS LAST
+      LIMIT $2`,
+    [userId, limit],
+  );
+  const previews = await Promise.all(rows.map((r) => renderMentionsAsText(r.body ?? '')));
+  return rows.map((r, i) => ({
+    conversationId: r.conversation_id,
+    conversationName: r.conversation_name,
+    conversationType: r.conversation_type,
+    rootId: r.root_id,
+    rootPreview: (previews[i] ?? '').slice(0, 160) || '📎 Attachment',
+    rootSenderName: r.sender_name,
+    replyCount: r.reply_count,
+    lastReplyAt: r.last_reply_at ? r.last_reply_at.toISOString() : null,
+    unread: r.unread,
+  }));
+}
+
+/**
+ * Mark a conversation unread from its newest main-flow message — the "come
+ * back to this" gesture. Moves the watermark to just before that message and
+ * recounts, so the badge shows exactly one.
+ */
+export async function markConversationUnread(
+  userId: string, conversationId: string, fromSeq?: number,
+): Promise<ReadResult> {
+  // `fromSeq`: "mark unread from here" on a message (B-10) — everything from
+  // that message on becomes new again. Without it, the newest one from
+  // someone else.
+  const from = Number.isFinite(fromSeq) && (fromSeq as number) > 0 ? Math.floor(fromSeq as number) : null;
+  const { rows } = await getPool().query<{
+    last_read_seq: string; unread_count: number; unread_mentions: number;
+  }>(
+    `WITH target AS (
+       SELECT COALESCE($3::bigint - 1, (
+         SELECT x.seq - 1 FROM messages x
+          WHERE x.conversation_id = $1 AND x.thread_root_id IS NULL
+            AND x.deleted_at IS NULL AND x.type <> 'system' AND x.sender_id <> $2
+          ORDER BY x.seq DESC LIMIT 1), NULL) AS seq
+     )
+     UPDATE conversation_members m
+        SET last_read_seq = LEAST(m.last_read_seq, target.seq),
+            unread_count = ${unreadCountSql('LEAST(m.last_read_seq, target.seq)')},
+            unread_mentions = ${unreadMentionsSql('LEAST(m.last_read_seq, target.seq)')}
+       FROM target
+      WHERE m.conversation_id = $1 AND m.user_id = $2 AND m.left_at IS NULL
+        AND target.seq IS NOT NULL
+      RETURNING m.last_read_seq, m.unread_count, m.unread_mentions`,
+    [conversationId, userId, from],
+  );
+  const r = rows[0];
+  if (!r) throw new ChatError('There is nothing from anyone else here to mark unread.', 409);
+  return {
+    lastReadSeq: Number(r.last_read_seq), unread: r.unread_count,
+    unreadMentions: r.unread_mentions, changed: true,
+  };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -1912,8 +2434,9 @@ export async function listSaved(
  */
 export async function forwardMessage(
   userId: string, sourceConversationId: string, messageId: string,
-  targetConversationIds: string[], comment?: string,
-): Promise<Array<{ conversationId: string; result: SendResult }>> {
+  targetConversationIds: string[], comment_?: string,
+): Promise<Array<{ conversationId: string; result: SendResult; comment?: SendResult }>> {
+  const comment_text = (c?: string) => (c ?? '').trim().slice(0, MAX_MESSAGE_LENGTH);
   await requireMembership(userId, sourceConversationId);
 
   const original = await getMessage(userId, sourceConversationId, messageId);
@@ -1925,54 +2448,105 @@ export async function forwardMessage(
   // in a channel would leak who is talking to whom.
   const sourceName = src[0]?.type === 'dm' ? null : (src[0]?.name ?? null);
 
-  const out: Array<{ conversationId: string; result: SendResult }> = [];
+  // A poll travels as a snapshot of its question and results (B-10): a
+  // forwarded poll message with no poll behind it rendered as an empty card.
+  let body = original.body ?? '';
+  let type: MessageType = original.type === 'system' ? 'text' : original.type;
+  if (original.type === 'poll') {
+    const poll = await getPollByMessage(userId, sourceConversationId, messageId);
+    if (poll) {
+      const lines = poll.options.map((o) => `• ${o.text} — ${o.votes} ${o.votes === 1 ? 'vote' : 'votes'}`);
+      body = `📊 ${poll.question}\n${lines.join('\n')}`;
+    }
+    type = 'text';
+  }
+  const forwardedFrom = {
+    senderId: original.senderId,
+    senderName: original.senderName,
+    conversationName: sourceName,
+  };
+
+  const out: Array<{ conversationId: string; result: SendResult; comment?: SendResult }> = [];
   for (const targetId of [...new Set(targetConversationIds)].slice(0, 20)) {
     const membership = await requireMembership(userId, targetId);
     if (membership.isArchived) continue;
 
-    if (comment?.trim()) {
-      await sendMessage({
+    // The note goes first and is returned, so it is broadcast like the
+    // forward itself (it used to be written and never sent to anyone).
+    const comment = comment_text(comment_)
+      ? await sendMessage({
         conversationId: targetId, senderId: userId,
-        body: comment.trim(), nonce: `fwd-note-${snowflake()}`,
-      });
-    }
+        body: comment_text(comment_), nonce: `fwd-note-${snowflake()}`,
+      })
+      : undefined;
 
     const result = await sendMessage({
       conversationId: targetId,
       senderId: userId,
-      body: original.body ?? '',
+      body,
       nonce: `fwd-${messageId}-${targetId}`,
-      type: original.type === 'system' ? 'text' : original.type,
+      type,
       attachments: original.attachments.map((a) => a.fileId),
+      reshareFileIds: original.attachments.map((a) => a.fileId),
       // Attribution rides on the message itself, not on a convention in the
       // body text that a client could choose not to render.
-      metadata: {
-        forwardedFrom: {
-          senderId: original.senderId,
-          senderName: original.senderName,
-          conversationName: sourceName,
-          messageId,
-          at: original.createdAt,
-        },
-      },
+      metadata: { forwardedFrom: { ...forwardedFrom, messageId, at: original.createdAt } },
       system: true,
     });
 
     await getPool().query(
       `UPDATE messages SET forwarded_from = $3
         WHERE conversation_id = $1 AND id = $2`,
-      [targetId, result.message.id, JSON.stringify({
-        senderId: original.senderId,
-        senderName: original.senderName,
-        conversationName: sourceName,
-      })],
+      [targetId, result.message.id, JSON.stringify(forwardedFrom)],
     );
+    // What is broadcast carries the attribution too, not only a reload.
+    result.message = { ...result.message, forwardedFrom } as WireMessage;
 
-    out.push({ conversationId: targetId, result });
+    out.push({ conversationId: targetId, result, comment });
   }
 
   if (!out.length) throw new ChatError('Nowhere to forward that to.', 400);
   return out;
+}
+
+export interface ConversationLink {
+  url: string; title: string | null; siteName: string | null; imageUrl: string | null;
+  messageId: string; senderName: string | null; at: string;
+}
+
+/**
+ * Links shared in a conversation, newest first (B-12) — the Links tab. Read
+ * from the previews already stored for each message; deleted messages take
+ * their links with them.
+ */
+export async function listConversationLinks(
+  viewerId: string, conversationId: string, opts: { before?: string; limit?: number } = {},
+): Promise<{ links: ConversationLink[]; nextBefore: string | null }> {
+  await requireMembership(viewerId, conversationId);
+  const limit = Math.min(Math.max(opts.limit ?? 40, 1), 100);
+  const { rows } = await getPool().query<{
+    url: string; title: string | null; site_name: string | null; image_url: string | null;
+    message_id: string; sender_name: string | null; created_at: string;
+  }>(
+    `SELECT lp.url, lp.title, lp.site_name, lp.image_url, ml.message_id, u.name AS sender_name, m.created_at
+       FROM message_links ml
+       JOIN link_previews lp ON lp.url_hash = ml.url_hash
+       JOIN messages m ON m.conversation_id = ml.conversation_id AND m.id = ml.message_id AND m.deleted_at IS NULL
+       LEFT JOIN users u ON u.id = m.sender_id
+      WHERE ml.conversation_id = $1
+        AND ($2::timestamptz IS NULL OR m.created_at < $2::timestamptz)
+      ORDER BY m.created_at DESC, ml.ordinal
+      LIMIT $3`,
+    [conversationId, opts.before ? parseClientDate(opts.before, 'before') : null, limit + 1],
+  );
+  const page = rows.slice(0, limit);
+  return {
+    links: page.map((r) => ({
+      url: r.url, title: r.title, siteName: r.site_name, imageUrl: r.image_url,
+      messageId: r.message_id, senderName: r.sender_name, at: new Date(r.created_at).toISOString(),
+    })),
+    nextBefore: rows.length > limit ? new Date(page[page.length - 1]!.created_at).toISOString() : null,
+  };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -2031,6 +2605,8 @@ export interface ChatPrefs {
   quietToMinute: number | null;
   timezone: string | null;
   showPresence: boolean;
+  /** Email a digest of unseen mentions and DMs (F-04). */
+  emailDigest: boolean;
 }
 
 const DEFAULT_PREFS: ChatPrefs = {
@@ -2043,6 +2619,7 @@ const DEFAULT_PREFS: ChatPrefs = {
   quietToMinute: null,
   timezone: null,
   showPresence: true,
+  emailDigest: true,
 };
 
 export async function getPrefs(userId: string): Promise<ChatPrefs> {
@@ -2050,7 +2627,7 @@ export async function getPrefs(userId: string): Promise<ChatPrefs> {
     read_receipts: boolean; enter_to_send: boolean; desktop_notifications: boolean;
     sound: boolean; default_level: NotificationLevel;
     quiet_from_minute: number | null; quiet_to_minute: number | null;
-    timezone: string | null; show_presence: boolean;
+    timezone: string | null; show_presence: boolean; email_digest: boolean;
   }>('SELECT * FROM user_chat_prefs WHERE user_id = $1', [userId]);
 
   const r = rows[0];
@@ -2068,6 +2645,7 @@ export async function getPrefs(userId: string): Promise<ChatPrefs> {
     quietToMinute: r.quiet_to_minute,
     timezone: r.timezone,
     showPresence: r.show_presence,
+    emailDigest: r.email_digest ?? true,
   };
 }
 
@@ -2085,8 +2663,8 @@ export async function setPrefs(
   await getPool().query(
     `INSERT INTO user_chat_prefs
        (user_id, read_receipts, enter_to_send, desktop_notifications, sound,
-        default_level, quiet_from_minute, quiet_to_minute, timezone, show_presence, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+        default_level, quiet_from_minute, quiet_to_minute, timezone, show_presence, email_digest, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
      ON CONFLICT (user_id) DO UPDATE SET
        read_receipts = EXCLUDED.read_receipts,
        enter_to_send = EXCLUDED.enter_to_send,
@@ -2097,11 +2675,12 @@ export async function setPrefs(
        quiet_to_minute = EXCLUDED.quiet_to_minute,
        timezone = EXCLUDED.timezone,
        show_presence = EXCLUDED.show_presence,
+       email_digest = EXCLUDED.email_digest,
        updated_at = now()`,
     [userId, next.readReceipts, next.enterToSend, next.desktopNotifications, next.sound,
      NOTIFICATION_LEVELS_SET.has(next.defaultLevel) ? next.defaultLevel : 'all',
      minute(next.quietFromMinute), minute(next.quietToMinute),
-     next.timezone ?? null, next.showPresence],
+     next.timezone ?? null, next.showPresence, next.emailDigest !== false],
   );
 
   /*
@@ -2201,11 +2780,18 @@ export async function searchMessages(
   const limit = Math.min(Math.max(filters.limit ?? 25, 1), 50);
   const offset = Math.max(filters.offset ?? 0, 0);
 
-  const params: unknown[] = [viewerId, term];
+  // Search as you type (B-12): every word also matches as a prefix, so
+  // "homew" finds "homework" before it is finished. Built from letters and
+  // digits only, so nothing typed can reach to_tsquery's own syntax; left out
+  // when the person used quotes or -exclusions, which mean something exact.
+  const words = /["-]/.test(term) ? [] : (term.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, 8);
+  const prefix = words.length ? words.map((w) => `${w}:*`).join(' & ') : null;
+  const params: unknown[] = [viewerId, term, prefix];
+  const tsq = `(websearch_to_tsquery('english', $2) || coalesce(to_tsquery('english', $3), ''::tsquery))`;
   const where: string[] = [
     'm.deleted_at IS NULL',
     "m.type <> 'system'",
-    `to_tsvector('english', coalesce(m.body, '')) @@ websearch_to_tsquery('english', $2)`,
+    `to_tsvector('english', coalesce(m.body, '')) @@ ${tsq}`,
   ];
 
   const add = (value: unknown, clause: (i: number) => string) => {
@@ -2238,7 +2824,7 @@ export async function searchMessages(
             false AS mentions_me, false AS saved, '0'::text AS read_count,
             c.name AS conversation_name, c.type AS conversation_type, peer.name AS peer_name,
             ts_headline('english', coalesce(m.body, ''),
-                        websearch_to_tsquery('english', $2),
+                        ${tsq},
                         'StartSel=' || $${startParam} || ', StopSel=' || $${endParam} ||
                         ', MaxFragments=2, MaxWords=18, MinWords=5') AS highlight
        FROM messages m
@@ -2452,11 +3038,14 @@ export async function createPoll(
     question: string; options: string[];
     multiChoice?: boolean; anonymous?: boolean; closesAt?: string | null;
   },
-): Promise<{ poll: WirePoll; message: WireMessage }> {
+): Promise<{ poll: WirePoll; message: WireMessage; sent: SendResult }> {
   const question = (input.question ?? '').trim();
   const options = (input.options ?? []).map((o) => String(o ?? '').trim()).filter(Boolean);
 
   if (!question) throw new ChatError('A poll needs a question.', 400);
+  if (question.length > 500) throw new ChatError('A poll question may be at most 500 characters.', 400);
+  if (options.some((o) => o.length > 200)) throw new ChatError('A poll option may be at most 200 characters.', 400);
+  input.closesAt = parseClientDate(input.closesAt, 'closesAt', { future: true }) ?? null;
   if (options.length < 2) throw new ChatError('A poll needs at least two options.', 400);
   if (options.length > MAX_POLL_OPTIONS) {
     throw new ChatError(`A poll may have at most ${MAX_POLL_OPTIONS} options.`, 400);
@@ -2471,10 +3060,11 @@ export async function createPoll(
    * to, pinned, forwarded and searched like anything else. A poll held outside
    * the message stream is a poll that scrolls away from its own discussion.
    */
-  const { message } = await sendMessage({
+  const sent = await sendMessage({
     conversationId, senderId: userId, body: question,
     nonce: `poll-${snowflake()}`, type: 'poll', system: true,
   });
+  const { message } = sent;
 
   const pollId = snowflake();
   await getPool().query(
@@ -2488,7 +3078,7 @@ export async function createPoll(
 
   const poll = await getPoll(userId, pollId);
   if (!poll) throw new ChatError('The poll could not be read back.', 500);
-  return { poll, message };
+  return { poll, message, sent };
 }
 
 export async function getPoll(viewerId: string, pollId: string): Promise<WirePoll | null> {
@@ -2535,10 +3125,10 @@ export async function getPoll(viewerId: string, pollId: string): Promise<WirePol
 }
 
 export async function getPollByMessage(
-  viewerId: string, messageId: string,
+  viewerId: string, conversationId: string, messageId: string,
 ): Promise<WirePoll | null> {
   const { rows } = await getPool().query<{ id: string }>(
-    'SELECT id FROM polls WHERE message_id = $1', [messageId]);
+    'SELECT id FROM polls WHERE message_id = $1 AND conversation_id = $2', [messageId, conversationId]);
   return rows[0] ? getPoll(viewerId, rows[0].id) : null;
 }
 
@@ -2554,7 +3144,9 @@ export async function votePoll(
   const poll = rows[0];
   if (!poll) throw new ChatError('Poll not found.', 404);
 
-  await requireMembership(userId, poll.conversation_id);
+  const membership = await requireMembership(userId, poll.conversation_id);
+  // An archived conversation is read-only, its polls included (B-11).
+  if (membership.isArchived) throw new ChatError('This conversation is archived.', 409);
 
   if (poll.closed_at || (poll.closes_at && new Date(poll.closes_at).getTime() < Date.now())) {
     throw new ChatError('This poll has closed.', 409);
@@ -2569,13 +3161,27 @@ export async function votePoll(
   // Replaced rather than appended: changing your mind is the normal case, and a
   // vote endpoint that only ever adds turns a single-choice poll into a
   // multiple-choice one on the second click.
-  await getPool().query('DELETE FROM poll_votes WHERE poll_id = $1 AND user_id = $2',
-    [pollId, userId]);
-  for (const optionId of chosen) {
-    await getPool().query(
-      `INSERT INTO poll_votes (poll_id, user_id, option_id) VALUES ($1,$2,$3)
-       ON CONFLICT DO NOTHING`,
-      [pollId, userId, optionId]);
+  //
+  // One transaction, serialised per (poll, voter) (B-11 / CHAT-M5): two quick
+  // clicks on a single-choice poll used to interleave their delete and insert
+  // and leave two votes.
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`poll:${pollId}:${userId}`]);
+    await client.query('DELETE FROM poll_votes WHERE poll_id = $1 AND user_id = $2', [pollId, userId]);
+    if (chosen.length) {
+      await client.query(
+        `INSERT INTO poll_votes (poll_id, user_id, option_id)
+         SELECT $1, $2, unnest($3::text[]) ON CONFLICT DO NOTHING`,
+        [pollId, userId, chosen]);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
 
   const updated = await getPoll(userId, pollId);
@@ -3005,7 +3611,10 @@ export async function applyRetention(conversationId: string, messageId: string):
  * and its timing all survive, which is most of what the setting exists to
  * remove.
  */
-export async function sweepExpiredMessages(limit = 500): Promise<number> {
+export async function sweepExpiredMessages(
+  limit = 500,
+  onRemoved?: (conversationId: string, messageIds: string[]) => void | Promise<void>,
+): Promise<number> {
   const { rows } = await getPool().query<{ id: string; conversation_id: string }>(
     `SELECT id, conversation_id, created_at FROM messages
       WHERE expires_at IS NOT NULL AND expires_at <= now()
@@ -3018,15 +3627,34 @@ export async function sweepExpiredMessages(limit = 500): Promise<number> {
   // The child tables carry message_id without a foreign key — `messages` is
   // partitioned, so one is not possible — which means they are swept here
   // rather than by a cascade.
+  // Translations, link previews and nonces too (B-11 / CHAT-M6): a
+  // translation left behind is the message, still readable. A poll goes with
+  // its message (its votes cascade).
   for (const table of ['message_reactions', 'message_receipts', 'message_mentions',
-                       'message_saves', 'message_edits', 'message_attachments']) {
+                       'message_saves', 'message_edits', 'message_attachments',
+                       'message_translations', 'message_links', 'message_nonces', 'polls']) {
     await getPool().query(`DELETE FROM ${table} WHERE message_id = ANY($1::text[])`, [ids]);
   }
+  // The conversation ids let Postgres skip every other partition.
+  const conversations = [...new Set(rows.map((r) => r.conversation_id))];
   await getPool().query(
-    `DELETE FROM messages WHERE id = ANY($1::text[]) AND expires_at <= now()`, [ids]);
+    `DELETE FROM messages
+      WHERE conversation_id = ANY($2::text[]) AND id = ANY($1::text[]) AND expires_at <= now()`,
+    [ids, conversations]);
 
-  for (const conversationId of new Set(rows.map((r) => r.conversation_id))) {
+  for (const conversationId of conversations) {
+    // Badges stop counting what is gone.
+    await getPool().query(
+      `UPDATE conversation_members m
+          SET unread_count = ${unreadCountSql('m.last_read_seq')},
+              unread_mentions = ${unreadMentionsSql('m.last_read_seq')}
+        WHERE m.conversation_id = $1 AND m.left_at IS NULL
+          AND (m.unread_count > 0 OR m.unread_mentions > 0)`,
+      [conversationId],
+    );
     await refreshPreview(conversationId);
+    // Open screens drop them too, rather than showing them until a reload.
+    await onRemoved?.(conversationId, rows.filter((r) => r.conversation_id === conversationId).map((r) => r.id));
   }
   return ids.length;
 }
@@ -3115,6 +3743,36 @@ export async function redeemInvite(
   return getConversation(userId, invite.conversation_id);
 }
 
+/**
+ * The invite links still working for a conversation (B-12): who made each,
+ * how often it has been used and when it stops — so a link sent to the wrong
+ * group can be found and revoked rather than left open for its whole life.
+ */
+export async function listInvites(
+  actorId: string, conversationId: string,
+): Promise<Array<InviteLink & { createdByName: string | null; createdAt: string }>> {
+  const membership = await requireMembership(actorId, conversationId);
+  if (!canManage(membership.role)) throw new ChatError('You cannot see this conversation\'s invites.', 403);
+  const { rows } = await getPool().query<{
+    code: string; expires_at: string | null; max_uses: number | null; uses: number;
+    created_at: string; creator: string | null;
+  }>(
+    `SELECT i.code, i.expires_at, i.max_uses, i.uses, i.created_at, u.name AS creator
+       FROM conversation_invites i LEFT JOIN users u ON u.id = i.created_by
+      WHERE i.conversation_id = $1 AND i.revoked_at IS NULL
+        AND (i.expires_at IS NULL OR i.expires_at > now())
+        AND (i.max_uses IS NULL OR i.uses < i.max_uses)
+      ORDER BY i.created_at DESC`,
+    [conversationId],
+  );
+  return rows.map((r) => ({
+    code: r.code, conversationId, conversationName: membership.name ?? 'Conversation',
+    expiresAt: r.expires_at ? new Date(r.expires_at).toISOString() : null,
+    maxUses: r.max_uses, uses: r.uses, createdByName: r.creator,
+    createdAt: new Date(r.created_at).toISOString(),
+  }));
+}
+
 export async function revokeInvite(actorId: string, code: string): Promise<boolean> {
   const { rows } = await getPool().query<{ conversation_id: string }>(
     'SELECT conversation_id FROM conversation_invites WHERE code = $1', [code]);
@@ -3198,14 +3856,16 @@ export async function setStatus(
   userId: string,
   status: { emoji?: string | null; text?: string | null; expiresAt?: string | null },
 ): Promise<UserProfile> {
+  const emoji = status.emoji?.trim() || null;
+  if (emoji && !isEmoji(emoji)) throw new ChatError('A status emoji must be a single emoji.', 400);
   await getPool().query(
     `UPDATE users
         SET status_emoji = $2, status_text = $3, status_expires_at = $4, updated_at = now()
       WHERE id = $1`,
     [userId,
-     status.emoji?.slice(0, 16) || null,
+     emoji,
      status.text?.slice(0, 100) || null,
-     status.expiresAt ?? null],
+     parseClientDate(status.expiresAt, 'expiresAt', { future: true }) ?? null],
   );
   return getProfile(userId, userId);
 }

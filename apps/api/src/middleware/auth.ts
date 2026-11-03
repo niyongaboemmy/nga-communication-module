@@ -38,6 +38,9 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
 
   const pool = getPool();
+  // Everything below touches the database. A blip there is "try again", never
+  // a crash — and never a 401 that would sign the person out for nothing.
+  try {
   const { rows } = await pool.query<{
     role: Role; status: string; mis_status: string | null; mis_user_id: string; avatar_url: string | null; revoked_at: Date | null;
   }>(
@@ -55,7 +58,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     return res.status(401).json(fail('Your session is no longer valid. Please sign in again.'));
   }
   if (user.status !== 'active') {
-    return res.status(403).json(fail('This account has been suspended.'));
+    return res.status(403).json({ ...fail('This account has been suspended.'), code: 'ACCOUNT_SUSPENDED' });
   }
   // Deactivated (or deleted) in NGA MIS, the source of truth for who is active:
   // the session is over, as MIS's own /auth/verify now says.
@@ -85,5 +88,13 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   // off/shadow: no-op beyond recording the mode. enforce: swaps in the v2 set.
   await attachAccess(authed);
   (req as AuthenticatedRequest).user = authed;
+  } catch (err) {
+    const status = (err as { status?: unknown }).status;
+    if (typeof status === 'number' && status >= 400 && status < 600) {
+      return res.status(status).json(fail(err instanceof Error ? err.message : 'Request failed.'));
+    }
+    console.error('[api] auth check failed:', err);
+    return res.status(503).json(fail('The service is busy. Please try again in a moment.'));
+  }
   next();
 }

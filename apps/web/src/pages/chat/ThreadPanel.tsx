@@ -1,6 +1,10 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { X, Send, CornerDownRight } from 'lucide-react';
+import { X, Send, CornerDownRight, Paperclip, FileText } from 'lucide-react';
 import { Avatar, IconButton, Skeleton } from '../../components/ui';
+import { useNotify } from '../../context/NotificationContext';
+import { MessageAttachments } from './Attachments';
+import { useUploads } from './useUploads';
+import { formatBytes } from './data';
 import { useAuth } from '../../context/AuthContext';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useChat } from './ChatProvider';
@@ -53,6 +57,8 @@ const ThreadMessage: React.FC<{
           {m.body && <RichText text={m.body} names={{ ...names, ...m.mentionNames }} meId={user?.id} />}
           {m.editedAt && <span className="ml-1 text-[10px] opacity-70">(edited)</span>}
         </div>
+        {/* The root's photo is usually what the thread is about (B-08). */}
+        {m.attachments.length > 0 && <MessageAttachments attachments={m.attachments} onDark={false} />}
         {m.reactions.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1">
             {m.reactions.map((r) => (
@@ -70,16 +76,32 @@ const ThreadMessage: React.FC<{
   );
 };
 
+/**
+ * Half-written replies, per thread, for as long as the tab is open (B-08):
+ * closing the panel, or switching to another thread and back, keeps them.
+ */
+const threadDrafts = new Map<string, string>();
+
 export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversation }) => {
   const { can } = usePermissions();
   const { user } = useAuth();
   const {
-    threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
+    threadRootId, threadMessages, threadLoading, openThread, sendThreadReply, markThreadRead,
   } = useChat();
 
-  const [value, setValue] = useState('');
+  const { notify } = useNotify();
+  const [value, setValueState] = useState(() => (threadRootId ? threadDrafts.get(threadRootId) ?? '' : ''));
+  const setValue = (next: string) => {
+    setValueState(next);
+    if (!threadRootId) return;
+    if (next) threadDrafts.set(threadRootId, next); else threadDrafts.delete(threadRootId);
+  };
+  // Another thread opened in the same panel: show that thread's draft.
+  useEffect(() => { setValueState(threadRootId ? threadDrafts.get(threadRootId) ?? '' : ''); }, [threadRootId]);
   const [alsoSend, setAlsoSend] = useState(false);
   const [sending, setSending] = useState(false);
+  const tray = useUploads();
+  const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -87,13 +109,42 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [threadMessages.length]);
 
+  /*
+   * The thread is read once its newest reply is on screen with the tab
+   * visible — the same honest proxy the main view uses. Re-checked when the
+   * tab comes back, so a reply that arrived while away is not cleared unseen.
+   */
+  useEffect(() => {
+    if (!threadRootId || threadLoading || threadMessages.length === 0) return;
+    const newest = threadMessages.reduce(
+      (max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
+    const mark = () => { if (!document.hidden && newest > 0) markThreadRead(threadRootId, newest); };
+    mark();
+    document.addEventListener('visibilitychange', mark);
+    return () => document.removeEventListener('visibilitychange', mark);
+  }, [threadRootId, threadLoading, threadMessages, markThreadRead]);
+
   useEffect(() => {
     if (!threadRootId) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') openThread(null); };
-    document.addEventListener('keydown', onKey);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      // A viewer or menu above the thread owns this Escape.
+      if (document.querySelector('[role="dialog"][aria-modal="true"], [data-lightbox]')) return;
+      // Escape in a half-written reply steps out of the box; it does not throw
+      // the reply away with the panel. Handled first (capture) and stopped, or
+      // the chat layout's "Escape closes the side panel" ran as well.
+      if (document.activeElement === inputRef.current && inputRef.current?.value.trim()) {
+        e.stopPropagation();
+        inputRef.current.blur();
+        return;
+      }
+      e.stopPropagation();
+      openThread(null);
+    };
+    document.addEventListener('keydown', onKey, true);
     // A thread opened by clicking "3 replies" is opened in order to reply.
     if (!window.matchMedia('(pointer: coarse)').matches) inputRef.current?.focus();
-    return () => document.removeEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey, true);
   }, [threadRootId, openThread]);
 
   if (!threadRootId) return null;
@@ -107,18 +158,26 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
 
   const submit = async () => {
     const text = value.trim();
-    if (!text || sending) return;
+    if ((!text && tray.readyIds.length === 0) || sending || tray.busy) return;
     setSending(true);
     try {
-      await sendThreadReply(text, alsoSend);
+      await sendThreadReply(text, alsoSend, tray.readyIds);
       setValue('');
       setAlsoSend(false);
+      tray.clear();
+    } catch (err) {
+      // The reply stays in the box to try again (B-10: failures are said).
+      notify({ title: 'Your reply was not sent', body: err instanceof Error ? err.message : undefined, tone: 'error' });
     } finally {
       setSending(false);
     }
   };
 
-  const canReply = can('MESSAGE_SEND') && !conversation.isArchived;
+  // The same rule as the server's assertCanPost: an announcement channel's
+  // threads are for announcers too.
+  const canReply = can('MESSAGE_SEND') && !conversation.isArchived
+    && (conversation.type !== 'announcement' || can('CHANNEL_ANNOUNCE')
+        || conversation.myRole === 'owner' || conversation.myRole === 'admin');
 
   return (
     <aside
@@ -172,8 +231,39 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
       </div>
 
       {canReply && (
-        <div className="pb-safe shrink-0 border-t border-border-light p-2 dark:border-border-dark/30">
+        <div className="pb-safe shrink-0 border-t border-border-light p-2 dark:border-border-dark/30"
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files?.length) tray.add(e.dataTransfer.files); }}>
+          {tray.errors.map((message, i) => (
+            <p key={i} role="alert" className="mb-1 flex items-center justify-between gap-2 rounded-lg bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:bg-red-900/30 dark:text-red-300">
+              {message}
+              <button onClick={() => tray.dismissError(i)} aria-label="Dismiss"><X size={12} /></button>
+            </p>
+          ))}
+          {tray.uploads.length > 0 && (
+            <ul className="mb-1.5 flex flex-wrap gap-1.5" aria-label="Attachments">
+              {tray.uploads.map((u) => (
+                <li key={u.localId} className="flex items-center gap-1.5 rounded-lg border border-border-light bg-surface-light py-1 pl-1 pr-1.5 dark:border-border-dark/50 dark:bg-elevated-dark/60">
+                  {u.previewUrl && u.kind === 'image'
+                    ? <img src={u.previewUrl} alt="" className="h-7 w-7 rounded object-cover" />
+                    : <span className="grid h-7 w-7 place-items-center rounded bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-300"><FileText size={13} /></span>}
+                  <span className="max-w-[7rem]">
+                    <span className="block truncate text-[11px] font-medium text-text-primary-light dark:text-text-primary-dark">{u.name}</span>
+                    <span className="block text-[10px] text-text-secondary-light dark:text-text-secondary-dark">
+                      {u.state === 'failed' ? 'Failed' : u.state === 'ready' ? formatBytes(u.size) : `${Math.round(u.progress * 100)}%`}
+                    </span>
+                  </span>
+                  <IconButton label={`Remove ${u.name}`} size="sm" onClick={() => tray.remove(u.localId)}><X size={12} /></IconButton>
+                </li>
+              ))}
+            </ul>
+          )}
           <div className="flex items-end gap-1.5 rounded-xl border border-border-light bg-surface-light px-2 py-1.5 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20 dark:border-border-dark/50 dark:bg-elevated-dark/60">
+            <IconButton label="Attach files" size="sm" onClick={() => fileRef.current?.click()} className="mb-0.5">
+              <Paperclip size={15} />
+            </IconButton>
+            <input ref={fileRef} type="file" multiple hidden
+              onChange={(e) => { if (e.target.files) tray.add(e.target.files); e.target.value = ''; }} />
             <label className="sr-only" htmlFor="thread-composer">Reply in thread</label>
             <textarea
               id="thread-composer"
@@ -181,6 +271,10 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
               rows={1}
               value={value}
               onChange={(e) => setValue(e.target.value)}
+              onPaste={(e) => {
+                const files = [...e.clipboardData.files];
+                if (files.length) { e.preventDefault(); tray.add(files); }
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey && !window.matchMedia('(pointer: coarse)').matches) {
                   e.preventDefault();
@@ -192,7 +286,7 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
             />
             <button
               onClick={() => void submit()}
-              disabled={!value.trim() || sending}
+              disabled={(!value.trim() && tray.readyIds.length === 0) || sending || tray.busy}
               aria-label="Send reply"
               className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-blue-600 text-white transition-colors duration-150 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
             >

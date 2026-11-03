@@ -12,8 +12,8 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
 
   /* Light tokens stay byte-identical to the `colors` block in
      nga_central_mis/frontend/tailwind.config.js and nga-task-mentor/client's.
@@ -484,4 +484,10 @@ table td, table th, .tabular-nums { font-variant-numeric: tabular-nums; }
    while discrete segments plainly read as "one lit, working". */
 .tupo-meter-seg {
   transition: background-color 90ms linear, opacity 90ms linear;
+}
+
+/* The top progress bar while a screen's code loads (AppShell › ScreenLoading). */
+@keyframes tupo-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
 }

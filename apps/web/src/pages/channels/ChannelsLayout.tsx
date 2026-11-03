@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Hash, Loader2, Plus, Search, X, BookOpen } from 'lucide-react';
 import type { ConversationSummary, SubjectSummary } from '@tupo/shared';
-import { EmptyState } from '../../components/ui';
+import { EmptyState, Skeleton } from '../../components/ui';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { useChat } from '../chat/ChatProvider';
 import { MessageThread } from '../chat/MessageThread';
@@ -10,6 +10,7 @@ import { ThreadPanel } from '../chat/ThreadPanel';
 import { ContextPanel } from '../chat/ContextPanel';
 import { ChannelSettings } from '../chat/ChannelSettings';
 import { SearchPanel } from '../chat/SearchPanel';
+import { PinnedPanel } from '../chat/PinnedPanel';
 import * as chatApi from '../chat/api';
 import type { Member } from '../chat/types';
 
@@ -24,7 +25,7 @@ import type { Member } from '../chat/types';
  * shows only those with a subject.
  */
 
-type Panel = 'none' | 'thread' | 'details' | 'channel' | 'search';
+type Panel = 'none' | 'thread' | 'details' | 'channel' | 'search' | 'pinned';
 
 const HUES = [211, 262, 340, 24, 152, 190, 45, 288];
 const hueFor = (id: string) => HUES[[...id].reduce((n, ch) => n + ch.charCodeAt(0), 0) % HUES.length]!;
@@ -177,7 +178,17 @@ const ChannelSidebar: React.FC<{
       </div>
 
       <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-4" aria-label="Subjects and channels">
-        {subjects === null && !error && <div className="grid place-items-center py-10"><Loader2 className="animate-spin text-text-secondary-light" /></div>}
+        {subjects === null && !error && (
+          <div aria-busy="true" aria-label="Loading subjects" className="space-y-3 px-3 py-3">
+            {Array.from({ length: 4 }, (_, i) => (
+              <div key={i} className="space-y-2">
+                <Skeleton className="h-3.5 w-1/2" />
+                <Skeleton className="ml-3 h-3 w-2/3" />
+                <Skeleton className="ml-3 h-3 w-1/2" />
+              </div>
+            ))}
+          </div>
+        )}
         {error && subjects === null && (
           <p className="px-3 py-8 text-center text-sm text-text-secondary-light dark:text-text-secondary-dark">
             Couldn't load your subjects. <button onClick={onRetry} className="font-medium text-blue-600 hover:underline dark:text-blue-400">Try again</button>
@@ -352,6 +363,7 @@ const ChannelsWorkspace: React.FC = () => {
             contextOpen={panel === 'details'}
             onOpenSearch={() => setPanel('search')}
             onOpenChannelSettings={() => setPanel('channel')}
+            onOpenPinned={() => setPanel((p) => (p === 'pinned' ? 'none' : 'pinned'))}
           >
             <Composer conversation={active} onOpenPanel={(p) => { if (p === 'search') setPanel('search'); }} />
           </MessageThread>
@@ -373,6 +385,9 @@ const ChannelsWorkspace: React.FC = () => {
         <SidePanel onDismiss={closePanel}>
           <ContextPanel conversation={active} members={members} onClose={closePanel} onOpenSettings={() => setPanel('channel')} />
         </SidePanel>
+      )}
+      {panel === 'pinned' && active && (
+        <SidePanel onDismiss={closePanel}><PinnedPanel conversation={active} onClose={closePanel} /></SidePanel>
       )}
       {panel === 'search' && (
         <SidePanel wide onDismiss={closePanel}><SearchPanel onClose={closePanel} scopedConversationId={active?.id ?? null} /></SidePanel>

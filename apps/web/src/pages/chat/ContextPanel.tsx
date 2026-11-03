@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   X, Users, FileText, Info, Bell, BellOff, Star, LogOut, AtSign, Download, Image as ImageIcon,
-  UserPlus,
+  UserPlus, Link2,
 } from 'lucide-react';
 import { Avatar, IconButton, EmptyState, Skeleton } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -17,6 +17,7 @@ import { ConversationAvatar } from './ConversationAvatar';
 import { toPresence } from './types';
 import type { Conversation, Member } from './types';
 import { PRESENCE_REFRESH_MS } from '@tupo/shared';
+import { ProfileCard } from './ProfileCard';
 
 /**
  * The right-hand context panel (§15.1) — thread, members, files and details for
@@ -27,12 +28,13 @@ import { PRESENCE_REFRESH_MS } from '@tupo/shared';
  * ChatLayout differs, so the two never drift apart.
  */
 
-type Tab = 'about' | 'members' | 'files';
+type Tab = 'about' | 'members' | 'files' | 'links';
 
 const TABS: { id: Tab; label: string; icon: typeof Info }[] = [
   { id: 'about', label: 'About', icon: Info },
   { id: 'members', label: 'Members', icon: Users },
   { id: 'files', label: 'Files', icon: FileText },
+  { id: 'links', label: 'Links', icon: Link2 },
 ];
 
 export const ContextPanel: React.FC<{
@@ -42,6 +44,7 @@ export const ContextPanel: React.FC<{
   /** Opens the settings panel — where members are added and details edited. */
   onOpenSettings?: () => void;
 }> = ({ conversation: c, members, onClose, onOpenSettings }) => {
+  const [profileFor, setProfileFor] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('about');
   const {
     toggleStar, setNotificationLevel, jumpTo, setActiveId, refresh, conversationPresence,
@@ -148,14 +151,23 @@ export const ContextPanel: React.FC<{
     () => membersWithPresence.filter((m) => toPresence(m.presence) !== 'offline'),
     [membersWithPresence],
   );
-  const sortedMembers = useMemo(() => [...membersWithPresence].sort((a, b) => {
+  // Large channels (B-12): searchable, and drawn a hundred at a time.
+  const [memberQuery, setMemberQuery] = useState('');
+  const [memberLimit, setMemberLimit] = useState(100);
+  useEffect(() => { setMemberLimit(100); }, [c.id, memberQuery]);
+  const allSorted = useMemo(() => [...membersWithPresence].sort((a, b) => {
     const aOn = toPresence(a.presence) !== 'offline' ? 0 : 1;
     const bOn = toPresence(b.presence) !== 'offline' ? 0 : 1;
     return aOn - bOn || a.name.localeCompare(b.name);
   }), [membersWithPresence]);
+  const matchingMembers = useMemo(() => {
+    const q = memberQuery.trim().toLowerCase();
+    return q ? allSorted.filter((m) => m.name.toLowerCase().includes(q)) : allSorted;
+  }, [allSorted, memberQuery]);
+  const sortedMembers = matchingMembers.slice(0, memberLimit);
 
   const [files, setFiles] = useState<ConversationFile[] | null>(null);
-  const [filter, setFilter] = useState<'all' | 'image' | 'document'>('all');
+  const [filter, setFilter] = useState<'all' | 'media' | 'document'>('all');
 
   // Fetched when the tab is opened, not on mount: a channel's file history can
   // be long, and most people never open this tab at all.
@@ -168,6 +180,19 @@ export const ContextPanel: React.FC<{
       .catch(() => { if (!cancelled) setFiles([]); });
     return () => { cancelled = true; };
   }, [tab, c.id, filter]);
+
+  // Links tab (B-12): newest first, more on demand.
+  const [links, setLinks] = useState<chatApi.ConversationLink[] | null>(null);
+  const [linksNext, setLinksNext] = useState<string | null>(null);
+  useEffect(() => {
+    if (tab !== 'links') return;
+    let cancelled = false;
+    setLinks(null);
+    chatApi.listLinks(c.id)
+      .then((r) => { if (!cancelled) { setLinks(r.links); setLinksNext(r.nextBefore); } })
+      .catch(() => { if (!cancelled) { setLinks([]); setLinksNext(null); } });
+    return () => { cancelled = true; };
+  }, [tab, c.id]);
 
   return (
     <aside
@@ -332,13 +357,27 @@ export const ContextPanel: React.FC<{
                 {onlineMembers.length} of {members.length} online
               </p>
             )}
+            {members.length > 20 && (
+              <input value={memberQuery} onChange={(e) => setMemberQuery(e.target.value)} placeholder="Find a member"
+                aria-label="Find a member"
+                className="mb-2 w-full rounded-lg border border-border-light bg-surface-light px-2.5 py-1.5 text-sm text-text-primary-light outline-none focus:border-blue-500 dark:border-border-dark/50 dark:bg-elevated-dark/60 dark:text-text-primary-dark" />
+            )}
+            {memberQuery && matchingMembers.length === 0 && (
+              <p className="px-2 py-3 text-xs text-text-secondary-light dark:text-text-secondary-dark">Nobody here matches “{memberQuery.trim()}”.</p>
+            )}
             <ul className="space-y-0.5">
               {sortedMembers.map((m) => {
                 const presence = toPresence(m.presence);
                 const seen = presence === 'offline' ? lastSeenLabel(m.lastSeenAt) : null;
                 return (
-                  <li key={m.userId}>
-                    <button className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors duration-150 hover:bg-surface-light dark:hover:bg-surface-dark">
+                  <li key={m.userId} className="relative">
+                    {profileFor === m.userId && (
+                      <ProfileCard userId={m.userId} anchor="right" onClose={() => setProfileFor(null)} />
+                    )}
+                    <button
+                      onClick={() => setProfileFor((cur) => (cur === m.userId ? null : m.userId))}
+                      className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors duration-150 hover:bg-surface-light dark:hover:bg-surface-dark"
+                    >
                       <Avatar
                         name={m.name}
                         src={m.avatarUrl ?? undefined}
@@ -377,9 +416,54 @@ export const ContextPanel: React.FC<{
                 );
               })}
             </ul>
+            {matchingMembers.length > sortedMembers.length && (
+              <button onClick={() => setMemberLimit((n) => n + 200)}
+                className="mt-1 w-full rounded-lg py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/20">
+                Show {Math.min(200, matchingMembers.length - sortedMembers.length)} more of {matchingMembers.length}
+              </button>
+            )}
           </>
             )}
           </>
+        )}
+
+        {tab === 'links' && (
+          links === null ? (
+            <div className="space-y-2" aria-busy="true">
+              {Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-12 w-full rounded-lg" />)}
+            </div>
+          ) : links.length === 0 ? (
+            <EmptyState icon={<Link2 size={22} />} title="No links shared yet" hint="Links posted in this conversation will collect here." />
+          ) : (
+            <>
+              <ul className="space-y-1">
+                {links.map((l) => (
+                  <li key={`${l.messageId}-${l.url}`} className="group flex items-start gap-2.5 rounded-lg px-2 py-1.5 hover:bg-surface-light dark:hover:bg-surface-dark">
+                    <span className="grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-lg bg-slate-100 text-slate-500 dark:bg-card-dark/60 dark:text-slate-300">
+                      {l.imageUrl ? <img src={l.imageUrl} alt="" className="h-full w-full object-cover" loading="lazy" /> : <Link2 size={15} />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <a href={l.url} target="_blank" rel="noopener noreferrer"
+                        className="block truncate text-xs font-medium text-blue-600 hover:underline dark:text-blue-400">
+                        {l.title || l.url.replace(/^https?:\/\//, '')}
+                      </a>
+                      <button onClick={() => void jumpTo(l.messageId)}
+                        className="block truncate text-left text-[11px] text-text-secondary-light hover:underline dark:text-text-secondary-dark">
+                        {[l.siteName, l.senderName, shortStamp(l.at)].filter(Boolean).join(' · ')}
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {linksNext && (
+                <button
+                  onClick={() => void chatApi.listLinks(c.id, linksNext).then((r) => { setLinks((cur) => [...(cur ?? []), ...r.links]); setLinksNext(r.nextBefore); })}
+                  className="mt-1 w-full rounded-lg py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/20">
+                  Show older links
+                </button>
+              )}
+            </>
+          )
         )}
 
         {tab === 'files' && (
@@ -387,7 +471,7 @@ export const ContextPanel: React.FC<{
             <div className="mb-2 flex gap-1 rounded-lg border border-border-light p-1 dark:border-border-dark/50">
               {([
                 { id: 'all', label: 'All' },
-                { id: 'image', label: 'Media' },
+                { id: 'media', label: 'Media' },
                 { id: 'document', label: 'Documents' },
               ] as const).map(({ id, label }) => (
                 <button

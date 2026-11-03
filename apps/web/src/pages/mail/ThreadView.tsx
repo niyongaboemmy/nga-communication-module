@@ -1,9 +1,12 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { SafeHtml, sanitizeHtml, escapeText } from '../../components/SafeHtml';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, Reply, ReplyAll, Forward, Archive, Trash2, Star, Tag, MoreVertical,
   Paperclip, Download, ChevronDown, ChevronRight, BarChart3, Clock, X, Send, Edit3, Loader2,
-  Sparkles, ListChecks, CheckCircle2,
+  Sparkles, ListChecks, CheckCircle2, RotateCcw, Inbox, Mail as MailIcon, Printer,
 } from 'lucide-react';
+import { usePermissions } from '../../hooks/usePermissions';
+import { useNotify } from '../../context/NotificationContext';
 import type { MailAiThreadSummary } from '@tupo/shared';
 import { HandoffControl, handoffPrompt, importHandoff } from '../../components/Handoff';
 import { Avatar, IconButton, Spinner, EmptyState, Button } from '../../components/ui';
@@ -16,6 +19,7 @@ import { AiOffNote } from '../../components/AiOffNote';
 import { AiAnsweredBy } from '../../components/MyAi';
 import type { MailThreadView, MailMessageView, MailLabel, MailMessageKind } from '@tupo/shared';
 import type { ComposerSeed } from './Composer';
+import { isTypingTarget } from '../../lib/shortcuts';
 
 interface Props {
   threadId: string;
@@ -44,7 +48,7 @@ const AttachmentChip: React.FC<{ a: MailMessageView['attachments'][number] }> = 
 const InlineReply: React.FC<{
   message: MailMessageView; kind: MailMessageKind; initialBody?: string; onDone: () => void; onCancel: () => void;
 }> = ({ message, kind, initialBody, onDone, onCancel }) => {
-  const [body, setBody] = useState(initialBody ? `<p>${initialBody}</p>` : '');
+  const [body, setBody] = useState(initialBody ? `<p>${escapeText(initialBody)}</p>` : '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -82,6 +86,10 @@ const MessageCard: React.FC<{
   onReply: (k: MailMessageKind) => void; onDelivery: () => void; onEditDraft: () => void; onChanged: () => void;
 }> = ({ message, myUserId, expanded, onToggle, onReply, onDelivery, onEditDraft, onChanged }) => {
   const isMine = message.from.userId === myUserId;
+  // Reply and forward only for those who can send (C-12): the buttons used to
+  // show for everyone and fail on press.
+  const { can } = usePermissions();
+  const maySend = can('MAIL_SEND');
   const ds = message.deliverySummary;
 
   return (
@@ -91,6 +99,8 @@ const MessageCard: React.FC<{
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-semibold">{message.from.name}</span>
+            {/* The real address, always: a display name is chosen by the sender. */}
+            <span className="hidden truncate text-xs text-text-secondary-light sm:inline dark:text-text-secondary-dark">&lt;{message.from.address}&gt;</span>
             {message.isDraft && <span className="rounded bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">Draft</span>}
             {message.scheduledAt && !message.sentAt && <span className="inline-flex items-center gap-1 rounded bg-blue-100 px-1.5 text-[10px] text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"><Clock size={10} /> {when(message.scheduledAt)}</span>}
             <span className="ml-auto shrink-0 text-xs text-text-secondary-light dark:text-text-secondary-dark">{when(message.sentAt ?? message.createdAt)}</span>
@@ -108,9 +118,10 @@ const MessageCard: React.FC<{
 
       {expanded && (
         <div className="px-3 pb-3">
-          <div
+          <SafeHtml
             className="tupo-prose max-w-none border-t border-border-light pt-3 dark:border-border-dark/40"
-            dangerouslySetInnerHTML={{ __html: message.bodyHtml || '<p class="text-text-secondary-light">(no content)</p>' }}
+            html={message.bodyHtml}
+            fallback='<p class="text-text-secondary-light">(no content)</p>'
           />
 
           {message.attachments.length > 0 && (
@@ -126,7 +137,7 @@ const MessageCard: React.FC<{
               <Button size="sm" variant="secondary" onClick={() => api.cancelScheduled(message.id).then(onChanged)}>
                 <X size={14} /> Cancel scheduled send
               </Button>
-            ) : (
+            ) : !maySend ? null : (
               <>
                 <Button size="sm" variant="secondary" onClick={() => onReply('reply')}><Reply size={14} /> Reply</Button>
                 {(message.to.length + message.cc.length > 0) && (
@@ -151,6 +162,28 @@ const MessageCard: React.FC<{
 
 export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack, onChanged, onCompose }) => {
   const [thread, setThread] = useState<MailThreadView | null>(null);
+  const [starred, setStarred] = useState(false);
+  useEffect(() => { setStarred(thread?.starred === true); }, [thread]);
+  const { notify, confirm: confirmed } = useNotify();
+  /** A thread action: done says so, a failure says so (C-12); `leave` closes the thread. */
+  /*
+   * Optimistic (P-04): the star fills, or the thread closes back to the list,
+   * as soon as the button is pressed; the server is told after. A refusal is
+   * said out loud, `undo` puts a local change back, and the list's own
+   * refresh (onChanged) restores a thread that did not really move.
+   */
+  const act = async (fn: () => Promise<unknown>, leave: boolean, apply?: () => void, done?: string, undo?: () => void) => {
+    apply?.();
+    if (leave) onBack();
+    try {
+      await fn();
+      if (done) confirmed(done);
+    } catch (e) {
+      undo?.();
+      notify({ title: 'That did not work', body: e instanceof Error ? e.message : undefined, tone: 'error' });
+    }
+    onChanged();
+  };
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [replyTo, setReplyTo] = useState<{ id: string; kind: MailMessageKind; initialBody?: string } | null>(null);
@@ -196,14 +229,42 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
 
   useEffect(() => { load(); }, [load]);
 
+  // r / a / f: reply, reply all, forward to the newest message (U-10).
+  const replyKeys = useRef<(e: KeyboardEvent) => void>(() => {});
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => replyKeys.current(e);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const { can: canDo } = usePermissions();
+
   if (loading) return <div className="grid h-full place-items-center"><Spinner /></div>;
   if (!thread) return <EmptyState title="Thread not found" hint="It may have been deleted." />;
 
   const currentLabels = thread.labels;
+  const where = thread.folder ?? 'inbox';
+  // Optimistic (P-04): the tick changes at once. It used to wait, swallow a
+  // refusal, and reload the whole thread behind a full-screen spinner.
   const toggleLabel = async (id: string) => {
-    const next = currentLabels.includes(id) ? currentLabels.filter((x) => x !== id) : [...currentLabels, id];
-    await api.setThreadLabels(threadId, next).catch(() => {});
-    load(); onChanged();
+    const before = currentLabels;
+    const next = before.includes(id) ? before.filter((x) => x !== id) : [...before, id];
+    setThread((t) => (t ? { ...t, labels: next } : t));
+    try {
+      await api.setThreadLabels(threadId, next);
+    } catch (e) {
+      setThread((t) => (t ? { ...t, labels: before } : t));
+      notify({ title: 'Could not change the labels', body: e instanceof Error ? e.message : undefined, tone: 'error' });
+    }
+    onChanged();
+  };
+
+  replyKeys.current = (e: KeyboardEvent) => {
+    if (isTypingTarget(e) || replyTo || !canDo('MAIL_SEND')) return;
+    const kind = ({ r: 'reply', a: 'reply_all', f: 'forward' } as const)[e.key as 'r' | 'a' | 'f'];
+    const newest = thread.messages[thread.messages.length - 1];
+    if (!kind || !newest) return;
+    e.preventDefault();
+    doReply(newest.id, kind);
   };
 
   const doReply = (messageId: string, kind: MailMessageKind) => {
@@ -211,7 +272,7 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
     if (kind === 'forward') {
       onCompose({
         subject: forwardSubject(m.subject),
-        bodyHtml: `<p></p><p></p><blockquote>---------- Forwarded message ----------<br>From: ${m.from.name} &lt;${m.from.address}&gt;<br>Subject: ${m.subject}</blockquote>${m.bodyHtml}`,
+        bodyHtml: `<p></p><p></p><blockquote>---------- Forwarded message ----------<br>From: ${escapeText(m.from.name)} &lt;${escapeText(m.from.address)}&gt;<br>Subject: ${escapeText(m.subject)}</blockquote>${sanitizeHtml(m.bodyHtml)}`,
         kind: 'forward',
       });
       return;
@@ -249,12 +310,31 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
               <Sparkles size={16} />
             </span>
           )}
-          <IconButton label="Archive" size="sm" onClick={() => { api.moveThread(threadId, 'archive').then(() => { onBack(); onChanged(); }); }}><Archive size={16} /></IconButton>
-          <IconButton label="Delete" size="sm" onClick={() => { api.moveThread(threadId, 'trash').then(() => { onBack(); onChanged(); }); }}><Trash2 size={16} /></IconButton>
+          <IconButton label={starred ? 'Unstar' : 'Star'} size="sm" active={starred}
+            onClick={() => void act(() => api.starThread(threadId, !starred), false, () => setStarred(!starred), undefined, () => setStarred(starred))}>
+            <Star size={16} className={starred ? 'fill-amber-400 text-amber-400' : ''} />
+          </IconButton>
+          {where !== 'trash' && where !== 'spam' && (
+            <IconButton label="Mark unread" size="sm" onClick={() => void act(() => api.markThread(threadId, false), true, undefined, 'Marked unread')}><MailIcon size={16} /></IconButton>
+          )}
+          {where === 'trash' || where === 'spam' ? (
+            <>
+              <IconButton label={where === 'spam' ? 'Not spam' : 'Restore'} size="sm" onClick={() => void act(() => api.restoreThread(threadId), true, undefined, where === 'spam' ? 'Moved to the Inbox' : 'Restored')}><RotateCcw size={16} /></IconButton>
+              {where === 'trash' && <IconButton label="Delete forever" size="sm" onClick={() => void act(() => api.purgeThread(threadId), true, undefined, 'Deleted forever')}><Trash2 size={16} /></IconButton>}
+            </>
+          ) : (
+            <>
+              {where === 'archive'
+                ? <IconButton label="Move to Inbox" size="sm" onClick={() => void act(() => api.moveThread(threadId, 'inbox'), true, undefined, 'Moved to the Inbox')}><Inbox size={16} /></IconButton>
+                : where !== 'sent' && <IconButton label="Archive" size="sm" onClick={() => void act(() => api.moveThread(threadId, 'archive'), true, undefined, 'Archived')}><Archive size={16} /></IconButton>}
+              <IconButton label="Delete" size="sm" onClick={() => void act(() => api.moveThread(threadId, 'trash'), true, undefined, 'Moved to Trash')}><Trash2 size={16} /></IconButton>
+            </>
+          )}
+          <IconButton label="Print" size="sm" onClick={() => window.print()} className="hidden sm:grid"><Printer size={16} /></IconButton>
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+      <div className="mail-print min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         {aiAvailable && !summary && thread.messages.length > 0 && (
           // "Summarise in my AI": the thread holds other people's words (maybe pupils'), so consent applies.
           <HandoffControl
@@ -317,7 +397,15 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
               onToggle={() => setExpanded((s) => { const n = new Set(s); n.has(m.id) ? n.delete(m.id) : n.add(m.id); return n; })}
               onReply={(k) => doReply(m.id, k)}
               onDelivery={() => setDelivery(m.id)}
-              onEditDraft={() => onCompose({ draftId: m.id, subject: m.subject, bodyHtml: m.bodyHtml, threadId: m.threadId })}
+              // Everything the draft holds: recipients, attachments and what it
+              // replies to. Seeding only subject and body made the first
+              // autosave wipe the rest.
+              onEditDraft={() => onCompose({
+                draftId: m.id, subject: m.subject, bodyHtml: m.bodyHtml, threadId: m.threadId,
+                to: m.to.map(recip), cc: m.cc.map(recip), bcc: m.bcc.map(recip),
+                attachments: m.attachments.map((a) => ({ fileId: a.fileId, name: a.name, mime: a.mime, size: a.size })),
+                parentId: m.parentId ?? undefined, kind: m.kind,
+              })}
               onChanged={() => { load(); onChanged(); }}
             />
             {replyTo?.id === m.id && (

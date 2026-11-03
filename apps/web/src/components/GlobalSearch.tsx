@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { Avatar, Skeleton } from './ui';
 import { Highlighted } from './Highlighted';
+import { LoadError } from './LoadError';
 import { apiGet } from '../lib/api';
 import { usePermissions } from '../hooks/usePermissions';
 import { shortStamp } from '../pages/chat/data';
@@ -74,7 +75,10 @@ const DESTINATIONS: Array<{ label: string; hint: string; href: string; icon: typ
   { label: 'Meet', hint: 'Start or join a meeting', href: '/app/meet', icon: Video, perm: ['MEET_JOIN'] },
   { label: 'Meeting history', hint: 'Past meetings and their notes', href: '/app/meet/history', icon: Video, perm: ['MEET_JOIN'] },
   { label: 'Moderation queue', hint: 'Reported posts and comments', href: '/app/feed/moderation', icon: LayoutGrid, perm: ['MODERATION_QUEUE_VIEW'] },
+  { label: 'Bulk announcements', hint: 'Campaigns to distribution lists', href: '/app/mail/campaigns', icon: Mail, perm: ['MAIL_BULK_SEND', 'MAIL_APPROVE'] },
+  { label: 'Dashboard', hint: 'Who is active, and where', href: '/app/admin/dashboard', icon: LayoutGrid, perm: ['DASHBOARD_VIEW'] },
   { label: 'People', hint: 'Manage accounts', href: '/app/admin/users', icon: Users, perm: ['USERS_VIEW', 'USERS_MANAGE'] },
+  { label: 'Oversight', hint: 'Review conversations for safeguarding', href: '/app/admin/oversight', icon: FileText, perm: ['OVERSIGHT_VIEW_ALL', 'OVERSIGHT_MESSAGE_DELETE'] },
   { label: 'Roles and permissions', hint: 'Who can do what', href: '/app/admin/roles', icon: Users, perm: ['ROLES_PERMISSIONS_VIEW', 'ROLES_PERMISSIONS_MANAGE'] },
   { label: 'Audit log', hint: 'What happened, and who did it', href: '/app/admin/audit', icon: FileText, perm: ['AUDIT_VIEW'] },
   { label: 'System status', hint: 'Services and health', href: '/app/system', icon: FileText, perm: ['SYSTEM_HEALTH_VIEW'] },
@@ -101,6 +105,7 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   const [available, setAvailable] = useState<SectionKey[]>([]);
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const term = query.trim();
@@ -113,10 +118,15 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
 
   /* Debounced fetch. 220ms is long enough that typing a word is one request
      and short enough that the list feels like it is keeping up. */
+  // A failed search is an error, not "nothing matches" (F-06). Bumping
+  // `attempt` retries the same query.
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    if (!searching) { setData(null); setLoading(false); return; }
+    if (!searching) { setData(null); setLoading(false); setFailed(false); return; }
     let cancelled = false;
     setLoading(true);
+    setFailed(false);
     const t = setTimeout(() => {
       const params = new URLSearchParams({ q: term, limit: '5' });
       if (filter) params.set('types', filter);
@@ -130,11 +140,11 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
               .filter((k) => (r.data?.results?.[k] ?? []).length > 0));
           }
         })
-        .catch(() => { if (!cancelled) setData(null); })
+        .catch(() => { if (!cancelled) { setData(null); setFailed(true); } })
         .finally(() => { if (!cancelled) setLoading(false); });
     }, 220);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [term, filter, searching]);
+  }, [term, filter, searching, attempt]);
 
   /* One flat list across every section — the cursor does not care which
      section a row came from, because neither does the person pressing Down. */
@@ -171,6 +181,20 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
+      // A modal keeps focus inside it: Tab cycles through its own controls
+      // instead of wandering into the page underneath.
+      if (e.key === 'Tab' && dialogRef.current) {
+        const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>(
+          'input, button:not([tabindex="-1"]), [href], [tabindex]:not([tabindex="-1"])')]
+          .filter((el) => !el.hasAttribute('disabled') && el.offsetParent !== null);
+        if (focusable.length) {
+          const first = focusable[0]!, last = focusable[focusable.length - 1]!;
+          const inside = dialogRef.current.contains(document.activeElement);
+          if (!inside || (e.shiftKey && document.activeElement === first)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+          else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+        return;
+      }
       if (!rows.length) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -201,6 +225,7 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
 
   return createPortal(
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-[110] flex items-start justify-center p-4 pt-[10vh]"
       role="dialog"
       aria-modal="true"
@@ -314,6 +339,8 @@ export const GlobalSearch: React.FC<{ onClose: () => void }> = ({ onClose }) => 
             <div className="space-y-2 p-1" aria-busy="true">
               {Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-14 w-full rounded-xl" />)}
             </div>
+          ) : failed ? (
+            <LoadError compact what="results" onRetry={() => setAttempt((n) => n + 1)} />
           ) : rows.length === 0 ? (
             <div className="px-4 py-12 text-center">
               <p className="text-sm font-medium text-text-primary-light dark:text-text-primary-dark">

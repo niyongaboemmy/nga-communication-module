@@ -72,9 +72,14 @@ export const markRead = (id: string, seq: number) =>
     `/api/chat/conversations/${id}/read`, { seq },
   ).then((r) => r.data!);
 
+export const markReadLatest = (id: string) =>
+  apiPost<{ lastReadSeq: number; unread: number; unreadMentions: number }>(
+    `/api/chat/conversations/${id}/read`, { latest: true },
+  ).then((r) => r.data!);
+
 export const setPrefs = (
   id: string,
-  prefs: { isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null },
+  prefs: { isStarred?: boolean; notification?: NotificationLevel; mutedUntil?: string | null; hidden?: boolean },
 ) => apiPatch<{ conversation: ConversationSummary }>(
   `/api/chat/conversations/${id}/prefs`, prefs,
 ).then((r) => r.data!.conversation);
@@ -132,6 +137,32 @@ export const replyInThread = (
 ) => apiPost<{ message: WireMessage; root: WireMessage | null; duplicate: boolean }>(
   `/api/chat/conversations/${conversationId}/messages/${rootId}/replies`, payload,
 ).then((r) => r.data!);
+
+/** One thread in the Threads inbox. */
+export interface FollowedThread {
+  conversationId: string;
+  conversationName: string | null;
+  conversationType: string;
+  rootId: string;
+  rootPreview: string;
+  rootSenderName: string | null;
+  replyCount: number;
+  lastReplyAt: string | null;
+  unread: number;
+}
+
+export const listFollowedThreads = () =>
+  apiGet<{ threads: FollowedThread[] }>('/api/chat/threads').then((r) => r.data!.threads);
+
+export const markThreadRead = (conversationId: string, rootId: string, seq: number) =>
+  apiPost<{ lastReadSeq: number }>(
+    `/api/chat/conversations/${conversationId}/threads/${rootId}/read`, { seq },
+  ).then((r) => r.data!);
+
+export const markUnread = (id: string, fromSeq?: number) =>
+  apiPost<{ lastReadSeq: number; unread: number; unreadMentions: number }>(
+    `/api/chat/conversations/${id}/unread`, fromSeq ? { seq: fromSeq } : {},
+  ).then((r) => r.data!);
 
 export const listPinned = (conversationId: string) =>
   apiGet<{ messages: WireMessage[] }>(`/api/chat/conversations/${conversationId}/pins`)
@@ -212,9 +243,9 @@ export interface ScheduledMessage {
 export const listScheduled = () =>
   apiGet<{ scheduled: ScheduledMessage[] }>('/api/chat/scheduled').then((r) => r.data!.scheduled);
 
-export const scheduleMessage = (conversationId: string, body: string, sendAt: string) =>
+export const scheduleMessage = (conversationId: string, body: string, sendAt: string, attachments: string[] = []) =>
   apiPost<{ scheduled: ScheduledMessage }>(
-    `/api/chat/conversations/${conversationId}/scheduled`, { body, sendAt },
+    `/api/chat/conversations/${conversationId}/scheduled`, { body, sendAt, ...(attachments.length ? { attachments } : {}) },
   ).then((r) => r.data!.scheduled);
 
 export const cancelScheduled = (id: string) =>
@@ -347,6 +378,8 @@ export interface UserProfile {
   statusExpiresAt: string | null;
   presence: string;
   directConversationId: string | null;
+  /** You have blocked this person (B-05). */
+  blockedByMe?: boolean;
 }
 
 export const getProfile = (userId: string) =>
@@ -380,6 +413,50 @@ export const translateMessage = (
   `/api/chat/conversations/${conversationId}/messages/${messageId}/translate`, { language },
 ).then((r) => r.data!);
 
+/* ── Blocking and reporting (B-05) ─────────────────────────────────────── */
+
+export interface BlockedPerson { id: string; name: string; avatarUrl: string | null; blockedAt: string }
+export type ReportReason = 'harassment' | 'spam' | 'inappropriate' | 'safety' | 'other';
+export interface ChatReport {
+  id: string; reason: ReportReason; details: string | null; status: 'open' | 'resolved' | 'dismissed';
+  reporter: { id: string; name: string };
+  reported: { id: string; name: string; avatarUrl: string | null } | null;
+  conversationId: string | null; messageId: string | null; messageExcerpt: string | null;
+  createdAt: string; resolvedAt: string | null; resolutionNote: string | null; priorReports: number;
+}
+
+export const listBlocks = () =>
+  apiGet<{ blocks: BlockedPerson[] }>('/api/chat/blocks').then((r) => r.data!.blocks);
+export const blockUser = (userId: string) => apiPut<{ blocked: boolean }>(`/api/chat/blocks/${userId}`, {});
+export const unblockUser = (userId: string) => apiDelete<{ blocked: boolean }>(`/api/chat/blocks/${userId}`);
+export const submitReport = (input: {
+  userId?: string; conversationId?: string; messageId?: string;
+  reason: ReportReason; details?: string; alsoBlock?: boolean;
+}) => apiPost<{ reportId: string; duplicate: boolean }>('/api/chat/reports', input).then((r) => r.data!);
+export const listReports = (status: 'open' | 'resolved' | 'dismissed' | 'all' = 'open') =>
+  apiGet<{ reports: ChatReport[] }>(`/api/chat/reports?status=${status}`).then((r) => r.data!.reports);
+export const resolveReport = (id: string, status: 'resolved' | 'dismissed', note?: string) =>
+  apiPatch<{ status: string }>(`/api/chat/reports/${id}`, { status, note });
+
+/** Links shared in a conversation, newest first (B-12). */
+export interface ConversationLink {
+  url: string; title: string | null; siteName: string | null; imageUrl: string | null;
+  messageId: string; senderName: string | null; at: string;
+}
+export const listLinks = (conversationId: string, before?: string) =>
+  apiGet<{ links: ConversationLink[]; nextBefore: string | null }>(
+    `/api/chat/conversations/${conversationId}/links${before ? `?before=${encodeURIComponent(before)}` : ''}`,
+  ).then((r) => r.data!);
+
+/** Invite links still working (B-12). */
+export interface ActiveInvite {
+  code: string; expiresAt: string | null; maxUses: number | null; uses: number;
+  createdByName: string | null; createdAt: string;
+}
+export const listInvites = (conversationId: string) =>
+  apiGet<{ invites: ActiveInvite[] }>(`/api/chat/conversations/${conversationId}/invites`).then((r) => r.data!.invites);
+export const revokeInvite = (code: string) =>
+  apiDelete<{ revoked: boolean }>(`/api/chat/invites/${encodeURIComponent(code)}`);
 /* ── Subject channels (the Channels page) ──────────────────────────────── */
 
 export const listSubjects = () =>

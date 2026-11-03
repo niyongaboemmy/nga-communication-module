@@ -10,7 +10,15 @@ const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'migra
  * Forward-only migration runner. Each file runs once, inside a transaction,
  * and is recorded in _migrations — so `npm run db:migrate` is safe to run on
  * every deploy and a partially applied file never half-lands.
+ *
+ * The exception is a file whose first line is `-- migrate:no-transaction`, for
+ * statements Postgres refuses inside a transaction (CREATE INDEX
+ * CONCURRENTLY, which builds an index without locking writes). Its statements
+ * are separated by `-- statement-break` lines and run one by one; each must be
+ * safe to re-run (IF NOT EXISTS), since a failure part-way is not rolled back.
  */
+const NO_TRANSACTION = /^--\s*migrate:no-transaction/;
+const STATEMENT_BREAK = /^--\s*statement-break\s*$/m;
 async function migrate(): Promise<void> {
   const pool = getPool();
 
@@ -35,6 +43,22 @@ async function migrate(): Promise<void> {
     }
     const sql = await readFile(join(migrationsDir, file), 'utf8');
     const client = await pool.connect();
+    if (NO_TRANSACTION.test(sql)) {
+      try {
+        for (const statement of sql.split(STATEMENT_BREAK).map((x) => x.trim()).filter(Boolean)) {
+          await client.query(statement);
+        }
+        await client.query('INSERT INTO _migrations (name) VALUES ($1)', [file]);
+        console.log(`  ✅ ${file} (no transaction)`);
+        count++;
+        continue;
+      } catch (err) {
+        console.error(`  ❌ ${file} failed — statements before the failure stay applied; it is safe to re-run`);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
     try {
       await client.query('BEGIN');
       await client.query(sql);

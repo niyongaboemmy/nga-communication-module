@@ -98,23 +98,26 @@ const urlCache = new Map<string, string>();
  */
 export function useMediaUrl(
   fileId: string | null | undefined, enabled = true, retryKey = 0, onFail?: () => void,
+  /** The 640 px WebP instead of the original (P-05): tiles, avatars, covers. */
+  thumb = false,
 ): string | undefined {
-  const [url, setUrl] = useState<string | undefined>(fileId ? urlCache.get(fileId) : undefined);
+  const key = fileId ? `${fileId}${thumb ? '|thumb' : ''}` : undefined;
+  const [url, setUrl] = useState<string | undefined>(key ? urlCache.get(key) : undefined);
   const failRef = useRef(onFail);
   failRef.current = onFail;
   useEffect(() => {
-    if (!fileId || !enabled) return;
-    const cached = urlCache.get(fileId);
+    if (!fileId || !key || !enabled) return;
+    const cached = urlCache.get(key);
     if (cached) { setUrl(cached); return; }
     let alive = true;
-    inlineUrl(fileId)
-      .then((u) => { if (alive) { urlCache.set(fileId, u); setUrl(u); } })
+    inlineUrl(fileId, { thumb })
+      .then((u) => { if (alive) { urlCache.set(key, u); setUrl(u); } })
       // A refused ticket (403/404) must surface as "broken", not as a
       // skeleton that shimmers forever.
       .catch(() => { if (alive) failRef.current?.(); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileId, enabled, retryKey]);
+  }, [fileId, enabled, retryKey, thumb]);
   return url;
 }
 
@@ -123,6 +126,7 @@ export function useMediaUrl(
  *  instead of replaying one that just failed to load. */
 export function invalidateMediaUrl(fileId: string): void {
   urlCache.delete(fileId);
+  urlCache.delete(`${fileId}|thumb`);
   bustTicket(fileId);
 }
 
@@ -160,7 +164,7 @@ const MEDIA_MAX_RETRIES = 2;
  * a "tap to reload" state instead of a permanently broken image.
  */
 export function useResilientMediaUrl(
-  fileId: string | null | undefined, enabled = true,
+  fileId: string | null | undefined, enabled = true, thumb = false,
 ): { url: string | undefined; broken: boolean; onError: () => void; retry: () => void } {
   const [retryKey, setRetryKey] = useState(0);
   const [broken, setBroken] = useState(false);
@@ -175,7 +179,7 @@ export function useResilientMediaUrl(
     }
   }, [fileId, retryKey]);
 
-  const url = useMediaUrl(fileId, enabled, retryKey, onError);
+  const url = useMediaUrl(fileId, enabled, retryKey, onError, thumb);
 
   useEffect(() => { setBroken(false); setRetryKey(0); }, [fileId]);
 
@@ -208,9 +212,11 @@ export const FeedImage: React.FC<{
   /** Reports the decoded image's natural size, so callers can lay out by
    *  the real aspect ratio when the post carries no stored dimensions. */
   onDims?: (w: number, h: number) => void;
-}> = ({ fileId, alt = '', className = '', imgClassName = '', onClick, eager, onDims }) => {
+  /** Load the 640 px thumbnail (P-05); the lightbox leaves this off for the original. */
+  thumb?: boolean;
+}> = ({ fileId, alt = '', className = '', imgClassName = '', onClick, eager, onDims, thumb = false }) => {
   const [ref, inView] = useInViewport<HTMLDivElement>();
-  const { url, broken, onError, retry } = useResilientMediaUrl(fileId, eager || inView);
+  const { url, broken, onError, retry } = useResilientMediaUrl(fileId, eager || inView, thumb);
 
   return (
     // `relative` is only a default: a caller asking for `absolute` must win,
@@ -279,8 +285,23 @@ export const ReactionPicker: React.FC<{
   onPick: (r: FeedReaction) => void;
   onClose: () => void;
   align?: 'left' | 'center';
-}> = ({ onPick, onClose, align = 'left' }) => {
+  /** Opened from the keyboard (U-23): focus the first reaction so arrows work at once. */
+  autoFocus?: boolean;
+}> = ({ onPick, onClose, align = 'left', autoFocus = false }) => {
   const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (autoFocus) ref.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+  }, [autoFocus]);
+  // Arrows move between the reactions, as in any menu (U-23).
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return;
+    const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])];
+    const i = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1
+      : (i + (e.key === 'ArrowRight' ? 1 : -1) + items.length) % items.length;
+    items[next]?.focus();
+    e.preventDefault();
+  };
   useEffect(() => {
     const away = (e: PointerEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
     const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -293,6 +314,8 @@ export const ReactionPicker: React.FC<{
       ref={ref}
       role="menu"
       aria-label="Pick a reaction"
+      aria-orientation="horizontal"
+      onKeyDown={onKeyDown}
       onMouseLeave={onClose}
       className={`feed-picker-in absolute bottom-full z-40 mb-1.5 flex items-center gap-0.5 rounded-full bg-white px-1.5 py-1 shadow-[0_12px_28px_rgba(0,0,0,0.2),0_2px_4px_rgba(0,0,0,0.1)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10 ${
         align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'

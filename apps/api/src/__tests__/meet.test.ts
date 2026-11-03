@@ -935,9 +935,9 @@ describe('transcript access', () => {
     const meeting = (await request(app).post('/api/meet/instant')
       .set('Authorization', `Bearer ${host.token}`).send({}).expect(201)).body.data;
 
-    const res = await request(app).get(`/api/meet/${meeting.id}/transcript`)
-      .set('Authorization', `Bearer ${stranger.token}`).expect(403);
-    expect(res.body.message).toMatch(/not in this meeting/i);
+    // 404, not 403: to someone with no part in it the meeting does not exist.
+    await request(app).get(`/api/meet/${meeting.id}/transcript`)
+      .set('Authorization', `Bearer ${stranger.token}`).expect(404);
   });
 
   it('serves it, speaker-attributed, to someone who was', async () => {

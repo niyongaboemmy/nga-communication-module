@@ -12,6 +12,7 @@
  * HTML fragment (a drafted message body), which is sanitised here before it
  * can reach an inbox.
  */
+import { sanitizeMailHtml } from '@tupo/mail';
 import {
   generateStructuredContent, generatePlainText, isAnyProviderConfigured,
 } from './aiProviders/index.js';
@@ -49,35 +50,11 @@ async function ensureConfigured(who?: AiWho): Promise<void> {
  * HTML sanitiser — the model's drafted body must be inbox-safe
  * ────────────────────────────────────────────────────────────────────────── */
 
-const ALLOWED_TAGS = new Set([
-  'p', 'br', 'strong', 'b', 'em', 'i', 'u', 's', 'a', 'ul', 'ol', 'li',
-  'blockquote', 'h1', 'h2', 'h3', 'h4', 'hr', 'span', 'div', 'code', 'pre',
-]);
-
 export function sanitizeAiHtml(raw: string): string {
-  let html = raw.trim()
-    .replace(/^```(?:html)?\s*/i, '').replace(/```\s*$/i, '')
-    // Drop dangerous elements *with their content*, not just the tags.
-    .replace(/<(script|style|iframe|object|embed|noscript|template)[\s\S]*?<\/\1\s*>/gi, '')
-    .replace(/<\/?(?:html|body|head|meta|title|link|base)[^>]*>/gi, '')
-    .replace(/<!--[\s\S]*?-->/g, '');
-
-  // Drop any tag not on the allowlist; strip every attribute except href on <a>.
-  html = html.replace(/<(\/?)([a-z0-9]+)((?:[^>"']|"[^"]*"|'[^']*')*)>/gi, (_m, close, tag, attrs) => {
-    const t = String(tag).toLowerCase();
-    if (!ALLOWED_TAGS.has(t)) return '';
-    if (close) return `</${t}>`;
-    if (t === 'a') {
-      const href = /href\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
-      const url = (href?.[2] ?? href?.[3] ?? href?.[4] ?? '').trim();
-      return /^(https?:|mailto:)/i.test(url)
-        ? `<a href="${url.replace(/"/g, '%22')}" rel="noopener nofollow" target="_blank">`
-        : '<a>';
-    }
-    return `<${t}>`;
-  });
-
-  html = html.replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  // Model output goes through the same policy as everything else that becomes
+  // a mail body; only the code fences a model likes to add are peeled first.
+  const unfenced = raw.trim().replace(/^```(?:html)?\s*/i, '').replace(/```\s*$/i, '');
+  let html = sanitizeMailHtml(unfenced);
   if (!/<(p|ul|ol|h[1-4]|blockquote)\b/i.test(html)) html = `<p>${html.replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>')}</p>`;
   return html.trim();
 }

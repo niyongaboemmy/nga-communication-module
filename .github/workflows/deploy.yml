@@ -25,7 +25,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Nothing reaches production without the quality gate passing first.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   deploy:
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +85,9 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
             "$EC2_USER@$EC2_HOST" "bash -euo pipefail -s" <<REMOTE
             cd /opt/apps/nga-communication-module
+            # The release id on every error row and in the web bundle (R-05);
+            # \`pm2 reload --update-env\` below hands it to the services.
+            export TUPO_RELEASE=${GITHUB_SHA::8}
 
             npm ci --no-audit --no-fund
 
@@ -87,7 +95,20 @@ jobs:
             # TaskMentor, Tupo needs devDependencies at deploy time — vite
             # builds the web bundle and the migration runner is tsx. Pruning
             # here is what breaks \`npm run db:migrate\` on the MIS box.
+            # R-06: keep what is running now, so scripts/release.sh rollback
+            # can put it back with one command if this release misbehaves.
+            bash scripts/release.sh snapshot
+
             npm run build
+
+            # Tabs opened before this deploy still load the chunks they know.
+            bash scripts/release.sh keep-assets
+
+            # A database backup before every migration run (newest 10 kept).
+            mkdir -p "\$HOME/tupo-backups"
+            PGPASSWORD="\$(cat "\$HOME/.tupo/db_password")" pg_dump -h 127.0.0.1 -U tupo -Fc tupo_prod \\
+              -f "\$HOME/tupo-backups/tupo_prod-\$(date -u +%Y%m%dT%H%M%SZ)-deploy.dump"
+            ls -1t "\$HOME"/tupo-backups/*-deploy.dump | tail -n +11 | xargs -r rm -f --
 
             # Migrations are idempotent (each file is recorded once applied),
             # so running them on every deploy is safe and means a schema change
@@ -106,6 +127,10 @@ jobs:
             else
               echo "skipping db:seed (run workflow_dispatch with seed=true to run it)"
             fi
+
+            # One-time and self-healing host setup (push keys, alert recipients,
+            # Redis ceiling, mail backfill, API cluster mode). Idempotent.
+            bash scripts/deploy-setup.sh
 
             # reload, not restart: pm2 replaces the processes without dropping
             # the listening socket, so an in-flight request is not killed.

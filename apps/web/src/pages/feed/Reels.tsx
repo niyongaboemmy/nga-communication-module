@@ -715,7 +715,10 @@ const ReelComposer: React.FC<{ onClose: () => void; onPosted: (reel: FeedReelVie
     if (!media?.fileId || !canSubmit) return;
     setBusy(true); setError(null);
     try {
-      const mediaItem: FeedMediaItem = { fileId: media.fileId, kind: 'video' };
+      const mediaItem: FeedMediaItem = {
+        fileId: media.fileId, kind: 'video',
+        durationSeconds: media.durationMs ? Math.round(media.durationMs / 1000) : null,
+      };
       const { reel } = await api.createReel({ caption: caption.trim(), media: mediaItem, audience });
       onPosted(reel);
     } catch (e) {

@@ -9,12 +9,14 @@
  *   npm run verify:mail:ui        (needs `npm run dev` running)
  */
 import { chromium } from 'playwright';
+import { prepareBrowser } from './lib/uiHarness.mjs';
 import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const env = Object.fromEntries(readFileSync(`${ROOT}/apps/api/.env`, 'utf8').split('\n')
@@ -46,7 +48,7 @@ const seed = (u) => ({
   tupo_role_permissions: JSON.stringify({ keys: u.perms, name: 'Staff' }),
 });
 
-const cleanup = () => pool.query(`DELETE FROM users WHERE id LIKE 'mailui-%'`);
+const cleanup = () => purgeUsersLike(pool, 'mailui-');
 
 let browser;
 try {
@@ -55,6 +57,8 @@ try {
   const ben = await makeUser('UI Ben');
 
   browser = await chromium.launch();
+
+  prepareBrowser(browser);
 
   // ── desktop: compose + send ────────────────────────────────────────────
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
@@ -89,9 +93,14 @@ try {
   check('bold toolbar button applies <strong>', hasBold > 0);
 
   // ── AI assistant (Staff holds MAIL_AI_USE) ──────────────────────────────
+  // Shown only when AI is available: a provider configured AND the school's
+  // switch on in NGA MIS (off by default). Off, the button must not appear.
+  const aiState = await (await fetch('http://localhost:5190/api/mail/ai/status', { headers: { authorization: `Bearer ${ada.token}` } })).json().catch(() => ({}));
+  const aiAvailable = aiState?.data?.available === true;
   const aiBtn = page.getByRole('button', { name: 'AI', exact: true });
-  const aiVisible = await aiBtn.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
-  check('AI assistant button is shown in the composer', aiVisible);
+  const aiVisible = await aiBtn.waitFor({ state: 'visible', timeout: aiAvailable ? 8000 : 2000 }).then(() => true).catch(() => false);
+  check(aiAvailable ? 'AI assistant button is shown in the composer' : 'AI is off for the school, so the composer shows no AI button',
+    aiVisible === aiAvailable, aiState?.data?.policy?.reason ?? '');
   if (aiVisible) {
     await aiBtn.click();
     await page.getByText('Rewrite what I have').waitFor({ state: 'visible', timeout: 4000 }).catch(() => {});

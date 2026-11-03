@@ -11,11 +11,21 @@ import type {
   CreatePagePayload, FeedPageDetail, FeedPageEditor, FeedPageFollower, FeedPageKind, FeedPageLink, FeedPageSummary,
   UpdatePageEditorPayload, UpdatePagePayload,
 } from '@tupo/shared';
-import { FEED_LIMITS, FEED_PAGE_KINDS, FEED_AUDIENCES } from '@tupo/shared';
+import { FEED_LIMITS, FEED_PAGE_KINDS, FEED_AUDIENCES, FEED_ACCENT_RE } from '@tupo/shared';
+import { assertOwnImage } from './posts.js';
 import { FeedError } from './errors.js';
 import {
-  type FeedActor, type RoleLevel, can, canTargetAudience, slugify, visibleAudiences,
+  type FeedActor, type RoleLevel, can, canTargetAudience, slugify, visibleAudiences, lockRow,
 } from './common.js';
+
+/** A page accent goes straight into inline styles: hex colours only (FEED-V4). */
+function safeAccent(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !FEED_ACCENT_RE.test(value)) {
+    throw new FeedError('The accent must be a colour like #2563eb.', 400);
+  }
+  return value.toLowerCase();
+}
 
 export interface PageRow {
   id: string;
@@ -193,8 +203,9 @@ export async function createPage(actor: FeedActor, payload: CreatePagePayload): 
     await client.query(
       `INSERT INTO feed_pages (id, slug, name, bio, links, kind, audience, accent, avatar_file_id, cover_file_id, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [id, slug, name, bio, JSON.stringify(links), kind, audience, payload.accent ?? '#2563eb',
-       payload.avatarFileId ?? null, payload.coverFileId ?? null, actor.id],
+      [id, slug, name, bio, JSON.stringify(links), kind, audience, safeAccent(payload.accent) ?? '#2563eb',
+       await assertOwnImage(client, payload.avatarFileId, actor.id),
+       await assertOwnImage(client, payload.coverFileId, actor.id), actor.id],
     );
     await client.query(
       `INSERT INTO feed_page_editors (page_id, user_id, role, added_by) VALUES ($1,$2,'owner',$2)`,
@@ -304,9 +315,13 @@ export async function updatePage(
   }
   if (patch.bio !== undefined) set('bio', String(patch.bio).slice(0, FEED_LIMITS.PAGE_BIO_MAX));
   if (patch.links !== undefined) set('links', JSON.stringify(normalizeLinks(patch.links)));
-  if (patch.accent !== undefined) set('accent', patch.accent);
-  if (patch.avatarFileId !== undefined) set('avatar_file_id', patch.avatarFileId);
-  if (patch.coverFileId !== undefined) set('cover_file_id', patch.coverFileId);
+  if (patch.accent !== undefined) set('accent', safeAccent(patch.accent) ?? '#2563eb');
+  if (patch.avatarFileId !== undefined) {
+    set('avatar_file_id', await assertOwnImage(getPool(), patch.avatarFileId, actor.id, row.avatar_file_id));
+  }
+  if (patch.coverFileId !== undefined) {
+    set('cover_file_id', await assertOwnImage(getPool(), patch.coverFileId, actor.id, row.cover_file_id));
+  }
   if (patch.kind !== undefined && (FEED_PAGE_KINDS as readonly string[]).includes(patch.kind)) set('kind', patch.kind);
   if (patch.audience !== undefined && (FEED_AUDIENCES as readonly string[]).includes(patch.audience)) set('audience', patch.audience);
   if (patch.verified !== undefined) set('verified', patch.verified);
@@ -341,6 +356,7 @@ export async function follow(actor: FeedActor, pageId: string, notify = true): P
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_pages', row.id);
     const { rowCount } = await client.query(
       `INSERT INTO feed_page_followers (page_id, user_id, notify, source)
        VALUES ($1,$2,$3,'manual') ON CONFLICT (page_id, user_id) DO UPDATE SET notify = EXCLUDED.notify`,
@@ -455,6 +471,16 @@ export async function updateEditor(
 }
 
 export async function removeEditor(actor: FeedActor, pageId: string, userId: string): Promise<void> {
+  // Leaving a page you help run needs no owner's say (D-10); an owner still
+  // has to leave another owner behind.
+  if (userId === actor.id) {
+    const { rows: mine } = await getPool().query<{ role: string }>(
+      'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [pageId, actor.id]);
+    if (!mine[0]) return;
+    if (mine[0].role === 'owner') await assertAnotherOwner(pageId, actor.id);
+    await getPool().query('DELETE FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [pageId, actor.id]);
+    return;
+  }
   const page = await assertPageOwner(actor, pageId);
   const { rows } = await getPool().query<{ role: string }>(
     'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [page.id, userId],
@@ -472,18 +498,26 @@ export async function removeEditor(actor: FeedActor, pageId: string, userId: str
  */
 export async function ensureMandatoryFollows(userId: string, roleLevel: RoleLevel): Promise<void> {
   const audiences = visibleAudiences(roleLevel);
-  await getPool().query(
+  // Writes only when someone is missing a follow, and recounts only those
+  // pages (D-11 / FEED-B14): this ran an UPDATE over every mandatory page on
+  // every feed load, contending on the hottest rows in the feed.
+  const { rows: added } = await getPool().query<{ page_id: string }>(
     `INSERT INTO feed_page_followers (page_id, user_id, notify, source)
        SELECT p.id, $1, true, 'mandatory'
          FROM feed_pages p
         WHERE p.deleted_at IS NULL AND p.mandatory AND p.audience = ANY($2)
-     ON CONFLICT (page_id, user_id) DO NOTHING`,
+          AND NOT EXISTS (SELECT 1 FROM feed_page_followers f WHERE f.page_id = p.id AND f.user_id = $1)
+     ON CONFLICT (page_id, user_id) DO NOTHING
+     RETURNING page_id`,
     [userId, audiences],
   );
-  await getPool().query(
-    `UPDATE feed_pages p SET follower_count = (SELECT count(*) FROM feed_page_followers f WHERE f.page_id = p.id)
-      WHERE p.mandatory AND p.deleted_at IS NULL`,
-  );
+  if (added.length) {
+    await getPool().query(
+      `UPDATE feed_pages p SET follower_count = (SELECT count(*) FROM feed_page_followers f WHERE f.page_id = p.id)
+        WHERE p.id = ANY($1::text[])`,
+      [added.map((a) => a.page_id)],
+    );
+  }
 }
 
 export async function followedPageIds(userId: string): Promise<string[]> {

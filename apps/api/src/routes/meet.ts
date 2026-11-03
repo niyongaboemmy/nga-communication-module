@@ -12,7 +12,7 @@ import {
   startRecordingSchema, attachRecordingSchema, meetingFolder, MAX_RECORDING_BYTES,
   isSfuTransport, capacityFor, SFU_MAX_TRACKS_PER_CALL, parseSfuTrackName,
 } from '@tupo/shared';
-import type { MeetJoinTicket, MeetRole, MeetTransport } from '@tupo/shared';
+import type { MeetCategory, MeetJoinTicket, MeetRole, MeetSettings, MeetTransport } from '@tupo/shared';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 import {
   meetAuth, denyGuests, isGuestRequest, issueGuestToken, newGuestTokenId,
@@ -33,9 +33,11 @@ import {
 import { tupoAiState } from '../services/aiPolicy.js';
 import { aiWhoOf, isPersonalAiError, personalAiBody, wantsHandoff } from '../services/myAiGateway.js';
 import { handoffResponse } from '../services/externalAi.js';
-import { enqueueMeetWrapUp } from '../services/queue.js';
+import { endMeetingEverywhere } from '../services/meetLifecycle.js';
+import { clearNotificationsAbout } from '../services/notificationSync.js';
 import { audit } from '../services/userService.js';
 import { activity } from '../activity/relay.js';
+import { slidingHit } from '../middleware/rateLimit.js';
 
 /**
  * Meet's REST surface (SRS §6.5).
@@ -59,20 +61,15 @@ const router = Router();
  * admitted from the lobby by a host. See middleware/meetAuth.ts.
  */
 
-/** Per-IP throttle. This route writes rows and is reachable by anyone. */
-const guestAttempts = new Map<string, { count: number; resetAt: number }>();
-const GUEST_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * Per-IP throttle. This route writes rows and is reachable by anyone. Counted
+ * in Redis so two API instances share one budget (R-01).
+ */
+const GUEST_WINDOW_SEC = 10 * 60;
 const GUEST_MAX_PER_WINDOW = 10;
 
-function guestRateLimited(ip: string): boolean {
-  const now = Date.now();
-  const entry = guestAttempts.get(ip);
-  if (!entry || entry.resetAt < now) {
-    guestAttempts.set(ip, { count: 1, resetAt: now + GUEST_WINDOW_MS });
-    return false;
-  }
-  entry.count += 1;
-  return entry.count > GUEST_MAX_PER_WINDOW;
+async function guestRateLimited(ip: string): Promise<boolean> {
+  return (await slidingHit('meet-guest-join', `ip:${ip}`, GUEST_WINDOW_SEC)) > GUEST_MAX_PER_WINDOW;
 }
 
 /** What a guest is told about a meeting *before* they commit to joining it. */
@@ -102,7 +99,7 @@ router.get('/:idOrCode/public', async (req: Request, res: Response) => {
 });
 
 router.post('/:idOrCode/guest', async (req: Request, res: Response) => {
-  if (guestRateLimited(req.ip ?? 'unknown')) {
+  if (await guestRateLimited(req.ip ?? 'unknown')) {
     return res.status(429).json(fail('Too many attempts. Please wait a few minutes.'));
   }
 
@@ -183,7 +180,7 @@ router.post('/:idOrCode/guest', async (req: Request, res: Response) => {
       name: parsed.data.displayName,
       tokenId,
     }),
-    iceServers: await getIceServers(),
+    iceServers: await getIceServers(`guest:${participant.id}`),
   };
   return res.status(201).json(ok(ticket));
 });
@@ -214,6 +211,60 @@ async function resolveMeetRole(req: Request, m: meet.MeetingRow): Promise<MeetRo
   // able to end a room whose host has left the building.
   if (user.permissions.has('MEET_HOST_CONTROLS') && user.roleLevel === 'ADMIN') return 'cohost';
   return rows[0]?.role ?? 'attendee';
+}
+
+/**
+ * How much of *this* meeting the caller may see (E-01).
+ *
+ *   insider — host and co-hosts, invitees, members of the conversation it
+ *             was started from, anyone who actually attended, and a platform
+ *             administrator taking over: details, attendance, transcript,
+ *             AI notes, recordings.
+ *   viewer  — someone the admission policy would let in (to knock or join):
+ *             the meeting's details and calendar file, nothing it produced.
+ *   none    — everyone else, who gets the same 404 as a meeting that does
+ *             not exist, so ids and codes cannot be probed.
+ *
+ * A guest ticket is a viewer of its own meeting and of nothing else.
+ */
+type MeetAccess = 'none' | 'viewer' | 'insider';
+async function meetingAccess(req: Request, m: meet.MeetingRow): Promise<MeetAccess> {
+  const guest = (req as MeetRequest).guest;
+  if (guest) return guest.meetingId === m.id ? 'viewer' : 'none';
+  const user = actor(req);
+  if (m.host_id === user.id) return 'insider';
+  const { rows } = await getPool().query<{
+    role: MeetRole | null; attended: boolean; invited: boolean; member: boolean;
+  }>(
+    `SELECT
+       (SELECT role FROM meeting_participants WHERE meeting_id = $1 AND user_id = $2
+         ORDER BY created_at DESC LIMIT 1) AS role,
+       EXISTS (SELECT 1 FROM meeting_participants WHERE meeting_id = $1 AND user_id = $2
+                AND state IN ('active', 'left')) AS attended,
+       EXISTS (SELECT 1 FROM meeting_invites WHERE meeting_id = $1 AND user_id = $2) AS invited,
+       ($3::text IS NOT NULL AND EXISTS (
+          SELECT 1 FROM conversation_members WHERE conversation_id = $3 AND user_id = $2 AND left_at IS NULL)) AS member`,
+    [m.id, user.id, m.conversation_id],
+  );
+  const r = rows[0]!;
+  if (r.attended || r.invited || r.member || (r.role && meetRoleAtLeast(r.role, 'cohost'))) return 'insider';
+  if (user.permissions.has('MEET_HOST_CONTROLS') && user.roleLevel === 'ADMIN') return 'insider';
+  const policy = parseMeetSettings(m.settings).admissionPolicy;
+  if (policy === 'authenticated' || policy === 'public') return 'viewer';
+  if (policy === 'permission' && can(req, 'MEET_JOIN')) return 'viewer';
+  return 'none';
+}
+
+/** 404 unless the caller has at least `level` on this meeting. */
+async function requireMeetingAccess(
+  req: Request, res: Response, m: meet.MeetingRow, level: 'viewer' | 'insider',
+): Promise<MeetAccess | null> {
+  const access = await meetingAccess(req, m);
+  if (access === 'none' || (level === 'insider' && access !== 'insider')) {
+    res.status(404).json(fail('Meeting not found.'));
+    return null;
+  }
+  return access;
 }
 
 async function requireHost(req: Request, res: Response, m: meet.MeetingRow): Promise<boolean> {
@@ -345,8 +396,10 @@ router.get('/capabilities', async (_req: Request, res: Response) => {
  * ICE servers. Behind auth on purpose — TURN relay bandwidth is metered, and an
  * open endpoint minting Cloudflare credentials is an open relay.
  */
-router.get('/ice', async (_req: Request, res: Response) => {
-  res.json(ok({ iceServers: await getIceServers() }));
+router.get('/ice', async (req: Request, res: Response) => {
+  const u = (req as AuthenticatedRequest).user;
+  const guest = (req as AuthenticatedRequest & { guest?: { participantId: string } }).guest;
+  res.json(ok({ iceServers: await getIceServers(guest ? `guest:${guest.participantId}` : u!.id) }));
 });
 
 /**
@@ -461,6 +514,43 @@ router.get('/', denyGuests, async (req: Request, res: Response) => {
   res.json(ok(rows.map((r) => ({ ...r, settings: parseMeetSettings(r.settings) })), { total: rows.length }));
 });
 
+/**
+ * Feature switches need the matching permission wherever they are flipped —
+ * create, instant, PATCH or the settings endpoint (MEET-SEC8). A co-host
+ * without MEET_TRANSCRIBE cannot switch transcription on for a class.
+ */
+function featureRefusal(req: Request, s: Partial<MeetSettings> | undefined): string | null {
+  if (!s) return null;
+  if ((s.recordingEnabled || s.autoRecord) && !can(req, 'MEET_RECORD')) return 'You do not have permission to record meetings.';
+  if (s.aiAssistantEnabled && !can(req, 'MEET_AI_USE')) return 'You do not have permission to use the AI notetaker.';
+  if (s.transcriptionEnabled && !can(req, 'MEET_TRANSCRIBE')) return 'You do not have permission to enable transcription.';
+  return null;
+}
+
+/**
+ * Who a new meeting is for (MEET-SEC4). The composer picks a category
+ * (private / signed in / public), which is the admission policy by another
+ * name; a meeting started from a conversation defaults to that conversation's
+ * members plus invitees, and its creator must be a member of it.
+ */
+async function admissionFor(
+  req: Request, settings: Partial<MeetSettings> | undefined, conversationId: unknown,
+): Promise<{ settings: Partial<MeetSettings>; error?: { status: number; message: string } }> {
+  const out: Partial<MeetSettings> = { ...(settings ?? {}) };
+  const category = (req.body?.settings as { category?: unknown } | undefined)?.category;
+  if (typeof category === 'string' && (MEET_CATEGORIES as readonly string[]).includes(category)) {
+    out.admissionPolicy = CATEGORY_TO_POLICY[category as MeetCategory];
+  }
+  if (conversationId !== undefined && conversationId !== null && conversationId !== '') {
+    if (typeof conversationId !== 'string') return { settings: out, error: { status: 400, message: 'Invalid conversation.' } };
+    const { rows } = await getPool().query(
+      'SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2', [conversationId, actor(req).id]);
+    if (!rows.length) return { settings: out, error: { status: 403, message: 'You are not in that conversation.' } };
+    out.admissionPolicy ??= 'invited';
+  }
+  return { settings: out };
+}
+
 /** Schedule a meeting. */
 router.post('/', denyGuests, authorizePermission('MEET_SCHEDULE', 'MEET_START'), async (req: Request, res: Response) => {
   const parsed = createMeetingSchema.safeParse(req.body ?? {});
@@ -474,15 +564,11 @@ router.post('/', denyGuests, authorizePermission('MEET_SCHEDULE', 'MEET_START'),
   if (input.scheduledStart && !can(req, 'MEET_SCHEDULE')) {
     return res.status(403).json(fail('You do not have permission to schedule meetings.'));
   }
-  if (input.settings?.recordingEnabled && !can(req, 'MEET_RECORD')) {
-    return res.status(403).json(fail('You do not have permission to record meetings.'));
-  }
-  if (input.settings?.aiAssistantEnabled && !can(req, 'MEET_AI_USE')) {
-    return res.status(403).json(fail('You do not have permission to use the AI notetaker.'));
-  }
-  if (input.settings?.transcriptionEnabled && !can(req, 'MEET_TRANSCRIBE')) {
-    return res.status(403).json(fail('You do not have permission to enable transcription.'));
-  }
+  const refused = featureRefusal(req, input.settings);
+  if (refused) return res.status(403).json(fail(refused));
+  const admission = await admissionFor(req, input.settings, input.conversationId);
+  if (admission.error) return res.status(admission.error.status).json(fail(admission.error.message));
+  input.settings = admission.settings;
 
   try {
     const meeting = await meet.createMeeting({
@@ -510,18 +596,25 @@ router.post('/', denyGuests, authorizePermission('MEET_SCHEDULE', 'MEET_START'),
 
 /** Instant meeting — the "Start a call" button. */
 router.post('/instant', denyGuests, authorizePermission('MEET_START'), async (req: Request, res: Response) => {
-  const { title, conversationId, settings } = req.body ?? {};
+  const { title, conversationId } = req.body ?? {};
+  const parsedSettings = meetSettingsSchema.partial().safeParse(req.body?.settings ?? {});
+  if (!parsedSettings.success) return res.status(400).json(fail('Invalid meeting settings.'));
+  const refused = featureRefusal(req, parsedSettings.data);
+  if (refused) return res.status(403).json(fail(refused));
+  const admission = await admissionFor(req, parsedSettings.data, conversationId);
+  if (admission.error) return res.status(admission.error.status).json(fail(admission.error.message));
   const meeting = await meet.createMeeting({
     hostId: actor(req).id,
-    title: String(title ?? '').trim() || defaultMeetingName(new Date(), 'instant'),
-    conversationId,
+    title: String(title ?? '').trim().slice(0, 200) || defaultMeetingName(new Date(), 'instant'),
+    conversationId: typeof conversationId === 'string' && conversationId ? conversationId : undefined,
     settings: {
       // An instant call has no lobby *by default* — whoever you just called is
-      // already someone you are talking to. These are defaults, so they go
-      // first: an explicit `lobbyEnabled: true` from the caller must win.
+      // already someone you are talking to (and, from a conversation, only
+      // its members are eligible at all). Defaults first: an explicit
+      // `lobbyEnabled: true` from the caller must win.
       lobbyEnabled: false,
       waitForHost: false,
-      ...(settings ?? {}),
+      ...admission.settings,
     },
     startNow: true,
   });
@@ -539,8 +632,11 @@ router.get('/:idOrCode', async (req: Request, res: Response) => {
 
   const m = await meet.findMeeting(key);
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  const access = await requireMeetingAccess(req, res, m, 'viewer');
+  if (!access) return;
 
-  const { rows: participants } = await getPool().query(
+  // Who was there is for insiders; someone about to knock sees the meeting only.
+  const { rows: participants } = access !== 'insider' ? { rows: [] } : await getPool().query(
     `SELECT p.id, p.display_name, p.role, p.state, p.joined_at, p.left_at,
             p.duration_seconds, u.avatar_url
        FROM meeting_participants p LEFT JOIN users u ON u.id = p.user_id
@@ -562,8 +658,13 @@ router.patch('/:id', denyGuests, async (req: Request, res: Response) => {
   if (!(await requireHost(req, res, m))) return;
 
   const parsed = updateMeetingSchema.safeParse(req.body ?? {});
-  if (!parsed.success) return res.status(400).json(fail('Invalid update.'));
+  if (!parsed.success) return res.status(400).json(fail(parsed.error.issues[0]?.message ?? 'Invalid update.'));
   const p = parsed.data;
+  const refused = featureRefusal(req, p.settings);
+  if (refused) return res.status(403).json(fail(refused));
+  if (p.status && (m.status === 'live' || m.status === 'ended')) {
+    return res.status(409).json(fail('A meeting that has started is ended from the call, not edited.'));
+  }
 
   const { rows } = await getPool().query<meet.MeetingRow>(
     `UPDATE meetings SET
@@ -774,7 +875,7 @@ router.post('/:idOrCode/join', async (req: Request, res: Response) => {
     role: participant.role,
     state: participant.state,
     transport,
-    iceServers: await getIceServers(),
+    iceServers: await getIceServers(participant.user_id ?? `guest:${participant.id}`),
     // The media token is issued only once the participant is actually admitted.
     // Handing it to someone still knocking would let them open media into a
     // room the host has not let them into.
@@ -783,6 +884,8 @@ router.post('/:idOrCode/join', async (req: Request, res: Response) => {
       : {}),
   };
 
+  // Joined: the "has started" / invitation notifications are read (F-01).
+  if (participant.user_id) void clearNotificationsAbout(participant.user_id, 'meeting', [m.id]);
   res.json(ok(ticket));
 });
 
@@ -821,7 +924,7 @@ router.post('/:id/token', authorizePermission('MEET_JOIN'), async (req: Request,
   const transport = (m.transport ?? 'mesh') as MeetTransport;
   res.json(ok({
     transport,
-    iceServers: await getIceServers(),
+    iceServers: await getIceServers(participant.user_id ?? `guest:${participant.id}`),
     ...(transport === 'cloudflare' ? { sfuEndpoint: `/api/meet/${m.id}/sfu` } : {}),
   }));
 });
@@ -858,21 +961,11 @@ router.post('/:id/end', authorizePermission('MEET_HOST_CONTROLS'), async (req: R
   if (!m) return res.status(404).json(fail('Meeting not found.'));
   if (!(await requireHost(req, res, m))) return;
 
-  await meet.endMeeting(m.id, actor(req).id);
-  // A meeting that has ended must stop inviting people into it.
-  void notifications.revokeSubject('meeting', m.id).catch(() => {});
-  // Ended before its scheduled start (the host ran it early): withdraw the
-  // reminders that would otherwise still fire.
-  reminders.queueMeetingReminderCancel(m.id);
-
-  // Minutes, chapters and action items are generated off the request, so
-  // ending a meeting stays instant and a Redis outage costs the minutes rather
-  // than the ability to end the call.
-  // Only the session claims travel to the worker — not the resolved RBAC
-  // fields the middleware attached, which the worker re-resolves anyway.
-  const { id, misUserId, name, email, role, avatarUrl } = actor(req);
-  const queued = await enqueueMeetWrapUp(m.id, { id, misUserId, name, email, role, avatarUrl });
-  res.json(ok({ ended: true, wrapUpQueued: queued }));
+  // One path for every way a meeting ends: legs closed, everyone in the room
+  // told and dropped, invitations and reminders withdrawn, and the wrap-up
+  // (minutes, chapters, action items) queued exactly once, off the request.
+  const { wrapUpQueued } = await endMeetingEverywhere(m.id, actor(req).id);
+  res.json(ok({ ended: true, wrapUpQueued }));
 });
 
 router.put('/:id/settings', authorizePermission('MEET_HOST_CONTROLS'), async (req: Request, res: Response) => {
@@ -885,15 +978,8 @@ router.put('/:id/settings', authorizePermission('MEET_HOST_CONTROLS'), async (re
 
   // Settings are the back door into the permission-gated features, so each one
   // re-checks the permission its REST equivalent would have required.
-  if (parsed.data.recordingEnabled && !can(req, 'MEET_RECORD')) {
-    return res.status(403).json(fail('You do not have permission to record meetings.'));
-  }
-  if (parsed.data.aiAssistantEnabled && !can(req, 'MEET_AI_USE')) {
-    return res.status(403).json(fail('You do not have permission to use the AI notetaker.'));
-  }
-  if (parsed.data.transcriptionEnabled && !can(req, 'MEET_TRANSCRIBE')) {
-    return res.status(403).json(fail('You do not have permission to enable transcription.'));
-  }
+  const refused = featureRefusal(req, parsed.data);
+  if (refused) return res.status(403).json(fail(refused));
 
   res.json(ok(await meet.updateSettings(m.id, parsed.data)));
 });
@@ -1089,6 +1175,7 @@ router.get('/:id/sfu/session', async (req: Request, res: Response) => {
 router.get('/:id/attendance', authorizePermission('MEET_ATTENDANCE_VIEW'), async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
 
   const { rows } = await getPool().query(
     `SELECT p.id, p.display_name, p.is_guest, p.role, p.state,
@@ -1160,6 +1247,7 @@ router.get('/:id/events', async (req: Request, res: Response) => {
 router.get('/:id/transcript', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
 
   // Anyone who was in the meeting may read its transcript; nobody else may.
   const { rows: seen } = await getPool().query(
@@ -1218,6 +1306,8 @@ async function aiPreflight(req: Request, res: Response): Promise<
 > {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) { res.status(404).json(fail('Meeting not found.')); return null; }
+  // Generating notes reads the whole transcript: insiders only.
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return null;
 
   // The school's master switch first: when the super admin has turned AI off,
   // nothing anyone in the meeting does will change that, so say it plainly.
@@ -1268,6 +1358,7 @@ function aiFailure(res: Response, err: unknown, fallback: string) {
 router.get('/:id/ai', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
   res.json(ok(await ai.listArtifacts(m.id)));
 });
 
@@ -1427,6 +1518,7 @@ router.post('/:id/ai/engagement', authorizePermission('MEET_ATTENDANCE_VIEW'), a
 router.post('/:id/ai/agenda', authorizePermission(AI_PERM), async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
   if (await refusedByAiPolicy(res)) return;
   if (!isAnyProviderConfigured() && !wantsHandoff(aiWhoOf(req))) {
     return res.status(503).json(fail('AI is not configured on this server.'));
@@ -1450,6 +1542,10 @@ router.post('/:id/ai/agenda', authorizePermission(AI_PERM), async (req: Request,
 
 /** Live caption translation. Kept small and fast — it is on the caption path. */
 router.post('/:id/ai/translate', authorizePermission('MEET_JOIN'), async (req: Request, res: Response) => {
+  const tm = await meet.findMeeting(param(req, 'id'));
+  if (!tm) return res.status(404).json(fail('Meeting not found.'));
+  // In-call translation is for people in (or allowed into) this meeting.
+  if (!(await requireMeetingAccess(req, res, tm, 'viewer'))) return;
   const { text, targetLang } = req.body ?? {};
   if (typeof text !== 'string' || !text.trim() || typeof targetLang !== 'string') {
     return res.status(400).json(fail('text and targetLang are required.'));
@@ -1476,14 +1572,17 @@ async function participantFor(req: Request, meetingId: string): Promise<{
   const request = req as MeetRequest;
   if (request.guest) {
     const { rows } = await getPool().query<{ id: string; display_name: string }>(
-      'SELECT id, display_name FROM meeting_participants WHERE id = $1 AND meeting_id = $2',
+      `SELECT id, display_name FROM meeting_participants
+        WHERE id = $1 AND meeting_id = $2 AND state IN ('active', 'left')`,
       [request.guest.participantId, meetingId],
     );
     return rows[0] ? { id: rows[0].id, displayName: rows[0].display_name } : null;
   }
   const { rows } = await getPool().query<{ id: string; display_name: string }>(
+    // Knocking, denied or removed is not "in the meeting".
     `SELECT id, display_name FROM meeting_participants
-      WHERE meeting_id = $1 AND user_id = $2 ORDER BY created_at DESC LIMIT 1`,
+      WHERE meeting_id = $1 AND user_id = $2 AND state IN ('active', 'left')
+      ORDER BY created_at DESC LIMIT 1`,
     [meetingId, actor(req).id],
   );
   return rows[0] ? { id: rows[0].id, displayName: rows[0].display_name } : null;
@@ -1769,6 +1868,7 @@ router.post('/:id/recordings/:recordingId/fail', denyGuests,
 router.get('/:id/recordings', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'insider'))) return;
   const { rows } = await getPool().query(
     `SELECT r.id, r.meeting_id, r.file_id, r.mode, r.status, r.duration_seconds,
             r.size_bytes, r.folder, r.started_at, r.ended_at,
@@ -1828,6 +1928,7 @@ router.put('/:id/invites/me', async (req: Request, res: Response) => {
 router.get('/:id/ics', async (req: Request, res: Response) => {
   const m = await meet.findMeeting(param(req, 'id'));
   if (!m) return res.status(404).json(fail('Meeting not found.'));
+  if (!(await requireMeetingAccess(req, res, m, 'viewer'))) return;
 
   const stamp = (d: Date) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const start = m.scheduled_start ?? m.started_at ?? m.created_at;
@@ -1847,10 +1948,13 @@ router.get('/:id/ics', async (req: Request, res: Response) => {
     `DTSTAMP:${stamp(new Date())}`,
     `DTSTART:${stamp(start)}`,
     `DTEND:${stamp(end)}`,
-    fold(`SUMMARY:${m.title.replace(/[\n,;]/g, ' ')}`),
+    fold(`SUMMARY:${m.title.replace(/[\r\n,;\\]/g, ' ')}`),
     fold(`DESCRIPTION:Join the meeting: ${url}\\nCode: ${m.join_code}`),
     fold(`LOCATION:${url}`),
-    ...(m.recurrence_rule ? [`RRULE:${m.recurrence_rule}`] : []),
+    // Stored rules are validated on write; older rows are re-checked here so
+    // a CR/LF can never inject extra calendar properties.
+    ...(m.recurrence_rule && /^[A-Z]+=[A-Za-z0-9,:+;=-]+$/.test(m.recurrence_rule.replace(/^RRULE:/, ''))
+      ? [`RRULE:${m.recurrence_rule.replace(/^RRULE:/, '')}`] : []),
     'END:VEVENT', 'END:VCALENDAR',
   ].join('\r\n');
 
@@ -1893,6 +1997,8 @@ async function announceLive(meetingId: string): Promise<void> {
     link: `/app/meet/${m.id}`,
     subjectType: 'meeting',
     subjectId: m.id,
+    // A meeting that flaps live → ended → live must not nag someone who dismissed it.
+    reopen: false,
   }, {
     // The host does not need to be told about their own meeting.
     exclude: [m.host_id],

@@ -114,6 +114,12 @@ export interface ChatClientToServerEvents {
  * ────────────────────────────────────────────────────────────────────────── */
 
 export interface ChatServerToClientEvents {
+  /** Someone in a conversation started a call: ring (N-05). To each member's user room but the caller's. */
+  'call:ring': (p: {
+    conversationId: string; meetingId: string; title: string;
+    callerId: string; callerName: string; audioOnly: boolean; at: string;
+  }) => void;
+
   /** A new message in a conversation this socket is subscribed to. */
   'message:new': (p: { conversationId: string; message: WireMessage }) => void;
 
@@ -123,6 +129,13 @@ export interface ChatServerToClientEvents {
   'message:deleted': (
     p: { conversationId: string; messageId: string; deletedBy: string; byModerator: boolean },
   ) => void;
+
+  /**
+   * Disappearing messages whose time is up, removed outright (B-11): no
+   * tombstone, since a message that leaves "deleted" behind has not
+   * disappeared. Sent by the worker's sweep to the conversation's room.
+   */
+  'messages:expired': (p: { conversationId: string; messageIds: string[] }) => void;
 
   'message:reaction': (
     p: { conversationId: string; messageId: string; reactions: WireReaction[] },
@@ -169,7 +182,12 @@ export interface ChatServerToClientEvents {
    * what makes reading on your phone clear the badge on your laptop.
    */
   'conversation:unread': (
-    p: { conversationId: string; unread: number; unreadMentions: number; lastReadSeq: number },
+    p: {
+      conversationId: string; unread: number; unreadMentions: number; lastReadSeq: number;
+      /** The conversation's newest seq, so a client that is not subscribed to
+       *  the room still knows what "read to the end" means. */
+      lastSeq?: number;
+    },
   ) => void;
 
   /** Metadata changed (topic, name, archive, member count) or a conversation
@@ -193,18 +211,33 @@ export interface ChatServerToClientEvents {
       isStarred?: boolean;
       notification?: NotificationLevel;
       mutedUntil?: string | null;
+      /** A DM was hidden on one of this person's devices (B-13). */
+      hidden?: boolean;
     },
   ) => void;
 
   /** Poll results moved — everyone watching sees the bars change (FR-MSG-21). */
-  'poll:updated': (p: { conversationId: string; poll: unknown }) => void;
+  /** `poll.myVotes` is the actor's; every other client keeps its own. */
+  'poll:updated': (p: { conversationId: string; poll: unknown; actorId?: string }) => void;
 
   /** A reply landed in a thread. Delivered separately from `message:new` so a
    *  client can update the thread pane without the reply appearing in the main
    *  flow, which is the entire point of a thread. */
+  /**
+   * This user's count of new replies in one thread they follow moved
+   * (delivered on `user:<id>`). Drives the "N new replies" marker and the
+   * Threads inbox; thread replies never move the conversation's own badge.
+   */
+  'thread:unread': (p: { conversationId: string; rootId: string; unread: number }) => void;
+
   'thread:reply': (
     p: { conversationId: string; rootId: string; message: WireMessage },
   ) => void;
+
+  /** This user is no longer a member (removed or left), on every device. */
+  'conversation:removed': (p: { conversationId: string; reason: 'removed' | 'left' }) => void;
+  /** You blocked or unblocked someone (on another device, or this one). Never sent to the blocked person. */
+  'block:changed': (p: { userId: string; blocked: boolean }) => void;
 
   /** A draft saved on another device (FR-MSG-17). */
   'conversation:draft': (

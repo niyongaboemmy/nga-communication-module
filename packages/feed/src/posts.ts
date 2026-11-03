@@ -13,9 +13,11 @@ import type {
   FeedReactionSummary,
 } from '@tupo/shared';
 import { FEED_AUDIENCES, FEED_LIMITS, FEED_REACTIONS } from '@tupo/shared';
+import { loadVisiblePost } from './visibility.js';
 import { FeedError } from './errors.js';
 import {
   type FeedActor, assertVisible, can, canTargetAudience, rankScore, visibleAudiences,
+  effectiveAudience,
 } from './common.js';
 import { toPageSummary, type PageRow } from './pages.js';
 
@@ -63,6 +65,28 @@ interface PostRow {
  * attachment was already accepted onto this post once, by its actual owner,
  * and re-sending it back unchanged is not a new grant of access to anything.
  */
+/**
+ * A page avatar/cover or a reel poster: must be the actor's own finished image
+ * upload (FEED-S1). Setting it makes the file readable by everyone who can see
+ * the feed, so it can never be someone else's file. `keep` is the value
+ * already stored — re-sending it unchanged is not a new grant.
+ */
+export async function assertOwnImage(
+  db: PoolClient | ReturnType<typeof getPool>, fileId: unknown, ownerId: string, keep?: string | null,
+): Promise<string | null> {
+  if (fileId === null || fileId === undefined || fileId === '') return null;
+  if (typeof fileId !== 'string') throw new FeedError('That image is not valid.', 400);
+  if (keep && fileId === keep) return fileId;
+  const { rows } = await db.query<{ owner_id: string; status: string; mime_type: string }>(
+    'SELECT owner_id, status, mime_type FROM files WHERE id = $1', [fileId]);
+  const f = rows[0];
+  if (!f) throw new FeedError('That image could not be found.', 400);
+  if (f.owner_id !== ownerId) throw new FeedError('That image is not yours to use.', 403);
+  if (f.status !== 'ready') throw new FeedError('That image has not finished uploading.', 409);
+  if (!f.mime_type.startsWith('image/')) throw new FeedError('That file is not an image.', 400);
+  return fileId;
+}
+
 export async function resolveMedia(
   client: PoolClient, media: FeedMediaItem[] | undefined, ownerId: string,
   limit: number = FEED_LIMITS.MAX_MEDIA, trustedIds?: ReadonlySet<string>,
@@ -96,12 +120,22 @@ export async function resolveMedia(
 
 function validatePoll(input: ComposePostPayload['poll']): PostRow['poll'] {
   if (!input) return null;
-  const question = (input.question ?? '').trim();
-  const options = (input.options ?? []).map((o) => o.trim()).filter(Boolean);
+  if (typeof input !== 'object' || !Array.isArray(input.options)) throw new FeedError('A poll needs a question and options.', 400);
+  const question = String(input.question ?? '').trim();
+  const options = input.options.map((o) => String(o ?? '').trim()).filter(Boolean);
   if (!question) throw new FeedError('A poll needs a question.', 400);
+  if (question.length > 300 || options.some((o) => o.length > 120)) throw new FeedError('That poll text is too long.', 400);
   if (options.length < FEED_LIMITS.MIN_POLL_OPTIONS) throw new FeedError('A poll needs at least two options.', 400);
   if (options.length > FEED_LIMITS.MAX_POLL_OPTIONS) throw new FeedError(`A poll can have at most ${FEED_LIMITS.MAX_POLL_OPTIONS} options.`, 400);
-  return { question, options, multi: Boolean(input.multi), closesAt: input.closesAt ?? null };
+  let closesAt: string | null = null;
+  if (input.closesAt !== undefined && input.closesAt !== null && input.closesAt !== '') {
+    const ms = Date.parse(String(input.closesAt));
+    // An unparseable date would make a poll that silently never closes.
+    if (!Number.isFinite(ms)) throw new FeedError('closesAt is not a valid date.', 400);
+    if (ms <= Date.now()) throw new FeedError('A poll must close in the future.', 400);
+    closesAt = new Date(ms).toISOString();
+  }
+  return { question, options, multi: Boolean(input.multi), closesAt };
 }
 
 function validateEvent(input: ComposePostPayload['event']): PostRow['event'] {
@@ -155,10 +189,22 @@ export async function assertCanPostAs(actor: FeedActor, pageId: string, audience
 
 export interface CreateResult { postId: string; status: FeedPostView['status']; }
 
+const POST_STATUSES = ['published', 'draft', 'scheduled'] as const;
+const COMMENT_POLICIES = ['open', 'followers', 'closed'] as const;
+
 export async function createPost(actor: FeedActor, payload: ComposePostPayload): Promise<CreateResult> {
-  const audience: FeedAudience =
-    payload.audience && (FEED_AUDIENCES as readonly string[]).includes(payload.audience) ? payload.audience : 'everyone';
-  await assertCanPostAs(actor, payload.pageId, audience);
+  const requested: FeedAudience | null =
+    payload.audience && (FEED_AUDIENCES as readonly string[]).includes(payload.audience) ? payload.audience : null;
+  const page = await assertCanPostAs(actor, payload.pageId, requested ?? 'everyone');
+  // The page caps the post: nothing on a staff-only page is ever wider than
+  // staff, whatever the composer sent — and no choice means the page's own.
+  const audience = effectiveAudience(requested ?? page.audience as FeedAudience, page.audience as FeedAudience);
+  if (payload.status !== undefined && !(POST_STATUSES as readonly string[]).includes(payload.status)) {
+    throw new FeedError('Unknown post status.', 400);
+  }
+  if (payload.commentPolicy !== undefined && !(COMMENT_POLICIES as readonly string[]).includes(payload.commentPolicy)) {
+    throw new FeedError('Unknown comment setting.', 400);
+  }
 
   const body = (payload.body ?? '').slice(0, FEED_LIMITS.POST_BODY_MAX);
   const poll = validatePoll(payload.poll);
@@ -193,8 +239,9 @@ export async function createPost(actor: FeedActor, payload: ComposePostPayload):
         id, payload.pageId, actor.id, body, payload.format === 'rich' ? 'rich' : 'plain',
         JSON.stringify(media), payload.linkPreview ? JSON.stringify(payload.linkPreview) : null,
         type, poll ? JSON.stringify(poll) : null, event ? JSON.stringify(event) : null,
+        // Pinning is its own action with its own cap (setPinned), not a create flag.
         audience, status, status === 'scheduled' ? payload.scheduledAt : null, publishedAt,
-        Boolean(payload.pinned), payload.commentPolicy ?? 'open',
+        false, payload.commentPolicy ?? 'open',
       ],
     );
 
@@ -227,12 +274,7 @@ export async function onPublished(client: PoolClient, postId: string): Promise<P
   const post = rows[0];
   if (!post) throw new FeedError('Post not found.', 404);
 
-  await client.query(
-    `UPDATE feed_pages SET post_count = (
-        SELECT count(*) FROM feed_posts WHERE page_id = $1 AND status = 'published' AND deleted_at IS NULL
-     ) WHERE id = $1`,
-    [post.page_id],
-  );
+  await recountPagePosts(client, post.page_id);
 
   // Hybrid fan-out: only for pages at or below the threshold. Big and mandatory
   // pages are merged at read time instead.
@@ -276,20 +318,73 @@ export async function publishPost(actor: FeedActor, postId: string): Promise<voi
   }
 }
 
+/**
+ * Move a draft or scheduled post in time (D-05): a future time schedules it,
+ * null puts it back to a draft. Published posts are not rescheduled.
+ */
+export async function schedulePost(actor: FeedActor, postId: string, scheduledAt: string | null): Promise<void> {
+  const post = await loadForWrite(actor, postId);
+  if (post.status !== 'draft' && post.status !== 'scheduled') {
+    throw new FeedError('Only a draft or a scheduled post can be rescheduled.', 409);
+  }
+  if (scheduledAt !== null) {
+    const at = Date.parse(scheduledAt);
+    if (!Number.isFinite(at) || at <= Date.now()) throw new FeedError('Pick a time in the future.', 400);
+    if (at > Date.now() + 366 * 86_400_000) throw new FeedError('That is too far ahead to schedule.', 400);
+  }
+  await getPool().query(
+    `UPDATE feed_posts SET status = $2, scheduled_at = $3, updated_at = now() WHERE id = $1`,
+    [postId, scheduledAt === null ? 'draft' : 'scheduled', scheduledAt === null ? null : new Date(scheduledAt).toISOString()],
+  );
+}
+
+/**
+ * A page's drafts and scheduled posts, for the people who run it (D-05):
+ * scheduled first by time, then drafts newest first.
+ */
+export async function listUnpublished(actor: FeedActor, pageId: string): Promise<FeedPostView[]> {
+  const { rows: who } = await getPool().query<{ role: string | null }>(
+    'SELECT role FROM feed_page_editors WHERE page_id = $1 AND user_id = $2', [pageId, actor.id]);
+  if (!who.length && actor.roleLevel !== 'ADMIN') throw new FeedError('Only editors of this page can see its drafts.', 403);
+  const { rows } = await getPool().query<{ id: string }>(
+    `SELECT id FROM feed_posts
+      WHERE page_id = $1 AND deleted_at IS NULL AND status IN ('draft', 'scheduled')
+      ORDER BY (status = 'draft'), scheduled_at ASC NULLS LAST, updated_at DESC
+      LIMIT 200`,
+    [pageId],
+  );
+  const map = await hydratePosts(actor, rows.map((r) => r.id));
+  return rows.map((r) => map.get(r.id)).filter((v): v is FeedPostView => Boolean(v));
+}
+
 export async function unpublishPost(actor: FeedActor, postId: string): Promise<void> {
   await loadForWrite(actor, postId);
   await getPool().query(`UPDATE feed_posts SET status = 'unpublished', updated_at = now() WHERE id = $1`, [postId]);
   await getPool().query('DELETE FROM feed_timeline WHERE post_id = $1', [postId]);
+  await recountPagePosts(getPool(), null, postId);
+}
+
+/**
+ * A page's post count is its published, live posts — recounted rather than
+ * decremented, so deleting a draft or an unpublished post cannot drag it
+ * down (FEED-B12). Addressed by page, or by one of its posts.
+ */
+async function recountPagePosts(
+  db: PoolClient | ReturnType<typeof getPool>, pageId: string | null, viaPostId?: string,
+): Promise<void> {
+  await db.query(
+    `UPDATE feed_pages pg SET post_count = (
+        SELECT count(*) FROM feed_posts p WHERE p.page_id = pg.id AND p.status = 'published' AND p.deleted_at IS NULL)
+      WHERE pg.id = COALESCE($1, (SELECT page_id FROM feed_posts WHERE id = $2))`,
+    [pageId, viaPostId ?? null],
+  );
 }
 
 export async function deletePost(actor: FeedActor, postId: string, byModerator = false): Promise<void> {
   await loadForWrite(actor, postId, byModerator);
   await getPool().query('UPDATE feed_posts SET deleted_at = now(), updated_at = now() WHERE id = $1', [postId]);
   await getPool().query('DELETE FROM feed_timeline WHERE post_id = $1', [postId]);
-  await getPool().query(
-    `UPDATE feed_pages SET post_count = GREATEST(0, post_count - 1) WHERE id = (SELECT page_id FROM feed_posts WHERE id = $1)`,
-    [postId],
-  );
+  await recountPagePosts(getPool(), null, postId);
 }
 
 export async function editPost(actor: FeedActor, postId: string, patch: EditPostPayload): Promise<void> {
@@ -326,10 +421,29 @@ export async function editPost(actor: FeedActor, postId: string, patch: EditPost
     if (patch.linkPreview !== undefined) { params.push(patch.linkPreview ? JSON.stringify(patch.linkPreview) : null); sets.push(`link_preview = $${params.length}`); }
     if (patch.audience !== undefined && (FEED_AUDIENCES as readonly string[]).includes(patch.audience)) {
       if (!canTargetAudience(actor.roleLevel, patch.audience)) throw new FeedError('You cannot post to that audience.', 403);
-      params.push(patch.audience); sets.push(`audience = $${params.length}`);
+      const { rows: pg } = await client.query<{ audience: FeedAudience }>(
+        'SELECT audience FROM feed_pages WHERE id = $1', [post.page_id],
+      );
+      params.push(effectiveAudience(patch.audience, pg[0]?.audience ?? 'everyone'));
+      sets.push(`audience = $${params.length}`);
     }
-    if (patch.commentPolicy !== undefined) { params.push(patch.commentPolicy); sets.push(`comment_policy = $${params.length}`); }
-    if (patch.pinned !== undefined) { params.push(Boolean(patch.pinned)); sets.push(`pinned = $${params.length}`); }
+    if (patch.commentPolicy !== undefined) {
+      if (!(COMMENT_POLICIES as readonly string[]).includes(patch.commentPolicy)) throw new FeedError('Unknown comment setting.', 400);
+      params.push(patch.commentPolicy); sets.push(`comment_policy = $${params.length}`);
+    }
+    // Poll and event changes are kept on edit (D-06). A poll people have
+    // already voted in cannot be rewritten under them.
+    if (patch.poll !== undefined) {
+      const { rows: votes } = await client.query('SELECT 1 FROM feed_poll_votes WHERE post_id = $1 LIMIT 1', [postId]);
+      if (votes.length) throw new FeedError('People have voted in this poll, so it can no longer be changed.', 409);
+      const poll = patch.poll === null ? null : validatePoll(patch.poll);
+      params.push(poll ? JSON.stringify(poll) : null); sets.push(`poll = $${params.length}`);
+    }
+    if (patch.event !== undefined) {
+      const event = patch.event === null ? null : validateEvent(patch.event);
+      params.push(event ? JSON.stringify(event) : null); sets.push(`event = $${params.length}`);
+    }
+    // Pinning goes through setPinned (cap, editor-only); an edit cannot pin.
     params.push(postId);
     await client.query(`UPDATE feed_posts SET ${sets.join(', ')} WHERE id = $${params.length}`, params);
     await client.query('COMMIT');
@@ -451,21 +565,24 @@ export async function hydratePosts(actor: FeedActor, postIds: string[]): Promise
   const pollPosts = posts.filter((p) => p.poll);
   const voteByPost = new Map<string, Map<number, number>>();
   const myVotesByPost = new Map<string, number[]>();
-  const votersByPost = new Map<string, Set<string>>();
+  const voterCountByPost = new Map<string, number>();
   if (pollPosts.length) {
-    const { rows: voteRows } = await pool.query<{ post_id: string; option_index: number; user_id: string }>(
-      `SELECT post_id, option_index, user_id FROM feed_poll_votes WHERE post_id = ANY($1)`,
-      [pollPosts.map((p) => p.id)],
-    );
-    for (const v of voteRows) {
-      if (!voteByPost.has(v.post_id)) { voteByPost.set(v.post_id, new Map()); votersByPost.set(v.post_id, new Set()); }
-      const m = voteByPost.get(v.post_id)!;
-      m.set(v.option_index, (m.get(v.option_index) ?? 0) + 1);
-      votersByPost.get(v.post_id)!.add(v.user_id);
-      if (v.user_id === actor.id) {
-        myVotesByPost.set(v.post_id, [...(myVotesByPost.get(v.post_id) ?? []), v.option_index]);
-      }
+    // Counted in SQL (D-11 / FEED-P2): a school-wide poll has thousands of
+    // votes, and every one of them used to be loaded to be counted here.
+    const ids = pollPosts.map((p) => p.id);
+    const { rows: counts } = await pool.query<{ post_id: string; option_index: number; n: number }>(
+      `SELECT post_id, option_index, count(*)::int AS n FROM feed_poll_votes
+        WHERE post_id = ANY($1) GROUP BY post_id, option_index`, [ids]);
+    const { rows: voters } = await pool.query<{ post_id: string; n: number }>(
+      `SELECT post_id, count(DISTINCT user_id)::int AS n FROM feed_poll_votes WHERE post_id = ANY($1) GROUP BY post_id`, [ids]);
+    const { rows: mine } = await pool.query<{ post_id: string; option_index: number }>(
+      `SELECT post_id, option_index FROM feed_poll_votes WHERE post_id = ANY($1) AND user_id = $2`, [ids, actor.id]);
+    for (const c of counts) {
+      if (!voteByPost.has(c.post_id)) voteByPost.set(c.post_id, new Map());
+      voteByPost.get(c.post_id)!.set(c.option_index, c.n);
     }
+    for (const v of voters) voterCountByPost.set(v.post_id, v.n);
+    for (const m of mine) myVotesByPost.set(m.post_id, [...(myVotesByPost.get(m.post_id) ?? []), m.option_index]);
   }
 
   // Event RSVPs.
@@ -510,7 +627,7 @@ export async function hydratePosts(actor: FeedActor, postIds: string[]): Promise
         multi: p.poll.multi,
         closesAt: p.poll.closesAt,
         closed,
-        totalVoters: (votersByPost.get(p.id)?.size) ?? 0,
+        totalVoters: voterCountByPost.get(p.id) ?? 0,
         myVotes: myVotesByPost.get(p.id) ?? [],
       };
     }
@@ -591,6 +708,9 @@ export async function getPostView(actor: FeedActor, postId: string): Promise<Fee
   if (!view) throw new FeedError('Post not found.', 404);
   if (view.status !== 'published' && !view.canEdit) throw new FeedError('Post not found.', 404);
   if (view.status === 'published') assertVisible(actor, view.audience);
+  // The same rule as every engagement path: page audience and page deletion
+  // count too, so a direct link cannot show what the feed would not.
+  if (!view.canEdit) await loadVisiblePost(actor, postId);
   return view;
 }
 
@@ -605,6 +725,12 @@ export async function publishDueScheduledPosts(): Promise<{ published: string[] 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // Re-checked under a row lock: a post unscheduled or deleted since the
+      // SELECT above, or claimed by an overlapping sweep, is skipped.
+      const { rows: due } = await client.query(
+        `SELECT 1 FROM feed_posts WHERE id = $1 AND status = 'scheduled' AND deleted_at IS NULL
+            AND scheduled_at <= now() FOR UPDATE SKIP LOCKED`, [r.id]);
+      if (!due.length) { await client.query('ROLLBACK'); continue; }
       await onPublished(client, r.id);
       await client.query('COMMIT');
       published.push(r.id);

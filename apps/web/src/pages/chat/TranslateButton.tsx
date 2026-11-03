@@ -7,6 +7,7 @@ import { TRANSLATION_LANGUAGES } from './api';
 import type { LanguageCode } from './api';
 import type { AiAnswer } from '@tupo/shared';
 import { answeredByText } from '../../components/MyAi';
+import { useAiPolicy } from '../../hooks/useAiPolicy';
 
 /**
  * Translate one message in place (FR-MSG-25).
@@ -25,6 +26,9 @@ export const TranslateControl: React.FC<{
   onDark: boolean;
 }> = ({ conversationId, messageId, onDark }) => {
   const { notify } = useNotify();
+  // Translation is AI. With the school's AI switched off the button could only
+  // ever fail, so it is not offered (the same rule as Mail's assistant).
+  const policy = useAiPolicy();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ language: LanguageCode; text: string; ai?: AiAnswer } | null>(null);
@@ -45,6 +49,8 @@ export const TranslateControl: React.FC<{
       setBusy(false);
     }
   };
+
+  if (!result && !policy?.enabled) return null;
 
   if (result) {
     return (

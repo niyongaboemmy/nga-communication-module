@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import { tokenizeInline } from './inlineTokens';
 
 /**
  * Message formatting (FR-MSG-3).
@@ -33,34 +34,16 @@ interface Props {
  * Inline
  * ────────────────────────────────────────────────────────────────────────── */
 
-/**
- * Order matters. Code is matched first so that `**` inside a code span is not
- * treated as bold, and links before emphasis so an underscore in a URL does not
- * italicise the rest of the sentence.
- */
-const INLINE = new RegExp([
-  '(`[^`\\n]+`)',                                   // `code`
-  '(<@[A-Za-z0-9_-]{1,64}>)',                       // mention
-  '(@channel\\b|@here\\b|@everyone\\b)',            // broadcast mention
-  '(https?://[^\\s<>()]+[^\\s<>().,;:!?])',         // bare link
-  '(\\*\\*[^*\\n]+\\*\\*)',                         // **bold**
-  '(~~[^~\\n]+~~)',                                 // ~~strike~~
-  '(\\*[^*\\n]+\\*|_[^_\\n]+_)',                    // *italic* / _italic_
-].join('|'), 'g');
-
 function renderInline(
   text: string, names: Record<string, string>, meId: string | undefined,
   onDark: boolean, keyPrefix: string,
 ): React.ReactNode[] {
   const out: React.ReactNode[] = [];
   let i = 0;
-  for (const part of text.split(INLINE)) {
-    // String.split with a capturing group yields undefined for groups that did
-    // not participate in the match; they are not content.
-    if (part === undefined || part === '') continue;
+  for (const { kind, text: part } of tokenizeInline(text)) {
     const key = `${keyPrefix}-${i++}`;
 
-    if (part.startsWith('`') && part.endsWith('`') && part.length > 1) {
+    if (kind === 'code') {
       out.push(
         <code
           key={key}
@@ -121,15 +104,15 @@ function renderInline(
       continue;
     }
 
-    if (part.startsWith('**') && part.endsWith('**')) {
+    if (kind === 'bold') {
       out.push(<strong key={key} className="font-semibold">{part.slice(2, -2)}</strong>);
       continue;
     }
-    if (part.startsWith('~~') && part.endsWith('~~')) {
+    if (kind === 'strike') {
       out.push(<s key={key} className="opacity-80">{part.slice(2, -2)}</s>);
       continue;
     }
-    if ((part.startsWith('*') && part.endsWith('*')) || (part.startsWith('_') && part.endsWith('_'))) {
+    if (kind === 'italic') {
       out.push(<em key={key}>{part.slice(1, -1)}</em>);
       continue;
     }

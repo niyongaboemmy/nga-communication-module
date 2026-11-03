@@ -12,7 +12,7 @@ import { getPool, snowflake } from '@tupo/db';
 import type {
   ComposeStoryPayload, FeedAudience, FeedMediaItem, FeedStoryGroup, FeedStoryView, FeedStoryViewer,
 } from '@tupo/shared';
-import { FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
+import { FEED_AUDIENCES, FEED_LIMITS, FEED_STORY_BACKGROUND_RE } from '@tupo/shared';
 import { FeedError } from './errors.js';
 import { type FeedActor, assertVisible, can, canTargetAudience, visibleAudiences } from './common.js';
 import { resolveMedia } from './posts.js';
@@ -40,7 +40,12 @@ export async function createStory(actor: FeedActor, payload: ComposeStoryPayload
   if (!canTargetAudience(actor.roleLevel, audience)) throw new FeedError('You cannot post to that audience.', 403);
 
   const caption = (payload.caption ?? '').slice(0, FEED_LIMITS.STORY_CAPTION_MAX);
-  const background = (payload.background ?? '').slice(0, 40);
+  // Goes into an inline style: a colour or a simple gradient, never free CSS
+  // such as url(), which would ping any server from every viewer (FEED-V4).
+  const background = (payload.background ?? '').trim();
+  if (background && !FEED_STORY_BACKGROUND_RE.test(background)) {
+    throw new FeedError('That story background is not a colour.', 400);
+  }
   if (!caption.trim() && !payload.media?.fileId) {
     throw new FeedError('A story needs a photo, a video or some text.', 400);
   }
@@ -139,7 +144,7 @@ export async function getViewers(actor: FeedActor, storyId: string): Promise<Fee
   const { rows: viewers } = await getPool().query<{ id: string; name: string; avatar_url: string | null; viewed_at: string }>(
     `SELECT u.id, u.name, u.avatar_url, v.viewed_at FROM feed_story_views v
        JOIN users u ON u.id = v.user_id
-      WHERE v.story_id = $1 ORDER BY v.viewed_at DESC`,
+      WHERE v.story_id = $1 ORDER BY v.viewed_at DESC LIMIT 500`,
     [storyId],
   );
   return viewers.map((v) => ({ id: v.id, name: v.name, avatarUrl: v.avatar_url, viewedAt: v.viewed_at }));

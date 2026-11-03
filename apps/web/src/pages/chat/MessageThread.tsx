@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useStartCall } from './useStartCall';
 import {
   Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
   RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
-  X, Bookmark, Forward, PinOff, Link2, Quote, Settings,
+  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag, Timer, Copy, Mail,
 } from 'lucide-react';
+import { useNotify } from '../../context/NotificationContext';
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
@@ -20,6 +22,8 @@ import type { Conversation, Message } from './types';
 import { RichText } from './RichText';
 import { EmojiPicker } from './EmojiPicker';
 import { ForwardDialog } from './ForwardDialog';
+import { ReportDialog } from './ReportDialog';
+import { ProfileCard } from './ProfileCard';
 import { MessageAttachments } from './Attachments';
 import { PinnedBar } from './PinnedBar';
 import { PollCard } from './PollCard';
@@ -29,6 +33,7 @@ import { TranslateControl } from './TranslateButton';
 import { useVirtualWindow } from './useVirtualWindow';
 import type { MeetMessageMetadata } from './MeetCard';
 import { QUICK_REACTIONS, EDIT_WINDOW_MS, PRESENCE_REFRESH_MS } from '@tupo/shared';
+import { useTouchGestures } from '../../hooks/useTouchGestures';
 
 /**
  * The message pane: header, scrollback, composer slot.
@@ -64,7 +69,9 @@ const ThreadHeader: React.FC<{
   contextOpen: boolean;
   onOpenSearch: () => void;
   onOpenChannelSettings: () => void;
-}> = ({ conversation: c, onBack, onToggleContext, contextOpen, onOpenSearch, onOpenChannelSettings }) => {
+  onOpenPinned: () => void;
+}> = ({ conversation: c, onBack, onToggleContext, contextOpen, onOpenSearch, onOpenChannelSettings, onOpenPinned }) => {
+  const { start: startCall, starting } = useStartCall(c);
   const { can } = usePermissions();
   const { typing, conversationPresence } = useChat();
   const Icon = c.type === 'dm' ? null : KIND_ICON[c.type];
@@ -139,6 +146,17 @@ const ThreadHeader: React.FC<{
               {c.name}
             </span>
             {c.isPrivate && c.type !== 'dm' && <Lock size={12} className="shrink-0 opacity-60" />}
+            {/* Disappearing messages are on (B-07): everyone here should know. */}
+            {c.retentionDays != null && (
+              <span
+                title={`Messages disappear after ${c.retentionDays === 1 ? '24 hours' : `${c.retentionDays} days`}`}
+                className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-amber-100 px-1.5 py-px text-[10px] font-medium text-amber-800 dark:bg-amber-500/15 dark:text-amber-200"
+              >
+                <Timer size={10} aria-hidden="true" />
+                {c.retentionDays === 1 ? '24h' : `${c.retentionDays}d`}
+                <span className="sr-only"> — messages disappear after {c.retentionDays === 1 ? '24 hours' : `${c.retentionDays} days`}</span>
+              </span>
+            )}
           </span>
           <span
             className={`block truncate text-xs ${
@@ -159,19 +177,19 @@ const ThreadHeader: React.FC<{
 
       <div className="flex items-center gap-0.5">
         {can('MESSAGE_PIN') && (
-          <IconButton label="Pinned messages" className="hidden sm:grid"><Pin size={17} /></IconButton>
+          <IconButton label="Pinned messages" className="hidden sm:grid" onClick={onOpenPinned}><Pin size={17} /></IconButton>
         )}
         <IconButton label="Search in conversation" className="hidden sm:grid" onClick={onOpenSearch}>
           <Search size={17} />
         </IconButton>
         {can('MEET_START') && (
           <>
-            <IconButton label="Start an audio call" className="hidden sm:grid"><Phone size={17} /></IconButton>
-            <IconButton label="Start a video meeting"><Video size={17} /></IconButton>
+            <IconButton label="Start an audio call" disabled={starting} onClick={() => void startCall(true)}><Phone size={17} /></IconButton>
+            <IconButton label="Start a video meeting" disabled={starting} onClick={() => void startCall(false)}><Video size={17} /></IconButton>
           </>
         )}
         {c.type !== 'dm' && (c.myRole === 'owner' || c.myRole === 'admin') && (
-          <IconButton label="Channel settings" onClick={onOpenChannelSettings}>
+          <IconButton label={c.type === 'group' ? 'Group settings' : 'Channel settings'} onClick={onOpenChannelSettings}>
             <Settings size={17} />
           </IconButton>
         )}
@@ -208,14 +226,36 @@ const MessageRow: React.FC<{
   const { user } = useAuth();
   const {
     react, edit, remove, pin, save, openThread, setReplyTarget, jumpTo, highlightedId,
-    editingId, setEditingId,
+    editingId, setEditingId, threadUnread, discard, blockedIds, active, markUnread,
   } = useChat();
+  const { notify, confirm: confirmed } = useNotify();
+  /** Every action says so when it fails (B-10) — they used to fail silently. */
+  const attempt = (what: () => Promise<unknown>, failed: string, done?: string) => {
+    void what().then(() => { if (done) confirmed(done); })
+      .catch((err) => notify({ title: failed, body: err instanceof Error ? err.message : undefined, tone: 'error' }));
+  };
+  const copy = (text: string, done: string) => attempt(async () => {
+    if (!navigator.clipboard) throw new Error('This browser does not allow copying here.');
+    await navigator.clipboard.writeText(text);
+  }, 'Could not copy', done);
+  const newReplies = threadUnread[m.id] ?? 0;
+  const [reporting, setReporting] = useState(false);
+  // The card behind every avatar: who this is, message them, block, report.
+  const [profileOpen, setProfileOpen] = useState(false);
+  // A message from someone you blocked is folded away until you ask (B-05).
+  const [revealBlocked, setRevealBlocked] = useState(false);
   const [picking, setPicking] = useState(false);
   const [forwarding, setForwarding] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Phones (U-01): swipe right to reply, long-press for the actions menu.
+  const gestures = useTouchGestures({
+    onSwipe: () => setReplyTarget(m),
+    onLongPress: () => setMenuOpen(true),
+    disabled: m.type === 'system' || Boolean(m.deletedAt),
+  });
   const editRef = useRef<HTMLTextAreaElement>(null);
 
   const mine = m.senderId === user?.id;
@@ -260,6 +300,20 @@ const MessageRow: React.FC<{
     );
   }
 
+  if (!mine && blockedIds.has(m.senderId) && !revealBlocked) {
+    return (
+      <li className={`flex gap-2.5 px-2 sm:px-4 ${newGroup ? 'mt-3' : 'mt-0.5'}`}>
+        <span className="w-9 shrink-0" />
+        <button
+          onClick={() => setRevealBlocked(true)}
+          className="rounded-2xl border border-dashed border-border-light px-3 py-1.5 text-xs text-text-secondary-light hover:bg-surface-light dark:border-border-dark/50 dark:text-text-secondary-dark dark:hover:bg-surface-dark"
+        >
+          Message from someone you blocked · <span className="font-medium text-blue-600 dark:text-blue-400">Show</span>
+        </button>
+      </li>
+    );
+  }
+
   const failed = m.delivery === 'failed';
   const pending = m.delivery === 'pending';
   // A bare 👍 gets no bubble and three times the size.
@@ -271,7 +325,11 @@ const MessageRow: React.FC<{
   // not landed yet — there is nothing on the server to edit.
   const withinEditWindow = Date.now() - new Date(m.createdAt).getTime() < EDIT_WINDOW_MS;
   const canEdit = mine && !pending && !failed && withinEditWindow && can('MESSAGE_EDIT_OWN');
-  const canDelete = (mine && can('MESSAGE_DELETE_OWN')) || can('MESSAGE_DELETE_ANY');
+  // A channel's own owner, admins and moderators may remove what is posted
+  // there (B-13) — the server always allowed it; the menu never offered it.
+  const runsThisRoom = active?.type !== 'dm'
+    && (active?.myRole === 'owner' || active?.myRole === 'admin' || active?.myRole === 'moderator');
+  const canDelete = (mine && can('MESSAGE_DELETE_OWN')) || can('MESSAGE_DELETE_ANY') || (!mine && runsThisRoom);
 
   const submitEdit = async () => {
     const next = draft.trim();
@@ -284,7 +342,9 @@ const MessageRow: React.FC<{
     <li
       id={`msg-${m.id}`}
       data-message-row=""
-      className={`group relative flex gap-2.5 px-2 sm:px-4 ${newGroup ? 'mt-3' : 'mt-0.5'} ${
+      {...gestures.handlers}
+      style={gestures.dx ? { transform: `translateX(${gestures.dx}px)`, transition: 'none' } : { transition: 'transform 150ms ease-out' }}
+      className={`group relative flex gap-2.5 px-2 sm:px-4 [touch-action:pan-y] ${newGroup ? 'mt-3' : 'mt-0.5'} ${
         mine ? 'flex-row-reverse' : ''
       } ${m.mentionsMe ? 'bg-amber-50/60 dark:bg-amber-500/5' : ''} ${
         highlightedId === m.id ? 'animate-fade-in rounded-xl bg-blue-100/70 dark:bg-blue-500/15' : ''
@@ -292,16 +352,30 @@ const MessageRow: React.FC<{
     >
       {/* The gutter keeps its width when the avatar is hidden, so a grouped run
           stays aligned instead of stepping left. */}
-      <span className="w-9 shrink-0">
-        {newGroup && <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={36} />}
+      <span className="relative w-9 shrink-0">
+        {newGroup && (
+          <button
+            onClick={() => setProfileOpen((v) => !v)}
+            aria-label={`${m.senderName}, profile`}
+            className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={36} />
+          </button>
+        )}
+        {profileOpen && (
+          <ProfileCard userId={m.senderId} anchor={mine ? 'right' : 'left'} onClose={() => setProfileOpen(false)} />
+        )}
       </span>
 
       <div className={`min-w-0 max-w-[min(46rem,85%)] ${mine ? 'items-end' : 'items-start'} flex flex-col`}>
         {newGroup && (
           <div className={`mb-1 flex items-baseline gap-2 ${mine ? 'flex-row-reverse' : ''}`}>
-            <span className="text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
+            <button
+              onClick={() => setProfileOpen((v) => !v)}
+              className="text-sm font-semibold text-text-primary-light hover:underline dark:text-text-primary-dark"
+            >
               {mine ? 'You' : m.senderName}
-            </span>
+            </button>
             {m.senderRole && !mine && (
               <span className="hidden text-[11px] capitalize text-text-secondary-light sm:inline dark:text-text-secondary-dark">
                 {m.senderRole}
@@ -443,12 +517,20 @@ const MessageRow: React.FC<{
         {/* UX-1: a failure is never silent, and the retry sits on the message
             itself rather than in a toast that scrolls out of reach. */}
         {failed && m.nonce && (
-          <button
-            onClick={() => onRetry(m.nonce!)}
-            className="mt-1 flex items-center gap-1 text-[11px] font-medium text-red-600 hover:underline dark:text-red-400"
-          >
-            <RotateCcw size={11} /> Not sent — tap to retry
-          </button>
+          <div className={`mt-1 flex items-center gap-3 text-[11px] font-medium ${mine ? 'justify-end' : ''}`}>
+            <button
+              onClick={() => onRetry(m.nonce!)}
+              className="flex items-center gap-1 text-red-600 hover:underline dark:text-red-400"
+            >
+              <RotateCcw size={11} /> Not sent — retry
+            </button>
+            <button
+              onClick={() => void discard(m.nonce!)}
+              className="text-text-secondary-light hover:underline dark:text-text-secondary-dark"
+            >
+              Discard
+            </button>
+          </div>
         )}
 
         {(m.reactions.length > 0 || m.replyCount > 0) && (
@@ -472,9 +554,20 @@ const MessageRow: React.FC<{
             {m.replyCount > 0 && (
               <button
                 onClick={() => openThread(m.id)}
-                className="flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/25"
+                aria-label={`${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}${
+                  newReplies > 0 ? `, ${newReplies} new` : ''}`}
+                className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium transition-colors duration-150 ${
+                  newReplies > 0
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/25'
+                }`}
               >
                 <MessageSquare size={11} /> {m.replyCount} {m.replyCount === 1 ? 'reply' : 'replies'}
+                {newReplies > 0 && (
+                  <span className="ml-0.5 rounded-full bg-white/25 px-1.5 text-[10px] font-semibold tabular-nums">
+                    {newReplies} new
+                  </span>
+                )}
               </button>
             )}
           </div>
@@ -484,15 +577,15 @@ const MessageRow: React.FC<{
       {/* UX-7: hover actions. Hidden until hover on pointer devices; the `…`
           button opens the same set as a menu, so nothing is unreachable
           without a mouse, and everything here is keyboard-focusable. */}
-      {!editing && !pending && (
+      {!editing && !pending && !failed && (
         <div
-          className={`absolute -top-3 z-10 flex items-center gap-0.5 rounded-xl border border-border-light bg-white p-0.5 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
+          className={`absolute -top-3 z-10 flex items-center gap-0.5 rounded-xl border border-border-light bg-white p-0.5 opacity-0 pointer-events-none transition-opacity duration-150 focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
             /* Anchored to the side the bubble is actually on. `left-12` for an
                own message put the toolbar at the far left of a full-width row,
                half a screen away from the message it acted on — easy to miss,
                and easy to hit for the wrong message. */
             mine ? 'right-14' : 'left-14'
-          } ${picking || menuOpen ? 'opacity-100' : ''}`}
+          } ${picking || menuOpen ? 'pointer-events-auto opacity-100' : ''}`}
         >
           {/* One tap for the common few, the picker for everything else. Most
               reactions are a thumbs-up; making that a two-step interaction is
@@ -502,7 +595,7 @@ const MessageRow: React.FC<{
               key={e}
               onClick={() => void react(m.id, e)}
               aria-label={`React with ${e}`}
-              className="hidden h-7 w-7 place-items-center rounded-lg text-base leading-none hover:bg-surface-light sm:grid dark:hover:bg-surface-dark"
+              className={`${menuOpen ? 'grid' : 'hidden sm:grid'} h-7 w-7 place-items-center rounded-lg text-base leading-none hover:bg-surface-light dark:hover:bg-surface-dark`}
             >
               {e}
             </button>
@@ -549,7 +642,7 @@ const MessageRow: React.FC<{
               label={m.pinnedAt ? 'Unpin message' : 'Pin message'}
               size="sm"
               active={Boolean(m.pinnedAt)}
-              onClick={() => void pin(m.id, !m.pinnedAt)}
+              onClick={() => attempt(() => pin(m.id, !m.pinnedAt), m.pinnedAt ? 'Could not unpin that message' : 'Could not pin that message')}
             >
               {m.pinnedAt ? <PinOff size={15} /> : <Pin size={15} />}
             </IconButton>
@@ -611,19 +704,45 @@ const MessageRow: React.FC<{
                 className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-xl border border-border-light bg-white py-1 shadow-xl dark:border-border-dark/50 dark:bg-elevated-dark"
                 onMouseLeave={() => setMenuOpen(false)}
               >
+                {m.body && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); copy(m.body ?? '', 'Text copied'); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
+                  >
+                    <Copy size={13} /> Copy text
+                  </button>
+                )}
                 <button
                   role="menuitem"
                   onClick={() => {
                     setMenuOpen(false);
                     // A permalink is a route in this app, never an absolute URL
                     // built from whatever origin the tab happens to be on.
-                    const url = `${window.location.origin}/app/chat/${m.conversationId}/${m.id}`;
-                    void navigator.clipboard?.writeText(url).catch(() => {});
+                    copy(`${window.location.origin}/app/chat/${m.conversationId}/${m.id}`, 'Link copied');
                   }}
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
                 >
                   <Link2 size={13} /> Copy link to message
                 </button>
+                {!mine && !pending && !failed && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); attempt(() => markUnread(m.conversationId, m.seq), 'Could not mark that unread'); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
+                  >
+                    <Mail size={13} /> Mark unread from here
+                  </button>
+                )}
+                {!mine && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); setReporting(true); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+                  >
+                    <Flag size={13} /> Report message
+                  </button>
+                )}
                 {m.editedCount > 0 && (
                   <p className="px-3 py-1.5 text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
                     Edited {m.editedCount} {m.editedCount === 1 ? 'time' : 'times'}
@@ -636,6 +755,14 @@ const MessageRow: React.FC<{
       )}
 
       {forwarding && <ForwardDialog message={m} onClose={() => setForwarding(false)} />}
+      {reporting && (
+        <ReportDialog
+          user={{ id: m.senderId, name: m.senderName }}
+          message={{ id: m.id, conversationId: m.conversationId }}
+          alreadyBlocked={blockedIds.has(m.senderId)}
+          onClose={() => setReporting(false)}
+        />
+      )}
     </li>
   );
 };
@@ -661,15 +788,16 @@ export const MessageThread: React.FC<{
   contextOpen: boolean;
   onOpenSearch: () => void;
   onOpenChannelSettings: () => void;
+  onOpenPinned: () => void;
   children: React.ReactNode; // the composer
 }> = ({
   conversation, onBack, onToggleContext, contextOpen, onOpenSearch,
-  onOpenChannelSettings, children,
+  onOpenChannelSettings, onOpenPinned, children,
 }) => {
   const { user } = useAuth();
   const {
     messages, messagesLoading: loading, hasMore, loadingMore, loadOlder,
-    markReadTo, retry,
+    markReadTo, retry, hasNewer, loadNewer, showLatest,
   } = useChat();
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -737,6 +865,7 @@ export const MessageThread: React.FC<{
     });
   }, [loadOlder]);
 
+  const oldestId = messages[0]?.id;
   useEffect(() => {
     const sentinel = topSentinel.current;
     const root = scrollRef.current;
@@ -747,7 +876,11 @@ export const MessageThread: React.FC<{
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, loading, loadingMore, loadOlderHoldingPosition]);
+    // `oldestId`: an observer only reports changes, so when the list under it
+    // is replaced (the device copy giving way to the network's page, P-03)
+    // while the top is already in view, it would never fire again and older
+    // messages would never load. Observing afresh asks the question again.
+  }, [hasMore, loading, loadingMore, loadOlderHoldingPosition, oldestId]);
 
   /*
    * Mark read when the newest message is actually on screen.
@@ -765,8 +898,25 @@ export const MessageThread: React.FC<{
     if (newest > 0) markReadTo(newest);
   }, [atBottom, loading, messages, markReadTo]);
 
-  const jumpToLatest = () =>
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  // After a jump into the past (U-04) "latest" is not on the page yet: fetch
+  // the newest page first, then go to the end.
+  const jumpToLatest = async () => {
+    if (hasNewer) await showLatest();
+    requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }));
+  };
+
+  // Reaching the bottom of an old window loads what came after it (U-04).
+  useEffect(() => {
+    const el = bottomRef.current;
+    const root = scrollRef.current;
+    if (!el || !root || !hasNewer || loading) return;
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0]?.isIntersecting) void loadNewer(); },
+      { root, rootMargin: '0px 0px 200px 0px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNewer, loading, loadNewer, messages.length]);
 
   let lastDay = '';
 
@@ -782,6 +932,7 @@ export const MessageThread: React.FC<{
         contextOpen={contextOpen}
         onOpenSearch={onOpenSearch}
         onOpenChannelSettings={onOpenChannelSettings}
+        onOpenPinned={onOpenPinned}
       />
 
       <PinnedBar conversation={conversation} />
@@ -871,9 +1022,9 @@ export const MessageThread: React.FC<{
         </div>
 
         {/* UX-3 */}
-        {!atBottom && !loading && messages.length > 0 && (
+        {(!atBottom || hasNewer) && !loading && messages.length > 0 && (
           <button
-            onClick={jumpToLatest}
+            onClick={() => void jumpToLatest()}
             className="animate-fade-in absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-xs font-medium text-white transition-colors duration-150 hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500"
           >
             <ChevronDown size={14} />

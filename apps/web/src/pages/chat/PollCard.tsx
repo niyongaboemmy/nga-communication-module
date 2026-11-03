@@ -4,6 +4,7 @@ import { Spinner } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { getSocket } from '../../lib/socket';
 import * as chatApi from './api';
+import { useNotify } from '../../context/NotificationContext';
 
 /**
  * A poll, rendered in the message log (FR-MSG-21).
@@ -25,6 +26,7 @@ export const PollCard: React.FC<{
   const { user } = useAuth();
   const [poll, setPoll] = useState<chatApi.WirePoll | null>(null);
   const [busy, setBusy] = useState(false);
+  const { notify } = useNotify();
   const [missing, setMissing] = useState(false);
 
   /*
@@ -57,13 +59,21 @@ export const PollCard: React.FC<{
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
-    const onUpdate = (p: { conversationId: string; poll: unknown }) => {
+    const onUpdate = (p: { conversationId: string; poll: unknown; actorId?: string }) => {
       const incoming = p.poll as chatApi.WirePoll;
       // Only this poll. One channel can hold several, and every vote in any of
       // them arrives on the same event.
       if (incoming?.messageId === messageId) {
         liveUpdates.current += 1;
-        setPoll(incoming);
+        // `myVotes` is the voter's. Keep this reader's own: from the voter
+        // lists when the poll is not anonymous, otherwise from what we had.
+        setPoll((prev) => {
+          if (p.actorId === user?.id) return incoming;
+          const myVotes = incoming.anonymous
+            ? (prev?.myVotes ?? [])
+            : incoming.options.filter((o) => user && o.voters.includes(user.id)).map((o) => o.id);
+          return { ...incoming, myVotes };
+        });
       }
     };
     socket.on('poll:updated', onUpdate);
@@ -91,7 +101,21 @@ export const PollCard: React.FC<{
       // Single choice: clicking your own answer clears it, which is the only
       // way to un-vote without a separate control.
       : (mine.has(optionId) ? [] : [optionId]);
+    // Optimistic (P-04): the tick and the counts move at once; the server's
+    // poll replaces them, and a refusal puts them back and says so.
+    const before = poll;
+    const had = new Set(poll.myVotes), will = new Set(next);
+    setPoll({
+      ...poll,
+      myVotes: next,
+      totalVoters: poll.totalVoters + (had.size === 0 && will.size > 0 ? 1 : had.size > 0 && will.size === 0 ? -1 : 0),
+      options: poll.options.map((o) => ({ ...o, votes: o.votes + (will.has(o.id) ? 1 : 0) - (had.has(o.id) ? 1 : 0) })),
+    });
     try { setPoll(await chatApi.votePoll(poll.id, next)); }
+    catch (e) {
+      setPoll(before);
+      notify({ title: 'Your vote did not count', body: e instanceof Error ? e.message : undefined, tone: 'error' });
+    }
     finally { setBusy(false); }
   };
 

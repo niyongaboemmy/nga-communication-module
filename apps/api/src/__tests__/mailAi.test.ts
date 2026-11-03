@@ -29,9 +29,10 @@ describe('sanitizeAiHtml', () => {
   it('allows only http/https/mailto links and forces safe rel/target', () => {
     const ok = sanitizeAiHtml('<p><a href="https://nga.ac.rw">site</a></p>');
     expect(ok).toContain('href="https://nga.ac.rw"');
-    expect(ok).toContain('rel="noopener nofollow"');
+    expect(ok).toMatch(/rel=\"[^\"]*noopener[^\"]*nofollow[^\"]*\"/);
     const bad = sanitizeAiHtml('<p><a href="javascript:alert(1)">x</a></p>');
-    expect(bad).toBe('<p><a>x</a></p>');
+    expect(bad).not.toMatch(/href|javascript/i);
+    expect(bad).toContain('>x</a>');
   });
 
   it('wraps a bare-text response in a paragraph', () => {

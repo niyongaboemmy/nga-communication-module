@@ -500,7 +500,7 @@ export async function overview(
            WHERE created_at > now() - interval '${win}' AND NOT is_draft AND campaign_id IS NOT NULL
              AND ${scopeSql('from_user_id', 1)})::int AS bulk,
          (SELECT count(*) FROM mail_recipients
-           WHERE NOT is_read AND folder = 'inbox' AND NOT is_hidden AND user_id IS NOT NULL
+           WHERE NOT is_read AND folder = 'inbox' AND NOT is_hidden AND NOT pending AND user_id IS NOT NULL
              AND ${scopeSql('user_id', 1)})::int AS unread_backlog`, p),
     pool.query(
       `SELECT

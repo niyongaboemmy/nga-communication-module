@@ -1,7 +1,20 @@
 import { getPool, activeUserSql } from '@tupo/db';
-import { notifyAndPush } from '@tupo/notify';
+import { notifyAndPush as pushToAll } from '@tupo/notify';
+import { notBlocking } from './safety.js';
 import type { WireMessage } from '@tupo/shared';
 
+
+/**
+ * Every chat notification goes through here: someone who has blocked the
+ * sender is never notified by them — not a mention, a reply or a reaction
+ * (B-05). `sender` is whoever caused the notification.
+ */
+async function notifyAndPush(
+  userIds: string[], n: Parameters<typeof pushToAll>[1], opts?: Parameters<typeof pushToAll>[2], sender?: string,
+): ReturnType<typeof pushToAll> {
+  const ids = sender ? await notBlocking(sender, userIds) : userIds;
+  return pushToAll(ids, n, opts);
+}
 /**
  * Who should be told about a message — and, more importantly, who should not.
  *
@@ -105,7 +118,7 @@ export async function notifyNewMessage(
       link,
       subjectType: 'conversation',
       subjectId: message.conversationId,
-    });
+    }, undefined, message.senderId);
     notified.push(...dm);
   }
 
@@ -119,7 +132,7 @@ export async function notifyNewMessage(
       link,
       subjectType: 'conversation',
       subjectId: message.conversationId,
-    });
+    }, undefined, message.senderId);
     notified.push(...mentions);
   }
 
@@ -131,11 +144,75 @@ export async function notifyNewMessage(
       link,
       subjectType: 'conversation',
       subjectId: message.conversationId,
-    });
+    }, undefined, message.senderId);
     notified.push(...plain);
   }
 
   return notified;
+}
+
+/**
+ * A reply in a thread notifies the thread, not the room (FR-MSG-6).
+ *
+ * Followers — the root's author, everyone who has replied, everyone who has
+ * opened it — hear "replied in a thread". Someone actually @mentioned hears
+ * "mentioned you", follower or not. Nobody else in the conversation is pinged:
+ * notifying the whole channel would make threads no quieter than the room,
+ * which is the one thing they exist to be. Mutes are honoured as everywhere.
+ */
+export async function notifyThreadReply(
+  message: WireMessage,
+  opts: {
+    conversationName: string;
+    rootId: string;
+    followerIds: string[];
+    mentionedUserIds: string[];
+  },
+): Promise<string[]> {
+  const candidates = [...new Set([...opts.followerIds, ...opts.mentionedUserIds])]
+    .filter((id) => id !== message.senderId);
+  if (!candidates.length) return [];
+
+  const { rows } = await getPool().query<Recipient>(
+    `SELECT user_id, notification, muted_until
+       FROM conversation_members
+      WHERE conversation_id = $1 AND user_id = ANY($2::text[]) AND left_at IS NULL`,
+    [message.conversationId, candidates],
+  );
+  const now = Date.now();
+  const mentioned = new Set(opts.mentionedUserIds);
+  const mentions: string[] = [];
+  const followers: string[] = [];
+  for (const r of rows) {
+    if (r.muted_until && new Date(r.muted_until).getTime() > now) continue;
+    if (r.notification === 'none') continue;
+    if (mentioned.has(r.user_id)) mentions.push(r.user_id);
+    else followers.push(r.user_id);
+  }
+
+  const preview = previewFor(message);
+  const link = `/app/chat?c=${message.conversationId}&thread=${opts.rootId}`;
+  if (mentions.length) {
+    await notifyAndPush(mentions, {
+      kind: 'chat.mention',
+      title: `${message.senderName} mentioned you in a thread`,
+      body: preview,
+      link,
+      subjectType: 'thread',
+      subjectId: opts.rootId,
+    }, undefined, message.senderId);
+  }
+  if (followers.length) {
+    await notifyAndPush(followers, {
+      kind: 'chat.thread',
+      title: `${message.senderName} replied in a thread`,
+      body: `${opts.conversationName}: ${preview}`,
+      link,
+      subjectType: 'thread',
+      subjectId: opts.rootId,
+    }, undefined, message.senderId);
+  }
+  return [...mentions, ...followers];
 }
 
 /** A mention added by editing an existing message (FR-MSG-8 meets FR-MSG-4). */
@@ -151,7 +228,7 @@ export async function notifyMention(
     link: `/app/chat/${message.conversationId}`,
     subjectType: 'conversation',
     subjectId: message.conversationId,
-  });
+  }, undefined, message.senderId);
   return targets;
 }
 
@@ -221,6 +298,6 @@ export async function notifyReaction(
     link: `/app/chat/${conversationId}`,
     subjectType: 'message',
     subjectId: message.id,
-  });
+  }, undefined, reactorId);
   return true;
 }

@@ -423,6 +423,13 @@ export const MeetingRoom: React.FC = () => {
         startedAt={room.startedAt}
       />
 
+      {room.reconnecting && (
+        <div role="status" aria-live="polite"
+          className="flex shrink-0 items-center gap-2 bg-amber-500/15 px-4 py-1.5 text-xs text-amber-100">
+          <Loader2 size={13} className="shrink-0 animate-spin" />
+          <span className="min-w-0 flex-1 truncate">Connection lost — reconnecting you to the call…</span>
+        </div>
+      )}
       {room.error && (
         <div className="flex shrink-0 items-center gap-2 bg-amber-500/15 px-4 py-1.5 text-xs text-amber-100">
           <AlertTriangle size={13} className="shrink-0" />

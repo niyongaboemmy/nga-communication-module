@@ -19,10 +19,37 @@ export interface ServerToClientEvents extends ChatServerToClientEvents, FeedServ
   'presence:update': (p: {
     userId: string; status: PresenceStatus; at: string; lastSeenAt?: string | null;
   }) => void;
+  /**
+   * This person's own status, on their own devices only (F-10): what they
+   * chose and what everyone else therefore sees. Separate from
+   * `presence:update` because "appear offline" shows others a grey dot while
+   * the status picker still has to show the choice.
+   */
+  'presence:self': (p: { choice: PresenceChoice; status: PresenceStatus }) => void;
   'pong': (p: { at: string }) => void;
   'system:reconnect_required': (p: { reason: string }) => void;
+  /**
+   * The gateway is about to cut this socket off because the session is over:
+   * the account was suspended, the person signed out of NGA MIS, or the token
+   * expired. The client signs out rather than retrying forever.
+   */
+  'session:ended': (p: { reason: 'suspended' | 'signed_out' | 'expired' }) => void;
   /** Raised on the recipient's own user room. See AppNotification. */
   'notification:new': (p: AppNotification) => void;
+  /**
+   * Notifications were read on one of this person's devices (or by reading
+   * what they were about). `ids: 'all'` after "mark all read". Carries the new
+   * unread total so every bell agrees without refetching.
+   */
+  'notification:read': (p: { ids: string[] | 'all'; unread: number }) => void;
+  /** This person's role, or what it allows, just changed: re-read permissions (F-07). */
+  'access:changed': (p: { reason: 'role' | 'permissions' | 'status' }) => void;
+  /**
+   * This person's mailbox counters moved — read, moved or deleted on one of
+   * their devices (delivered on `user:<id>`). Carries nothing: every client
+   * refetches its own counts rather than trusting a pushed number.
+   */
+  'mail:counts': (p: { at: string }) => void;
 }
 
 /**
@@ -42,11 +69,22 @@ export interface AppNotification {
   subjectId: string | null;
   readAt: string | null;
   createdAt: string;
+  /** On a live push: this delivery added one to the unread count (new, or re-opened). */
+  fresh?: boolean;
 }
 
 export interface ClientToServerEvents extends ChatClientToServerEvents, FeedClientToServerEvents {
   'ping': (ack: (p: { at: string }) => void) => void;
+  /** This tab's activity: `online` while used, `away` once idle or hidden. */
   'presence:set': (p: { status: PresenceStatus }, ack: (p: { ok: boolean }) => void) => void;
+  /**
+   * A status the person picked (F-10). It holds across every tab and device
+   * until changed; `auto` hands control back to activity.
+   */
+  'presence:choose': (
+    p: { choice: PresenceChoice },
+    ack?: (p: { ok: boolean; choice: PresenceChoice; status: PresenceStatus }) => void,
+  ) => void;
 
   /**
    * Keep this person's presence key alive.
@@ -79,6 +117,10 @@ export interface PresenceSnapshot {
 }
 
 export type PresenceStatus = 'online' | 'away' | 'busy' | 'in-a-meeting' | 'dnd' | 'offline';
+
+/** What a person can pick for themselves; `auto` follows activity and meetings. */
+export type PresenceChoice = 'auto' | 'busy' | 'dnd' | 'invisible';
+export const PRESENCE_CHOICES: readonly PresenceChoice[] = ['auto', 'busy', 'dnd', 'invisible'];
 
 export const PRESENCE_TTL_SECONDS = 90;
 export const PRESENCE_HEARTBEAT_SECONDS = 45;
@@ -116,3 +158,14 @@ export const presenceKey = (userId: string) => `presence:${userId}`;
  * cache in front of it, so the common case never touches the database.
  */
 export const lastSeenKey = (userId: string) => `lastseen:${userId}`;
+
+/**
+ * Redis key saying a person has Tupo open, whatever anyone else is shown (F-10).
+ * Never read for presence: only the push sender uses it, so someone who
+ * appears offline, or hides their presence, is not also pushed to their phone
+ * while they sit at an open tab. TTL'd like the presence key.
+ */
+export const connectedKey = (userId: string) => `connected:${userId}`;
+
+/** Redis key holding the status a person picked. No TTL: it holds until changed. */
+export const presenceChoiceKey = (userId: string) => `presence:choice:${userId}`;

@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { config } from '../config.js';
+import { closeAttendanceLegs, OPEN_ATTENDANCE_LEG } from '@tupo/db';
 
 /**
  * The realtime gateway's own database handle.
@@ -227,7 +228,9 @@ export function setParticipantState(participantId: string, state: string): void 
   getPool().query(
     `UPDATE meeting_participants
         SET state = $2,
-            joined_at = COALESCE(joined_at, CASE WHEN $2 = 'active' THEN now() END)
+            joined_at = COALESCE(joined_at, CASE WHEN $2 = 'active' THEN now() END),
+            segment_started_at = CASE WHEN $2 = 'active' THEN COALESCE(segment_started_at, now())
+                                      ELSE segment_started_at END
       WHERE id = $1`,
     [participantId, state],
   ).catch(soft('participant state'));
@@ -240,14 +243,23 @@ export function setParticipantState(participantId: string, state: string): void 
  * rejoined shows one attendance with the right total, not two partial ones.
  */
 export function closeParticipant(participantId: string, state = 'left'): void {
-  getPool().query(
+  closeAttendanceLegs(getPool(), { participantId }, state).catch(soft('close participant'));
+}
+
+/**
+ * Back in after a dropped connection (MEET-RT1): someone who had been let in
+ * returns to the call — a new attendance leg — rather than to a lobby whose
+ * host never sees them. Returns the refreshed row.
+ */
+export async function rejoinParticipant(participantId: string) {
+  const { rows } = await getPool().query(
     `UPDATE meeting_participants
-        SET state = $2, left_at = now(),
-            duration_seconds = duration_seconds + GREATEST(
-              EXTRACT(EPOCH FROM (now() - COALESCE(joined_at, now())))::int, 0)
-      WHERE id = $1 AND left_at IS NULL`,
-    [participantId, state],
-  ).catch(soft('close participant'));
+        SET state = 'active', left_at = NULL, ${OPEN_ATTENDANCE_LEG}
+      WHERE id = $1 AND state = 'left'
+      RETURNING *`,
+    [participantId],
+  );
+  return rows[0] ?? null;
 }
 
 export function setMediaState(
@@ -288,7 +300,8 @@ export function setQuality(participantId: string, quality: string): void {
 export function admit(participantId: string, byUserId: string | null): void {
   getPool().query(
     `UPDATE meeting_participants
-        SET state = 'active', admitted_at = now(), admitted_by = $2, joined_at = COALESCE(joined_at, now())
+        SET state = 'active', admitted_at = now(), admitted_by = $2, joined_at = COALESCE(joined_at, now()),
+            left_at = NULL, ${OPEN_ATTENDANCE_LEG}
       WHERE id = $1`,
     [participantId, byUserId],
   ).catch(soft('admit'));
@@ -352,13 +365,32 @@ export async function insertPoll(p: {
 }
 
 /** Upsert, so changing your mind replaces your vote instead of adding one. */
-export async function castVote(pollId: string, participantId: string, optionIndexes: number[]) {
+/**
+ * Every poll and question helper takes the meeting id: an id from another
+ * meeting is simply not found, so nobody can vote in, close, or answer
+ * anything outside the call they are in (MEET-SEC9).
+ *
+ * A vote is accepted only while the poll is open, only for options that
+ * exist, and only one option unless the poll allows several. Returns false
+ * when refused.
+ */
+export async function castVote(meetingId: string, pollId: string, participantId: string, optionIndexes: number[]) {
+  const { rows } = await getPool().query<{ options: unknown[]; multiple_choice: boolean; status: string }>(
+    'SELECT options, multiple_choice, status FROM meeting_polls WHERE id = $1 AND meeting_id = $2',
+    [pollId, meetingId]);
+  const poll = rows[0];
+  if (!poll || poll.status !== 'open') return false;
+  const picks = [...new Set(optionIndexes)];
+  if (!picks.length || picks.some((i) => !Number.isInteger(i) || i < 0 || i >= poll.options.length)) return false;
+  if (!poll.multiple_choice && picks.length > 1) return false;
+  optionIndexes = picks;
   await getPool().query(
     `INSERT INTO meeting_poll_votes (poll_id, participant_id, option_indexes)
      VALUES ($1,$2,$3)
      ON CONFLICT (poll_id, participant_id) DO UPDATE SET option_indexes = EXCLUDED.option_indexes`,
     [pollId, participantId, JSON.stringify(optionIndexes)],
   );
+  return true;
 }
 
 export async function pollWithTally(pollId: string, participantId: string) {
@@ -375,9 +407,11 @@ export async function pollWithTally(pollId: string, participantId: string) {
   return rows[0] ?? null;
 }
 
-export async function closePoll(pollId: string) {
-  await getPool().query(
-    `UPDATE meeting_polls SET status = 'closed', closed_at = now() WHERE id = $1`, [pollId]);
+export async function closePoll(meetingId: string, pollId: string) {
+  const { rowCount } = await getPool().query(
+    `UPDATE meeting_polls SET status = 'closed', closed_at = COALESCE(closed_at, now())
+      WHERE id = $1 AND meeting_id = $2`, [pollId, meetingId]);
+  return Boolean(rowCount);
 }
 
 export async function insertQuestion(p: {
@@ -396,11 +430,12 @@ export async function insertQuestion(p: {
  * Upvote once per participant. The junction table is what enforces it — a
  * counter alone would let anyone hold the key down and win the queue.
  */
-export async function upvoteQuestion(questionId: string, participantId: string) {
+export async function upvoteQuestion(meetingId: string, questionId: string, participantId: string) {
   const { rowCount } = await getPool().query(
     `INSERT INTO meeting_question_upvotes (question_id, participant_id)
-     VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-    [questionId, participantId],
+     SELECT id, $2 FROM meeting_questions WHERE id = $1 AND meeting_id = $3
+     ON CONFLICT DO NOTHING`,
+    [questionId, participantId, meetingId],
   );
   if (!rowCount) return null;
   const { rows } = await getPool().query(
@@ -411,11 +446,11 @@ export async function upvoteQuestion(questionId: string, participantId: string) 
   return rows[0] ?? null;
 }
 
-export async function answerQuestion(questionId: string, answerText: string | null) {
+export async function answerQuestion(meetingId: string, questionId: string, answerText: string | null) {
   const { rows } = await getPool().query(
-    `UPDATE meeting_questions SET answered = true, answer_text = $2 WHERE id = $1
+    `UPDATE meeting_questions SET answered = true, answer_text = $2 WHERE id = $1 AND meeting_id = $3
       RETURNING id, meeting_id, participant_id, asked_by, text, upvotes, answered, answer_text, created_at`,
-    [questionId, answerText],
+    [questionId, answerText, meetingId],
   );
   return rows[0] ?? null;
 }
@@ -481,12 +516,7 @@ export function startMeeting(meetingId: string): void {
 
 export async function endMeeting(meetingId: string) {
   const pool = getPool();
-  await pool.query(
-    `UPDATE meeting_participants
-        SET state = 'left', left_at = now(),
-            duration_seconds = duration_seconds + GREATEST(
-              EXTRACT(EPOCH FROM (now() - COALESCE(joined_at, now())))::int, 0)
-      WHERE meeting_id = $1 AND left_at IS NULL`, [meetingId]);
+  await closeAttendanceLegs(pool, { meetingId });
   await pool.query(
     `UPDATE meetings SET status = 'ended', ended_at = now() WHERE id = $1 AND status <> 'ended'`,
     [meetingId]);
@@ -497,4 +527,28 @@ export async function countFinalSegments(meetingId: string): Promise<number> {
     `SELECT COUNT(*)::text AS count FROM meeting_transcript_segments
       WHERE meeting_id = $1 AND is_final = true`, [meetingId]);
   return Number(rows[0]?.count ?? 0);
+}
+
+/**
+ * A note as stored, for the share broadcast — only the author's own, from
+ * this meeting, and only once it is actually marked shared. The client used to
+ * send the whole note, so its text and author name were whatever it claimed
+ * (MEET-SEC11).
+ */
+export async function noteForShare(meetingId: string, participantId: string, noteId: string) {
+  const { rows } = await getPool().query(
+    `SELECT id, meeting_id, participant_id, author_name, body, source, original_body, provider_used,
+            offset_seconds, is_shared, pinned, created_at, updated_at
+       FROM meeting_notes
+      WHERE id = $1 AND meeting_id = $2 AND participant_id = $3 AND deleted_at IS NULL`,
+    [noteId, meetingId, participantId],
+  );
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    id: r.id, meetingId: r.meeting_id, participantId: r.participant_id, authorName: r.author_name,
+    body: r.body, source: r.source, originalBody: r.original_body, providerUsed: r.provider_used,
+    offsetSeconds: r.offset_seconds, isShared: r.is_shared, pinned: r.pinned,
+    createdAt: new Date(r.created_at).toISOString(), updatedAt: new Date(r.updated_at).toISOString(),
+  };
 }

@@ -10,6 +10,7 @@
  *   node scripts/verify-chat-ui.mjs        (needs `npm run dev` running)
  */
 import { readFileSync, mkdirSync } from 'node:fs';
+import { prepareBrowser } from './lib/uiHarness.mjs';
 let chromium;
 try {
   ({ chromium } = await import('playwright'));
@@ -76,7 +77,11 @@ const seed = (u) => ({
  * for edit and delete, both of which were working the whole time.
  */
 const visible = (locator, ms = 6000) =>
-  locator.waitFor({ state: 'visible', timeout: ms }).then(() => true).catch(() => false);
+  locator.waitFor({ state: 'visible', timeout: ms }).then(() => true).catch((err) => {
+    // DEBUG_VISIBLE=1: say why — a strict-mode clash and a timeout look the same otherwise.
+    if (process.env.DEBUG_VISIBLE) console.log(`    · not visible: ${String(err.message).split('\n').slice(0, 3).join(' | ')}`);
+    return false;
+  });
 
 const hidden = (locator, ms = 6000) =>
   locator.waitFor({ state: 'hidden', timeout: ms }).then(() => true).catch(() => false);
@@ -113,6 +118,7 @@ const sendReady = (page) =>
 const BASE = 'http://localhost:5194';
 const API = 'http://localhost:5190';
 const browser = await chromium.launch();
+prepareBrowser(browser);
 const alice = await makeUser('Ada Umutoni');
 const bob = await makeUser('Bosco Rugema');
 /** Extra accounts made mid-run, so the cleanup can remove them too. */
@@ -424,7 +430,7 @@ try {
   check('a chosen file appears in the composer tray',
     await visible(A.page.getByRole('list', { name: 'Attachments' })));
   check('and it uploads without being asked to',
-    await visible(A.page.getByRole('list', { name: 'Attachments' }).getByText('lesson-plan.png')));
+    await visible(A.page.getByRole('list', { name: 'Attachments' }).getByText('lesson-plan.png').first()));
 
   await A.page.locator('#composer').fill('Here is the plan');
   check('send unlocks once the attachment has finished uploading', await sendReady(A.page));
@@ -495,7 +501,7 @@ try {
   await B.page.getByRole('tab', { name: 'Files' }).click();
   const filesPanel = B.page.getByRole('complementary', { name: 'Conversation details' });
   check('the Files tab lists what has been shared',
-    await visible(filesPanel.getByText('lesson-plan.png'), 6000));
+    await visible(filesPanel.getByText('lesson-plan.png').first(), 6000));
   check('with who shared it',
     await visible(filesPanel.getByText(/Ada Umutoni/).first()));
   await B.page.screenshot({ path: `${SHOTS}/10-bob-files-tab.png` });
@@ -510,8 +516,9 @@ try {
     await visible(picker2.getByRole('option', { name: /Bosco Rugema/ })));
 
   await A.page.keyboard.press('Enter');
-  check('Enter inserts the mention rather than sending the message',
-    (await A.page.locator('#composer').inputValue()).startsWith('<@'),
+  // The box shows the name (B-09); it becomes an id only as it is sent.
+  check('Enter inserts the mention (as a readable name) rather than sending the message',
+    (await A.page.locator('#composer').inputValue()).startsWith('@Bosco Rugema'),
     await A.page.locator('#composer').inputValue());
   check('and the picker closes', await hidden(picker2, 3000));
 
@@ -542,7 +549,7 @@ try {
 
   /* ── Notification settings ────────────────────────────────────────────── */
 
-  await A.page.getByRole('button', { name: 'Notification settings' }).click();
+  await A.page.getByRole('button', { name: 'Notification settings', exact: true }).click();
   const settings = A.page.getByRole('complementary', { name: 'Notification settings' });
   check('notification settings open in their own pane', await visible(settings, 5000));
   check('with the three notification levels',
@@ -551,7 +558,7 @@ try {
   await settings.getByRole('checkbox', { name: /Sound/ }).uncheck();
   await A.page.waitForTimeout(600);
   await A.page.reload({ waitUntil: 'domcontentloaded' });
-  await A.page.getByRole('button', { name: 'Notification settings' }).click();
+  await A.page.getByRole('button', { name: 'Notification settings', exact: true }).click();
   const settings2 = A.page.getByRole('complementary', { name: 'Notification settings' });
   await visible(settings2, 5000);
   check('a preference survives a reload — it is saved on change, not on a Save button',
@@ -583,7 +590,7 @@ try {
    * newline. A test that changes durable state has to restore it, or it is not
    * testing one thing, it is testing everything that comes after it too.
    */
-  await A.page.getByRole('button', { name: 'Notification settings' }).click();
+  await A.page.getByRole('button', { name: 'Notification settings', exact: true }).click();
   const settings3 = A.page.getByRole('complementary', { name: 'Notification settings' });
   await visible(settings3, 5000);
   await settings3.getByRole('checkbox', { name: /Enter sends the message/ }).check();
@@ -831,6 +838,10 @@ try {
   /* ── Disappearing messages ────────────────────────────────────────────── */
 
   await chanSettings.getByRole('button', { name: '7 days', exact: true }).click();
+  // Shortening history deletes messages for everyone, so it asks first (B-07).
+  const retentionConfirm = A.page.getByRole('alertdialog');
+  check('turning on disappearing messages asks first', await visible(retentionConfirm, 4000));
+  await retentionConfirm.getByRole('button', { name: 'Turn on' }).click();
   check('retention can be set from the panel, and is announced',
     await visible(A.page.getByRole('log', { name: 'Messages' })
       .getByText(/disappear after 7 days/).first(), 8000));
@@ -862,9 +873,7 @@ try {
       body: JSON.stringify({ type: 'channel', name: `Names ${Date.now()}`, memberIds: [peer] }),
     });
   }, quietPerson.id);
-  await A.page.reload({ waitUntil: 'domcontentloaded' });
-  await A.page.waitForSelector('#composer');
-  await A.page.locator('li', { hasText: /^Names/ }).first().click();
+await A.page.locator('li', { hasText: /^Names/ }).first().click();
   await A.page.waitForTimeout(700);
 
   await A.page.locator('#composer').type('@Silent', { delay: 40 });
@@ -975,19 +984,28 @@ try {
   const foreignRow = namesLog.locator('li', { hasText: foreignText }).first();
   await foreignRow.waitFor({ timeout: 10000 });
   await foreignRow.hover();
-  check('a translate control is offered on someone else’s message',
-    await visible(foreignRow.getByRole('button', { name: 'Translate' }), 5000));
-  check('and not on your own — translating what you just typed is not a feature',
-    (await namesLog.locator('li', { hasText: typoText })
-      .getByRole('button', { name: 'Translate' }).count()) === 0);
+  // Translation is AI: offered only while the school's AI switch (NGA MIS
+  // ai_policy, off by default) is on.
+  const aiPolicy = await fetch(`${API}/api/ai/policy`, { headers: { Authorization: `Bearer ${A.token}` } })
+    .then((r) => r.json()).then((r) => r.data).catch(() => null);
+  if (aiPolicy && aiPolicy.enabled === false) {
+    check('with AI off for the school, no translate control is offered',
+      (await foreignRow.getByRole('button', { name: 'Translate' }).count()) === 0, aiPolicy.reason);
+  } else {
+    check('a translate control is offered on someone else’s message',
+      await visible(foreignRow.getByRole('button', { name: 'Translate' }), 5000));
+    check('and not on your own — translating what you just typed is not a feature',
+      (await namesLog.locator('li', { hasText: typoText })
+        .getByRole('button', { name: 'Translate' }).count()) === 0);
 
-  await foreignRow.getByRole('button', { name: 'Translate' }).click();
-  await A.page.getByRole('menuitem', { name: 'English' }).click();
-  const translated = await visible(foreignRow.getByText(/machine translation/i), 30000);
-  check('translating shows the result under the original, labelled as a machine translation',
-    translated);
-  check('and the original stays on screen — the translation is a reading aid, not a replacement',
-    await visible(foreignRow.getByText(foreignText)));
+    await foreignRow.getByRole('button', { name: 'Translate' }).click();
+    await A.page.getByRole('menuitem', { name: 'English' }).click();
+    const translated = await visible(foreignRow.getByText(/machine translation/i), 30000);
+    check('translating shows the result under the original, labelled as a machine translation',
+      translated);
+    check('and the original stays on screen — the translation is a reading aid, not a replacement',
+      await visible(foreignRow.getByText(foreignText)));
+  }
   await A.page.screenshot({ path: `${SHOTS}/17-translate.png` });
 
   /* ── Virtualisation ───────────────────────────────────────────────────── */
@@ -1007,28 +1025,34 @@ try {
   const bulkConv = await fetch(`${API}/api/chat/conversations`, { headers: bulkHeaders })
     .then((r) => r.json())
     .then((r) => r.data.conversations.find((c) => c.name?.startsWith('Names')));
+  // Through the chat service's own write path rather than HTTP: the API rate
+  // limits a person to 60 sends a minute (A-03), which a 600-message fixture
+  // is not, and going around it is a test concern, not a product one. Sequence
+  // numbers, previews and counters are written exactly as a real send.
+  process.env.DATABASE_URL ??= env.DATABASE_URL;
+  const chatSvc = await import('@tupo/chat');
   for (let k = 0; k < 20; k++) {
-    await Promise.all(Array.from({ length: 30 }, (_, i) => fetch(
-      `${API}/api/chat/conversations/${bulkConv.id}/messages`, {
-        method: 'POST',
-        headers: bulkHeaders,
-        body: JSON.stringify({ body: `bulk ${k}-${i} filler text of ordinary length`, nonce: `bulk-${k}-${i}` }),
-      })));
+    await Promise.all(Array.from({ length: 30 }, (_, i) => chatSvc.sendMessage({
+      conversationId: bulkConv.id, senderId: A.id,
+      body: `bulk ${k}-${i} filler text of ordinary length`, nonce: `bulk-${k}-${i}`,
+    })));
   }
   const bulkCount = Number((await pool.query(
     'SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1', [bulkConv.id])).rows[0].n);
   check('the long conversation really is long — the fixture itself is verified',
     bulkCount > 560, `${bulkCount} messages`);
 
-  await A.page.reload({ waitUntil: 'domcontentloaded' });
+  // Opened by id: right after a reload the list first shows the device copy
+  // (P-03) in its earlier order, so "the first row called Names" can be
+  // another Names conversation until the network copy re-sorts it.
+  await A.page.goto(`${BASE}/app/chat?c=${bulkConv.id}`, { waitUntil: 'domcontentloaded' });
   await A.page.waitForSelector('#composer');
-  await A.page.locator('li', { hasText: /^Names/ }).first().click();
   await A.page.waitForTimeout(1500);
 
   /** Geometry of the scroller that actually holds the log. */
   const logState = () => A.page.evaluate(() => {
     let el = document.querySelector('[role="log"]');
-    while (el && el.scrollHeight <= el.clientHeight + 4) el = el.parentElement;
+    while (el && !(/(auto|scroll)/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight + 4)) el = el.parentElement;
     if (!el) return null;
     const box = el.getBoundingClientRect();
     const rows = [...document.querySelectorAll('[data-message-row]')];
@@ -1052,7 +1076,7 @@ try {
 
   const scrollLogTo = (frac) => A.page.evaluate((f) => {
     let el = document.querySelector('[role="log"]');
-    while (el && el.scrollHeight <= el.clientHeight + 4) el = el.parentElement;
+    while (el && !(/(auto|scroll)/.test(getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight + 4)) el = el.parentElement;
     el.scrollTop = (el.scrollHeight - el.clientHeight) * f;
   }, frac);
 

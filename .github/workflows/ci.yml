@@ -1,0 +1,81 @@
+name: CI
+
+# The quality gate (G-01). Runs on every pull request and every push, and is
+# called by deploy.yml, which only deploys after it passes.
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]   # main runs it through deploy.yml
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # The API test setup creates and migrates this database itself.
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/tupo_test
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/tupo_test
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      REDIS_URL: redis://127.0.0.1:6379/0
+      REDIS_QUEUE_URL: redis://127.0.0.1:6379/1
+      JWT_SECRET: ci-only-secret-not-used-anywhere-else
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The lock file is written by npm 11; npm 10 (the runner default) fails
+      # `npm ci` on it.
+      - name: Use npm 11
+        run: npm install -g npm@11.6.2
+
+      - name: Install
+        run: npm ci
+
+      - name: Build the shared packages
+        run: npm run build:packages
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit and integration tests
+        run: npm test
+
+      # P-01 / target T3: the first visit stays under 250 KB of gzip JS.
+      # Built as production builds it: this job's NODE_ENV=test would make Vite
+      # bundle React's development build and measure the wrong thing.
+      - name: Web build and bundle budget
+        run: NODE_ENV=production npm run build -w @tupo/web && npm run check:bundle
+
+      # Critical for now. nodemailer is on 10.x (S-06) and body-parser and
+      # markdown-it are patched; the open "high" is zod 3 (memory on oversized
+      # inputs; request bodies are capped at 1 MB), whose only fix is zod 4, a
+      # breaking upgrade of every validator, which also unblocks openai's.
+      # Raise this to --audit-level=high once that lands
+      # (docs/RESPONSIVENESS_PLAN_2026-11.md, follow-ups).
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=critical

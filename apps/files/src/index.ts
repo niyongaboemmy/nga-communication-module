@@ -1,32 +1,100 @@
+import './utils/asyncErrors.js';
 import express from 'express';
+import { installProcessGuards } from './utils/asyncErrors.js';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
-import { getPool, pingDb, snowflake, closeDb } from '@tupo/db';
+import { getPool, pingDb, snowflake, closeDb, startProcessMetrics } from '@tupo/db';
 import { ok, fail, MEETING_FOLDER_PATTERN } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
 import { createStorageDriver } from './storage/driver.js';
 import { canReadFile, canDeleteFile, listConversationFiles } from './access.js';
+import { makeThumbnail, thumbKey, THUMBABLE, type ThumbResult } from './thumbnails.js';
+
+installProcessGuards('files');
 
 const app = express();
 const storage = createStorageDriver();
 
 app.disable('x-powered-by');
 app.use(cors({ origin: config.corsOrigins, credentials: true }));
+
+// The files service's own numbers (R-04). Downloads can be long streams, so
+// latency is measured to the first byte of the answer, not to its end.
+const metrics = startProcessMetrics('files');
+app.use((req, res, next) => {
+  const started = process.hrtime.bigint();
+  const writeHead = res.writeHead.bind(res) as (...a: unknown[]) => typeof res;
+  (res as unknown as { writeHead: (...a: unknown[]) => typeof res }).writeHead = (...a: unknown[]) => {
+    if (!req.path.endsWith('/health')) metrics.time('http', Number(process.hrtime.bigint() - started) / 1e6);
+    return writeHead(...a);
+  };
+  res.on('finish', () => {
+    metrics.count('http_requests');
+    if (res.statusCode >= 500) metrics.count('http_5xx');
+    else if (res.statusCode >= 400) metrics.count('http_4xx');
+  });
+  next();
+});
 app.use(express.json({ limit: '256kb' }));
 
 interface FileRequest extends express.Request { user?: SessionClaims }
 
+/**
+ * The account behind a valid token, checked the way the API checks it (A-06):
+ * it still exists, it is active, and it has not signed out of NGA (single
+ * sign-out) since the token was issued. A signature alone said nothing about
+ * any of that — a suspended or signed-out token kept uploading and
+ * downloading for the rest of its 24 hours.
+ */
+async function accountState(userId: string, iatSeconds: number | undefined): Promise<'ok' | 'gone' | 'suspended' | 'signed-out'> {
+  const { rows } = await getPool().query<{ status: string; revoked_at: Date | null }>(
+    `SELECT u.status, r.revoked_at FROM users u
+       LEFT JOIN session_revocations r ON r.user_id = u.id
+      WHERE u.id = $1`, [userId]);
+  const u = rows[0];
+  if (!u) return 'gone';
+  if (u.status !== 'active') return 'suspended';
+  if (u.revoked_at && (!iatSeconds || iatSeconds * 1000 <= u.revoked_at.getTime())) return 'signed-out';
+  return 'ok';
+}
+
+/** Whether the person's role grants a permission (read fresh, never from the token). */
+async function hasFilePermission(userId: string, key: string): Promise<boolean> {
+  const { rows } = await getPool().query(
+    `SELECT 1 FROM users u
+       JOIN role_permissions rp ON rp.role_id = u.role_id
+       JOIN permissions p ON p.id = rp.permission_id
+      WHERE u.id = $1 AND p.key = $2 LIMIT 1`, [userId, key]);
+  return rows.length > 0;
+}
+
 /** Same session token as the API — this service issues no credential of its own. */
-function requireSession(req: express.Request, res: express.Response, next: express.NextFunction) {
+async function requireSession(req: express.Request, res: express.Response, next: express.NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return res.status(401).json(fail('Authentication required.'));
+  let claims: SessionClaims & { iat?: number };
   try {
-    (req as FileRequest).user = jwt.verify(header.slice(7), config.jwtSecret) as SessionClaims;
-    next();
+    claims = jwt.verify(header.slice(7), config.jwtSecret) as SessionClaims & { iat?: number };
   } catch {
     return res.status(401).json(fail('Invalid or expired session token.'));
   }
+  const state = await accountState(claims.id, claims.iat);
+  if (state === 'suspended') return res.status(403).json(fail('This account has been suspended.'));
+  if (state !== 'ok') return res.status(401).json(fail('Your session is no longer valid. Please sign in again.'));
+  (req as FileRequest).user = claims;
+  next();
+}
+
+/** A platform permission, checked on the live role. */
+function requireFilePermission(key: string) {
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const user = (req as FileRequest).user;
+    if (!user || !(await hasFilePermission(user.id, key))) {
+      return res.status(403).json(fail('You do not have permission to do that.'));
+    }
+    next();
+  };
 }
 
 /**
@@ -48,11 +116,15 @@ function requireSession(req: express.Request, res: express.Response, next: expre
  * ticket was issued is refused by the same check as everyone else, and a copied
  * URL is worthless to anyone other than the person it was minted for.
  */
-const MEDIA_TICKET_TTL_SECONDS = 60;
+// Long enough to play a voice note or watch a clip — media players keep making
+// range requests with the same URL as they buffer and seek, and a 60s ticket
+// stopped playback a minute in (A-08). Still bound to one file and one person,
+// and canReadFile re-runs on every request, so revoking access still works.
+const MEDIA_TICKET_TTL_SECONDS = 15 * 60;
 
 interface MediaTicketClaims { sub: string; fid: string; aud: string }
 
-app.post('/api/files/:id/ticket', requireSession, async (req, res) => {
+app.post('/api/files/:id/ticket', requireSession, requireFilePermission('FILE_DOWNLOAD'), async (req, res) => {
   const user = (req as FileRequest).user!;
   // Minting is itself authorised, so a ticket cannot even be obtained for a
   // file the caller may not read.
@@ -73,23 +145,27 @@ app.post('/api/files/:id/ticket', requireSession, async (req, res) => {
  * A ticket is accepted only for the exact file in the path, so one minted for a
  * harmless image cannot be replayed against anything else.
  */
-function resolveMediaCaller(req: express.Request): string | null {
+async function resolveMediaCaller(req: express.Request): Promise<string | null> {
+  let who: { id: string; iat?: number } | null = null;
   const header = req.headers.authorization;
   if (header?.startsWith('Bearer ')) {
     try {
-      return (jwt.verify(header.slice(7), config.jwtSecret) as SessionClaims).id;
+      const c = jwt.verify(header.slice(7), config.jwtSecret) as SessionClaims & { iat?: number };
+      who = { id: c.id, iat: c.iat };
     } catch { return null; }
+  } else {
+    const ticket = typeof req.query.t === 'string' ? req.query.t : null;
+    if (!ticket) return null;
+    try {
+      const claims = jwt.verify(ticket, config.jwtSecret, { audience: 'file' }) as MediaTicketClaims & { iat?: number };
+      if (claims.fid !== req.params.id) return null;
+      who = { id: claims.sub, iat: claims.iat };
+    } catch {
+      return null;
+    }
   }
-
-  const ticket = typeof req.query.t === 'string' ? req.query.t : null;
-  if (!ticket) return null;
-  try {
-    const claims = jwt.verify(ticket, config.jwtSecret, { audience: 'file' }) as MediaTicketClaims;
-    if (claims.fid !== req.params.id) return null;
-    return claims.sub;
-  } catch {
-    return null;
-  }
+  // A ticket or token is only as good as the account behind it, right now.
+  return (await accountState(who.id, who.iat)) === 'ok' ? who.id : null;
 }
 
 /**
@@ -97,7 +173,7 @@ function resolveMediaCaller(req: express.Request): string | null {
  * and hand back a key. In production this returns a presigned URL so bytes go
  * straight to object storage; the local driver uploads through step 2 instead.
  */
-app.post('/api/files/tickets', requireSession, async (req, res) => {
+app.post('/api/files/tickets', requireSession, requireFilePermission('FILE_UPLOAD'), async (req, res) => {
   const user = (req as FileRequest).user!;
   const { name, size, mime, folder } = req.body ?? {};
 
@@ -113,6 +189,17 @@ app.post('/api/files/tickets', requireSession, async (req, res) => {
   // arbitrary path, which is the whole reason the key is server-generated.
   if (folder !== undefined && (typeof folder !== 'string' || !MEETING_FOLDER_PATTERN.test(folder))) {
     return res.status(400).json(fail('That is not a folder this service will write to.'));
+  }
+
+  // Per-person quota (A-07): what they already store, plus uploads in flight.
+  if (!(await hasFilePermission(user.id, 'FILE_QUOTA_MANAGE'))) {
+    const { rows: used } = await getPool().query<{ bytes: string }>(
+      `SELECT COALESCE(sum(size_bytes), 0)::text AS bytes FROM files
+        WHERE owner_id = $1 AND deleted_at IS NULL AND status IN ('ready', 'pending')`, [user.id]);
+    if (Number(used[0]?.bytes ?? 0) + size > config.userQuotaBytes) {
+      return res.status(413).json(fail(
+        `This would go over your storage allowance of ${Math.floor(config.userQuotaBytes / 1024 ** 3)} GB. Delete some files and try again.`));
+    }
   }
 
   const id = snowflake();
@@ -138,21 +225,32 @@ app.post('/api/files/tickets', requireSession, async (req, res) => {
 });
 
 /** Step 2 — receive the bytes and checksum them on the way past. */
-app.put('/api/files/:id/content', requireSession, async (req, res) => {
+app.put('/api/files/:id/content', requireSession, requireFilePermission('FILE_UPLOAD'), async (req, res) => {
   const user = (req as FileRequest).user!;
-  const { rows } = await getPool().query<{ storage_key: string; owner_id: string; status: string }>(
-    'SELECT storage_key, owner_id, status FROM files WHERE id = $1',
+  const { rows } = await getPool().query<{
+    storage_key: string; owner_id: string; status: string; size_bytes: string; created_at: Date; mime_type: string;
+  }>(
+    'SELECT storage_key, owner_id, status, size_bytes, created_at, mime_type FROM files WHERE id = $1',
     [req.params.id]
   );
   const file = rows[0];
   if (!file) return res.status(404).json(fail('Upload ticket not found.'));
   if (file.owner_id !== user.id) return res.status(403).json(fail('This upload ticket is not yours.'));
   if (file.status !== 'pending') return res.status(409).json(fail('This ticket has already been used.'));
+  // The ticket's expiresAt is a promise, not decoration.
+  if (Date.now() - file.created_at.getTime() > config.signedUrlTtlSeconds * 1000) {
+    return res.status(410).json(fail('This upload ticket has expired. Start the upload again.'));
+  }
+
+  // Never more bytes than were declared (and reserved against the quota), and
+  // never more than the service allows — counted as they arrive, not trusted
+  // from a header (A-07). The limit runs inside the storage pipeline.
+  const limit = Math.min(Number(file.size_bytes), config.maxFileSizeBytes);
 
   try {
     // The driver hashes as it writes — see the comment on hashingStage for why
     // this must not be done with a listener on `req`.
-    const { sizeBytes, checksum } = await storage.put(file.storage_key, req);
+    const { sizeBytes, checksum } = await storage.put(file.storage_key, req, { maxBytes: limit });
 
     if (sizeBytes === 0) {
       await storage.remove(file.storage_key);
@@ -166,9 +264,28 @@ app.put('/api/files/:id/content', requireSession, async (req, res) => {
       `UPDATE files SET size_bytes = $2, checksum = $3, status = 'ready' WHERE id = $1`,
       [req.params.id, sizeBytes, checksum]
     );
-    res.json(ok({ fileId: req.params.id, sizeBytes, checksum, status: 'ready' }));
+    // An image gets its thumbnail and placeholder now (P-05), so a message
+    // sent straight after the upload already carries them. Waited for up to
+    // 4 s; a slower one still finishes and is saved, the answer just goes first.
+    let thumb: ThumbResult | null = null;
+    if (THUMBABLE.test(file.mime_type)) {
+      const work = makeThumbnail(storage, file.storage_key)
+        .then(async (t) => { await saveThumbMetadata(req.params.id!, t); return t; });
+      thumb = await Promise.race([work, new Promise<null>((r) => setTimeout(() => r(null), 4_000).unref())])
+        .catch((err) => { console.warn('[files] thumbnail failed:', err instanceof Error ? err.message : err); return null; });
+    }
+    res.json(ok({
+      fileId: req.params.id, sizeBytes, checksum, status: 'ready',
+      ...(thumb ? { width: thumb.width, height: thumb.height, blurhash: thumb.blurhash } : {}),
+    }));
   } catch (err) {
+    await storage.remove(file.storage_key).catch(() => {});
     await getPool().query(`UPDATE files SET status = 'failed' WHERE id = $1`, [req.params.id]);
+    if ((err as { tooLarge?: boolean }).tooLarge) {
+      // Tell the client and stop reading; the connection closes after.
+      res.setHeader('Connection', 'close');
+      return res.status(413).json(fail('The file is larger than declared.'));
+    }
     console.error('[files] upload failed:', err);
     res.status(500).json(fail('Upload failed.'));
   }
@@ -241,18 +358,28 @@ app.patch('/api/files/:id/metadata', requireSession, async (req, res) => {
  * seeking re-downloads from the start.
  */
 
+/** Thumbnail facts go beside the client's own metadata; the decoder's dimensions win. */
+async function saveThumbMetadata(fileId: string, t: ThumbResult): Promise<void> {
+  await getPool().query(
+    `UPDATE files SET metadata = metadata || $2::jsonb WHERE id = $1`,
+    [fileId, JSON.stringify({ width: t.width, height: t.height, blurhash: t.blurhash, thumb: true })]);
+}
+
 /** MIME types safe to render in the page. Everything else downloads. */
 const INLINE_SAFE = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/(mp4|webm|ogg|quicktime)|audio\/(mpeg|mp4|ogg|wav|webm))$/;
 
 app.get('/api/files/:id/content', async (req, res) => {
-  const callerId = resolveMediaCaller(req);
+  const callerId = await resolveMediaCaller(req);
   if (!callerId) return res.status(401).json(fail('Authentication required.'));
+  if (!(await hasFilePermission(callerId, 'FILE_DOWNLOAD'))) {
+    return res.status(403).json(fail('You do not have permission to open files.'));
+  }
 
   const { rows } = await getPool().query<{
     storage_key: string; original_name: string; mime_type: string;
-    size_bytes: string; status: string;
+    size_bytes: string; status: string; metadata: { thumb?: boolean } | null;
   }>(
-    `SELECT storage_key, original_name, mime_type, size_bytes, status
+    `SELECT storage_key, original_name, mime_type, size_bytes, status, metadata
        FROM files WHERE id = $1 AND deleted_at IS NULL`,
     [req.params.id]);
   const file = rows[0];
@@ -272,15 +399,31 @@ app.get('/api/files/:id/content', async (req, res) => {
   }
 
   const inline = req.query.inline === '1' && INLINE_SAFE.test(file.mime_type);
-  res.setHeader('Content-Type', file.mime_type);
+  // Private: an authorised response must not be cached by a shared proxy and
+  // handed to the next person who asks. Immutable: a file id's bytes never
+  // change once uploaded, so this browser may keep them (P-05).
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+
+  // ?thumb=1 (P-05): the 640 px WebP for lists. Made now if this image
+  // predates thumbnails — that is the whole backfill. Anything that cannot
+  // have one (a GIF, a video, a failed decode) falls back to the original.
+  if (req.query.thumb === '1' && THUMBABLE.test(file.mime_type)) {
+    try {
+      if (!file.metadata?.thumb) await saveThumbMetadata(req.params.id!, await makeThumbnail(storage, file.storage_key));
+      res.setHeader('Content-Type', 'image/webp');
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(file.original_name)}.webp`);
+      return pipeSafely(await storage.get(thumbKey(file.storage_key)), res);
+    } catch (err) {
+      console.warn('[files] thumbnail unavailable, sending the original:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  res.setHeader('Content-Type', file.mime_type);
   res.setHeader(
     'Content-Disposition',
     `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.original_name)}`,
   );
-  // Private: an authorised response must not be cached by a shared proxy and
-  // handed to the next person who asks for the same URL.
-  res.setHeader('Cache-Control', 'private, max-age=300');
   res.setHeader('Accept-Ranges', 'bytes');
 
   const total = Number(file.size_bytes);
@@ -289,8 +432,10 @@ app.get('/api/files/:id/content', async (req, res) => {
   if (range && storage.getRange) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
     if (match) {
-      const start = match[1] ? parseInt(match[1], 10) : 0;
-      const end = match[2] ? parseInt(match[2], 10) : total - 1;
+      // `bytes=-N` is a suffix range: the last N bytes, not the first N.
+      const suffix = !match[1] && match[2];
+      const start = suffix ? Math.max(0, total - parseInt(match[2]!, 10)) : match[1] ? parseInt(match[1], 10) : 0;
+      const end = suffix ? total - 1 : match[2] ? parseInt(match[2], 10) : total - 1;
       if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= total) {
         res.setHeader('Content-Range', `bytes */${total}`);
         return res.status(416).end();
@@ -299,13 +444,27 @@ app.get('/api/files/:id/content', async (req, res) => {
       res.status(206);
       res.setHeader('Content-Range', `bytes ${start}-${last}/${total}`);
       res.setHeader('Content-Length', String(last - start + 1));
-      return (await storage.getRange(file.storage_key, start, last)).pipe(res);
+      return pipeSafely(await storage.getRange(file.storage_key, start, last), res);
     }
   }
 
   res.setHeader('Content-Length', String(total));
-  (await storage.get(file.storage_key)).pipe(res);
+  pipeSafely(await storage.get(file.storage_key), res);
 });
+
+/**
+ * Stream a stored file to the response. A read error (the file vanished from
+ * disk, a permissions problem) is an `error` event on the stream; without a
+ * listener Node treats it as uncaught and the whole files service exits.
+ */
+function pipeSafely(stream: NodeJS.ReadableStream, res: express.Response): void {
+  stream.on('error', (err) => {
+    console.error('[files] read failed:', err instanceof Error ? err.message : err);
+    if (!res.headersSent) res.status(404).json(fail('That file is no longer available.'));
+    else res.destroy();
+  });
+  stream.pipe(res);
+}
 
 /**
  * Everything shared in one conversation — the Files tab.
@@ -385,6 +544,50 @@ app.get('/health', async (_req, res) => {
 
 app.use((_req, res) => res.status(404).json(fail('Not found')));
 
+/**
+ * Housekeeping (A-07): uploads that were started and never finished, and
+ * uploads that failed, are removed from storage after a day, so abandoned
+ * bytes do not quietly fill the disk. Their rows are marked deleted.
+ */
+async function collectAbandonedUploads(): Promise<void> {
+  try {
+    const { rows } = await getPool().query<{ id: string; storage_key: string }>(
+      `SELECT id, storage_key FROM files
+        WHERE deleted_at IS NULL AND status IN ('pending', 'failed') AND created_at < now() - interval '24 hours'
+        LIMIT 500`);
+    for (const r of rows) {
+      await storage.remove(r.storage_key).catch(() => {});
+      await getPool().query('UPDATE files SET deleted_at = now() WHERE id = $1', [r.id]);
+    }
+    if (rows.length) console.log(`[files] cleaned up ${rows.length} abandoned upload(s)`);
+  } catch (err) {
+    console.error('[files] clean-up failed:', err instanceof Error ? err.message : err);
+  }
+}
+if (process.env.NODE_ENV !== 'test') {
+  setInterval(() => void collectAbandonedUploads(), 30 * 60_000).unref();
+  setTimeout(() => void collectAbandonedUploads(), 60_000).unref();
+}
+
+// Every error a route passes on (including rejected async handlers, see
+// utils/asyncErrors) ends here: a clean status, no internals, never a crash.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (res.headersSent) { res.destroy(); return; }
+  const status = (err as { status?: unknown }).status;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    res.status(status).json(fail(err.message));
+    return;
+  }
+  const pgCode = (err as { code?: unknown }).code;
+  if (typeof pgCode === 'string' && /^22/.test(pgCode)) {
+    res.status(400).json(fail('One of the values sent is not valid.'));
+    return;
+  }
+  console.error(`[files] unhandled error on ${req.method} ${req.path}:`, err);
+  res.status(500).json(fail('An unexpected error occurred.'));
+});
+
 const server = app.listen(config.port, () => {
   console.log(`📁 tupo-files listening on http://localhost:${config.port}  (driver: ${storage.name})`);
 });
@@ -397,6 +600,6 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   throw err;
 });
 
-const shutdown = () => server.close(async () => { await closeDb(); process.exit(0); });
+const shutdown = () => server.close(async () => { await metrics.stop(); await closeDb(); process.exit(0); });
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

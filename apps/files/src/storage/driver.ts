@@ -20,6 +20,22 @@ export interface PutResult {
  * it before the write stream is attached, which silently stores a zero-byte
  * file while still producing a correct-looking checksum.
  */
+/**
+ * Refuse more than `maxBytes` (A-07): counted as the bytes arrive, inside the
+ * same pipeline as the write, so the error is handled from the first byte and
+ * the partial file is never left behind as if complete.
+ */
+function limitStage(maxBytes: number): Transform {
+  let seen = 0;
+  return new Transform({
+    transform(chunk: Buffer, _enc, callback) {
+      seen += chunk.length;
+      if (seen > maxBytes) return callback(Object.assign(new Error('Upload is larger than declared.'), { tooLarge: true }));
+      callback(null, chunk);
+    },
+  });
+}
+
 function hashingStage(hash: ReturnType<typeof createHash>): Transform {
   return new Transform({
     transform(chunk, _enc, callback) {
@@ -36,7 +52,7 @@ function hashingStage(hash: ReturnType<typeof createHash>): Transform {
  */
 export interface StorageDriver {
   readonly name: string;
-  put(key: string, body: Readable): Promise<PutResult>;
+  put(key: string, body: Readable, opts?: { maxBytes?: number }): Promise<PutResult>;
   get(key: string): Promise<Readable>;
   /**
    * A byte range, for HTTP 206 responses.
@@ -74,11 +90,14 @@ export class LocalStorageDriver implements StorageDriver {
     return full;
   }
 
-  async put(key: string, body: Readable): Promise<PutResult> {
+  async put(key: string, body: Readable, opts: { maxBytes?: number } = {}): Promise<PutResult> {
     const path = this.pathFor(key);
     await mkdir(dirname(path), { recursive: true });
     const hash = createHash('sha256');
-    await pipeline(body, hashingStage(hash), createWriteStream(path));
+    const stages: Array<NodeJS.ReadWriteStream> = [];
+    if (opts.maxBytes !== undefined) stages.push(limitStage(opts.maxBytes));
+    stages.push(hashingStage(hash));
+    await pipeline(body, ...(stages as [Transform]), createWriteStream(path));
     return { sizeBytes: (await stat(path)).size, checksum: hash.digest('hex') };
   }
 

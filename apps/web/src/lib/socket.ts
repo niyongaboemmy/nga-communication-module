@@ -1,6 +1,6 @@
 import { io, type Socket } from 'socket.io-client';
 import type { ClientToServerEvents, ServerToClientEvents } from '@tupo/shared';
-import { SESSION_KEY } from './api';
+import { SESSION_KEY, apiGet, clearSession } from './api';
 import { getDeviceId } from '../vendor/nga-activity';
 
 /**
@@ -78,11 +78,111 @@ export function getSocket(): AppSocket | null {
       reconnectionDelayMax: 5_000,
       timeout: 10_000,
     });
+    wireLifecycle(socket);
   }
   return socket;
 }
 
+/* ---------------------------------------------------------------------------
+ * Connection state, for the banner (RT-04).
+ *
+ * `reconnecting` is only reported after a short grace period, so the first
+ * connect of a page load and a sub-second blip never flash a banner.
+ * ------------------------------------------------------------------------- */
+export type SocketState = 'connected' | 'reconnecting';
+let state: SocketState = 'connected';
+let graceTimer: ReturnType<typeof setTimeout> | null = null;
+const stateListeners = new Set<(s: SocketState) => void>();
+
+function setState(next: SocketState) {
+  if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+  if (next === 'reconnecting') {
+    graceTimer = setTimeout(() => { state = 'reconnecting'; stateListeners.forEach((l) => l(state)); }, 2_000);
+    return;
+  }
+  if (state !== next) { state = next; stateListeners.forEach((l) => l(state)); }
+}
+
+export function getSocketState(): SocketState { return state; }
+export function onSocketState(fn: (s: SocketState) => void): () => void {
+  stateListeners.add(fn);
+  return () => { stateListeners.delete(fn); };
+}
+
+function endSession(reason: string) {
+  clearSession();
+  disconnectSocket();
+  window.location.href = reason === 'suspended' ? '/suspended' : '/';
+}
+
+/**
+ * The gateway refused or dropped us on purpose (a middleware error or a
+ * server-side disconnect), and socket.io does not retry those by itself. Ask
+ * the API whether the session is still good: if it is, this was a blip and we
+ * reconnect; if not, the API's 401/403 handling signs the person out.
+ */
+async function recheckAndReconnect(s: AppSocket) {
+  try {
+    await apiGet('/api/roles-permissions/me');
+    reconnectSpread(s, 1_000, 3_000);
+  } catch {
+    // apiGet has already redirected on 401 / suspension; a network failure
+    // leaves the banner up and the next online event retries.
+  }
+}
+
+/**
+ * Reconnect after a random delay in [min, min + spread] ms. When the gateway
+ * restarts, every open tab in the school loses its socket at the same instant;
+ * without the spread they would all come back in the same instant too (R-02).
+ */
+function reconnectSpread(s: AppSocket, min: number, spread: number) {
+  setTimeout(() => { if (socket === s && s.disconnected) s.connect(); }, min + Math.random() * spread);
+}
+
+/** Set when the gateway announces a planned restart (a deploy), for the disconnect that follows. */
+let plannedRestart = false;
+
+/**
+ * The network is back: reconnect now (S-11). Two cases. Socket.IO noticed the
+ * drop and is waiting out its backoff (up to 5 s); or it did not notice at all
+ * (a short outage inside its ping window) and would keep a dead connection
+ * until the ping times out, 20 s or more. Either way live updates — sidebar,
+ * badges, typing — stay frozen though the catch-up already ran. Reconnecting
+ * by hand starts at once; a healthy connection is back in a moment.
+ */
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    if (!socket) return;
+    // A manual reconnect, not the automatic one: attempts made while offline
+    // have pushed Socket.IO's backoff to its 5 s ceiling, and closing the
+    // transport would still wait that long.
+    socket.disconnect().connect();
+  });
+}
+
+function wireLifecycle(s: AppSocket) {
+  s.on('connect', () => { plannedRestart = false; setState('connected'); });
+  // A deploy: the gateway says so before it closes (R-02). The session is not
+  // in question, so skip the API re-check that a refused connection gets —
+  // a thousand of those at once would be a stampede of their own.
+  s.on('system:reconnect_required', () => { plannedRestart = true; });
+  s.on('disconnect', (reason) => {
+    setState('reconnecting');
+    if (reason !== 'io server disconnect') return;
+    if (plannedRestart) reconnectSpread(s, 500, 3_500);
+    else void recheckAndReconnect(s);
+  });
+  s.on('connect_error', (err) => {
+    setState('reconnecting');
+    if (/^(unauthorized|forbidden)/.test(err.message)) void recheckAndReconnect(s);
+  });
+  s.on('session:ended', ({ reason }) => endSession(reason));
+  s.io.on('reconnect_failed', () => setState('reconnecting'));
+}
+
 export function disconnectSocket(): void {
+  setState('connected');
   socket?.removeAllListeners();
   socket?.disconnect();
   socket = null;

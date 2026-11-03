@@ -156,6 +156,9 @@ describe('permissions', () => {
 
     // Institutional flags stay with the institution, owner or not.
     expect((await api(owner.token).patch(`/api/feed/pages/${pageId}`, { verified: true })).status).toBe(403);
+
+    // Leave the page with the one owner the later tests assume.
+    await api(admin.token).del(`/api/feed/pages/${pageId}/editors/${owner.id}`);
   });
 
   it('addressing a page by slug updates that page rather than silently nothing', async () => {
@@ -431,11 +434,17 @@ describe('engagement', () => {
   it('an impression counts unique reach once per person', async () => {
     const id = await publish(admin.token, pageId);
     await api(student.token).post(`/api/feed/posts/${id}/view`);
-    await api(student.token).post(`/api/feed/posts/${id}/view`);
+    await api(student.token).post(`/api/feed/posts/${id}/view`); // straight away again: not counted
     await api(parent.token).post(`/api/feed/posts/${id}/view`);
-    const { rows } = await getPool().query('SELECT view_count, unique_reach FROM feed_posts WHERE id = $1', [id]);
+    let { rows } = await getPool().query('SELECT view_count, unique_reach FROM feed_posts WHERE id = $1', [id]);
     expect(rows[0].unique_reach).toBe(2);
+    expect(rows[0].view_count).toBe(2);
+    // Half an hour later the same person seeing it again is a new impression.
+    await getPool().query(`UPDATE feed_post_views SET last_at = now() - interval '31 minutes' WHERE post_id = $1`, [id]);
+    await api(student.token).post(`/api/feed/posts/${id}/view`);
+    ({ rows } = await getPool().query('SELECT view_count, unique_reach FROM feed_posts WHERE id = $1', [id]));
     expect(rows[0].view_count).toBe(3);
+    expect(rows[0].unique_reach).toBe(2);
   });
 });
 

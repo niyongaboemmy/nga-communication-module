@@ -7,8 +7,10 @@
     { "key": "tupo.meet.guest", "label": "Guest meeting (public link)", "module": "Public", "patterns": ["/meet/:idOrCode"], "public": true },
 
     { "key": "tupo.launch", "label": "Opening the app", "module": "Home", "patterns": ["/app"] },
+    { "key": "tupo.suspended", "label": "Account suspended", "module": "Home", "patterns": ["/suspended"] },
 
-    { "key": "tupo.chat", "label": "Chat", "module": "Chat", "patterns": ["/app/chat"] },
+    { "key": "tupo.chat", "label": "Chat", "module": "Chat", "patterns": ["/app/chat", "/app/chat/invite/:code", "/app/chat/:conversationId/:messageId?"] },
+    { "key": "tupo.channels", "label": "Subject channels", "module": "Chat", "patterns": ["/app/channels"] },
 
     { "key": "tupo.feed.home", "label": "Home feed", "module": "Feed", "patterns": ["/app/feed"] },
     { "key": "tupo.feed.reels", "label": "Reels", "module": "Feed", "patterns": ["/app/feed/reels/:reelId?"] },
@@ -28,7 +30,7 @@
     { "key": "tupo.meet.room", "label": "In a meeting", "module": "Meet", "patterns": ["/app/meet/:idOrCode"] },
 
     { "key": "tupo.mail.mailbox", "label": "Mailbox", "module": "Mail", "patterns": ["/app/mail", "/app/mail/t/:threadId"] },
-    { "key": "tupo.mail.campaigns", "label": "Bulk mail campaigns", "module": "Mail", "patterns": ["/app/mail/campaigns"] },
+    { "key": "tupo.mail.campaigns", "label": "Bulk mail campaigns", "module": "Mail", "patterns": ["/app/mail/campaigns", "/app/mail/campaigns/:campaignId?"] },
     { "key": "tupo.mail.lists", "label": "Distribution lists", "module": "Mail", "patterns": ["/app/mail/lists"] },
     { "key": "tupo.mail.templates", "label": "Mail templates", "module": "Mail", "patterns": ["/app/mail/templates"] },
     { "key": "tupo.mail.settings", "label": "Mail settings", "module": "Mail", "patterns": ["/app/mail/settings"] },
@@ -39,6 +41,7 @@
     { "key": "tupo.admin.audit", "label": "Audit log", "module": "Administration", "patterns": ["/app/admin/audit"] },
     { "key": "tupo.admin.oversight", "label": "Conversation oversight", "module": "Administration", "patterns": ["/app/admin/oversight"] },
     { "key": "tupo.admin.system", "label": "System status", "module": "Administration", "patterns": ["/app/system"] },
+    { "key": "tupo.settings", "label": "Profile & settings", "module": "Account", "patterns": ["/app/settings"] },
 
     { "key": "tupo.chat.send", "label": "Chat message sent", "module": "Chat", "event": true, "key_event": true },
     { "key": "tupo.mail.send", "label": "Mail sent", "module": "Mail", "event": true, "key_event": true },

@@ -8,8 +8,9 @@
 import { getPool, snowflake } from '@tupo/db';
 import type { AddCommentPayload, FeedCommentView, FeedMediaItem, FeedPerson, FeedReaction } from '@tupo/shared';
 import { FEED_LIMITS, FEED_REACTIONS } from '@tupo/shared';
+import { loadVisiblePost, loadVisibleComment } from './visibility.js';
 import { FeedError } from './errors.js';
-import { type FeedActor, can, clampLimit, decodeCursor, encodeCursor } from './common.js';
+import { type FeedActor, can, clampLimit, decodeCursor, encodeCursor, lockRow } from './common.js';
 import { resolveMedia } from './posts.js';
 
 /** Comments carry far less media than a post — Facebook allows one attachment;
@@ -48,18 +49,9 @@ interface PostGuardRow {
   editor_role: string | null; following: boolean; status: string;
 }
 
+/** Visible to this person (audience, page, status) — see visibility.ts. */
 async function loadPostGuard(actor: FeedActor, postId: string): Promise<PostGuardRow> {
-  const { rows } = await getPool().query<PostGuardRow>(
-    `SELECT fp.id, fp.author_id, fp.comment_policy, fp.page_id, fp.status,
-            e.role AS editor_role, (f.user_id IS NOT NULL) AS following
-       FROM feed_posts fp
-       LEFT JOIN feed_page_editors e ON e.page_id = fp.page_id AND e.user_id = $2
-       LEFT JOIN feed_page_followers f ON f.page_id = fp.page_id AND f.user_id = $2
-      WHERE fp.id = $1 AND fp.deleted_at IS NULL`,
-    [postId, actor.id],
-  );
-  if (!rows[0]) throw new FeedError('Post not found.', 404);
-  return rows[0];
+  return loadVisiblePost(actor, postId);
 }
 
 function assertCanComment(actor: FeedActor, guard: PostGuardRow): void {
@@ -127,6 +119,7 @@ export async function addComment(
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_posts', postId);
     // Never trust client-supplied media straight into a table the `feed`
     // file-access grant treats as world-readable — resolve it the same way a
     // post's media is resolved, so a fileId must actually belong to this
@@ -169,7 +162,8 @@ export interface CommentPage { items: FeedCommentView[]; nextCursor: string | nu
 export async function listComments(
   actor: FeedActor, postId: string, opts: { cursor?: string | null; limit?: number } = {},
 ): Promise<CommentPage> {
-  await loadPostGuard(actor, postId); // 404s if the post is gone
+  const guard = await loadPostGuard(actor, postId); // 404s if gone or not for this person
+  if (guard.status !== 'published' && guard.editor_role === null) throw new FeedError('Post not found.', 404);
   const limit = clampLimit(opts.limit, 12);
   const before = decodeCursor(opts.cursor);
   const params: unknown[] = [actor.id, postId];
@@ -187,10 +181,12 @@ export async function listComments(
 
   // First two replies per top-level comment, oldest first.
   if (top.length) {
+    // Two per parent, chosen in SQL (D-11): every reply used to be loaded.
     const { rows: replies } = await getPool().query<CommentRow>(
       `SELECT * FROM (
-         ${COMMENT_SELECT} AND c.parent_id = ANY($2)
-       ) c ORDER BY c.created_at ASC`,
+         SELECT x.*, row_number() OVER (PARTITION BY x.parent_id ORDER BY x.created_at ASC, x.id ASC) AS rn
+           FROM (${COMMENT_SELECT} AND c.parent_id = ANY($2)) x
+       ) c WHERE c.rn <= 2 ORDER BY c.created_at ASC`,
       [actor.id, top.map((t) => t.id)],
     );
     const byParent = new Map<string, FeedCommentView[]>();
@@ -212,6 +208,7 @@ export async function listComments(
 export async function listReplies(
   actor: FeedActor, commentId: string, opts: { cursor?: string | null; limit?: number } = {},
 ): Promise<CommentPage> {
+  await loadVisibleComment(actor, commentId); // replies inherit their post's audience
   const limit = clampLimit(opts.limit, 10);
   const before = decodeCursor(opts.cursor);
   const params: unknown[] = [actor.id, commentId];
@@ -252,7 +249,10 @@ async function loadCommentForWrite(actor: FeedActor, commentId: string, moderato
 }
 
 export async function editComment(actor: FeedActor, commentId: string, body: string): Promise<FeedCommentView> {
-  await loadCommentForWrite(actor, commentId);
+  const c = await loadCommentForWrite(actor, commentId);
+  // Words are only ever the author's (FEED-A2). Page admins and moderators may
+  // remove a comment, never put words in someone else's mouth.
+  if (c.author_id !== actor.id) throw new FeedError('Only the author can edit a comment.', 403);
   const trimmed = (body ?? '').trim().slice(0, FEED_LIMITS.COMMENT_BODY_MAX);
   if (!trimmed) throw new FeedError('A comment cannot be empty.', 400);
   await getPool().query('UPDATE feed_comments SET body = $2, edited_at = now() WHERE id = $1', [commentId, trimmed]);
@@ -267,6 +267,7 @@ export async function deleteComment(actor: FeedActor, commentId: string, byModer
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await lockRow(client, 'feed_posts', c.post_id);
     await client.query('UPDATE feed_comments SET deleted_at = now() WHERE id = $1', [commentId]);
     // Replies to a deleted top-level comment go with it.
     if (!c.parent_id) await client.query('UPDATE feed_comments SET deleted_at = now() WHERE parent_id = $1', [commentId]);

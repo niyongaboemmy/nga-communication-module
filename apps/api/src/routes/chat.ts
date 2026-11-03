@@ -10,8 +10,10 @@ import { authorizePermission } from '../middleware/authorize.js';
 import { config } from '../config.js';
 import * as chat from '@tupo/chat';
 import { ChatError } from '@tupo/chat';
-import { emitToConversation, emitToUsers } from '../services/chatRealtime.js';
+import { evictFromRooms, emitToConversation, emitToUsers } from '../services/chatRealtime.js';
 import { audit } from '../services/userService.js';
+import { notifyAndPush } from '@tupo/notify';
+import { clearConversationNotifications, clearNotificationsAbout } from '../services/notificationSync.js';
 import { hasPermission } from '../access/gate.js';
 import { contactDenied } from '../access/contactGate.js';
 import { enqueueUnfurl } from '../services/queue.js';
@@ -217,6 +219,8 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
   const me = actor(req);
   const q = String(req.query.q ?? '').trim();
   const limit = Math.min(Math.max(Number(req.query.limit ?? 20), 1), 50);
+  // Paged (B-12): a school-wide directory is longer than one screen.
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
 
   const { rows } = await getPool().query<{
     id: string; name: string; avatar_url: string | null; role: string; email: string;
@@ -240,9 +244,11 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
       -- Name, then email: same-named people get a stable, predictable order
       -- rather than whatever the planner felt like.
       ORDER BY name ASC, email ASC
-      LIMIT $3`,
-    [me.id, q, limit],
+      LIMIT $3 OFFSET $4`,
+    [me.id, q, limit + 1, offset],
   );
+  const hasMore = rows.length > limit;
+  rows.splice(limit);
 
   // Contact policy: the picker lists only people the viewer may contact.
   const hidden = await contactDenied(me, rows.map((r) => r.id), 'directory');
@@ -255,6 +261,8 @@ router.get('/directory', authorizePermission('DIRECTORY_VIEW'), wrap(async (req,
       id: r.id, name: r.name, avatarUrl: r.avatar_url, role: r.role,
       email: r.email,
     }, r.id, online, seen)),
+    hasMore,
+    nextOffset: hasMore ? offset + limit : null,
   }));
 }));
 
@@ -390,7 +398,7 @@ router.patch('/conversations/:id/prefs', wrap(async (req, res) => {
   const id = req.params.id!;
   await chat.requireMembership(me.id, id);
 
-  const { isStarred, notification, mutedUntil } = req.body ?? {};
+  const { isStarred, notification, mutedUntil, hidden } = req.body ?? {};
   if (notification !== undefined && !NOTIFICATION_LEVELS.includes(notification)) {
     return res.status(400).json(fail('That is not a notification level.'));
   }
@@ -399,14 +407,18 @@ router.patch('/conversations/:id/prefs', wrap(async (req, res) => {
     isStarred: typeof isStarred === 'boolean' ? isStarred : undefined,
     notification: notification as NotificationLevel | undefined,
     mutedUntil: mutedUntil === undefined ? undefined : mutedUntil,
+    hidden: typeof hidden === 'boolean' ? hidden : undefined,
   });
 
   // Preferences are per-person, so this goes to the user's own room — every
   // device they have open, and nobody else's.
   emitToUsers([me.id], 'conversation:prefs', {
     conversationId: id, isStarred, notification, mutedUntil,
+    ...(typeof hidden === 'boolean' ? { hidden } : {}),
   });
 
+  // A hidden DM is out of this person's list, so there is nothing to read back.
+  if (hidden === true) return res.json(ok({ hidden: true }));
   res.json(ok({ conversation: await chat.getConversation(me.id, id) }));
 }));
 
@@ -420,6 +432,14 @@ router.put('/conversations/:id/draft', wrap(async (req, res) => {
     conversationId: id, draft, at: new Date().toISOString(),
   });
   res.json(ok({ saved: true }));
+}));
+
+/** Links shared here, newest first (B-12). */
+router.get('/conversations/:id/links', wrap(async (req, res) => {
+  const me = actor(req);
+  res.json(ok(await chat.listConversationLinks(me.id, req.params.id!, {
+    before: typeof req.query.before === 'string' ? req.query.before : undefined,
+  })));
 }));
 
 router.get('/conversations/:id/members', wrap(async (req, res) => {
@@ -485,33 +505,26 @@ router.post('/conversations/:id/messages', authorizePermission('MESSAGE_SEND'),
   wrap(async (req, res) => {
     const me = actor(req);
     const id = req.params.id!;
-    const membership = await chat.requireMembership(me.id, id);
-
-    if (membership.isArchived) {
-      return res.status(409).json(fail('This conversation is archived.'));
-    }
-    // Announcement channels are read-only unless you are one of the announcers.
-    if (membership.type === 'announcement'
-        && !hasPermission(req, 'CHANNEL_ANNOUNCE')
-        && !chat.canManage(membership.role)) {
-      return res.status(403).json(fail('Only announcers can post in this channel.'));
-    }
+    // Member, not archived, and an announcer in an announcement channel (B-03).
+    const membership = await chat.assertCanPost(me.id, id, { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
 
     const { body, nonce, type, threadRootId, replyToId, attachments, metadata } = req.body ?? {};
     if (!nonce || typeof nonce !== 'string') {
       return res.status(400).json(fail('A nonce is required so a retry cannot duplicate.'));
     }
 
+    // The client picks the kind of message, never its authority (B-01).
+    const safe = await chat.normaliseClientMessage(me.id, id, type, metadata);
     const result = await chat.sendMessage({
       conversationId: id,
       senderId: me.id,
       body: String(body ?? ''),
       nonce,
-      type,
+      type: safe.type,
       threadRootId: threadRootId ?? null,
       replyToId: replyToId ?? null,
       attachments: Array.isArray(attachments) ? attachments : [],
-      metadata: metadata && typeof metadata === 'object' ? metadata : {},
+      metadata: safe.metadata,
     });
 
     if (result.created) {
@@ -546,6 +559,12 @@ async function fanOutNewMessage(
   emitToConversation(conversationId, 'message:new', {
     conversationId, message: result.message,
   });
+  // A call just started here: ring everyone else, wherever they are (N-05).
+  const ring = chat.callRingOf(result.message);
+  if (ring) {
+    const members = (await chat.memberIdsOf(conversationId)).filter((id) => id !== ring.callerId);
+    emitToUsers(members, 'call:ring', { conversationId, ...ring });
+  }
 
   // Queued, not awaited: fetching somebody else's server is not allowed to be
   // in the way of the message appearing.
@@ -576,7 +595,7 @@ async function fanOutNewMessage(
   for (const [userId, c] of Object.entries(counts)) {
     emitToUsers([userId], 'conversation:unread', {
       conversationId, unread: c.unread, unreadMentions: c.unreadMentions,
-      lastReadSeq: c.lastReadSeq,
+      lastReadSeq: c.lastReadSeq, lastSeq: c.lastSeq,
     });
   }
 }
@@ -586,21 +605,32 @@ router.post('/conversations/:id/read', wrap(async (req, res) => {
   const id = req.params.id!;
   await chat.requireMembership(me.id, id);
 
-  const seq = Number(req.body?.seq);
+  // `latest` marks read to the conversation's end as the server knows it —
+  // for "Mark as read" on a row whose newest seq this client never saw.
+  const seq = req.body?.latest === true ? await chat.lastSeqOf(id) : Number(req.body?.seq);
   if (!Number.isFinite(seq)) return res.status(400).json(fail('A sequence number is required.'));
 
   const result = await chat.advanceRead(me.id, id, seq);
-  await chat.markRead(me.id, id, seq);
+  const newlyRead = await chat.markRead(me.id, id, seq, result.previousSeq);
 
   // Other devices of the same person clear their badge too.
   emitToUsers([me.id], 'conversation:unread', {
     conversationId: id, unread: result.unread,
     unreadMentions: result.unreadMentions, lastReadSeq: result.lastReadSeq,
   });
-  // And everyone in the room repaints this person's read marker.
-  emitToConversation(id, 'read:update', {
-    conversationId: id, userId: me.id, seq: result.lastReadSeq, at: new Date().toISOString(),
-  });
+  // And everyone in the room repaints this person's read marker — unless
+  // they keep their reads private (B-11).
+  if (await chat.receiptsVisibleTo(me.id)) {
+    emitToConversation(id, 'read:update', {
+      conversationId: id, userId: me.id, seq: result.lastReadSeq, at: new Date().toISOString(),
+    });
+  }
+  // Senders' ticks move live, on their own devices only.
+  for (const u of await chat.receiptUpdatesFor(id, newlyRead)) {
+    emitToUsers([u.senderId], 'receipt:update', u.payload);
+  }
+  // Read to the end: what the bell had about it is read too (F-01).
+  if (result.unread === 0) void clearConversationNotifications(me.id, id);
 
   res.json(ok(result));
 }));
@@ -639,7 +669,7 @@ router.get('/conversations/:id/messages/:messageId/reactions', wrap(async (req, 
   const { id, messageId } = req.params as { id: string; messageId: string };
   await chat.requireMembership(me.id, id);
   const emoji = String(req.query.emoji ?? '');
-  res.json(ok({ names: emoji ? await chat.reactorNames(messageId, emoji) : [] }));
+  res.json(ok({ names: emoji ? await chat.reactorNames(id, messageId, emoji) : [] }));
 }));
 
 router.patch('/conversations/:id/messages/:messageId', authorizePermission('MESSAGE_EDIT_OWN'),
@@ -722,8 +752,9 @@ router.post('/conversations/:id/messages/:messageId/replies',
   authorizePermission('MESSAGE_SEND'), wrap(async (req, res) => {
     const me = actor(req);
     const { id, messageId } = req.params as { id: string; messageId: string };
-    const membership = await chat.requireMembership(me.id, id);
-    if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
+    // A thread reply is still posting into this conversation — and "also send
+    // to the channel" posts into the main flow — so the same rule applies.
+    const membership = await chat.assertCanPost(me.id, id, { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
 
     const { body, nonce, attachments, alsoSendToChannel } = req.body ?? {};
     if (!nonce) return res.status(400).json(fail('A nonce is required.'));
@@ -746,6 +777,11 @@ router.post('/conversations/:id/messages/:messageId/replies',
       // main flow, even those who never opened the thread.
       if (root) emitToConversation(id, 'message:updated', { conversationId: id, message: root });
 
+      // Followers' "N new replies" markers. A thread reply never moves anyone's
+      // conversation badge (see unreadCountSql), so this is the only counter it
+      // touches — and it goes to each follower's own room, open or not.
+      await pushThreadUnread(id, root?.id ?? messageId);
+
       /*
        * A thread reply notifies the people who have written in it.
        *
@@ -753,15 +789,13 @@ router.post('/conversations/:id/messages/:messageId/replies',
        * means threads notify nobody; notifying the whole channel means threads
        * are no quieter than the room, which is the one thing they exist to be.
        */
-      const followers = await chat.threadParticipants(id, root?.id ?? messageId);
+      const rootKey = root?.id ?? messageId;
       const deniedMentions = await contactDenied(me, reply.mentionedUserIds, 'mention');
-      await chat.notifyNewMessage(reply.message, {
+      await chat.notifyThreadReply(reply.message, {
         conversationName: membership.name ?? 'a conversation',
-        conversationType: membership.type,
-        mentionedUserIds: [...new Set([
-          ...reply.mentionedUserIds.filter((u) => !deniedMentions.has(u)), ...followers])],
-        broadcast: reply.broadcast,
-        senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
+        rootId: rootKey,
+        followerIds: await chat.threadFollowers(id, rootKey),
+        mentionedUserIds: reply.mentionedUserIds.filter((u) => !deniedMentions.has(u)),
       }).catch(() => {});
     }
 
@@ -777,6 +811,57 @@ router.post('/conversations/:id/messages/:messageId/replies',
       message: reply.message, root, duplicate: !reply.created,
     }));
   }));
+
+/** Send every follower of a thread their own new-reply count for it. */
+async function pushThreadUnread(conversationId: string, rootId: string): Promise<void> {
+  const counts = await chat.threadUnreadFor(conversationId, rootId).catch(() => []);
+  for (const c of counts) {
+    emitToUsers([c.userId], 'thread:unread', { conversationId, rootId, unread: c.unread });
+  }
+}
+
+/** The reader has seen a thread up to `seq` (the ThreadPanel, scrolled to its end). */
+router.post('/conversations/:id/threads/:rootId/read', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, rootId } = req.params as { id: string; rootId: string };
+  await chat.requireMembership(me.id, id);
+  const seq = Number(req.body?.seq);
+  if (!Number.isFinite(seq) || seq < 0) return res.status(400).json(fail('A sequence number is required.'));
+  const lastReadSeq = await chat.markThreadRead(me.id, id, rootId, seq);
+  // Every device this person owns drops the marker together.
+  emitToUsers([me.id], 'thread:unread', { conversationId: id, rootId, unread: 0 });
+  void clearNotificationsAbout(me.id, 'thread', [rootId]);
+  res.json(ok({ lastReadSeq }));
+}));
+
+/** New-reply counts for the threads in one conversation, keyed by root id. */
+router.get('/conversations/:id/threads/unread', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id } = req.params as { id: string };
+  await chat.requireMembership(me.id, id);
+  res.json(ok({ threads: await chat.threadUnreadIn(me.id, id) }));
+}));
+
+/** The Threads inbox: every thread this person follows, newest activity first. */
+router.get('/threads', wrap(async (req, res) => {
+  const me = actor(req);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  res.json(ok({ threads: await chat.followedThreads(me.id, limit) }));
+}));
+
+/** "Mark as unread" — bring a conversation back to the reader's attention. */
+router.post('/conversations/:id/unread', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id } = req.params as { id: string };
+  await chat.requireMembership(me.id, id);
+  const result = await chat.markConversationUnread(me.id, id,
+    req.body?.seq === undefined ? undefined : Number(req.body.seq));
+  emitToUsers([me.id], 'conversation:unread', {
+    conversationId: id, unread: result.unread, unreadMentions: result.unreadMentions,
+    lastReadSeq: result.lastReadSeq,
+  });
+  res.json(ok(result));
+}));
 
 /* ────────────────────────────────────────────────────────────────────────── *
  * Pins
@@ -841,18 +926,24 @@ router.post('/conversations/:id/messages/:messageId/forward',
     const { id, messageId } = req.params as { id: string; messageId: string };
     const targets = Array.isArray(req.body?.conversationIds) ? req.body.conversationIds : [];
     if (!targets.length) return res.status(400).json(fail('Choose where to forward it.'));
+    // Forwarding into a conversation is posting there.
+    for (const target of targets) {
+      await chat.assertCanPost(me.id, String(target), { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
+    }
 
     const results = await chat.forwardMessage(
       me.id, id, messageId, targets, typeof req.body?.comment === 'string' ? req.body.comment : undefined,
     );
 
-    for (const { conversationId, result } of results) {
+    for (const { conversationId, result, comment } of results) {
       const target = await chat.requireMembership(me.id, conversationId);
-      await fanOutNewMessage(conversationId, result, {
+      const context = {
         name: target.name ?? 'a conversation',
         type: target.type,
         senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
-      });
+      };
+      if (comment) await fanOutNewMessage(conversationId, comment, context);
+      await fanOutNewMessage(conversationId, result, context);
     }
 
     res.json(ok({ forwarded: results.map((r) => r.conversationId) }));
@@ -938,6 +1029,7 @@ router.patch('/prefs', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, 
   if (bool('desktopNotifications') !== undefined) patch.desktopNotifications = bool('desktopNotifications');
   if (bool('sound') !== undefined) patch.sound = bool('sound');
   if (bool('showPresence') !== undefined) patch.showPresence = bool('showPresence');
+  if (bool('emailDigest') !== undefined) patch.emailDigest = bool('emailDigest');
   if (num('quietFromMinute') !== undefined) patch.quietFromMinute = num('quietFromMinute');
   if (num('quietToMinute') !== undefined) patch.quietToMinute = num('quietToMinute');
   if (typeof body.timezone === 'string') patch.timezone = body.timezone.slice(0, 64);
@@ -994,8 +1086,7 @@ router.post('/conversations/:id/scheduled', authorizePermission('MESSAGE_SCHEDUL
   wrap(async (req, res) => {
     const me = actor(req);
     const id = req.params.id!;
-    const membership = await chat.requireMembership(me.id, id);
-    if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
+    await chat.assertCanPost(me.id, id, { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
 
     const at = new Date(String(req.body?.sendAt ?? ''));
     const scheduled = await chat.scheduleMessage(
@@ -1019,15 +1110,9 @@ router.post('/conversations/:id/polls', authorizePermission('MESSAGE_SEND'),
   wrap(async (req, res) => {
     const me = actor(req);
     const id = req.params.id!;
-    const membership = await chat.requireMembership(me.id, id);
-    if (membership.isArchived) return res.status(409).json(fail('This conversation is archived.'));
-    if (membership.type === 'announcement'
-        && !hasPermission(req, 'CHANNEL_ANNOUNCE')
-        && !chat.canManage(membership.role)) {
-      return res.status(403).json(fail('Only announcers can post in this channel.'));
-    }
+    const membership = await chat.assertCanPost(me.id, id, { mayAnnounce: hasPermission(req, 'CHANNEL_ANNOUNCE') });
 
-    const { poll, message } = await chat.createPoll(me.id, id, {
+    const { poll, message, sent } = await chat.createPoll(me.id, id, {
       question: String(req.body?.question ?? ''),
       options: Array.isArray(req.body?.options) ? req.body.options : [],
       multiChoice: req.body?.multiChoice === true,
@@ -1035,9 +1120,14 @@ router.post('/conversations/:id/polls', authorizePermission('MESSAGE_SEND'),
       closesAt: req.body?.closesAt ?? null,
     });
 
-    // The poll is a message, so it fans out as one — and notifies as one.
-    emitToConversation(id, 'message:new', { conversationId: id, message });
-    emitToConversation(id, 'poll:updated', { conversationId: id, poll });
+    // The poll is a message, so it fans out as one — badges and notifications
+    // included (B-11: it used to emit the message and nothing else).
+    await fanOutNewMessage(id, sent, {
+      name: membership.name ?? 'a conversation',
+      type: membership.type,
+      senderMayBroadcast: hasPermission(req, 'CHANNEL_ANNOUNCE'),
+    });
+    emitToConversation(id, 'poll:updated', { conversationId: id, poll: { ...poll, myVotes: [] }, actorId: me.id });
     res.status(201).json(ok({ poll, message }));
   }));
 
@@ -1045,7 +1135,7 @@ router.get('/conversations/:id/messages/:messageId/poll', wrap(async (req, res) 
   const me = actor(req);
   const { id, messageId } = req.params as { id: string; messageId: string };
   await chat.requireMembership(me.id, id);
-  const poll = await chat.getPollByMessage(me.id, messageId);
+  const poll = await chat.getPollByMessage(me.id, id, messageId);
   if (!poll) return res.status(404).json(fail('No poll on that message.'));
   res.json(ok({ poll }));
 }));
@@ -1061,7 +1151,9 @@ router.post('/polls/:pollId/vote', wrap(async (req, res) => {
     // Everyone sees the bars move. A poll whose results only update on reload
     // is a poll people vote in twice.
     emitToConversation(rows[0].conversation_id, 'poll:updated', {
-      conversationId: rows[0].conversation_id, poll,
+      // Neutral: the voter has their own votes from the response; broadcasting
+      // them next to actorId would reveal an anonymous vote.
+      conversationId: rows[0].conversation_id, poll: { ...poll, myVotes: [] }, actorId: me.id,
     });
   }
   res.json(ok({ poll }));
@@ -1074,7 +1166,9 @@ router.post('/polls/:pollId/close', wrap(async (req, res) => {
     'SELECT conversation_id FROM polls WHERE id = $1', [req.params.pollId]);
   if (rows[0]) {
     emitToConversation(rows[0].conversation_id, 'poll:updated', {
-      conversationId: rows[0].conversation_id, poll,
+      // Neutral: the voter has their own votes from the response; broadcasting
+      // them next to actorId would reveal an anonymous vote.
+      conversationId: rows[0].conversation_id, poll: { ...poll, myVotes: [] }, actorId: me.id,
     });
   }
   res.json(ok({ poll }));
@@ -1171,6 +1265,9 @@ router.delete('/conversations/:id/members/:userId', wrap(async (req, res) => {
   emitToConversation(id, 'conversation:member_changed', {
     conversationId: id, userId, action: leaving ? 'left' : 'removed', memberCount,
   });
+  // Out of the room on every device now, not at their next reconnect.
+  evictFromRooms([userId], [`conv:${id}`]);
+  emitToUsers([userId], 'conversation:removed', { conversationId: id, reason: leaving ? 'left' : 'removed' });
 
   if (!leaving) {
     await audit({
@@ -1279,6 +1376,8 @@ router.post('/conversations/:id/retention', authorizePermission('RETENTION_MANAG
       actorId: me.id, action: 'chat.retention.set', targetType: 'conversation', targetId: id,
       metadata: { days }, ipAddress: req.ip, userAgent: req.headers['user-agent'],
     });
+    // Every member's header and settings follow at once (B-11).
+    void announceConversation(id).catch(() => {});
     res.json(ok({ conversation }));
   }));
 
@@ -1295,6 +1394,10 @@ router.post('/conversations/:id/invites', authorizePermission('CHANNEL_MEMBERS_M
     });
     res.status(201).json(ok({ invite }));
   }));
+
+router.get('/conversations/:id/invites', authorizePermission('CHANNEL_MEMBERS_MANAGE'), wrap(async (req, res) => {
+  res.json(ok({ invites: await chat.listInvites(actor(req).id, req.params.id!) }));
+}));
 
 router.post('/invites/:code/redeem', authorizePermission('CHANNEL_JOIN'), wrap(async (req, res) => {
   const me = actor(req);
@@ -1318,9 +1421,78 @@ router.delete('/invites/:code', wrap(async (req, res) => {
 router.get('/profile/:userId', authorizePermission('DIRECTORY_VIEW'), wrap(async (req, res) => {
   const me = actor(req);
   const profile = await chat.getProfile(me.id, req.params.userId!);
+  const block = me.id === profile.id ? { byMe: false, byThem: false } : await chat.blockedBetween(me.id, profile.id);
+  // A block hides presence both ways (B-05): offline, no last seen.
+  if (block.byMe || block.byThem) {
+    return res.json(ok({ profile: { ...profile, presence: 'offline', lastSeenAt: null, blockedByMe: block.byMe } }));
+  }
   const online = await presenceFor([profile.id]);
   const seen = await lastSeenFor([profile.id]);
-  res.json(ok({ profile: withPresence(profile, profile.id, online, seen) }));
+  res.json(ok({ profile: { ...withPresence(profile, profile.id, online, seen), blockedByMe: false } }));
+}));
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Blocking and reporting (B-05, FR-USR-7)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+router.get('/blocks', wrap(async (req, res) => {
+  res.json(ok({ blocks: await chat.listBlocks(actor(req).id) }));
+}));
+
+router.put('/blocks/:userId', wrap(async (req, res) => {
+  const me = actor(req);
+  await chat.blockUser(me.id, req.params.userId!, req.body?.reason ?? null);
+  await audit({ actorId: me.id, action: 'chat.block', targetType: 'user', targetId: req.params.userId! });
+  // Every device of the blocker updates (composer, presence, menus). The
+  // blocked person is deliberately not told.
+  emitToUsers([me.id], 'block:changed', { userId: req.params.userId!, blocked: true });
+  res.json(ok({ blocked: true }));
+}));
+
+router.delete('/blocks/:userId', wrap(async (req, res) => {
+  const me = actor(req);
+  await chat.unblockUser(me.id, req.params.userId!);
+  await audit({ actorId: me.id, action: 'chat.unblock', targetType: 'user', targetId: req.params.userId! });
+  emitToUsers([me.id], 'block:changed', { userId: req.params.userId!, blocked: false });
+  res.json(ok({ blocked: false }));
+}));
+
+router.post('/reports', authorizePermission('REPORT_SUBMIT'), wrap(async (req, res) => {
+  const me = actor(req);
+  const body = req.body ?? {};
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
+  const result = await chat.submitReport({
+    reporterId: me.id, userId: str(body.userId), conversationId: str(body.conversationId),
+    messageId: str(body.messageId), reason: String(body.reason ?? ''), details: str(body.details),
+  });
+  if (body.alsoBlock === true && str(body.userId)) {
+    await chat.blockUser(me.id, String(body.userId));
+    emitToUsers([me.id], 'block:changed', { userId: String(body.userId), blocked: true });
+  }
+  if (!result.duplicate) {
+    await audit({ actorId: me.id, action: 'chat.report', targetType: 'user_report', targetId: result.id });
+  }
+  res.status(result.duplicate ? 200 : 201).json(ok({ reportId: result.id, duplicate: result.duplicate }));
+}));
+
+router.get('/reports', authorizePermission('MODERATION_QUEUE_VIEW'), wrap(async (req, res) => {
+  const status = String(req.query.status ?? 'open');
+  if (!['open', 'resolved', 'dismissed', 'all'].includes(status)) return res.status(400).json(fail('Unknown status.'));
+  res.json(ok({ reports: await chat.listReports(status as 'open') }));
+}));
+
+router.patch('/reports/:id', authorizePermission('MODERATION_ACT'), wrap(async (req, res) => {
+  const me = actor(req);
+  const status = req.body?.status;
+  const { reporterId } = await chat.resolveReport(req.params.id!, me.id, status, req.body?.note ?? null);
+  await audit({ actorId: me.id, action: `chat.report.${status}`, targetType: 'user_report', targetId: req.params.id! });
+  // The reporter hears that it was looked at — never who was actioned or how.
+  await notifyAndPush([reporterId], {
+    kind: 'moderation.report', title: 'Your report was reviewed',
+    body: 'Thank you — a moderator has looked at what you reported.',
+    link: '/app/chat', subjectType: 'user_report', subjectId: req.params.id!,
+  }).catch(() => {});
+  res.json(ok({ status }));
 }));
 
 router.put('/status', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, res) => {

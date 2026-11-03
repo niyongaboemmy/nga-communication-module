@@ -91,7 +91,8 @@ export const IconButton: React.FC<IconButtonProps> = ({
       >
         {children}
       </button>
-      <span
+      {/* No tooltip while the control's own popup is open — it would sit on top of it. */}
+      {!(rest as { 'aria-expanded'?: boolean })['aria-expanded'] && <span
         role="tooltip"
         className={`pointer-events-none absolute left-1/2 z-50 -translate-x-1/2 whitespace-nowrap rounded-md ` +
           'bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-lg ' +
@@ -101,7 +102,7 @@ export const IconButton: React.FC<IconButtonProps> = ({
           `dark:bg-gray-700 ${tooltipPos}`}
       >
         {label}
-      </span>
+      </span>}
     </span>
   );
 };

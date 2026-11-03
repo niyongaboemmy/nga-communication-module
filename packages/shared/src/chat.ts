@@ -41,6 +41,8 @@ export interface ConversationSummary {
   description: string | null;
   isPrivate: boolean;
   isArchived: boolean;
+  /** Disappearing messages: kept this many days, or null for always (B-07). */
+  retentionDays: number | null;
   iconEmoji: string | null;
   avatarColor: string | null;
   avatarUrl: string | null;
@@ -114,6 +116,8 @@ export interface WireAttachment {
   durationMs?: number;
   /** Peak samples for a voice note's waveform, 0–1, pre-computed client-side. */
   waveform?: number[];
+  /** Images: a blurhash painted while the thumbnail loads (P-05). */
+  blurhash?: string;
 }
 
 export interface WireMessage {

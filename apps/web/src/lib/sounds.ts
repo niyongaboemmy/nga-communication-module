@@ -19,7 +19,7 @@ export type SoundName =
   | 'join' | 'leave' | 'knock' | 'admitted' | 'denied'
   | 'message' | 'mention' | 'hand' | 'reaction'
   | 'poll' | 'recording-start' | 'recording-stop'
-  | 'success' | 'error' | 'ended';
+  | 'success' | 'error' | 'ended' | 'ring';
 
 interface Note { freq: number; at: number; dur: number; gain?: number; type?: OscillatorType }
 
@@ -77,6 +77,14 @@ const SCORES: Record<SoundName, Note[]> = {
   error: [
     { freq: 311.13, at: 0, dur: 0.13, type: 'square', gain: 0.22 },
     { freq: 233.08, at: 0.11, dur: 0.2, type: 'square', gain: 0.22 },
+  ],
+  // An incoming call (N-05): a phone's double ring, E and G alternating.
+  // Repeated every ~2.5 s by the incoming-call screen while it rings.
+  ring: [
+    { freq: 659.25, at: 0, dur: 0.12, gain: 0.7 }, { freq: 783.99, at: 0.12, dur: 0.12, gain: 0.7 },
+    { freq: 659.25, at: 0.24, dur: 0.12, gain: 0.7 }, { freq: 783.99, at: 0.36, dur: 0.12, gain: 0.7 },
+    { freq: 659.25, at: 0.7, dur: 0.12, gain: 0.7 }, { freq: 783.99, at: 0.82, dur: 0.12, gain: 0.7 },
+    { freq: 659.25, at: 0.94, dur: 0.12, gain: 0.7 }, { freq: 783.99, at: 1.06, dur: 0.12, gain: 0.7 },
   ],
   ended: [
     { freq: 659.25, at: 0, dur: 0.1 },

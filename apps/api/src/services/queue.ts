@@ -18,7 +18,9 @@ const QUEUE_NAME = 'tupo-jobs';
 const queueUrl = process.env.REDIS_QUEUE_URL ?? 'redis://127.0.0.1:6379/1';
 
 let queue: Queue | null = null;
-let disabled = false;
+// JOB_QUEUE=off: no background queue at all (the test suite — its jobs must
+// never land on a developer's running worker, which reads another database).
+let disabled = process.env.JOB_QUEUE === 'off';
 
 function getQueue(): Queue | null {
   if (disabled) return null;
@@ -72,6 +74,8 @@ export async function enqueueMeetWrapUp(meetingId: string, host: SessionClaims):
       actorId: host.id,
       token: serviceToken(host),
     }, {
+      // At most one wrap-up per meeting in the queue at a time.
+      jobId: `meet-wrapup-${meetingId}`,
       // The models are the slow, flaky part; retry with backoff rather than
       // losing the minutes to one rate-limited call.
       attempts: 3,
@@ -167,6 +171,25 @@ export async function enqueueMailListSync(listId: string): Promise<boolean> {
     });
     return true;
   } catch {
+    return false;
+  }
+}
+
+/** Announce a published post from the worker (FEED-P4). False if the queue is unavailable. */
+export async function enqueueFeedAnnounce(postId: string): Promise<boolean> {
+  const q = getQueue();
+  if (!q) return false;
+  try {
+    await q.add('feed:announce', { postId }, {
+      jobId: `feed-announce-${postId}`,
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5_000 },
+      removeOnComplete: 200,
+      removeOnFail: 100,
+    });
+    return true;
+  } catch (err) {
+    console.error('[queue] could not enqueue feed announce:', err instanceof Error ? err.message : err);
     return false;
   }
 }

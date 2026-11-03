@@ -60,6 +60,10 @@ async function candidateIds(
   // and the whole query 500s with "could not determine data type of
   // parameter $1", which is exactly what a page's own post list did.
   const audP = p(audiences);
+  // The page counts as much as the post: a post on a deleted page, or on a
+  // page whose audience excludes this person, is not in their feed (D-01).
+  const pageOk = `AND EXISTS (SELECT 1 FROM feed_pages pv
+                   WHERE pv.id = fp.page_id AND pv.deleted_at IS NULL AND pv.audience = ANY(${audP}))`;
 
   let source: string;
   if (opts.filter === 'bookmarks') {
@@ -69,14 +73,14 @@ async function candidateIds(
         FROM feed_bookmarks bm
         JOIN feed_posts fp ON fp.id = bm.post_id
        WHERE bm.user_id = ${actorP} AND fp.deleted_at IS NULL AND fp.status = 'published'
-         AND fp.audience = ANY(${audP})`;
+         AND fp.audience = ANY(${audP}) ${pageOk}`;
   } else if (opts.pageId) {
     const pinnedFilter = pinnedLeadsPage(opts) ? 'AND NOT fp.pinned' : '';
     source = `
       SELECT fp.id, fp.published_at, false AS is_followed
         FROM feed_posts fp
        WHERE fp.page_id = ${p(opts.pageId)} AND fp.deleted_at IS NULL AND fp.status = 'published'
-         AND fp.audience = ANY(${audP}) ${pinnedFilter}`;
+         AND fp.audience = ANY(${audP}) ${pinnedFilter} ${pageOk}`;
   } else if (opts.filter === 'following') {
     // Strictly followed content — timeline fan-out ∪ read-time merge of
     // big/mandatory pages the user follows.
@@ -85,13 +89,13 @@ async function candidateIds(
       SELECT fp.id, fp.published_at, true AS is_followed FROM feed_timeline t
         JOIN feed_posts fp ON fp.id = t.post_id
        WHERE t.user_id = ${actorP} AND fp.deleted_at IS NULL AND fp.status = 'published'
-         AND fp.audience = ANY(${audP}) AND t.reason = 'follow'
+         AND fp.audience = ANY(${audP}) AND t.reason = 'follow' ${pageOk}
       UNION
       SELECT fp.id, fp.published_at, true AS is_followed FROM feed_page_followers f
         JOIN feed_pages pg ON pg.id = f.page_id AND pg.deleted_at IS NULL
         JOIN feed_posts fp ON fp.page_id = pg.id
        WHERE f.user_id = ${actorP} AND (pg.mandatory OR pg.follower_count > ${p(FEED_LIMITS.FANOUT_THRESHOLD)})
-         AND fp.deleted_at IS NULL AND fp.status = 'published' AND fp.audience = ANY(${audP})`;
+         AND fp.deleted_at IS NULL AND fp.status = 'published' AND fp.audience = ANY(${audP}) ${pageOk}`;
   } else {
     // "all" (default) and "announcements": every published, audience-visible
     // post is a candidate — not just pages the actor follows — so the feed
@@ -109,7 +113,11 @@ async function candidateIds(
              ) AS is_followed
         FROM feed_posts fp
        WHERE fp.deleted_at IS NULL AND fp.status = 'published'
-         AND fp.audience = ANY(${audP}) ${annFilter}`;
+         -- Bounded (D-11 / FEED-P1): the open feed ranks the last half year,
+         -- not every post ever made, on each request. Following, a page's own
+         -- posts and saved posts reach further back.
+         AND fp.published_at > now() - interval '180 days'
+         AND fp.audience = ANY(${audP}) ${annFilter} ${pageOk}`;
   }
 
   const keyset = before && (opts.sort ?? 'recent') === 'recent'

@@ -94,6 +94,12 @@ export const publishPost = (id: string) =>
   apiPost<{ post: FeedPostView }>(`/api/feed/posts/${id}/publish`).then((r) => r.data!.post);
 
 export const unpublishPost = (id: string) => apiPost(`/api/feed/posts/${id}/unpublish`);
+/** A page's drafts and scheduled posts, for its editors (D-05). */
+export const listDrafts = (pageId: string) =>
+  apiGet<{ posts: FeedPostView[] }>(`/api/feed/pages/${pageId}/drafts`).then((r) => r.data!.posts);
+/** Reschedule a draft/scheduled post; null turns it back into a draft. */
+export const schedulePost = (id: string, scheduledAt: string | null) =>
+  apiPost<{ post: FeedPostView }>(`/api/feed/posts/${id}/schedule`, { scheduledAt }).then((r) => r.data!.post);
 export const deletePost = (id: string) => apiDelete(`/api/feed/posts/${id}`);
 
 export const reactToPost = (id: string, emoji: FeedReaction | null) =>

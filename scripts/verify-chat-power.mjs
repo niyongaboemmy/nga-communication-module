@@ -327,9 +327,10 @@ try {
 
   const translated = await api(trUrl, bob.token, {
     method: 'POST', body: JSON.stringify({ language: 'fr' }) });
-  if (translated.status === 503) {
+  if (translated.status === 503 || (translated.status === 403 && translated.body?.code === 'AI_DISABLED')) {
+    // No provider here, or the school's AI switch is off in NGA MIS (the default).
     check('translation is unavailable in this environment — skipped', true,
-      translated.body.message ?? '');
+      translated.body?.message ?? '');
   } else {
     check('a message can be translated',
       translated.status === 200 && typeof translated.data.text === 'string'

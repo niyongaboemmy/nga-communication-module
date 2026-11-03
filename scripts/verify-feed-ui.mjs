@@ -10,12 +10,14 @@
  *   npm run verify:feed:ui        (needs `npm run dev` running)
  */
 import { chromium } from 'playwright';
+import { prepareBrowser } from './lib/uiHarness.mjs';
 import jwt from 'jsonwebtoken';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import { purgeUsers, purgeUsersLike } from './lib/purge.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const env = Object.fromEntries(readFileSync(`${ROOT}/apps/api/.env`, 'utf8').split('\n')
@@ -47,7 +49,7 @@ const seed = (u) => ({
   tupo_permissions: JSON.stringify([]),
   tupo_role_permissions: JSON.stringify({ keys: u.perms, name: u.roleName }),
 });
-const cleanup = () => pool.query(`DELETE FROM users WHERE id LIKE 'feedui-%'`);
+const cleanup = () => purgeUsersLike(pool, 'feedui-');
 
 let browser;
 try {
@@ -61,6 +63,8 @@ try {
   const pageId = pageRes.data.page.id;
 
   browser = await chromium.launch();
+
+  prepareBrowser(browser);
   const ctx = await browser.newContext({ viewport: { width: 1360, height: 900 } });
   await ctx.addInitScript((kv) => { for (const [k, v] of Object.entries(kv)) localStorage.setItem(k, v); }, seed(ada));
   const page = await ctx.newPage();

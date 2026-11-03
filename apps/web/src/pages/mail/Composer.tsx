@@ -22,12 +22,24 @@ export interface ComposerSeed {
   kind?: MailMessageKind;
   draftId?: string;
   scheduledAt?: string | null;
+  attachments?: Array<{ fileId: string; name: string; mime: string; size: number }>;
 }
+
+/** A send held back so it can be undone (U-10): what to send, and how to reopen it. */
+export interface QueuedSend { payload: MailComposePayload; reopen: ComposerSeed }
 
 interface Props {
   seed?: ComposerSeed;
+  /**
+   * Undo send (U-10): when given, Send closes at once and hands the message
+   * here instead of sending it; the layout sends it a few seconds later
+   * unless the person presses Undo.
+   */
+  onQueueSend?: (job: QueuedSend) => void;
   signatureHtml?: string;
   onClose: () => void;
+  /** Closed with something in it: it was kept as a draft. */
+  onDraftSaved?: () => void;
   onSent: (result: { threadId: string; scheduled: boolean; draft: boolean }) => void;
 }
 
@@ -35,7 +47,7 @@ type Att = { fileId: string; name: string; mime: string; size: number };
 
 const fmtSize = (n: number) => (n < 1024 ? `${n} B` : n < 1e6 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1e6).toFixed(1)} MB`);
 
-export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent }) => {
+export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent, onDraftSaved, onQueueSend }) => {
   const [to, setTo] = useState<RecipientToken[]>(seed?.to ?? []);
   const [cc, setCc] = useState<RecipientToken[]>(seed?.cc ?? []);
   const [bcc, setBcc] = useState<RecipientToken[]>(seed?.bcc ?? []);
@@ -43,7 +55,7 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
   const [subject, setSubject] = useState(seed?.subject ?? '');
   const initialBody = seed?.bodyHtml ?? (signatureHtml ? `<p></p><p></p>${signatureHtml}` : '');
   const [body, setBody] = useState(initialBody);
-  const [attachments, setAttachments] = useState<Att[]>([]);
+  const [attachments, setAttachments] = useState<Att[]>(seed?.attachments ?? []);
   const [uploading, setUploading] = useState(false);
   const [busy, setBusy] = useState<null | 'send' | 'draft' | 'schedule'>(null);
   const [error, setError] = useState<string | null>(null);
@@ -72,19 +84,54 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
     draftId: draftIdRef.current,
   });
 
+  /*
+   * Drafts (C-10). Every save goes through one queue, so the autosave and a
+   * close can never both create a draft (there used to be two copies); the
+   * header says when it was last saved; closing — or being replaced by a new
+   * compose or forward — saves what is there instead of losing it.
+   */
+  const [savedAt, setSavedAt] = useState<Date | null>(null);
+  const [saving, setSaving] = useState(false);
+  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const lastSaved = useRef<string>('');
+  const sentRef = useRef(false);
+  const snapshot = () => JSON.stringify([to, cc, bcc, subject, body, attachments]);
+  const hasContent = () => Boolean(to.length || cc.length || bcc.length || subject.trim()
+    || body.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim() || attachments.length);
+  const saveDraftNow = (): Promise<unknown> => {
+    if (sentRef.current || !hasContent() || snapshot() === lastSaved.current) return saveChain.current;
+    const payload = { ...payloadBase(), draft: true as const };
+    const snap = snapshot();
+    setSaving(true);
+    saveChain.current = saveChain.current.then(async () => {
+      const r = await api.compose({ ...payload, draftId: draftIdRef.current });
+      draftIdRef.current = r.messageId;
+      lastSaved.current = snap;
+      setSavedAt(new Date());
+    }).catch(() => { /* autosave is best-effort */ }).finally(() => setSaving(false));
+    return saveChain.current;
+  };
+  const saveRef = useRef(saveDraftNow);
+  saveRef.current = saveDraftNow;
+
   // Autosave a draft every 4s once there is anything worth keeping.
   useEffect(() => {
-    const hasContent = to.length || subject.trim() || body.replace(/<[^>]+>/g, '').trim();
-    if (!hasContent) return;
-    const t = setTimeout(async () => {
-      try {
-        const r = await api.compose({ ...payloadBase(), draft: true });
-        draftIdRef.current = r.messageId;
-      } catch { /* autosave is best-effort */ }
-    }, 4000);
+    if (!hasContent()) return;
+    const t = setTimeout(() => { void saveRef.current(); }, 4000);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [to, cc, bcc, subject, body, attachments]);
+
+  // Replaced by another compose or forward: keep this one as a draft.
+  useEffect(() => () => { void saveRef.current(); }, []);
+
+  /** Close: saved as a draft if there is anything in it, and said so. */
+  const closeComposer = async () => {
+    const had = hasContent() && !sentRef.current;
+    await saveDraftNow();
+    onClose();
+    if (had && draftIdRef.current) onDraftSaved?.();
+  };
 
   useEffect(() => {
     api.aiState()
@@ -121,6 +168,18 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
     setError(null);
     if (!to.length && !cc.length && !bcc.length) { setError('Add at least one recipient.'); return; }
     if (mode === 'schedule' && !scheduleAt) { setError('Pick a date and time.'); return; }
+    if (mode === 'send' && onQueueSend && !uploading) {
+      // Saved as a draft first, so an undone send reopens exactly this — and
+      // nothing is lost if the page closes while the send is held.
+      setBusy('send');
+      await saveDraftNow();
+      sentRef.current = true;
+      onQueueSend({
+        payload: { ...payloadBase(), draft: false, scheduledAt: null, draftId: draftIdRef.current },
+        reopen: { to, cc, bcc, subject, bodyHtml: body, attachments, threadId: seed?.threadId, parentId: seed?.parentId, kind, draftId: draftIdRef.current },
+      });
+      return;
+    }
     setBusy(mode);
     try {
       const r = await api.compose({
@@ -128,6 +187,7 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
         draft: false,
         scheduledAt: mode === 'schedule' ? new Date(scheduleAt).toISOString() : null,
       });
+      sentRef.current = true;
       onSent({ threadId: r.threadId, scheduled: r.scheduled, draft: false });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not send.');
@@ -138,8 +198,11 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
   const saveDraft = async () => {
     setBusy('draft');
     try {
-      const r = await api.compose({ ...payloadBase(), draft: true });
+      await saveChain.current;
+      const r = await api.compose({ ...payloadBase(), draft: true, draftId: draftIdRef.current });
       draftIdRef.current = r.messageId;
+      lastSaved.current = snapshot();
+      sentRef.current = true;
       onSent({ threadId: r.threadId, scheduled: false, draft: true });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save draft.');
@@ -148,13 +211,24 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
   };
 
   const discard = async () => {
+    sentRef.current = true;
+    await saveChain.current;
     if (draftIdRef.current) await api.deleteDraft(draftIdRef.current).catch(() => {});
     onClose();
   };
 
+  /**
+   * A template goes in above what is already written (C-13) — it used to
+   * replace the whole body — and one Undo takes it back out.
+   */
   const applyTemplate = (t: MailTemplate) => {
     if (!subject.trim()) setSubject(t.subject);
-    setBody(t.bodyHtml + (signatureHtml ? `<p></p>${signatureHtml}` : ''));
+    const written = body.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+    const signatureOnly = signatureHtml && body.replace(/\s/g, '') === `<p></p><p></p>${signatureHtml}`.replace(/\s/g, '');
+    setUndoBody(body);
+    setBody(!written || signatureOnly
+      ? t.bodyHtml + (signatureHtml ? `<p></p>${signatureHtml}` : '')
+      : `${t.bodyHtml}<p></p>${body}`);
     setShowTemplates(false);
   };
 
@@ -183,7 +257,12 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
     <div className={`fixed z-95 ${shellClass}`}>
       <div className="pt-safe flex h-full flex-col overflow-hidden border-border-light bg-white shadow-2xl sm:rounded-xl sm:border dark:border-border-dark dark:bg-elevated-dark">
         <div className="flex items-center justify-between bg-blue-600 px-4 py-2 text-white">
-          <span className="text-sm font-semibold">{title}</span>
+          <span className="flex min-w-0 items-baseline gap-2">
+            <span className="text-sm font-semibold">{title}</span>
+            <span className="truncate text-[11px] text-white/75" aria-live="polite">
+              {saving ? 'Saving…' : savedAt ? `Draft saved ${savedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}
+            </span>
+          </span>
           <div className="flex items-center gap-1">
             <IconButton label="Minimise" size="sm" className="text-white hover:bg-white/15" onClick={() => setMinimized(true)}>
               <Minus size={15} />
@@ -191,7 +270,7 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
             <IconButton label={expanded ? 'Shrink' : 'Expand'} size="sm" className="text-white hover:bg-white/15" onClick={() => setExpanded((v) => !v)}>
               <Maximize2 size={14} />
             </IconButton>
-            <IconButton label="Close" size="sm" className="text-white hover:bg-white/15" onClick={onClose}>
+            <IconButton label="Close" size="sm" className="text-white hover:bg-white/15" onClick={() => void closeComposer()}>
               <X size={16} />
             </IconButton>
           </div>

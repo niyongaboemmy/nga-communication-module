@@ -94,7 +94,20 @@ export interface FeedMediaItem {
   /** Short-lived signed URL, filled by the API on read. */
   url?: string | null;
   posterUrl?: string | null;
+  /** Reels: length in seconds and an optional poster image (the author's own upload). */
+  durationSeconds?: number | null;
+  posterFileId?: string | null;
 }
+
+/** A page accent: a six-digit hex colour (the UI appends alpha to it). */
+export const FEED_ACCENT_RE = /^#[0-9a-fA-F]{6}$/;
+/**
+ * A story background: a hex colour, a two-stop angled gradient of them, or a
+ * named preset (a bare lowercase word — no parentheses, so no url()) — never
+ * free CSS.
+ */
+export const FEED_STORY_BACKGROUND_RE =
+  /^(#[0-9a-fA-F]{6}|linear-gradient\(\d{1,3}deg, ?#[0-9a-fA-F]{6}, ?#[0-9a-fA-F]{6}\)|[a-z][a-z-]{0,23})$/;
 
 export interface FeedLinkPreview {
   url: string;
@@ -286,7 +299,7 @@ export interface ComposePostPayload {
 }
 
 export type EditPostPayload = Partial<
-  Pick<ComposePostPayload, 'body' | 'format' | 'media' | 'linkPreview' | 'audience' | 'commentPolicy' | 'pinned'>
+  Pick<ComposePostPayload, 'body' | 'format' | 'media' | 'linkPreview' | 'audience' | 'commentPolicy' | 'pinned' | 'poll' | 'event'>
 >;
 
 /* ────────────────────────────────────────────────────────────────────────── *

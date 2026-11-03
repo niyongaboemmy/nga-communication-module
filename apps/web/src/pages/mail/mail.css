@@ -48,3 +48,11 @@
 .tupo-prose .merge-token {
   background: #fef3c7; color: #92400e; border-radius: 0.3rem; padding: 0 0.25em; font-weight: 500;
 }
+
+/* Print a conversation (C-12): only the thread, not the app around it. */
+@media print {
+  body * { visibility: hidden !important; }
+  .mail-print, .mail-print * { visibility: visible !important; }
+  .mail-print { position: absolute; inset: 0; overflow: visible !important; height: auto !important; }
+  .mail-print button { display: none !important; }
+}

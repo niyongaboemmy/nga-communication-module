@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowUp, CircleCheck, Clock, Flame, Sparkles, X } from 'lucide-react';
+import { ArrowUp, CircleCheck, Clock, Flame, Sparkles, X , RefreshCw } from 'lucide-react';
 import type { FeedFilter, FeedPostView, FeedSort } from '@tupo/shared';
 import { EmptyState } from '../../components/ui';
 import { useFeed, useFeedList } from './FeedProvider';
@@ -10,6 +10,7 @@ import { HighlightsBar } from './HighlightsBar';
 import { StoriesBar } from './StoriesBar';
 import { ReelsStrip } from './ReelsStrip';
 import * as api from './api';
+import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 
 /** The reels sampler sits after this many posts (or at the end of a short feed). */
 const REELS_STRIP_AFTER = 3;
@@ -18,7 +19,7 @@ export const FeedHome: React.FC = () => {
   const [params, setParams] = useSearchParams();
   const filter = (params.get('filter') as FeedFilter) || 'all';
   const [sort, setSort] = useState<FeedSort>('recent');
-  const { posts, ingest, currentUserId } = useFeed();
+  const { posts, ingest, watch, currentUserId } = useFeed();
   const [pendingTop, setPendingTop] = useState<FeedPostView[]>([]);
   const { pages, left, right } = useFeedRails();
 
@@ -26,7 +27,10 @@ export const FeedHome: React.FC = () => {
     (cursor?: string) => api.getFeed({ cursor, sort, filter: filter === 'all' ? undefined : filter }),
     [sort, filter],
   );
-  const list = useFeedList(loader, [sort, filter]);
+  const list = useFeedList(loader, [sort, filter], `feed:home:${sort}:${filter}`);
+  // Pull down at the top to refresh, on phones (U-20); new posts waiting in
+  // the pill come in with it.
+  const ptr = usePullToRefresh(() => { setPendingTop([]); return list.reload(); });
 
   // Live posts land in a "new posts" pill rather than jumping the scroll.
   useEffect(() => list.onNewPost((post) => {
@@ -37,6 +41,7 @@ export const FeedHome: React.FC = () => {
 
   const showPending = () => {
     ingest(pendingTop);
+    watch(pendingTop.map((p) => p.id));   // revealed posts get live updates too
     pendingTop.forEach((p) => list.prepend(p.id));
     setPendingTop([]);
     document.querySelector('[data-app-scroll]')?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -47,10 +52,19 @@ export const FeedHome: React.FC = () => {
   return (
     <>
       <FeedFrame left={left} right={right}>
+        {(ptr.pull > 0 || ptr.refreshing) && (
+          <div aria-live="polite" className="flex justify-center overflow-hidden transition-[height] duration-150" style={{ height: ptr.pull }}>
+            <span className={`mt-2 grid h-8 w-8 place-items-center rounded-full bg-white shadow dark:bg-elevated-dark ${ptr.refreshing ? 'animate-spin' : ''}`}
+              style={{ transform: ptr.refreshing ? undefined : `rotate(${ptr.pull * 4}deg)` }}>
+              <RefreshCw size={16} className={ptr.ready || ptr.refreshing ? 'text-blue-600' : 'text-text-secondary-light'} />
+              <span className="sr-only">{ptr.refreshing ? 'Refreshing the feed' : ptr.ready ? 'Release to refresh' : 'Pull to refresh'}</span>
+            </span>
+          </div>
+        )}
         <div className="relative space-y-3 pt-0 sm:pt-0">
           <StoriesBar />
           <HighlightsBar />
-          <Composer pages={pages} onPublished={(post) => { if (post) { list.prepend(post.id); ingest([post]); } }} />
+          <Composer pages={pages} onPublished={(post) => { if (post) { list.prepend(post.id); ingest([post]); watch([post.id]); } }} />
 
           <div className="flex items-center gap-2 px-3 sm:px-0">
             <div className="flex items-center gap-0.5 rounded-full bg-black/[0.06] p-0.5 text-[13px] dark:bg-white/[0.06]">
@@ -95,7 +109,12 @@ export const FeedHome: React.FC = () => {
                 </React.Fragment>
               ))}
               {items.length < REELS_STRIP_AFTER && <ReelsStrip />}
-              {list.hasMore
+              {list.moreError ? (
+                <div role="alert" className="flex flex-col items-center gap-2 py-6 text-center text-sm text-text-secondary-light dark:text-text-secondary-dark">
+                  Couldn’t load more posts.
+                  <button onClick={list.loadMore} className="rounded-full border border-border-light px-3 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:border-border-dark/50 dark:text-blue-400 dark:hover:bg-blue-900/20">Try again</button>
+                </div>
+              ) : list.hasMore
                 ? <LoadMoreSentinel onHit={list.loadMore} disabled={list.more} />
                 : (
                   <p className="flex items-center justify-center gap-2 py-8 text-center text-sm font-medium text-text-secondary-light dark:text-text-secondary-dark">
