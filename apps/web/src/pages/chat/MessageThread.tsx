@@ -33,6 +33,7 @@ import { TranslateControl } from './TranslateButton';
 import { useVirtualWindow } from './useVirtualWindow';
 import type { MeetMessageMetadata } from './MeetCard';
 import { QUICK_REACTIONS, EDIT_WINDOW_MS, PRESENCE_REFRESH_MS } from '@tupo/shared';
+import { useTouchGestures } from '../../hooks/useTouchGestures';
 
 /**
  * The message pane: header, scrollback, composer slot.
@@ -249,6 +250,12 @@ const MessageRow: React.FC<{
   const [draft, setDraft] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Phones (U-01): swipe right to reply, long-press for the actions menu.
+  const gestures = useTouchGestures({
+    onSwipe: () => setReplyTarget(m),
+    onLongPress: () => setMenuOpen(true),
+    disabled: m.type === 'system' || Boolean(m.deletedAt),
+  });
   const editRef = useRef<HTMLTextAreaElement>(null);
 
   const mine = m.senderId === user?.id;
@@ -335,7 +342,9 @@ const MessageRow: React.FC<{
     <li
       id={`msg-${m.id}`}
       data-message-row=""
-      className={`group relative flex gap-2.5 px-2 sm:px-4 ${newGroup ? 'mt-3' : 'mt-0.5'} ${
+      {...gestures.handlers}
+      style={gestures.dx ? { transform: `translateX(${gestures.dx}px)`, transition: 'none' } : { transition: 'transform 150ms ease-out' }}
+      className={`group relative flex gap-2.5 px-2 sm:px-4 [touch-action:pan-y] ${newGroup ? 'mt-3' : 'mt-0.5'} ${
         mine ? 'flex-row-reverse' : ''
       } ${m.mentionsMe ? 'bg-amber-50/60 dark:bg-amber-500/5' : ''} ${
         highlightedId === m.id ? 'animate-fade-in rounded-xl bg-blue-100/70 dark:bg-blue-500/15' : ''
@@ -586,7 +595,7 @@ const MessageRow: React.FC<{
               key={e}
               onClick={() => void react(m.id, e)}
               aria-label={`React with ${e}`}
-              className="hidden h-7 w-7 place-items-center rounded-lg text-base leading-none hover:bg-surface-light sm:grid dark:hover:bg-surface-dark"
+              className={`${menuOpen ? 'grid' : 'hidden sm:grid'} h-7 w-7 place-items-center rounded-lg text-base leading-none hover:bg-surface-light dark:hover:bg-surface-dark`}
             >
               {e}
             </button>
@@ -788,7 +797,7 @@ export const MessageThread: React.FC<{
   const { user } = useAuth();
   const {
     messages, messagesLoading: loading, hasMore, loadingMore, loadOlder,
-    markReadTo, retry,
+    markReadTo, retry, hasNewer, loadNewer, showLatest,
   } = useChat();
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -889,8 +898,25 @@ export const MessageThread: React.FC<{
     if (newest > 0) markReadTo(newest);
   }, [atBottom, loading, messages, markReadTo]);
 
-  const jumpToLatest = () =>
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  // After a jump into the past (U-04) "latest" is not on the page yet: fetch
+  // the newest page first, then go to the end.
+  const jumpToLatest = async () => {
+    if (hasNewer) await showLatest();
+    requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }));
+  };
+
+  // Reaching the bottom of an old window loads what came after it (U-04).
+  useEffect(() => {
+    const el = bottomRef.current;
+    const root = scrollRef.current;
+    if (!el || !root || !hasNewer || loading) return;
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0]?.isIntersecting) void loadNewer(); },
+      { root, rootMargin: '0px 0px 200px 0px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNewer, loading, loadNewer, messages.length]);
 
   let lastDay = '';
 
@@ -996,9 +1022,9 @@ export const MessageThread: React.FC<{
         </div>
 
         {/* UX-3 */}
-        {!atBottom && !loading && messages.length > 0 && (
+        {(!atBottom || hasNewer) && !loading && messages.length > 0 && (
           <button
-            onClick={jumpToLatest}
+            onClick={() => void jumpToLatest()}
             className="animate-fade-in absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-xs font-medium text-white transition-colors duration-150 hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500"
           >
             <ChevronDown size={14} />

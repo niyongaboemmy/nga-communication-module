@@ -94,6 +94,11 @@ interface ChatValue {
 
   /** Scroll a specific message into view, loading around it if needed. */
   jumpTo: (messageId: string) => Promise<void>;
+  /** After a jump to an old message: newer ones exist that are not loaded (U-04). */
+  hasNewer: boolean;
+  loadNewer: () => Promise<void>;
+  /** Back to the newest page, wherever the log is now. */
+  showLatest: () => Promise<void>;
   /** Set briefly after a jump so the target can flash. */
   highlightedId: string | null;
   edit: (messageId: string, body: string) => Promise<void>;
@@ -228,6 +233,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const [messages, setMessages] = useState<WireMessage[]>([]);
   const messagesRef = useRef<WireMessage[]>([]);
+  const [hasNewer, setHasNewer] = useState(false);
+  const hasNewerRef = useRef(false);
+  hasNewerRef.current = hasNewer;
   messagesRef.current = messages;
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesConversationId, setMessagesConversationId] = useState<string | null>(null);
@@ -413,6 +421,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     setMessagesConversationId(null);
     networkPageFor.current = null;
+    setHasNewer(false);
     if (!activeId) { setMessages([]); setHasMore(false); return; }
     let cancelled = false;
     let fromNetwork = false;
@@ -496,6 +505,40 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setLoadingMore(false);
     }
   }, [hasMore, loadingMore]);
+
+  /** The next page after the window a jump left the log in (U-04). */
+  const loadingNewer = useRef(false);
+  const loadNewer = useCallback(async () => {
+    const id = activeIdRef.current;
+    if (!id || !hasNewerRef.current || loadingNewer.current) return;
+    const newest = messagesRef.current.reduce(
+      (max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
+    loadingNewer.current = true;
+    try {
+      const page = await chatApi.listMessages(id, { after: newest, limit: 40 });
+      if (activeIdRef.current !== id) return;
+      setMessages((prev) => {
+        const seen = new Set(prev.map((m) => m.id));
+        return [...prev, ...page.messages.filter((m) => !seen.has(m.id))];
+      });
+      setHasNewer(page.hasMore);
+    } catch { /* the next scroll tries again */ }
+    finally { loadingNewer.current = false; }
+  }, []);
+
+  const showLatest = useCallback(async () => {
+    const id = activeIdRef.current;
+    if (!id) return;
+    if (!hasNewerRef.current) return;
+    try {
+      const page = await chatApi.listMessages(id, { limit: 40 });
+      if (activeIdRef.current !== id) return;
+      jumps.current += 1;
+      setMessages(page.messages);
+      setHasMore(page.hasMore);
+      setHasNewer(false);
+    } catch { /* stay where we are */ }
+  }, []);
 
   /* ────────────────────────────────────────────────────────────────────── *
    * Socket
@@ -617,9 +660,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // finds nothing and costs one small request.
         const newest = messagesRef.current.reduce(
           (max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
-        if (newest && message.seq > newest + 1) void catchUp(conversationId);
-        setMessages((prev) => reconcile(prev, message.senderId === user.id
-          ? message : personalise(message, user.id)));
+        // Reading an old window after a jump (U-04): the live message is not
+        // appended — that would leave a hole — it arrives with "load newer".
+        if (hasNewerRef.current) { /* nothing on screen to change */ }
+        else {
+          if (newest && message.seq > newest + 1) void catchUp(conversationId);
+          setMessages((prev) => reconcile(prev, message.senderId === user.id
+            ? message : personalise(message, user.id)));
+        }
       }
       // The sidebar preview moves whether or not the conversation is open.
       setConversations((prev) => prev.map((c) => c.id === conversationId
@@ -1310,6 +1358,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const context = await chatApi.messageContext(conversationId, messageId);
       jumps.current += 1;
       setMessages(context.messages);
+      // Is there anything after this window? (U-04) One message is enough to know.
+      const newestHere = context.messages.reduce((max, m) => Math.max(max, m.seq), 0);
+      void chatApi.listMessages(conversationId, { after: newestHere, limit: 1 })
+        .then((p) => { if (activeIdRef.current === conversationId) setHasNewer(p.messages.length > 0); })
+        .catch(() => {});
       setHasMore(context.hasMore);
       flash();
     } catch { /* the message is gone; leave the reader where they are */ }
@@ -1483,7 +1536,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     markEverythingRead, lastEditableOwnMessage, editingId, setEditingId,
     replyTarget, setReplyTarget,
     threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
-    pin, save, forward, jumpTo, highlightedId,
+    pin, save, forward, jumpTo, highlightedId, hasNewer, loadNewer, showLatest,
     draftFor, setDraft, toggleStar, setNotificationLevel, muteUntil, hideConversation,
     totalUnread, totalMentions, threadUnread, threadsUnreadTotal,
     markThreadRead, markUnread, markConversationRead,
