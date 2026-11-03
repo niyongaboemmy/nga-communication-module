@@ -252,7 +252,11 @@ try {
     const draft = await api('/api/mail/ai/compose', ada.token, {
       method: 'POST', body: { action: 'draft', instruction: 'hello' },
     });
-    check('AI endpoint returns 503 when no provider is configured', draft.status === 503);
+    // Unavailable means one of two answers: no provider configured (503), or
+    // the school's AI switch is off in NGA MIS (403 AI_DISABLED, the default).
+    check('AI endpoint refuses when AI is unavailable (no provider, or switched off)',
+      draft.status === 503 || (draft.status === 403 && draft.body?.code === 'AI_DISABLED'),
+      `${draft.status} ${draft.body?.code ?? ''}`);
   }
 
   /* ── 7. distribution list + campaign preview + approval gate ─────────── */
