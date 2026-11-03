@@ -1,5 +1,5 @@
 import { SafeHtml } from '../../components/SafeHtml';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Megaphone, Send, Eye, Check, X, Loader2, Clock, AlertTriangle, Trash2, Sparkles,
@@ -9,6 +9,9 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
 import { RichTextEditor } from './RichTextEditor';
 import * as api from './api';
+import { Suppressions } from './Suppressions';
+import { useConfirmDialog } from '../../components/ConfirmDialog';
+import { useNotify } from '../../context/NotificationContext';
 import { AiOffNote } from '../../components/AiOffNote';
 import type { AiAnswer, MailCampaignView, MailDistributionList, MailTemplate } from '@tupo/shared';
 import { AiAnsweredBy, AiSourceControl } from '../../components/MyAi';
@@ -249,8 +252,55 @@ export const MailCampaigns: React.FC = () => {
   const [templates, setTemplates] = useState<MailTemplate[]>([]);
   const [mode, setMode] = useState<'list' | 'new' | { edit: MailCampaignView }>('list');
   const [preview, setPreview] = useState<string | null>(null);
+  const [confirm, confirmDialog] = useConfirmDialog();
+  const { notify } = useNotify();
+  const reasonRef = useRef('');
 
   const load = () => api.listCampaigns().then(setCampaigns).catch(() => setCampaigns([]));
+  const act = async (what: string, run: () => Promise<unknown>) => {
+    try { await run(); } catch (err) {
+      notify({ title: `Could not ${what}`, body: err instanceof Error ? err.message : undefined, tone: 'error' });
+    }
+    await load();
+  };
+
+  // Each of these reaches a whole list of people, or throws away work: ask first.
+  const approve = async (c: MailCampaignView) => {
+    if (!(await confirm({
+      title: `Approve "${c.subject || c.name}"?`,
+      body: `It goes out to ${c.totalRecipients} ${c.totalRecipients === 1 ? 'person' : 'people'} from ${c.from.name}${c.scheduledAt ? ` at ${new Date(c.scheduledAt).toLocaleString()}` : ' straight away'}.`,
+      warning: 'Sent mail cannot be called back.',
+      confirmLabel: 'Approve and send',
+    }))) return;
+    await act('approve the campaign', () => api.approveCampaign(c.id));
+  };
+  const reject = async (c: MailCampaignView) => {
+    reasonRef.current = '';
+    if (!(await confirm({
+      title: `Send "${c.subject || c.name}" back?`,
+      body: (
+        <label className="mt-2 block text-sm">
+          <span className="mb-1 block">Tell {c.from.name} what to change</span>
+          <textarea data-autofocus rows={3} maxLength={500} onChange={(e) => { reasonRef.current = e.target.value; }}
+            className="w-full rounded-lg border border-border-light bg-white px-3 py-2 text-sm dark:border-border-dark/50 dark:bg-chrome-dark" />
+        </label>
+      ),
+      confirmLabel: 'Send back',
+    }))) return;
+    const reason = reasonRef.current.trim();
+    if (!reason) { notify({ title: 'Say what to change, so it can be fixed', tone: 'error' }); return; }
+    await act('send the campaign back', () => api.rejectCampaign(c.id, reason));
+  };
+  const cancel = async (c: MailCampaignView) => {
+    if (!(await confirm({
+      title: `Cancel "${c.subject || c.name}"?`,
+      body: c.status === 'draft' ? 'The draft is deleted.' : 'It will not be sent, and approval would be needed again.',
+      confirmLabel: 'Cancel campaign',
+      cancelLabel: 'Keep it',
+      tone: 'danger',
+    }))) return;
+    await act('cancel the campaign', () => api.cancelCampaign(c.id));
+  };
   useEffect(() => {
     load();
     api.listLists().then(setLists).catch(() => {});
@@ -294,8 +344,8 @@ export const MailCampaigns: React.FC = () => {
             {pending.map((c) => (
               <li key={c.id} className="flex items-center gap-2 text-sm">
                 <span className="min-w-0 flex-1 truncate">{c.subject} <span className="text-text-secondary-light">· {c.totalRecipients} recipients · {c.from.name}</span></span>
-                <Button size="sm" onClick={() => api.approveCampaign(c.id).then(load)}><Check size={13} /> Approve</Button>
-                <Button size="sm" variant="ghost" onClick={() => { const r = window.prompt('Reason for sending back'); if (r) api.rejectCampaign(c.id, r).then(load); }}>Reject</Button>
+                <Button size="sm" onClick={() => void approve(c)}><Check size={13} /> Approve</Button>
+                <Button size="sm" variant="ghost" onClick={() => void reject(c)}>Send back</Button>
               </li>
             ))}
           </ul>
@@ -334,7 +384,7 @@ export const MailCampaigns: React.FC = () => {
                     </>
                   )}
                   {['draft', 'pending_approval', 'scheduled', 'approved'].includes(c.status) && canSend && (
-                    <IconButton label="Cancel" size="sm" onClick={() => api.cancelCampaign(c.id).then(load)}><Trash2 size={15} /></IconButton>
+                    <IconButton label="Cancel campaign" size="sm" onClick={() => void cancel(c)}><Trash2 size={15} /></IconButton>
                   )}
                 </div>
               </div>
@@ -343,7 +393,10 @@ export const MailCampaigns: React.FC = () => {
         </ul>
       )}
 
+      {(canSend || canApprove) && <Suppressions />}
+
       {preview && <PreviewModal campaignId={preview} onClose={() => setPreview(null)} onSubmitted={() => { setPreview(null); load(); }} />}
+      {confirmDialog}
     </div>
   );
 };

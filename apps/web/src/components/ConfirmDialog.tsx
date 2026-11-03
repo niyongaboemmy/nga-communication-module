@@ -43,13 +43,15 @@ const ConfirmDialog: React.FC<ConfirmOptions & { onClose: (ok: boolean) => void 
   const opener = useRef<Element | null>(document.activeElement);
 
   useEffect(() => {
-    // Cancel is focused first: Enter on a dangerous dialog should not do the dangerous thing.
-    cancelRef.current?.focus();
+    // Cancel is focused first: Enter on a dangerous dialog should not do the
+    // dangerous thing. A dialog that asks for something (a reason) marks its
+    // field with data-autofocus, and that goes first instead.
+    (ref.current?.querySelector<HTMLElement>('[data-autofocus]') ?? cancelRef.current)?.focus();
     const back = opener.current;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.stopPropagation(); onClose(false); return; }
       if (e.key !== 'Tab' || !ref.current) return;
-      const items = [...ref.current.querySelectorAll<HTMLElement>('button')];
+      const items = [...ref.current.querySelectorAll<HTMLElement>('button, textarea, input, select')];
       const first = items[0]; const last = items[items.length - 1];
       if (!first || !last) return;
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }

@@ -72,6 +72,7 @@
     "verify:sync": "node scripts/verify-sync.mjs",
     "verify:push-ui": "node scripts/verify-push-ui.mjs",
     "verify:mail:power": "node scripts/verify-mail-power.mjs",
+    "verify:mail:campaigns": "node scripts/verify-mail-campaigns.mjs",
     "verify:chat:touch": "node scripts/verify-chat-touch.mjs",
     "verify:feed:touch": "node scripts/verify-feed-touch.mjs",
     "verify:calls": "node scripts/verify-calls.mjs",

@@ -188,3 +188,11 @@ export async function uploadAttachment(file: File): Promise<{ fileId: string; na
   if (!put.ok) throw new Error(`Upload failed (${put.status})`);
   return { fileId: ticket.fileId, name: file.name, mime: file.type || 'application/octet-stream', size: file.size };
 }
+
+/* Do-not-email list (FR-MAIL-7) */
+export interface MailSuppression { address: string; reason: string; note: string; created_at: string }
+export const listSuppressions = (q = '') =>
+  apiGet<{ suppressions: MailSuppression[] }>(`/api/mail/suppressions${q ? `?q=${encodeURIComponent(q)}` : ''}`)
+    .then((r) => r.data!.suppressions);
+export const addSuppression = (address: string, note: string) => apiPost('/api/mail/suppressions', { address, note });
+export const removeSuppression = (address: string) => apiDelete(`/api/mail/suppressions/${encodeURIComponent(address)}`);
