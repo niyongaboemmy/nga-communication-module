@@ -113,6 +113,9 @@ export const MailList: React.FC<Props> = ({
         if (stale || gotNetwork.current || !cached?.length) return;
         shownFromCache.current = true;
         setThreads(cached);
+        // Offline, the request can fail before this read finishes: the copy
+        // on the device then replaces the error, not the other way round.
+        setFailed(false);
         setLoading(false);
       });
     }

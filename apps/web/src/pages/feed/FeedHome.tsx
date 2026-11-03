@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ArrowUp, CircleCheck, Clock, Flame, Sparkles, X } from 'lucide-react';
+import { ArrowUp, CircleCheck, Clock, Flame, Sparkles, X , RefreshCw } from 'lucide-react';
 import type { FeedFilter, FeedPostView, FeedSort } from '@tupo/shared';
 import { EmptyState } from '../../components/ui';
 import { useFeed, useFeedList } from './FeedProvider';
@@ -10,6 +10,7 @@ import { HighlightsBar } from './HighlightsBar';
 import { StoriesBar } from './StoriesBar';
 import { ReelsStrip } from './ReelsStrip';
 import * as api from './api';
+import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 
 /** The reels sampler sits after this many posts (or at the end of a short feed). */
 const REELS_STRIP_AFTER = 3;
@@ -27,6 +28,9 @@ export const FeedHome: React.FC = () => {
     [sort, filter],
   );
   const list = useFeedList(loader, [sort, filter], `feed:home:${sort}:${filter}`);
+  // Pull down at the top to refresh, on phones (U-20); new posts waiting in
+  // the pill come in with it.
+  const ptr = usePullToRefresh(() => { setPendingTop([]); return list.reload(); });
 
   // Live posts land in a "new posts" pill rather than jumping the scroll.
   useEffect(() => list.onNewPost((post) => {
@@ -48,6 +52,15 @@ export const FeedHome: React.FC = () => {
   return (
     <>
       <FeedFrame left={left} right={right}>
+        {(ptr.pull > 0 || ptr.refreshing) && (
+          <div aria-live="polite" className="flex justify-center overflow-hidden transition-[height] duration-150" style={{ height: ptr.pull }}>
+            <span className={`mt-2 grid h-8 w-8 place-items-center rounded-full bg-white shadow dark:bg-elevated-dark ${ptr.refreshing ? 'animate-spin' : ''}`}
+              style={{ transform: ptr.refreshing ? undefined : `rotate(${ptr.pull * 4}deg)` }}>
+              <RefreshCw size={16} className={ptr.ready || ptr.refreshing ? 'text-blue-600' : 'text-text-secondary-light'} />
+              <span className="sr-only">{ptr.refreshing ? 'Refreshing the feed' : ptr.ready ? 'Release to refresh' : 'Pull to refresh'}</span>
+            </span>
+          </div>
+        )}
         <div className="relative space-y-3 pt-0 sm:pt-0">
           <StoriesBar />
           <HighlightsBar />

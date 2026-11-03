@@ -348,6 +348,9 @@ export function useFeedList(
       void cacheGet<{ items: FeedPostView[]; nextCursor: string | null }>(key).then((cached) => {
         if (stale || fresh.current || !cached?.items.length) return;
         shownFromCache.current = true;
+        // A request that failed before this read finished (offline) does not
+        // keep its error over the copy on the device.
+        setError(null);
         ingest(cached.items);
         setIds(cached.items.map((p) => p.id));
         setCursor(cached.nextCursor);

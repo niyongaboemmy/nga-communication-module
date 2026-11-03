@@ -285,8 +285,23 @@ export const ReactionPicker: React.FC<{
   onPick: (r: FeedReaction) => void;
   onClose: () => void;
   align?: 'left' | 'center';
-}> = ({ onPick, onClose, align = 'left' }) => {
+  /** Opened from the keyboard (U-23): focus the first reaction so arrows work at once. */
+  autoFocus?: boolean;
+}> = ({ onPick, onClose, align = 'left', autoFocus = false }) => {
   const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (autoFocus) ref.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+  }, [autoFocus]);
+  // Arrows move between the reactions, as in any menu (U-23).
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return;
+    const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])];
+    const i = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1
+      : (i + (e.key === 'ArrowRight' ? 1 : -1) + items.length) % items.length;
+    items[next]?.focus();
+    e.preventDefault();
+  };
   useEffect(() => {
     const away = (e: PointerEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
     const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -299,6 +314,8 @@ export const ReactionPicker: React.FC<{
       ref={ref}
       role="menu"
       aria-label="Pick a reaction"
+      aria-orientation="horizontal"
+      onKeyDown={onKeyDown}
       onMouseLeave={onClose}
       className={`feed-picker-in absolute bottom-full z-40 mb-1.5 flex items-center gap-0.5 rounded-full bg-white px-1.5 py-1 shadow-[0_12px_28px_rgba(0,0,0,0.2),0_2px_4px_rgba(0,0,0,0.1)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10 ${
         align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'

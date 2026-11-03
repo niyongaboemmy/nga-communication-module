@@ -100,23 +100,46 @@ const Tile: React.FC<TileProps> = ({ item, onOpen, onDims, anchorTop, overlay, s
   );
 };
 
-/** A video's first frame with a play badge — lazy and resilient like
- *  `FeedImage` (a `<video>` has no built-in `loading="lazy"`). */
+/** In-post video (U-21): plays muted and looped while mostly on screen and
+ *  pauses when scrolled away, as on Facebook — unless the person asked for
+ *  less motion or less data, when it stays a still frame with a play badge.
+ *  Lazy and resilient like `FeedImage`. */
+const autoplayAllowed = () => {
+  if (typeof window === 'undefined') return false;
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return false;
+  const conn = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+  return !(conn?.saveData || conn?.effectiveType === '2g' || conn?.effectiveType === 'slow-2g');
+};
+
 const VideoFill: React.FC<{ item: FeedMediaItem; onDims: TileProps['onDims'] }> = ({ item, onDims }) => {
   const [ref, inView] = useInViewport<HTMLSpanElement>();
   const { url, broken, onError, retry } = useResilientMediaUrl(item.fileId, inView);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(false);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !url || !autoplayAllowed()) return;
+    const io = new IntersectionObserver(([e]) => {
+      if (e && e.intersectionRatio >= 0.6) void v.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+      else { v.pause(); setPlaying(false); }
+    }, { threshold: [0, 0.6, 1] });
+    io.observe(v);
+    return () => { io.disconnect(); v.pause(); };
+  }, [url]);
   return (
     <span ref={ref} className="absolute inset-0">
       {url && (
         <video
+          ref={videoRef}
           src={url}
           className="h-full w-full object-cover"
-          muted playsInline preload="metadata"
+          muted playsInline loop preload="metadata"
+          data-autoplaying={playing ? 'true' : 'false'}
           onError={onError}
           onLoadedMetadata={(e) => onDims(item.fileId, e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
         />
       )}
-      {url && (
+      {url && !playing && (
         <span className="absolute inset-0 grid place-items-center bg-black/20">
           <span className="grid h-14 w-14 place-items-center rounded-full bg-black/55 text-white ring-2 ring-white/80 backdrop-blur-sm">
             <Play size={24} className="ml-1" fill="currentColor" />
