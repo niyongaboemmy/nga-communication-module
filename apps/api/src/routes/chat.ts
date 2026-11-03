@@ -605,7 +605,7 @@ router.post('/conversations/:id/read', wrap(async (req, res) => {
   if (!Number.isFinite(seq)) return res.status(400).json(fail('A sequence number is required.'));
 
   const result = await chat.advanceRead(me.id, id, seq);
-  const newlyRead = await chat.markRead(me.id, id, seq);
+  const newlyRead = await chat.markRead(me.id, id, seq, result.previousSeq);
 
   // Other devices of the same person clear their badge too.
   emitToUsers([me.id], 'conversation:unread', {

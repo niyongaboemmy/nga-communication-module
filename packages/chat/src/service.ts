@@ -1193,6 +1193,8 @@ export interface ReadResult {
   unread: number;
   unreadMentions: number;
   changed: boolean;
+  /** The watermark before this change, for `markRead`'s lower bound (S-12). */
+  previousSeq?: number;
 }
 
 /**
@@ -1254,7 +1256,7 @@ export async function advanceRead(
    * value explicit in all four places it is needed.
    */
   const { rows } = await getPool().query<{
-    last_read_seq: string; unread_count: number; unread_mentions: number; changed: boolean;
+    last_read_seq: string; unread_count: number; unread_mentions: number; changed: boolean; old_seq: string;
   }>(
     `WITH prev AS (
        SELECT last_read_seq AS old_seq,
@@ -1273,7 +1275,7 @@ export async function advanceRead(
        FROM prev
       WHERE m.conversation_id = $1 AND m.user_id = $2 AND m.left_at IS NULL
       RETURNING m.last_read_seq, m.unread_count, m.unread_mentions,
-                (prev.next_seq > prev.old_seq) AS changed`,
+                (prev.next_seq > prev.old_seq) AS changed, prev.old_seq`,
     [conversationId, userId, seq],
   );
 
@@ -1284,6 +1286,7 @@ export async function advanceRead(
     unread: r.unread_count,
     unreadMentions: r.unread_mentions,
     changed: r.changed,
+    previousSeq: Number(r.old_seq),
   };
 }
 
@@ -1315,6 +1318,12 @@ export async function markDelivered(
  */
 export async function markRead(
   userId: string, conversationId: string, upToSeq: number,
+  /**
+   * Only messages after this sequence (S-12 / CHAT-M8): the watermark before
+   * this read, from `advanceRead`. Without it every read walked the whole
+   * history up to `upToSeq`, a cost that grew with the conversation's age.
+   */
+  afterSeq = 0,
 ): Promise<string[]> {
   const { rows: prefs } = await getPool().query<{ read_receipts: boolean }>(
     'SELECT read_receipts FROM user_chat_prefs WHERE user_id = $1', [userId]);
@@ -1324,13 +1333,13 @@ export async function markRead(
     `INSERT INTO message_receipts (message_id, conversation_id, user_id, state)
      SELECT m.id, m.conversation_id, $2, 'read'
        FROM messages m
-      WHERE m.conversation_id = $1 AND m.seq <= $3 AND m.sender_id <> $2
+      WHERE m.conversation_id = $1 AND m.seq <= $3 AND m.seq > $4 AND m.sender_id <> $2
             AND m.deleted_at IS NULL
      ON CONFLICT (message_id, user_id)
        DO UPDATE SET state = 'read', at = now()
        WHERE message_receipts.state <> 'read'
      RETURNING message_id`,
-    [conversationId, userId, upToSeq],
+    [conversationId, userId, upToSeq, Math.max(0, afterSeq)],
   );
   return rows.map((r) => r.message_id);
 }

@@ -4,7 +4,15 @@ import jwt from 'jsonwebtoken';
 import { getPool, closeDb, seedRbac, snowflake, recordError, writeSamples } from '@tupo/db';
 import { app } from '../app.js';
 import { config } from '../config.js';
-import { evaluateAlerts, alertRules } from '../../../worker/src/jobs/monitor.js';
+// The worker's alert rules, loaded at run time: a static import would pull the
+// worker's sources into this project's typecheck (outside its rootDir).
+type Rule = { name: string };
+type MonitorModule = {
+  evaluateAlerts: (notify: (subject: string, text: string) => Promise<void>, rules: Rule[]) => Promise<string[]>;
+  alertRules: () => Rule[];
+};
+const monitorPath = new URL('../../../worker/src/jobs/monitor.ts', import.meta.url).href;
+const { evaluateAlerts, alertRules } = (await import(monitorPath)) as MonitorModule;
 
 /** R-03/R-04/R-05: errors are grouped and visible, metrics read back, alerts fire once and resolve. */
 

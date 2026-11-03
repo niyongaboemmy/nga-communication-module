@@ -79,4 +79,22 @@ describe('ticks over the API', () => {
     const [u] = await chat.receiptUpdatesFor(conv, [msg.id]);
     expect(u!.payload).toMatchObject({ delivery: 'delivered', readCount: 0 });
   });
+
+  it('a read only touches what was new since the last one (S-12 / CHAT-M8)', async () => {
+    const ada = await user('Ada'); const ben = await user('Ben');
+    const conv = (await as(ada).post('/api/chat/conversations', { type: 'group', name: `rc-${nonce()}`, memberIds: [ben.id] })).body.data.conversation.id;
+    const sent = [];
+    for (let i = 0; i < 5; i++) sent.push((await as(ada).post(`/api/chat/conversations/${conv}/messages`, { body: `m${i}`, nonce: nonce() })).body.data.message);
+    const first = await chat.advanceRead(ben.id, conv, sent[2].seq);
+    expect(first.previousSeq).toBe(0);
+    // The first three, plus the group's creation notice (seq 1).
+    expect(await chat.markRead(ben.id, conv, sent[2].seq, first.previousSeq)).toEqual(expect.arrayContaining(sent.slice(0, 3).map((m) => m.id)));
+    const second = await chat.advanceRead(ben.id, conv, sent[4].seq);
+    expect(second.previousSeq).toBe(sent[2].seq);
+    // Only the two new ones — not a walk over the whole history again.
+    expect((await chat.markRead(ben.id, conv, sent[4].seq, second.previousSeq)).sort())
+      .toEqual([sent[3].id, sent[4].id].sort());
+    expect(await tickOf(ada, conv, sent[0].id)).toBe('read');
+    expect(await tickOf(ada, conv, sent[4].id)).toBe('read');
+  });
 });

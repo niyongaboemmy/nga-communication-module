@@ -361,7 +361,7 @@ export function registerChatHandlers(
     try {
       await chat.requireMembership(user.id, conversationId);
       const result = await chat.advanceRead(user.id, conversationId, seq);
-      const newlyRead = await chat.markRead(user.id, conversationId, seq);
+      const newlyRead = await chat.markRead(user.id, conversationId, seq, result.previousSeq);
 
       ack?.({ ok: true, unread: result.unread, unreadMentions: result.unreadMentions });
 
