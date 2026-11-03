@@ -70,6 +70,13 @@ export interface OutboundMail {
   html: string;
   text: string;
   attachments?: Array<{ filename: string; content: Buffer; contentType: string }>;
+  /** Stable across retries, so a resend is recognised as the same message. */
+  messageId?: string;
+  /** Threading, so a reply sits under what it answers in the recipient's mail app. */
+  inReplyTo?: string;
+  references?: string[];
+  /** Extra headers, e.g. List-Unsubscribe on bulk mail. */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -127,6 +134,10 @@ export async function sendSmtp(cfg: SmtpConfig, mail: OutboundMail): Promise<Smt
       html: mail.html,
       text: mail.text,
       attachments: mail.attachments,
+      messageId: mail.messageId,
+      inReplyTo: mail.inReplyTo,
+      references: mail.references?.length ? mail.references : undefined,
+      headers: mail.headers,
     });
     return { ok: true, messageId: info.messageId };
   } catch (err) {

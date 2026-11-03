@@ -3,6 +3,7 @@ import express from 'express';
 import { installProcessGuards } from './utils/asyncErrors.js';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
+import { timingSafeEqual } from 'node:crypto';
 import { getPool, pingDb, snowflake, closeDb, startProcessMetrics } from '@tupo/db';
 import { ok, fail, MEETING_FOLDER_PATTERN } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
@@ -472,6 +473,28 @@ function pipeSafely(stream: NodeJS.ReadableStream, res: express.Response): void 
  * Membership is checked here rather than trusted from the client, and the query
  * behind it reads only the named conversation.
  */
+/**
+ * Service-to-service read of a file's bytes (mail attachments sent by email).
+ * Never proxied by nginx, loopback only, and gated by a shared secret: no
+ * person is asking, so there is no per-person access check to make.
+ */
+app.get('/internal/files/:id/content', async (req, res) => {
+  const given = Buffer.from(String(req.headers['x-internal-secret'] ?? ''));
+  const want = Buffer.from(config.internalSecret);
+  const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '');
+  if (!want.length || !loopback || given.length !== want.length || !timingSafeEqual(given, want)) {
+    return res.status(404).json(fail('Not found'));
+  }
+  const { rows } = await getPool().query<{ storage_key: string; mime_type: string; size_bytes: string }>(
+    `SELECT storage_key, mime_type, size_bytes FROM files WHERE id = $1 AND deleted_at IS NULL AND status = 'ready'`,
+    [req.params.id]);
+  const file = rows[0];
+  if (!file) return res.status(404).json(fail('File not found.'));
+  res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Length', file.size_bytes);
+  (await storage.get(file.storage_key)).on('error', () => res.destroy()).pipe(res);
+});
+
 app.get('/api/files/conversations/:conversationId', requireSession, async (req, res) => {
   const user = (req as FileRequest).user!;
   const { rows } = await getPool().query(

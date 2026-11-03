@@ -5,6 +5,7 @@
 #
 #   - web push keys (VAPID) in the api and worker settings, if missing;
 #   - monitoring alert recipients in the worker settings, if missing;
+#   - shared secrets for email attachments and unsubscribe links, if missing;
 #   - a Redis memory ceiling with noeviction (BullMQ needs it);
 #   - the mail HTML re-sanitising backfill, once;
 #   - tupo-api moved from one fork process to the two-process cluster, once
@@ -44,6 +45,28 @@ if ! has ALERT_EMAILS "$WORKER_ENV"; then
   printf '\n# Monitoring alerts (added by scripts/deploy-setup.sh; see docs/OPERATIONS_MONITORING.md)\nALERT_EMAILS=%s\n' \
     "${TUPO_ALERT_EMAILS:-mis@nga.ac.rw}" >> "$WORKER_ENV"
   echo "setup: alert recipients added to $WORKER_ENV"
+fi
+
+# ── Email copies: attachments and unsubscribe links (M5) ─────────────────
+FILES_ENV="apps/files/.env"
+# One value shared by the listed files; generated once, then reused.
+share_secret() {
+  local key="$1"; shift
+  local val=""
+  for f in "$@"; do has "$key" "$f" && val="$(grep "^$key=" "$f" | tail -n 1 | cut -d= -f2-)" && break; done
+  [ -n "$val" ] || val="$(openssl rand -hex 32)"
+  for f in "$@"; do
+    if ! has "$key" "$f"; then
+      printf '\n# Added by scripts/deploy-setup.sh\n%s=%s\n' "$key" "$val" >> "$f"
+      echo "setup: $key added to $f"
+    fi
+  done
+}
+share_secret FILES_INTERNAL_SECRET "$FILES_ENV" "$WORKER_ENV"
+share_secret MAIL_LINK_SECRET "$API_ENV" "$WORKER_ENV"
+if ! has APP_PUBLIC_URL "$WORKER_ENV" && has APP_PUBLIC_URL "$API_ENV"; then
+  printf '\n# Added by scripts/deploy-setup.sh (unsubscribe links)\n%s\n' "$(grep '^APP_PUBLIC_URL=' "$API_ENV" | tail -n 1)" >> "$WORKER_ENV"
+  echo "setup: APP_PUBLIC_URL added to $WORKER_ENV"
 fi
 
 # ── Redis ceiling (R-07) ──────────────────────────────────────────────────

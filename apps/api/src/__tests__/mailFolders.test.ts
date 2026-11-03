@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
-import { wakeDueSnoozes } from '@tupo/mail';
+import { wakeDueSnoozes, unsubscribeUrl } from '@tupo/mail';
 import { app } from '../app.js';
 import { config } from '../config.js';
 
@@ -175,5 +175,32 @@ describe('Sent', () => {
     const cursor = first.body.data.nextCursor;
     expect(cursor).toBeTruthy();
     expect(ids(await as(cy.token).get(`/api/mail/threads?folder=sent&limit=2&cursor=${encodeURIComponent(cursor)}`))).toEqual([sentIds[0]]);
+  });
+});
+
+describe('unsubscribe link (RFC 8058)', () => {
+  it('GET only asks; POST unsubscribes; a forged link does nothing', async () => {
+    process.env.MAIL_LINK_SECRET = 'test-link-secret';
+    process.env.APP_PUBLIC_URL = 'https://tupo.example';
+    const address = `pat-${snowflake()}@outside.example`;
+    const url = new URL(unsubscribeUrl(address)!);
+    const path = `${url.pathname}${url.search}`;
+    const isSuppressed = async () => (await getPool().query('SELECT 1 FROM mail_suppressions WHERE address = $1', [address])).rows.length > 0;
+    try {
+      const page = await request(app).get(path);
+      expect(page.status).toBe(200);
+      expect(page.text).toContain('<form method="post">');
+      expect(await isSuppressed()).toBe(false);
+
+      expect((await request(app).post(path.replace(/t=[^&]+/, 't=forged'))).status).toBe(400);
+      expect(await isSuppressed()).toBe(false);
+
+      const done = await request(app).post(path).type('form').send('List-Unsubscribe=One-Click');
+      expect(done.status).toBe(200);
+      expect(await isSuppressed()).toBe(true);
+    } finally {
+      await getPool().query('DELETE FROM mail_suppressions WHERE address = $1', [address]);
+      delete process.env.MAIL_LINK_SECRET;
+    }
   });
 });
