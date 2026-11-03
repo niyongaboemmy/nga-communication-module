@@ -129,6 +129,15 @@ export interface MeetRoomActions {
 const CAPTION_WINDOW = 60;
 const CHAT_WINDOW = 500;
 
+/**
+ * Speaker view on a phone (U-33): one face large enough to see, the others in
+ * a strip, as WhatsApp and Meet do on a small screen. A grid of nine on a
+ * 360 px screen is nine thumbnails nobody can read, and nine video decodes.
+ */
+function defaultLayout(): 'grid' | 'speaker' {
+  return typeof window !== 'undefined' && window.matchMedia?.('(max-width: 640px)').matches ? 'speaker' : 'grid';
+}
+
 export function useMeetRoom(
   ticket: MeetJoinTicket | null,
   initialStream: MediaStream | null,
@@ -165,7 +174,7 @@ export function useMeetRoom(
     presenterName: null,
     notes: [],
     handRaised: false,
-    layout: 'grid',
+    layout: defaultLayout(),
     layoutPinned: false,
     quality: 'good',
     publishQuality: 'high',
@@ -507,7 +516,7 @@ export function useMeetRoom(
         return {
           presenterId: null,
           presenterName: null,
-          layout: s.layoutPinned ? s.layout : 'grid',
+          layout: s.layoutPinned ? s.layout : defaultLayout(),
         };
       });
     });

@@ -444,8 +444,11 @@ try {
   await hostP.page.getByRole('button', { name: /AI notes|Invite the AI notetaker/i }).click();
   await hostP.page.waitForTimeout(1200);
   await hostP.page.screenshot({ path: `${SHOTS}/17-ai-panel.png` });
-  check('the AI panel opens on a consent screen, not a spinner',
-    await hostP.page.getByText(/Invite Tupo AI to this meeting/i).isVisible());
+  // With the school's AI switched off in NGA MIS (the default), the panel
+  // says so instead of offering the notetaker.
+  const aiOff = await hostP.page.getByText(/turned off/i).first().isVisible().catch(() => false);
+  check(aiOff ? 'the AI panel says AI is turned off for the school' : 'the AI panel opens on a consent screen, not a spinner',
+    aiOff || await hostP.page.getByText(/Invite Tupo AI to this meeting/i).isVisible());
 
   console.log('  ℹ  host peer state:',
     JSON.stringify(await hostP.page.evaluate(() => window.__meshState ?? {})));
