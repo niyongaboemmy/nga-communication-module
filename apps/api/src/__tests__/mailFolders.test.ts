@@ -152,3 +152,28 @@ describe('snooze (U-10)', () => {
   });
 });
 
+
+describe('Sent', () => {
+  it('leaves out campaign copies and pages newest first', async () => {
+    const sentIds: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const r = await as(cy.token).post('/api/mail/compose', { to: [`userId:${ada.id}`], subject: `Sent page ${i} ${snowflake()}`, bodyHtml: '<p>x</p>' });
+      sentIds.push(r.body.data.threadId);
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    // One personal copy of a campaign, as the campaign runner writes it.
+    const camp = await as(cy.token).post('/api/mail/compose', { to: [`userId:${ben.id}`], subject: `Campaign copy ${snowflake()}`, bodyHtml: '<p>all</p>' });
+    await getPool().query(`UPDATE mail_messages SET campaign_id = $2 WHERE thread_id = $1`, [camp.body.data.threadId, snowflake()]);
+    await getPool().query(`DELETE FROM mail_recipients WHERE thread_id = $1 AND kind = 'self'`, [camp.body.data.threadId]);
+
+    const all = await folder(cy, 'sent');
+    expect(all).not.toContain(camp.body.data.threadId);
+    expect(all.slice(0, 3)).toEqual([...sentIds].reverse());
+
+    const first = await as(cy.token).get('/api/mail/threads?folder=sent&limit=2');
+    expect(ids(first)).toEqual([sentIds[2], sentIds[1]]);
+    const cursor = first.body.data.nextCursor;
+    expect(cursor).toBeTruthy();
+    expect(ids(await as(cy.token).get(`/api/mail/threads?folder=sent&limit=2&cursor=${encodeURIComponent(cursor)}`))).toEqual([sentIds[0]]);
+  });
+});
