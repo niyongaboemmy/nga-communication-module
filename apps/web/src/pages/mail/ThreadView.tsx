@@ -1,5 +1,5 @@
 import { SafeHtml, sanitizeHtml, escapeText } from '../../components/SafeHtml';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, Reply, ReplyAll, Forward, Archive, Trash2, Star, Tag, MoreVertical,
   Paperclip, Download, ChevronDown, ChevronRight, BarChart3, Clock, X, Send, Edit3, Loader2,
@@ -19,6 +19,7 @@ import { AiOffNote } from '../../components/AiOffNote';
 import { AiAnsweredBy } from '../../components/MyAi';
 import type { MailThreadView, MailMessageView, MailLabel, MailMessageKind } from '@tupo/shared';
 import type { ComposerSeed } from './Composer';
+import { isTypingTarget } from '../../lib/shortcuts';
 
 interface Props {
   threadId: string;
@@ -228,6 +229,15 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
 
   useEffect(() => { load(); }, [load]);
 
+  // r / a / f: reply, reply all, forward to the newest message (U-10).
+  const replyKeys = useRef<(e: KeyboardEvent) => void>(() => {});
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => replyKeys.current(e);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const { can: canDo } = usePermissions();
+
   if (loading) return <div className="grid h-full place-items-center"><Spinner /></div>;
   if (!thread) return <EmptyState title="Thread not found" hint="It may have been deleted." />;
 
@@ -246,6 +256,15 @@ export const ThreadView: React.FC<Props> = ({ threadId, labels, myUserId, onBack
       notify({ title: 'Could not change the labels', body: e instanceof Error ? e.message : undefined, tone: 'error' });
     }
     onChanged();
+  };
+
+  replyKeys.current = (e: KeyboardEvent) => {
+    if (isTypingTarget(e) || replyTo || !canDo('MAIL_SEND')) return;
+    const kind = ({ r: 'reply', a: 'reply_all', f: 'forward' } as const)[e.key as 'r' | 'a' | 'f'];
+    const newest = thread.messages[thread.messages.length - 1];
+    if (!kind || !newest) return;
+    e.preventDefault();
+    doReply(newest.id, kind);
   };
 
   const doReply = (messageId: string, kind: MailMessageKind) => {

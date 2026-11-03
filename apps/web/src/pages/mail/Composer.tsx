@@ -25,8 +25,17 @@ export interface ComposerSeed {
   attachments?: Array<{ fileId: string; name: string; mime: string; size: number }>;
 }
 
+/** A send held back so it can be undone (U-10): what to send, and how to reopen it. */
+export interface QueuedSend { payload: MailComposePayload; reopen: ComposerSeed }
+
 interface Props {
   seed?: ComposerSeed;
+  /**
+   * Undo send (U-10): when given, Send closes at once and hands the message
+   * here instead of sending it; the layout sends it a few seconds later
+   * unless the person presses Undo.
+   */
+  onQueueSend?: (job: QueuedSend) => void;
   signatureHtml?: string;
   onClose: () => void;
   /** Closed with something in it: it was kept as a draft. */
@@ -38,7 +47,7 @@ type Att = { fileId: string; name: string; mime: string; size: number };
 
 const fmtSize = (n: number) => (n < 1024 ? `${n} B` : n < 1e6 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1e6).toFixed(1)} MB`);
 
-export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent, onDraftSaved }) => {
+export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent, onDraftSaved, onQueueSend }) => {
   const [to, setTo] = useState<RecipientToken[]>(seed?.to ?? []);
   const [cc, setCc] = useState<RecipientToken[]>(seed?.cc ?? []);
   const [bcc, setBcc] = useState<RecipientToken[]>(seed?.bcc ?? []);
@@ -159,6 +168,18 @@ export const Composer: React.FC<Props> = ({ seed, signatureHtml, onClose, onSent
     setError(null);
     if (!to.length && !cc.length && !bcc.length) { setError('Add at least one recipient.'); return; }
     if (mode === 'schedule' && !scheduleAt) { setError('Pick a date and time.'); return; }
+    if (mode === 'send' && onQueueSend && !uploading) {
+      // Saved as a draft first, so an undone send reopens exactly this — and
+      // nothing is lost if the page closes while the send is held.
+      setBusy('send');
+      await saveDraftNow();
+      sentRef.current = true;
+      onQueueSend({
+        payload: { ...payloadBase(), draft: false, scheduledAt: null, draftId: draftIdRef.current },
+        reopen: { to, cc, bcc, subject, bodyHtml: body, attachments, threadId: seed?.threadId, parentId: seed?.parentId, kind, draftId: draftIdRef.current },
+      });
+      return;
+    }
     setBusy(mode);
     try {
       const r = await api.compose({

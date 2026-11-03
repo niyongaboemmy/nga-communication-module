@@ -10,6 +10,7 @@ import * as api from './api';
 import type { MailFolder, MailThreadSummary, MailLabel } from '@tupo/shared';
 import { LoadError } from '../../components/LoadError';
 import { cacheGet, cacheSet } from '../../lib/localStore';
+import { isTypingTarget } from '../../lib/shortcuts';
 
 interface Props {
   folder: MailFolder;
@@ -212,6 +213,42 @@ export const MailList: React.FC<Props> = ({
     if (ok) await act(() => api.emptyTrash(), 'Trash emptied');
   };
 
+  /*
+   * Keyboard (U-10), Gmail's keys: j / k next and previous conversation,
+   * e archive, # delete, s star, u mark unread, / search. Never while typing.
+   */
+  const searchRef = useRef<HTMLInputElement>(null);
+  const keysRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  keysRef.current = (e: KeyboardEvent) => {
+    if (isTypingTarget(e)) return;
+    const i = threads.findIndex((t) => t.threadId === selectedThreadId);
+    const current = i >= 0 ? threads[i]! : null;
+    const run = (key: string) => {
+      const a = current && actionsFor(current).find((x) => x.key === key);
+      if (a && current) void act(() => a.run(current.threadId), a.done, { ids: [current.threadId], change: a.change });
+      return Boolean(a);
+    };
+    switch (e.key) {
+      case 'j': { const n = threads[Math.min(threads.length - 1, i + 1)]; if (n) onOpen(n); break; }
+      case 'k': { const n = threads[Math.max(0, i - 1)]; if (n) onOpen(n); break; }
+      case 'e': if (!run('archive')) return; break;
+      case '#': if (!run('trash')) return; break;
+      case 'u': if (!run('unread')) return; break;
+      case 's':
+        if (!current) return;
+        void act(() => api.starThread(current.threadId, !current.starred), undefined, { ids: [current.threadId], change: { starred: !current.starred } });
+        break;
+      case '/': searchRef.current?.focus(); break;
+      default: return;
+    }
+    e.preventDefault();
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => keysRef.current(e);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const labelById = (id: string) => labels.find((l) => l.id === id);
   const title = labelId ? labelById(labelId)?.name ?? 'Label'
     : folder.charAt(0).toUpperCase() + folder.slice(1);
@@ -237,7 +274,7 @@ export const MailList: React.FC<Props> = ({
             )}
             <div className="relative ml-auto min-w-0">
               <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-secondary-light" />
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search mail"
+              <input ref={searchRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search mail"
                 className="w-36 max-w-full rounded-full border border-border-light bg-transparent py-1.5 pl-8 pr-3 text-xs outline-none transition-[width] duration-150 focus:w-48 focus:border-blue-400 sm:w-44 sm:focus:w-56 dark:border-border-dark/60" />
             </div>
             <IconButton label="Refresh" size="sm" onClick={() => load(true)}><RefreshCw size={15} /></IconButton>
