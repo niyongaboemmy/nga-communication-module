@@ -12,8 +12,11 @@
 import type { PoolClient } from 'pg';
 import { getPool, snowflake } from '@tupo/db';
 import { notify, push } from '@tupo/notify';
-import { smtpConfigFromEnv, sendSmtp } from './smtp.js';
+import { smtpConfigFromEnv, sendSmtp, bareAddress, type OutboundMail } from './smtp.js';
 import { wrapEmailHtml } from './render.js';
+import {
+  emailAttachments, omittedNote, emailMessageId, threadHeaders, unsubscribeUrl,
+} from './outbound.js';
 
 type Db = PoolClient | ReturnType<typeof getPool>;
 
@@ -129,9 +132,9 @@ export async function deliverSmtp(
 
   const { rows: msg } = await pool.query<{
     from_name: string; from_address: string; subject: string; body_html: string; body_text: string;
-    is_draft: boolean; scheduled_at: string | null;
+    is_draft: boolean; scheduled_at: string | null; campaign_id: string | null;
   }>(
-    `SELECT from_name, from_address, subject, body_html, body_text, is_draft, scheduled_at
+    `SELECT from_name, from_address, subject, body_html, body_text, is_draft, scheduled_at, campaign_id
        FROM mail_messages WHERE id = $1`, [messageId],
   );
   const m = msg[0];
@@ -168,6 +171,25 @@ export async function deliverSmtp(
 
   let sent = 0, failed = 0, skipped = 0;
   let transportDown = false;
+
+  // Built once per message, and only when a copy is really about to go out:
+  // the attachments' bytes, and the headers that thread it.
+  let prepared: Promise<Omit<OutboundMail, 'to' | 'toName' | 'headers'>> | null = null;
+  const prepare = (domain: string) => (prepared ??= (async () => {
+    const [files, thread] = await Promise.all([emailAttachments(messageId, env), threadHeaders(messageId, domain)]);
+    const note = omittedNote(files.omitted);
+    return {
+      fromName: m.from_name,
+      replyTo: m.from_address || undefined,
+      subject: m.subject,
+      html: wrapEmailHtml(m.body_html + (note?.html ?? '')),
+      text: m.body_text + (note?.text ?? ''),
+      attachments: files.attachments.length ? files.attachments : undefined,
+      messageId: emailMessageId(messageId, domain),
+      inReplyTo: thread.inReplyTo,
+      references: thread.references,
+    };
+  })());
   for (const r of recipients) {
     // The relay itself is failing: put the rest back untouched for the next
     // attempt rather than burning an attempt on every one of them.
@@ -201,14 +223,17 @@ export async function deliverSmtp(
       continue;
     }
 
+    const base = await prepare(bareAddress(cfg.from).split('@')[1] || 'tupo.local');
+    // Bulk mail carries a one-click unsubscribe (RFC 8058): mail providers
+    // expect it, and without it a campaign is far more likely to land in spam.
+    const unsubscribe = m.campaign_id ? unsubscribeUrl(r.address, env) : null;
     const result = await sendSmtp(cfg, {
+      ...base,
       to: r.address,
       toName: r.name,
-      fromName: m.from_name,
-      replyTo: m.from_address || undefined,
-      subject: m.subject,
-      html: wrapEmailHtml(m.body_html),
-      text: m.body_text,
+      headers: unsubscribe
+        ? { 'List-Unsubscribe': `<${unsubscribe}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
+        : undefined,
     });
 
     if (result.ok) {

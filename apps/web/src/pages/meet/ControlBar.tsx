@@ -462,6 +462,21 @@ export const ControlBar: React.FC<ControlBarProps> = (p) => {
                       }}
                     />
                   )}
+                  {p.isHost && p.onEndForAll && (
+                    <>
+                      <div className="my-1 h-px bg-white/10" />
+                      <SheetItem
+                        Icon={PhoneOff}
+                        label="End for everyone"
+                        hint="Closes the meeting for all"
+                        danger
+                        onClick={() => {
+                          setOverflowOpen(false);
+                          p.onEndForAll?.();
+                        }}
+                      />
+                    </>
+                  )}
                 </span>
               </div>
             </Popover>
@@ -534,8 +549,9 @@ const SheetItem: React.FC<{
   hint?: string;
   active?: boolean;
   disabled?: boolean;
+  danger?: boolean;
   onClick: () => void;
-}> = ({ Icon, label, hint, active, disabled, onClick }) => (
+}> = ({ Icon, label, hint, active, disabled, danger, onClick }) => (
   <button
     onClick={onClick}
     disabled={disabled}
@@ -543,9 +559,11 @@ const SheetItem: React.FC<{
       'flex w-full items-start gap-2.5 rounded-xl px-2.5 py-2 text-left text-sm transition-colors duration-150 ' +
       (disabled
         ? 'cursor-not-allowed text-white/30'
-        : active
-          ? 'bg-blue-600/20 text-blue-200 hover:bg-blue-600/30'
-          : 'text-white/80 hover:bg-white/10')
+        : danger
+          ? 'text-red-300 hover:bg-red-600 hover:text-white'
+          : active
+            ? 'bg-blue-600/20 text-blue-200 hover:bg-blue-600/30'
+            : 'text-white/80 hover:bg-white/10')
     }
   >
     <Icon size={16} className="mt-0.5 shrink-0" />

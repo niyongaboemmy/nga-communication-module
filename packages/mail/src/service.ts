@@ -309,21 +309,28 @@ export async function listThreads(userId: string, opts: ListOpts): Promise<{
       : opts.folder === 'scheduled' ? 'NOT m.is_draft AND m.scheduled_at IS NOT NULL AND m.sent_at IS NULL'
       // Sent leaves out what the sender put in Trash or deleted (C-08); mail
       // sent before sender copies existed has none, and stays.
-      : `NOT m.is_draft AND (m.scheduled_at IS NULL OR m.sent_at IS NOT NULL)
+      // A campaign's personal copies live under Campaigns, not here: one
+      // announcement to 500 people must not bury everything else sent.
+      : `NOT m.is_draft AND (m.scheduled_at IS NULL OR m.sent_at IS NOT NULL) AND m.campaign_id IS NULL
          AND (NOT EXISTS (SELECT 1 FROM mail_recipients sr WHERE sr.message_id = m.id AND sr.user_id = $1 AND sr.kind = 'self')
               OR EXISTS (SELECT 1 FROM mail_recipients sr WHERE sr.message_id = m.id AND sr.user_id = $1
                           AND sr.kind = 'self' AND sr.folder = 'sent' AND NOT sr.is_hidden))`;
+    // Paged in SQL: a long-serving sender's whole history is never loaded to
+    // show one page of it.
     const { rows } = await db.query<{ thread_id: string; sort_at: string }>(
-      `SELECT DISTINCT ON (m.thread_id) m.thread_id,
-              COALESCE(m.sent_at, m.updated_at) AS sort_at
-         FROM mail_messages m
-        WHERE m.from_user_id = $1 AND ${cond}
-          AND ($2::text IS NULL OR m.subject ILIKE $2 OR m.body_text ILIKE $2)
-          AND ($3::timestamptz IS NULL OR COALESCE(m.sent_at, m.updated_at) < $3::timestamptz)
-        ORDER BY m.thread_id, sort_at DESC`,
-      [userId, like, opts.cursor ?? null],
+      `SELECT thread_id, sort_at FROM (
+         SELECT DISTINCT ON (m.thread_id) m.thread_id,
+                COALESCE(m.sent_at, m.updated_at) AS sort_at
+           FROM mail_messages m
+          WHERE m.from_user_id = $1 AND ${cond}
+            AND ($2::text IS NULL OR m.subject ILIKE $2 OR m.body_text ILIKE $2)
+            AND ($3::timestamptz IS NULL OR COALESCE(m.sent_at, m.updated_at) < $3::timestamptz)
+          ORDER BY m.thread_id, sort_at DESC) t
+        ORDER BY sort_at DESC
+        LIMIT $4`,
+      [userId, like, opts.cursor ?? null, limit + 1],
     );
-    threadIds = rows.sort((a, b) => (a.sort_at < b.sort_at ? 1 : -1)).slice(0, limit + 1);
+    threadIds = rows;
   } else {
     // The folder is always a bound parameter, never part of the SQL text.
     // A label is a view across folders (C-09): an archived conversation with

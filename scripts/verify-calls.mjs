@@ -92,6 +92,33 @@ try {
     check('the meeting offers "Pop out the video"', false, 'control not found');
   }
 
+  console.log('\nOn a phone');
+  await callerPage.setViewportSize({ width: 390, height: 844 });
+  // The app's own phone tab bar has a "More" too: use the meeting's.
+  await callerPage.locator('div', { has: callerPage.getByRole('button', { name: 'Leave the meeting' }) }).last()
+    .getByRole('button', { name: 'More', exact: true }).click();
+  check('the host can end for everyone from a phone',
+    await callerPage.getByRole('button', { name: /End for everyone/ }).first().isVisible().catch(() => false));
+  await callerPage.keyboard.press('Escape');
+  await callerPage.setViewportSize({ width: 1280, height: 900 });
+
+  console.log('\nRecording, then leaving');
+  await callerPage.getByRole('button', { name: 'More', exact: true }).click();
+  const startRec = callerPage.getByRole('button', { name: /Start recording/ }).first();
+  if (await startRec.waitFor({ timeout: 5_000 }).then(() => true).catch(() => false)) {
+    await startRec.click();
+    await sleep(4_000);
+    await callerPage.getByRole('button', { name: 'Leave the meeting' }).click();
+    let rec = null;
+    for (let i = 0; i < 30 && rec?.status !== 'ready'; i++) {
+      await sleep(1_000);
+      rec = (await pool.query(`SELECT status, file_id FROM meeting_recordings WHERE meeting_id = $1 ORDER BY started_at DESC LIMIT 1`, [meetingId])).rows[0] ?? null;
+    }
+    check('leaving while recording saves the recording instead of losing it', rec?.status === 'ready' && Boolean(rec?.file_id), JSON.stringify(rec));
+  } else {
+    check('the host can start a recording', false, 'control not found');
+  }
+
   console.log('\nDecline');
   await calleePage.goto(`${BASE}/app/feed`);
   await calleePage.waitForTimeout(1_500);

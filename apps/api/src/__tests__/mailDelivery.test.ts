@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import net from 'node:net';
+import http from 'node:http';
 import { getPool, closeDb, seedRbac, snowflake } from '@tupo/db';
-import { compose, deliverSmtp, classifySmtpError, MailError, createCampaign, submitCampaign, runCampaign } from '@tupo/mail';
+import { compose, deliverSmtp, classifySmtpError, MailError, createCampaign, submitCampaign, runCampaign, unsubscribeUrl, verifyUnsubscribe } from '@tupo/mail';
 
 /**
  * C-06: SMTP delivery is safe to run concurrently, classifies failures
@@ -11,6 +12,7 @@ import { compose, deliverSmtp, classifySmtpError, MailError, createCampaign, sub
 /** A scripted relay: unknown@ → 550 5.1.1, relay@ → 554 5.7.1, anyone else accepted. */
 function relay() {
   const accepted: string[] = [];
+  const messages: string[] = [];
   const sockets = new Set<net.Socket>();
   const server = net.createServer((sock) => {
     sockets.add(sock);
@@ -24,7 +26,7 @@ function relay() {
       while ((i = buf.indexOf(inData ? '\r\n.\r\n' : '\r\n')) !== -1) {
         const line = buf.slice(0, i);
         buf = buf.slice(i + (inData ? 5 : 2));
-        if (inData) { inData = false; accepted.push(...rcpt); rcpt = []; sock.write('250 OK queued\r\n'); continue; }
+        if (inData) { inData = false; messages.push(line); accepted.push(...rcpt); rcpt = []; sock.write('250 OK queued\r\n'); continue; }
         const up = line.toUpperCase();
         if (up.startsWith('EHLO') || up.startsWith('HELO')) sock.write('250-relay.test\r\n250 OK\r\n');
         else if (up.startsWith('RCPT TO')) {
@@ -39,9 +41,9 @@ function relay() {
       }
     });
   });
-  return new Promise<{ port: number; accepted: string[]; close: () => Promise<void> }>((resolve) => {
+  return new Promise<{ port: number; accepted: string[]; messages: string[]; close: () => Promise<void> }>((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve({
-      port: (server.address() as net.AddressInfo).port, accepted,
+      port: (server.address() as net.AddressInfo).port, accepted, messages,
       close: () => new Promise((r) => { for (const s of sockets) s.destroy(); server.close(() => r()); }),
     }));
   });
@@ -205,5 +207,68 @@ describe('campaigns', () => {
     // A second run after it finished sends nothing more.
     await runCampaign(c.id);
     expect(await count()).toBe(1);
+  });
+});
+
+describe('what an email copy carries', () => {
+  /** Stands in for tupo-files' internal route. */
+  async function filesStub(bytes: Record<string, Buffer>) {
+    const server = http.createServer((req, res) => {
+      const id = /^\/internal\/files\/([^/]+)\/content$/.exec(req.url ?? '')?.[1];
+      if (req.headers['x-internal-secret'] !== 'files-secret' || !id || !bytes[id]) { res.statusCode = 404; return res.end(); }
+      res.end(bytes[id]);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    return { url: `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`, close: () => new Promise<void>((r) => server.close(() => r())) };
+  }
+  async function file(name: string, size: number) {
+    const id = snowflake();
+    await getPool().query(
+      `INSERT INTO files (id, owner_id, storage_driver, storage_key, original_name, mime_type, size_bytes, status)
+       VALUES ($1,$2,'local',$3,$4,'text/plain',$5,'ready')`, [id, sender, `test/${id}`, name, size]);
+    return id;
+  }
+  const raw = (to: string) => sink.messages.find((m) => m.includes(to)) ?? '';
+
+  it('attaches the files, threads replies and names what was too large', async () => {
+    const small = await file('notes.txt', 11);
+    const big = await file('video.mp4', 40 * 1024 * 1024);
+    const stub = await filesStub({ [small]: Buffer.from('hello world') });
+    const fenv = { ...env, FILES_INTERNAL_URL: stub.url, FILES_INTERNAL_SECRET: 'files-secret' };
+    try {
+      const to = ext('attach');
+      const first = await compose(sender, { to: [to], subject: 'With files', bodyHtml: '<p>see attached</p>',
+        attachments: [{ fileId: small, name: 'notes.txt', mime: 'text/plain', size: 11 }, { fileId: big, name: 'video.mp4', mime: 'video/mp4', size: 1 }] });
+      await deliverSmtp(first.messageId, fenv);
+      const m1 = raw(to);
+      expect(m1).toMatch(/filename=notes\.txt/);
+      expect(m1).toContain(Buffer.from('hello world').toString('base64'));
+      expect(m1).not.toMatch(/filename=video\.mp4/);
+      expect(m1).toMatch(/Too large to send by email/);
+      expect(m1).toContain(`Message-ID: <${first.messageId}@amashuri.com>`);
+
+      const to2 = ext('reply');
+      const reply = await compose(sender, { to: [to2], subject: 'Re: With files', bodyHtml: '<p>and more</p>',
+        threadId: first.threadId, parentId: first.messageId, kind: 'reply' });
+      await deliverSmtp(reply.messageId, fenv);
+      const m2 = raw(to2);
+      expect(m2).toContain(`In-Reply-To: <${first.messageId}@amashuri.com>`);
+      expect(m2).toMatch(new RegExp(`References: <${first.messageId}@amashuri\\.com>`));
+    } finally {
+      await stub.close();
+      await getPool().query('DELETE FROM mail_attachments WHERE file_id = ANY($1::text[])', [[small, big]]);
+      await getPool().query('DELETE FROM files WHERE id = ANY($1::text[])', [[small, big]]);
+    }
+  });
+
+  it('a one-click unsubscribe link is signed for one address', () => {
+    const uenv = { MAIL_LINK_SECRET: 's3cret', APP_PUBLIC_URL: 'https://tupo.example/' };
+    const url = new URL(unsubscribeUrl('Pat@Outside.example', uenv)!);
+    expect(url.pathname).toBe('/api/mail/unsubscribe');
+    const a = url.searchParams.get('a')!, t = url.searchParams.get('t')!;
+    expect(verifyUnsubscribe(a, t, uenv)).toBe('pat@outside.example');
+    expect(verifyUnsubscribe(Buffer.from('someone@else.example').toString('base64url'), t, uenv)).toBeNull();
+    expect(verifyUnsubscribe(a, t, { MAIL_LINK_SECRET: 'other' })).toBeNull();
+    expect(unsubscribeUrl('x@y.z', {})).toBeNull();
   });
 });

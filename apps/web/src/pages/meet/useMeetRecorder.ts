@@ -252,7 +252,8 @@ export function useMeetRecorder({
   }, [paintersRef]);
 
   const start = useCallback(async () => {
-    if (state !== 'idle') return;
+    // A failed attempt can be retried; only a live or uploading one blocks.
+    if (state === 'recording' || state === 'uploading') return;
     setError(null);
 
     const mimeType = pickMimeType();

@@ -754,6 +754,12 @@ try {
 
   // ---- post-meeting summary ----
   await hostP.page.getByRole('button', { name: /End for everyone/i }).click();
+  const endConfirm = hostP.page.getByRole('alertdialog').filter({ hasText: 'End the meeting for everyone?' });
+  check('ending for everyone asks first', await endConfirm.waitFor({ timeout: 5000 }).then(() => true).catch(() => false));
+  await endConfirm.getByRole('button', { name: 'Cancel' }).click();
+  check('and Cancel keeps the meeting going', /\/app\/meet\/[^/]+$/.test(hostP.page.url()));
+  await hostP.page.getByRole('button', { name: /End for everyone/i }).click();
+  await endConfirm.getByRole('button', { name: 'End for everyone' }).click();
   await hostP.page.waitForURL(/\/summary$/, { timeout: 20000 });
   await hostP.page.waitForTimeout(2500);
   await hostP.page.screenshot({ path: `${SHOTS}/18-summary.png`, fullPage: true });

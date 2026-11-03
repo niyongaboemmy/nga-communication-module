@@ -419,15 +419,19 @@ router.post('/campaigns/:id/cancel', authorizePermission('MAIL_BULK_SEND'), wrap
  * Suppression list (FR-MAIL-7)
  * ────────────────────────────────────────────────────────────────────────── */
 
-router.get('/suppressions', authorizePermission('MAIL_BULK_SEND', 'MAIL_APPROVE'), wrap(async (_req, res) => {
+router.get('/suppressions', authorizePermission('MAIL_BULK_SEND', 'MAIL_APPROVE'), wrap(async (req, res) => {
+  const q = str(req.query.q, 320).trim().toLowerCase();
   const { rows } = await getPool().query(
-    `SELECT address, reason, note, created_at FROM mail_suppressions ORDER BY created_at DESC LIMIT 500`,
+    `SELECT address, reason, note, created_at FROM mail_suppressions
+      WHERE ($1::text = '' OR address LIKE '%' || $1 || '%')
+      ORDER BY created_at DESC LIMIT 500`, [q.replace(/[%_\\]/g, '')],
   );
   res.json(ok({ suppressions: rows }));
 }));
 
 router.post('/suppressions', authorizePermission('MAIL_BULK_SEND', 'MAIL_APPROVE'), wrap(async (req, res) => {
-  await mail.suppress(str(req.body?.address, 320), 'manual', str(req.body?.note, 500), undefined, actor(req).id);
+  if (!mail.isEmailAddress(str(req.body?.address, 320).trim())) return res.status(400).json(fail('Enter a valid email address.'));
+  await mail.suppress(str(req.body?.address, 320).trim(), 'manual', str(req.body?.note, 500), undefined, actor(req).id);
   res.status(201).json(ok({ added: true }));
 }));
 

@@ -17,6 +17,11 @@ export const config = {
   signedUrlTtlSeconds: parseInt(process.env.SIGNED_URL_TTL_SECONDS ?? '900', 10),
   /** Per-person storage quota (A-07). Holders of FILE_QUOTA_MANAGE are exempt. */
   userQuotaBytes: parseInt(process.env.FILE_USER_QUOTA_BYTES ?? String(10 * 1024 ** 3), 10),
+  /**
+   * Shared with tupo-worker so it can read a mail attachment's bytes to send
+   * it by email. Unset means the internal route is closed.
+   */
+  internalSecret: process.env.FILES_INTERNAL_SECRET ?? '',
 };
 
 // apps/api refuses to boot on this same default in production (see its
