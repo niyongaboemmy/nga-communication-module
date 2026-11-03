@@ -87,10 +87,45 @@ const assetKey = (url) => {
   return key.toString();
 };
 
+/* Pictures from the files service (P-05). Every image URL carries a short-lived
+ * ticket (`t=`), so the browser's own cache never matched twice and every view
+ * downloaded the picture again. A file id's bytes never change, so images are
+ * kept here keyed by everything but the ticket, cache-first, newest 400. Only
+ * images: video and audio stream with range requests. Deleted on sign-out
+ * (lib/api clearSession) so nothing one person saw stays for the next. */
+const MEDIA = "tupo-media-v1";
+const MEDIA_MAX = 400;
+const isMedia = (req, url) =>
+  url.origin === self.location.origin &&
+  /^\/api\/files\/[^/]+\/content$/.test(url.pathname) &&
+  req.destination === "image" &&
+  !req.headers.has("range");
+
+async function trimMedia(cache) {
+  const keys = await cache.keys();
+  for (let i = 0; i < keys.length - MEDIA_MAX; i++) await cache.delete(keys[i]);
+}
+
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
+
+  if (isMedia(req, url)) {
+    const key = assetKey(url);
+    event.respondWith(
+      caches.open(MEDIA).then(async (cache) => {
+        const hit = await cache.match(key);
+        if (hit) return hit;
+        const res = await fetch(req);
+        if (res.ok && (res.headers.get("content-type") || "").startsWith("image/")) {
+          cache.put(key, res.clone()).then(() => trimMedia(cache)).catch(() => undefined);
+        }
+        return res;
+      }).catch(() => fetch(req)),
+    );
+    return;
+  }
 
   if (req.mode === "navigate") {
     event.respondWith(

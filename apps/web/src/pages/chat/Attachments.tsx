@@ -5,6 +5,7 @@ import {
 import { IconButton, Spinner } from '../../components/ui';
 import { formatBytes } from './data';
 import { downloadFile, useMediaUrl } from './uploads';
+import { blurhashUrl } from '../../lib/blurhash';
 import type { Attachment } from './types';
 
 /**
@@ -324,16 +325,22 @@ const ImageTile: React.FC<{
 const ImageTileInner: React.FC<{
   attachment: Attachment; onOpen: () => void; visible: boolean;
 }> = ({ attachment: a, onOpen, visible }) => {
-  const { url, failed } = useMediaUrl(a.fileId, visible);
+  // Images load their 640 px thumbnail (P-05); the lightbox opens the original.
+  const { url, failed } = useMediaUrl(a.fileId, visible, { thumb: a.kind === 'image' });
+  const [loaded, setLoaded] = useState(false);
   // The box is reserved from the dimensions the sender's browser measured, so
-  // the log does not jump as pictures decode.
+  // the log does not jump as pictures decode; the blurhash fills it meanwhile.
   const ratio = a.width && a.height ? a.width / a.height : 4 / 3;
+  const placeholder = a.kind === 'image' ? blurhashUrl(a.blurhash) : null;
 
   return (
     <button
       onClick={onOpen}
       aria-label={`Open ${a.name}`}
-      style={{ aspectRatio: String(Math.min(Math.max(ratio, 0.5), 2.5)) }}
+      style={{
+        aspectRatio: String(Math.min(Math.max(ratio, 0.5), 2.5)),
+        ...(placeholder ? { backgroundImage: `url(${placeholder})`, backgroundSize: 'cover' } : {}),
+      }}
       className="group/img relative w-full overflow-hidden rounded-xl bg-slate-200 dark:bg-slate-700"
     >
       {failed ? (
@@ -358,9 +365,12 @@ const ImageTileInner: React.FC<{
           src={url}
           alt={a.name}
           loading="lazy"
-          className="h-full w-full object-cover transition-transform duration-200 group-hover/img:scale-[1.02]"
+          decoding="async"
+          onLoad={() => setLoaded(true)}
+          className={`h-full w-full object-cover transition-[transform,opacity] duration-200 group-hover/img:scale-[1.02] ${
+            placeholder && !loaded ? 'opacity-0' : 'opacity-100'}`}
         />
-      ) : (
+      ) : placeholder ? null : (
         <span className="grid h-full w-full place-items-center"><Spinner className="h-4 w-4" /></span>
       )}
     </button>

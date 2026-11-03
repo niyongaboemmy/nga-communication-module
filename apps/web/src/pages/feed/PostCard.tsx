@@ -44,7 +44,7 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   const menuRef = useDismiss(menu, closeMenu);
   const cardRef = useRef<HTMLElement>(null);
   const viewed = useRef(false);
-  const avatarUrl = useMediaUrl(post.page.avatarFileId);
+  const avatarUrl = useMediaUrl(post.page.avatarFileId, true, 0, undefined, true);
 
   useEffect(() => {
     const el = cardRef.current;

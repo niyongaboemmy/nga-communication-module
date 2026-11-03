@@ -116,6 +116,8 @@ export interface WireAttachment {
   durationMs?: number;
   /** Peak samples for a voice note's waveform, 0–1, pre-computed client-side. */
   waveform?: number[];
+  /** Images: a blurhash painted while the thumbnail loads (P-05). */
+  blurhash?: string;
 }
 
 export interface WireMessage {

@@ -287,7 +287,7 @@ export const PageProfile: React.FC = () => {
   const [editing, setEditing] = useState(false);
   const [followersOpen, setFollowersOpen] = useState(false);
   const cover = useMediaUrl(page?.coverFileId);
-  const avatar = useMediaUrl(page?.avatarFileId);
+  const avatar = useMediaUrl(page?.avatarFileId, true, 0, undefined, true);
 
   // Not found, not visible to this person, or the request failed (D-07): each
   // says so, where a page that cannot load used to spin forever.
@@ -971,7 +971,7 @@ export const PageDirectory: React.FC = () => {
 };
 
 const PageDirCard: React.FC<{ page: FeedPageSummary; onFollow: () => void }> = ({ page, onFollow }) => {
-  const avatar = useMediaUrl(page.avatarFileId);
+  const avatar = useMediaUrl(page.avatarFileId, true, 0, undefined, true);
   return (
     <div className="flex items-center gap-3 rounded-2xl border border-border-light bg-card-light p-3 dark:border-border-dark/40 dark:bg-elevated-dark/40">
       <Link to={`/app/feed/p/${page.slug}`}><Avatar name={page.name} src={avatar} size={44} /></Link>

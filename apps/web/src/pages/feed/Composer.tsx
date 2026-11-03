@@ -371,7 +371,7 @@ const PagePicker: React.FC<{ pages: FeedPageSummary[]; value: string; onChange: 
   const close = useCallback(() => setOpen(false), []);
   const ref = useDismiss(open, close);
   const current = pages.find((p) => p.id === value);
-  const avatarUrl = useMediaUrl(current?.avatarFileId);
+  const avatarUrl = useMediaUrl(current?.avatarFileId, true, 0, undefined, true);
   return (
     <div ref={ref} className="relative">
       <button onClick={() => !disabled && setOpen((v) => !v)} disabled={disabled} aria-haspopup="listbox" aria-expanded={open}

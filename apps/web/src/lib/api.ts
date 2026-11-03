@@ -16,8 +16,9 @@ export const PERMISSIONS_KEY = 'tupo_permissions';
 export const ROLE_PERMISSIONS_KEY = 'tupo_role_permissions';
 
 export function clearSession(): void {
-  // What this person saw must not render for whoever signs in next (P-02).
+  // What this person saw must not render for whoever signs in next (P-02, P-05).
   void cacheClearAll();
+  try { void caches?.delete('tupo-media-v1').catch(() => {}); } catch { /* no Cache API */ }
   localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(USER_KEY);
   localStorage.removeItem(PERMISSIONS_KEY);

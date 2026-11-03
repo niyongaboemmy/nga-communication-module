@@ -63,7 +63,7 @@ export const LoadMoreSentinel: React.FC<{ onHit: () => void; disabled?: boolean 
 };
 
 const RailPageRow: React.FC<{ page: FeedPageSummary }> = ({ page }) => {
-  const avatar = useMediaUrl(page.avatarFileId);
+  const avatar = useMediaUrl(page.avatarFileId, true, 0, undefined, true);
   return (
     <Link to={`/app/feed/p/${page.slug}`} className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm transition-colors hover:bg-black/5 dark:hover:bg-white/5">
       <Avatar name={page.name} src={avatar} size={30} />

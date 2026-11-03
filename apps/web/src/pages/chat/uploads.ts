@@ -217,11 +217,15 @@ export function uploadFile(
  */
 const ticketCache = new Map<string, { token: string; expiresAt: number }>();
 
-export async function inlineUrl(fileId: string): Promise<string> {
+export async function inlineUrl(fileId: string, opts: { thumb?: boolean } = {}): Promise<string> {
+  // `thumb=1` (P-05): the 640 px WebP for lists; the server falls back to the
+  // original for anything without one. Before `t`, so the service worker's
+  // cache key (everything but the ticket) is stable.
+  const variant = opts.thumb ? '&thumb=1' : '';
   const cached = ticketCache.get(fileId);
   // Renewed with ten seconds to spare, so a ticket cannot expire mid-request.
   if (cached && cached.expiresAt - 10_000 > Date.now()) {
-    return `/api/files/${fileId}/content?inline=1&t=${encodeURIComponent(cached.token)}`;
+    return `/api/files/${fileId}/content?inline=1${variant}&t=${encodeURIComponent(cached.token)}`;
   }
 
   const { token, expiresIn } = await fetch(`/api/files/${fileId}/ticket`, {
@@ -229,7 +233,7 @@ export async function inlineUrl(fileId: string): Promise<string> {
   }).then(json<{ token: string; expiresIn: number }>);
 
   ticketCache.set(fileId, { token, expiresAt: Date.now() + expiresIn * 1000 });
-  return `/api/files/${fileId}/content?inline=1&t=${encodeURIComponent(token)}`;
+  return `/api/files/${fileId}/content?inline=1${variant}&t=${encodeURIComponent(token)}`;
 }
 
 /**
@@ -253,8 +257,9 @@ export function bustTicket(fileId: string): void {
  * the hook then simply never resolves a URL, so callers can fall back.
  */
 export function useMediaUrl(
-  fileId: string | null | undefined, enabled = true,
+  fileId: string | null | undefined, enabled = true, opts: { thumb?: boolean } = {},
 ): { url: string | null; failed: boolean; refresh: () => boolean } {
+  const thumb = Boolean(opts.thumb);
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [version, setVersion] = useState(0);
@@ -267,11 +272,11 @@ export function useMediaUrl(
     setFailed(false);
     if (!enabled || !fileId) return;
     let cancelled = false;
-    inlineUrl(fileId)
+    inlineUrl(fileId, { thumb })
       .then((u) => { if (!cancelled) setUrl(u); })
       .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
-  }, [fileId, enabled, version]);
+  }, [fileId, enabled, version, thumb]);
 
   // A file change starts the retry budget again.
   useEffect(() => { refreshes.current = 0; }, [fileId]);

@@ -853,7 +853,7 @@ async function resolveAttachments(
     if (!f) throw new ChatError('Attachment not found.', 404);
     if (f.owner_id !== senderId && !reshare.includes(id)) throw new ChatError('That attachment is not yours to send.', 403);
     if (f.status !== 'ready') throw new ChatError('An attachment is still uploading.', 409);
-    const meta = (f.metadata ?? {}) as Record<string, number | number[] | undefined>;
+    const meta = (f.metadata ?? {}) as Record<string, number | number[] | string | undefined>;
     out.push({
       fileId: f.id,
       name: f.original_name,
@@ -864,6 +864,7 @@ async function resolveAttachments(
       height: meta.height as number | undefined,
       durationMs: meta.durationMs as number | undefined,
       waveform: meta.waveform as number[] | undefined,
+      blurhash: typeof meta.blurhash === 'string' ? meta.blurhash : undefined,
     });
   }
   return out;

@@ -9,6 +9,7 @@ import type { SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
 import { createStorageDriver } from './storage/driver.js';
 import { canReadFile, canDeleteFile, listConversationFiles } from './access.js';
+import { makeThumbnail, thumbKey, THUMBABLE, type ThumbResult } from './thumbnails.js';
 
 installProcessGuards('files');
 
@@ -227,9 +228,9 @@ app.post('/api/files/tickets', requireSession, requireFilePermission('FILE_UPLOA
 app.put('/api/files/:id/content', requireSession, requireFilePermission('FILE_UPLOAD'), async (req, res) => {
   const user = (req as FileRequest).user!;
   const { rows } = await getPool().query<{
-    storage_key: string; owner_id: string; status: string; size_bytes: string; created_at: Date;
+    storage_key: string; owner_id: string; status: string; size_bytes: string; created_at: Date; mime_type: string;
   }>(
-    'SELECT storage_key, owner_id, status, size_bytes, created_at FROM files WHERE id = $1',
+    'SELECT storage_key, owner_id, status, size_bytes, created_at, mime_type FROM files WHERE id = $1',
     [req.params.id]
   );
   const file = rows[0];
@@ -263,7 +264,20 @@ app.put('/api/files/:id/content', requireSession, requireFilePermission('FILE_UP
       `UPDATE files SET size_bytes = $2, checksum = $3, status = 'ready' WHERE id = $1`,
       [req.params.id, sizeBytes, checksum]
     );
-    res.json(ok({ fileId: req.params.id, sizeBytes, checksum, status: 'ready' }));
+    // An image gets its thumbnail and placeholder now (P-05), so a message
+    // sent straight after the upload already carries them. Waited for up to
+    // 4 s; a slower one still finishes and is saved, the answer just goes first.
+    let thumb: ThumbResult | null = null;
+    if (THUMBABLE.test(file.mime_type)) {
+      const work = makeThumbnail(storage, file.storage_key)
+        .then(async (t) => { await saveThumbMetadata(req.params.id!, t); return t; });
+      thumb = await Promise.race([work, new Promise<null>((r) => setTimeout(() => r(null), 4_000).unref())])
+        .catch((err) => { console.warn('[files] thumbnail failed:', err instanceof Error ? err.message : err); return null; });
+    }
+    res.json(ok({
+      fileId: req.params.id, sizeBytes, checksum, status: 'ready',
+      ...(thumb ? { width: thumb.width, height: thumb.height, blurhash: thumb.blurhash } : {}),
+    }));
   } catch (err) {
     await storage.remove(file.storage_key).catch(() => {});
     await getPool().query(`UPDATE files SET status = 'failed' WHERE id = $1`, [req.params.id]);
@@ -344,6 +358,13 @@ app.patch('/api/files/:id/metadata', requireSession, async (req, res) => {
  * seeking re-downloads from the start.
  */
 
+/** Thumbnail facts go beside the client's own metadata; the decoder's dimensions win. */
+async function saveThumbMetadata(fileId: string, t: ThumbResult): Promise<void> {
+  await getPool().query(
+    `UPDATE files SET metadata = metadata || $2::jsonb WHERE id = $1`,
+    [fileId, JSON.stringify({ width: t.width, height: t.height, blurhash: t.blurhash, thumb: true })]);
+}
+
 /** MIME types safe to render in the page. Everything else downloads. */
 const INLINE_SAFE = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/(mp4|webm|ogg|quicktime)|audio\/(mpeg|mp4|ogg|wav|webm))$/;
 
@@ -356,9 +377,9 @@ app.get('/api/files/:id/content', async (req, res) => {
 
   const { rows } = await getPool().query<{
     storage_key: string; original_name: string; mime_type: string;
-    size_bytes: string; status: string;
+    size_bytes: string; status: string; metadata: { thumb?: boolean } | null;
   }>(
-    `SELECT storage_key, original_name, mime_type, size_bytes, status
+    `SELECT storage_key, original_name, mime_type, size_bytes, status, metadata
        FROM files WHERE id = $1 AND deleted_at IS NULL`,
     [req.params.id]);
   const file = rows[0];
@@ -378,15 +399,31 @@ app.get('/api/files/:id/content', async (req, res) => {
   }
 
   const inline = req.query.inline === '1' && INLINE_SAFE.test(file.mime_type);
-  res.setHeader('Content-Type', file.mime_type);
+  // Private: an authorised response must not be cached by a shared proxy and
+  // handed to the next person who asks. Immutable: a file id's bytes never
+  // change once uploaded, so this browser may keep them (P-05).
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+
+  // ?thumb=1 (P-05): the 640 px WebP for lists. Made now if this image
+  // predates thumbnails — that is the whole backfill. Anything that cannot
+  // have one (a GIF, a video, a failed decode) falls back to the original.
+  if (req.query.thumb === '1' && THUMBABLE.test(file.mime_type)) {
+    try {
+      if (!file.metadata?.thumb) await saveThumbMetadata(req.params.id!, await makeThumbnail(storage, file.storage_key));
+      res.setHeader('Content-Type', 'image/webp');
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(file.original_name)}.webp`);
+      return pipeSafely(await storage.get(thumbKey(file.storage_key)), res);
+    } catch (err) {
+      console.warn('[files] thumbnail unavailable, sending the original:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  res.setHeader('Content-Type', file.mime_type);
   res.setHeader(
     'Content-Disposition',
     `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.original_name)}`,
   );
-  // Private: an authorised response must not be cached by a shared proxy and
-  // handed to the next person who asks for the same URL.
-  res.setHeader('Cache-Control', 'private, max-age=300');
   res.setHeader('Accept-Ranges', 'bytes');
 
   const total = Number(file.size_bytes);

@@ -83,6 +83,7 @@ const Tile: React.FC<TileProps> = ({ item, onOpen, onDims, anchorTop, overlay, s
     >
       {item.kind === 'image' ? (
         <FeedImage
+          thumb
           fileId={item.fileId}
           alt={item.name ?? ''}
           className="absolute inset-0"
