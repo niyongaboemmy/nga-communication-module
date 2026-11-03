@@ -16,6 +16,7 @@ import pg from 'pg';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import sharp from 'sharp';
 import { purgeUsers } from './lib/purge.mjs';
 import { prepareBrowser } from './lib/uiHarness.mjs';
 
@@ -110,6 +111,36 @@ try {
     return t;
   });
   check('a vertical drag is left to scrolling (the row does not move)', scrolled === 'none' || scrolled === 'matrix(1, 0, 0, 1, 0, 0)', scrolled);
+
+  console.log('\nPictures on a phone');
+  const FILES = 'http://localhost:5192';
+  const fileIds = [];
+  for (const color of ['#cc3333', '#3366cc']) {
+    const png = await sharp({ create: { width: 600, height: 400, channels: 3, background: color } }).png().toBuffer();
+    const t = await (await fetch(`${FILES}/api/files/tickets`, { method: 'POST', headers: { authorization: `Bearer ${other.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ name: `pic-${color.slice(1)}.png`, mime: 'image/png', size: png.length }) })).json();
+    await fetch(`${FILES}${t.data.uploadUrl}`, { method: 'PUT', headers: { authorization: `Bearer ${other.token}` }, body: png });
+    fileIds.push(t.data.fileId);
+  }
+  await fetch(`${API}/api/chat/conversations/${convId}/messages`, { method: 'POST', headers: { authorization: `Bearer ${other.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ body: `two pictures ${tag}`, nonce: `pics-${tag}`, attachments: fileIds }) });
+  await phone.getByRole('button', { name: 'Open pic-cc3333.png' }).first().click({ timeout: 15_000 });
+  const viewer = phone.locator('[data-lightbox]');
+  await viewer.waitFor({ timeout: 5_000 });
+  const pos = async () => (await viewer.innerText()).match(/(\d) \/ (\d)/)?.[0];
+  check('the viewer opens on the tapped picture', (await pos()) === '1 / 2', await pos());
+  await viewer.locator('div.grid').first().evaluate(async (el) => {
+    const ev = (type, x) => el.dispatchEvent(new PointerEvent(type, { clientX: x, clientY: 300, pointerId: 9, pointerType: 'touch', bubbles: true }));
+    ev('pointerdown', 300); ev('pointerup', 120);
+  });
+  await sleep(300);
+  check('swiping left shows the next picture', (await pos()) === '2 / 2', await pos());
+  const img = viewer.locator('img').first();
+  await img.waitFor({ timeout: 5_000 });
+  await img.click(); await img.click();
+  check('a double tap zooms in', (await img.getAttribute('data-zoomed')) === 'true');
+  await sleep(350);
+  await img.click(); await img.click();
+  check('and another zooms back out', (await img.getAttribute('data-zoomed')) === 'false');
+  await pool.query('DELETE FROM files WHERE id = ANY($1)', [fileIds]).catch(() => {});
 } catch (err) {
   check('suite ran to completion', false, err?.message ?? String(err));
 } finally {

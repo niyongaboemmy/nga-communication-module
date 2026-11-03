@@ -87,6 +87,39 @@ export const Lightbox: React.FC<{
     };
   }, [index, items.length, onIndex, onClose]);
 
+  // Phones (U-03): swipe sideways between pictures; double-tap zooms 2x where
+  // tapped, double-tap again to fit. A swipe never counts as a backdrop tap.
+  const swipe = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const lastTap = useRef(0);
+  const swipedAt = useRef(0);
+  const [zoom, setZoom] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => { setZoom(null); }, [index]);
+  const touch = {
+    onPointerDown: (e: React.PointerEvent) => { if (e.pointerType === 'touch') swipe.current = { x: e.clientX, y: e.clientY, moved: false }; },
+    onPointerUp: (e: React.PointerEvent) => {
+      const st = swipe.current; swipe.current = null;
+      if (!st || e.pointerType !== 'touch' || zoom) return;
+      const dx = e.clientX - st.x, dy = e.clientY - st.y;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        st.moved = true;
+        if (dx < 0 && index < items.length - 1) onIndex(index + 1);
+        if (dx > 0 && index > 0) onIndex(index - 1);
+        // A browser may still send a click for the lifted finger: ignore only that one.
+        swipedAt.current = Date.now();
+      }
+    },
+  };
+  const onImageTap = (e: React.MouseEvent<HTMLImageElement>) => {
+    e.stopPropagation();
+    const now = Date.now();
+    if (now - swipedAt.current < 80) return;
+    if (now - lastTap.current < 300) {
+      const r = e.currentTarget.getBoundingClientRect();
+      setZoom((z) => (z ? null : { x: ((e.clientX - r.left) / r.width) * 100, y: ((e.clientY - r.top) / r.height) * 100 }));
+      lastTap.current = 0;
+    } else lastTap.current = now;
+  };
+
   if (!current) return null;
 
   return (
@@ -120,7 +153,7 @@ export const Lightbox: React.FC<{
 
       {/* Clicking the backdrop closes; clicking the image itself does not, so a
           mis-aimed tap while panning a large picture is not a dismissal. */}
-      <div className="grid min-h-0 flex-1 place-items-center p-4" onClick={onClose}>
+      <div className="grid min-h-0 flex-1 place-items-center overflow-hidden p-4 [touch-action:pan-y_pinch-zoom]" onClick={onClose} {...touch}>
         {failed ? (
           <p className="flex flex-col items-center gap-2 text-sm text-white/70">
             <ImageOff size={28} /> This file could not be loaded.
@@ -145,8 +178,10 @@ export const Lightbox: React.FC<{
           <img
             src={url}
             alt={current.name}
-            onClick={(e) => e.stopPropagation()}
-            className="max-h-full max-w-full rounded-lg object-contain"
+            onClick={onImageTap}
+            data-zoomed={zoom ? 'true' : 'false'}
+            style={zoom ? { transform: 'scale(2)', transformOrigin: `${zoom.x}% ${zoom.y}%` } : undefined}
+            className="max-h-full max-w-full rounded-lg object-contain transition-transform duration-200"
           />
         )}
       </div>
