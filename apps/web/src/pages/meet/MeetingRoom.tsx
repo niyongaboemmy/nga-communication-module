@@ -41,6 +41,7 @@ import { useMeetRecorder } from './useMeetRecorder';
 import { primeSounds } from '../../lib/sounds';
 import { useSpeechCaptions, speechRecognitionSupported } from './useSpeechCaptions';
 import * as meetApi from './api';
+import { useConfirmDialog } from '../../components/ConfirmDialog';
 
 /**
  * The meeting room.
@@ -88,6 +89,7 @@ export const MeetingRoom: React.FC = () => {
   const ticket = isThisMeeting ? call!.ticket : null;
 
   const { notify } = useNotify();
+  const [confirm, confirmDialog] = useConfirmDialog();
   const isHost = room?.you?.role === 'host' || room?.you?.role === 'cohost';
 
   /* Before joining there is no room and no `you`, so the in-room check above is
@@ -205,12 +207,20 @@ export const MeetingRoom: React.FC = () => {
 
   const endForAll = useCallback(async () => {
     if (!meeting || !room) return;
+    // One tap would drop everyone mid-sentence, with no way back.
+    if (!(await confirm({
+      title: 'End the meeting for everyone?',
+      body: 'Everyone is taken out of the meeting and it cannot be rejoined.',
+      warning: recorderRef.current?.state === 'recording' ? 'The recording is saved first.' : undefined,
+      confirmLabel: 'End for everyone',
+      tone: 'danger',
+    }))) return;
     await saveRecordingFirst();
     await room.hostCommand({ action: 'end' });
     await meetApi.endMeeting(meeting.id).catch(() => {});
     await endCall();
     navigate(`/app/meet/${meeting.id}/summary`);
-  }, [meeting, room, endCall, navigate, saveRecordingFirst]);
+  }, [meeting, room, endCall, navigate, saveRecordingFirst, confirm]);
 
   /**
    * Recording.
@@ -670,6 +680,7 @@ export const MeetingRoom: React.FC = () => {
           {openPolls} poll{openPolls === 1 ? '' : 's'} open — vote
         </button>
       )}
+      {confirmDialog}
     </div>
   );
 };

@@ -92,6 +92,16 @@ try {
     check('the meeting offers "Pop out the video"', false, 'control not found');
   }
 
+  console.log('\nOn a phone');
+  await callerPage.setViewportSize({ width: 390, height: 844 });
+  // The app's own phone tab bar has a "More" too: use the meeting's.
+  await callerPage.locator('div', { has: callerPage.getByRole('button', { name: 'Leave the meeting' }) }).last()
+    .getByRole('button', { name: 'More', exact: true }).click();
+  check('the host can end for everyone from a phone',
+    await callerPage.getByRole('button', { name: /End for everyone/ }).first().isVisible().catch(() => false));
+  await callerPage.keyboard.press('Escape');
+  await callerPage.setViewportSize({ width: 1280, height: 900 });
+
   console.log('\nRecording, then leaving');
   await callerPage.getByRole('button', { name: 'More', exact: true }).click();
   const startRec = callerPage.getByRole('button', { name: /Start recording/ }).first();
