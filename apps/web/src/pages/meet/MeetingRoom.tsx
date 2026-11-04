@@ -13,7 +13,7 @@ import {
   Sparkles,
   Upload,
   Wifi,
-  X,
+  X, Headphones
 } from 'lucide-react';
 import type { MeetJoinTicket, MeetTransport } from '@tupo/shared';
 import { isSfuTransport } from '@tupo/shared';
@@ -475,6 +475,19 @@ export const MeetingRoom: React.FC = () => {
           <span className="min-w-0 flex-1 truncate">Connection lost — reconnecting you to the call…</span>
         </div>
       )}
+      {room.audioOnly && !room.reconnecting && (
+        <div role="status" aria-live="polite"
+          className="flex shrink-0 items-center gap-2 bg-sky-500/15 px-4 py-1.5 text-xs text-sky-100">
+          <Headphones size={13} className="shrink-0" />
+          <span className="min-w-0 truncate">
+            {room.audioOnlyAuto ? 'Weak connection — video is paused to keep the sound clear.' : 'Audio only — video is paused.'}
+          </span>
+          {/* Next to the message, not at the far right where toasts land over it. */}
+          <button onClick={() => room.setAudioOnly(false)} className="shrink-0 rounded-full px-2 py-0.5 font-medium underline underline-offset-2 hover:text-white">
+            Turn video back on
+          </button>
+        </div>
+      )}
       {room.error && (
         <div className="flex shrink-0 items-center gap-2 bg-amber-500/15 px-4 py-1.5 text-xs text-amber-100">
           <AlertTriangle size={13} className="shrink-0" />
@@ -491,6 +504,7 @@ export const MeetingRoom: React.FC = () => {
             media={room.media}
             localStream={room.localStream}
             videoTileIds={room.videoTileIds}
+            audioOnly={room.audioOnly}
             speakingIds={room.speakingIds}
             activeSpeakerId={room.activeSpeakerId}
             spotlightId={room.spotlightId}
@@ -659,6 +673,8 @@ export const MeetingRoom: React.FC = () => {
           setCaptionsOn((c) => !c);
         }}
         onToggleDataSaver={() => room.setDataSaver(!room.dataSaver)}
+        audioOnly={room.audioOnly}
+        onToggleAudioOnly={() => room.setAudioOnly(!room.audioOnly)}
         onToggleRecording={() => void toggleRecording()}
         onSetLayout={room.setLayout}
         onOpenPanel={setPanel}

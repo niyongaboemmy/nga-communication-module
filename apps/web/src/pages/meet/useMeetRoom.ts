@@ -25,6 +25,10 @@ import * as meetApi from './api';
  * them into three hooks would mean three copies of the same synchronisation.
  */
 
+/** How long a poor line lasts before video is dropped, and a good one before it returns. */
+const AUDIO_ONLY_AFTER_MS = 8_000;
+const VIDEO_BACK_AFTER_MS = 20_000;
+
 export type RoomPhase = 'connecting' | 'lobby' | 'active' | 'ended' | 'removed' | 'error';
 
 export interface FloatingReaction {
@@ -77,6 +81,13 @@ export interface MeetRoomState {
   /** Set by the host's data-saver, by a poor connection, or by the user. */
   publishQuality: VideoQuality;
   dataSaver: boolean;
+  /**
+   * Audio only: no incoming video except a shared screen, outgoing at the
+   * lowest rung. Set by the user, or by a connection that stays poor
+   * (`audioOnlyAuto`), in which case it lifts itself once the line recovers.
+   */
+  audioOnly: boolean;
+  audioOnlyAuto: boolean;
   startedAt: string | null;
 }
 
@@ -105,6 +116,8 @@ export interface MeetRoomActions {
   shareNote: (note: MeetNote, shared: boolean) => void;
   setPinned: (participantId: string | null) => void;
   setDataSaver: (on: boolean) => void;
+  /** `auto` marks a switch made for a poor line, which lifts itself. */
+  setAudioOnly: (on: boolean, auto?: boolean) => void;
   createPoll: (p: {
     question: string; options: string[]; kind: 'poll' | 'quiz';
     correctOptionIndex?: number; anonymous: boolean; multipleChoice: boolean;
@@ -179,6 +192,8 @@ export function useMeetRoom(
     quality: 'good',
     publishQuality: 'high',
     dataSaver: false,
+    audioOnly: false,
+    audioOnlyAuto: false,
     startedAt: null,
   }));
 
@@ -1090,6 +1105,38 @@ export function useMeetRoom(
     void transportRef.current?.setPublishQuality(on ? 'low' : 'high');
   }, [patch]);
 
+  const audioOnlyRef = useRef(false);
+  const setAudioOnly = useCallback((on: boolean, auto = false) => {
+    audioOnlyRef.current = on;
+    patch((s) => ({ audioOnly: on, audioOnlyAuto: on && auto, publishQuality: on || s.dataSaver ? 'low' : 'high' }));
+    void transportRef.current?.setPublishQuality(on || stateRef.current?.dataSaver ? 'low' : 'high');
+    // Re-declare what is wanted now, from what is on screen.
+    const visible = lastVisibleRef.current;
+    const wanted = on
+      ? visible.filter((v) => (stateRef.current?.participants ?? []).some((p) => p.id === v.participantId && p.screenSharing))
+      : visible;
+    void transportRef.current?.setSubscriptions(wanted);
+    socketRef.current?.emit('meet:subscriptions', { visible: wanted });
+  }, [patch]);
+
+  // A line that stays poor drops to audio only, the way a phone call keeps
+  // the voice when the picture cannot keep up; it comes back by itself once
+  // the line has been good for a while. Only the automatic switch lifts
+  // itself: audio only chosen by hand stays until it is turned off.
+  useEffect(() => {
+    if (state.phase !== 'active') return;
+    const bad = state.quality === 'poor' || state.quality === 'lost';
+    if (bad && !state.audioOnly) {
+      const t = setTimeout(() => setAudioOnly(true, true), AUDIO_ONLY_AFTER_MS);
+      return () => clearTimeout(t);
+    }
+    if (!bad && state.audioOnly && state.audioOnlyAuto) {
+      const t = setTimeout(() => setAudioOnly(false), VIDEO_BACK_AFTER_MS);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [state.phase, state.quality, state.audioOnly, state.audioOnlyAuto, setAudioOnly]);
+
   const createPoll = useCallback((p: {
     question: string; options: string[]; kind: 'poll' | 'quiz';
     correctOptionIndex?: number; anonymous: boolean; multipleChoice: boolean;
@@ -1154,8 +1201,11 @@ export function useMeetRoom(
       quality: qualityForWidth(v.width, held.get(v.participantId)),
     }));
     lastVisibleRef.current = mapped;
-    void transportRef.current?.setSubscriptions(mapped);
-    socketRef.current?.emit('meet:subscriptions', { visible: mapped });
+    const wanted = audioOnlyRef.current
+      ? mapped.filter((v) => (stateRef.current?.participants ?? []).some((p) => p.id === v.participantId && p.screenSharing))
+      : mapped;
+    void transportRef.current?.setSubscriptions(wanted);
+    socketRef.current?.emit('meet:subscriptions', { visible: wanted });
   }, []);
 
   const leave = useCallback(async () => {
@@ -1198,18 +1248,20 @@ export function useMeetRoom(
       return 7;
     };
     return [...state.participants]
+      // Audio only keeps a shared screen and your own preview (it costs nothing).
+      .filter((p) => !state.audioOnly || p.screenSharing || p.id === state.you?.id)
       .sort((a, b) => rank(a) - rank(b))
       .slice(0, state.dataSaver ? 4 : MAX_VIDEO_TILES)
       .map((p) => p.id);
   }, [state.participants, state.spotlightId, state.pinnedId, state.activeSpeakerId,
-    state.presenterId, state.speakingIds, state.dataSaver]);
+    state.presenterId, state.speakingIds, state.dataSaver, state.audioOnly, state.you?.id]);
 
   return {
     ...state,
     videoTileIds,
     toggleMic, toggleCamera, toggleScreenShare, startScreenShare, stopScreenShare,
     toggleHand, react, sendChat, sendCaption,
-    hostCommand, patchSettings, setLayout, setNotes, shareNote, setPinned, setDataSaver,
+    hostCommand, patchSettings, setLayout, setNotes, shareNote, setPinned, setDataSaver, setAudioOnly,
     createPoll, votePoll, closePoll, askQuestion, upvoteQuestion, answerQuestion,
     openBreakouts, closeBreakouts, broadcastToBreakouts, setRecording,
     reportVisible, leave,

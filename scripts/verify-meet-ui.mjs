@@ -753,6 +753,28 @@ try {
   ).then(() => true).catch(() => false);
   check('the call was never interrupted — video is still painting', stillPainting);
 
+  // ---- audio only ----
+  {
+    const page = hostP.page;
+    const remoteVideo = page.locator('[data-meet-video="remote"]');
+    const hadVideo = await remoteVideo.count() > 0;
+    await page.locator('div', { has: page.getByRole('button', { name: 'Leave the meeting' }) }).last()
+      .getByRole('button', { name: 'More', exact: true }).click();
+    await page.getByRole('button', { name: /^Audio only/ }).first().click();
+    const audioBanner = page.getByText('Audio only — video is paused.');
+    const bannerShown = await audioBanner.waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+    await page.waitForTimeout(800);
+    check('audio only pauses the other person\'s video and says so',
+      hadVideo && bannerShown && await remoteVideo.count() === 0,
+      `had video ${hadVideo}, banner ${bannerShown}, remote videos now ${await remoteVideo.count()}`);
+    check('your own preview stays', await page.locator('[data-meet-video="local"]').count() > 0);
+    await page.getByRole('button', { name: 'Turn video back on' }).click();
+    const back = await page.waitForFunction(
+      () => [...document.querySelectorAll('[data-meet-video="remote"]')].some((v) => v.videoWidth > 0),
+      null, { timeout: 10000 }).then(() => true).catch(() => false);
+    check('and "Turn video back on" brings it back', back && !(await audioBanner.isVisible().catch(() => false)));
+  }
+
   // ---- post-meeting summary ----
   await hostP.page.getByRole('button', { name: /End for everyone/i }).click();
   const endConfirm = hostP.page.getByRole('alertdialog').filter({ hasText: 'End the meeting for everyone?' });
