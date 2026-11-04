@@ -15,9 +15,9 @@ import { chromium } from 'playwright';
 import jwt from 'jsonwebtoken';
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { readFileSync } from 'node:fs';
+import { readFileSync, utimesSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { purgeUsers } from './lib/purge.mjs';
 import { prepareBrowser } from './lib/uiHarness.mjs';
 
@@ -91,6 +91,25 @@ try {
   } else {
     check('the meeting offers "Pop out the video"', false, 'control not found');
   }
+
+  console.log('\nConnection drops');
+  const banner = callerPage.getByText(/reconnecting you to the call/);
+  const errorPage = callerPage.getByText('Something went wrong');
+  await callerPage.context().setOffline(true);
+  check('losing the network shows a reconnecting banner, not an error page',
+    await banner.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false) && !(await errorPage.isVisible().catch(() => false)));
+  await sleep(3_000);
+  await callerPage.context().setOffline(false);
+  check('and the call comes back by itself when the network does',
+    await banner.waitFor({ state: 'hidden', timeout: 15_000 }).then(() => true).catch(() => false)
+    && await callerPage.getByRole('button', { name: 'Leave the meeting' }).isVisible().catch(() => false));
+  // A deploy restarting the realtime gateway (dev: tsx watch reloads it).
+  const gw = join(ROOT, 'apps/realtime/src/index.ts');
+  utimesSync(gw, new Date(), new Date());
+  const sawDrop = await banner.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false);
+  const back = await banner.waitFor({ state: 'hidden', timeout: 40_000 }).then(() => true).catch(() => false);
+  check('a gateway restart is ridden out the same way', sawDrop && back && !(await errorPage.isVisible().catch(() => false)),
+    `drop seen ${sawDrop}, back ${back}`);
 
   console.log('\nOn a phone');
   await callerPage.setViewportSize({ width: 390, height: 844 });

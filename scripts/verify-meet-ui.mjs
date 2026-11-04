@@ -94,7 +94,8 @@ async function newPage(user) {
   page.on('pageerror', (e) => errors.push(`${user.name}: ${e.message}`));
   page.on('console', (m) => {
     const text = m.text();
-    if (m.type() === 'error') errors.push(`${user.name}: ${text}`);
+    // A failed request's console line has no URL; name it so a failure says which.
+    if (m.type() === 'error') errors.push(`${user.name}: ${text}${m.location()?.url ? ` (${m.location().url.replace(/[?#].*/, '')})` : ''}`);
     if (/\[mesh\]|\[cf\]|mesh:|peer_joined|transport|subscribe|Cloudflare/i.test(text)) {
       console.log(`  ·  ${user.name}: ${text}`);
     }

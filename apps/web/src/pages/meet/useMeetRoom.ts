@@ -319,32 +319,84 @@ export function useMeetRoom(
     });
     socketRef.current = socket;
 
+    // A dropped connection is a banner, never the error page: like a phone
+    // call on a bad line, the call holds while the app keeps trying. Only a
+    // refusal (signed out, not allowed) or a join that keeps failing ends it.
     let connectedOnce = false;
-    socket.on('connect', () => {
-      connectedOnce = true;
-      patch(() => ({ reconnecting: false }));
+    let firstFailures = 0;
+    let joinFailures = 0;
+    let finished = false;
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const later = (fn: () => void, ms: number) => {
+      const t = setTimeout(() => { timers.delete(t); if (!finished) fn(); }, ms);
+      timers.add(t);
+    };
+    const refused = (message: string) => /^(unauthorized|forbidden)/i.test(message);
+
+    const join = () => {
       // Also on every reconnect: the gateway restores an admitted participant
       // straight into the call (a fresh meet:state follows).
       socket.emit('meet:join', {
         meetingId: ticket.meeting.meetingId,
         participantId: ticket.participantId,
       }, (res: { ok: boolean; message?: string }) => {
-        if (!res?.ok) patch(() => ({ phase: 'error', error: res?.message ?? 'Could not join.' }));
+        if (res?.ok) { joinFailures = 0; patch(() => ({ reconnecting: false })); return; }
+        // A gateway that has just restarted can answer before the meeting is
+        // back in its memory: mid-call, try again before giving up.
+        if (connectedOnce && ++joinFailures <= 3 && socket.connected) {
+          patch(() => ({ reconnecting: true }));
+          later(join, 1_500 * joinFailures);
+          return;
+        }
+        patch(() => ({ phase: 'error', error: res?.message ?? 'Could not join.' }));
       });
+    };
+
+    socket.on('connect', () => {
+      connectedOnce = true;
+      firstFailures = 0;
+      join();
     });
 
     socket.on('connect_error', (err: Error) => {
-      // Mid-call, a failed reconnect attempt is just "still reconnecting" —
-      // socket.io keeps trying. Only a first connection that fails is fatal.
-      if (connectedOnce && !/^(unauthorized|forbidden)/.test(err.message)) {
-        patch(() => ({ reconnecting: true }));
+      if (refused(err.message)) {
+        patch(() => ({ phase: 'error', error: err.message || 'You cannot join this meeting.' }));
+        return;
+      }
+      // Mid-call, a failed attempt is just "still reconnecting": socket.io
+      // keeps trying. A first connection gets a few tries before the error
+      // page, so one blip while joining does not end it.
+      if (connectedOnce || ++firstFailures < 4) {
+        patch(() => ({ reconnecting: connectedOnce }));
         return;
       }
       patch(() => ({ phase: 'error', error: err.message || 'Could not reach the meeting server.' }));
     });
+    // The gateway announces a restart before it closes every socket. Any other
+    // server-side close is deliberate (removed, not admitted) and final.
+    let restarting = false;
+    socket.on('system:reconnect_required', () => { restarting = true; });
     socket.on('disconnect', (reason) => {
-      if (reason !== 'io client disconnect') patch(() => ({ reconnecting: true }));
+      if (reason === 'io client disconnect') return;
+      if (reason === 'io server disconnect' && !restarting) return;
+      patch((s) => (s.phase === 'ended' || s.phase === 'removed' ? {} : { reconnecting: true }));
+      // socket.io does not retry on its own after a server-side close. Spread
+      // out, so a room of forty does not all knock in the same instant.
+      if (reason === 'io server disconnect') {
+        restarting = false;
+        later(() => { if (socket.disconnected) socket.connect(); }, 500 + Math.random() * 3_000);
+      }
     });
+    // The device says it is offline: say so now, not after the socket's
+    // heartbeat times out. Back online: try at once rather than waiting out
+    // socket.io's backoff, or clear the banner if the socket never dropped.
+    const onOffline = () => patch((s) => (s.phase === 'active' || s.phase === 'lobby' ? { reconnecting: true } : {}));
+    const onOnline = () => {
+      if (socket.disconnected) socket.connect();
+      else patch(() => ({ reconnecting: false }));
+    };
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('online', onOnline);
 
     socket.on('meet:state', (p: {
       you: MeetParticipant; participants: MeetParticipant[]; lobby: MeetParticipant[];
@@ -614,6 +666,10 @@ export function useMeetRoom(
     });
 
     return () => {
+      finished = true;
+      timers.forEach(clearTimeout);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
       socket.removeAllListeners();
       socket.disconnect();
       socketRef.current = null;
