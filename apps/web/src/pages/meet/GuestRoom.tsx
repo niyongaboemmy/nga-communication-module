@@ -84,6 +84,7 @@ export const GuestRoom: React.FC<{
             media={room.media}
             localStream={room.localStream}
             videoTileIds={room.videoTileIds}
+            audioOnly={room.audioOnly}
             speakingIds={room.speakingIds}
             activeSpeakerId={room.activeSpeakerId}
             spotlightId={room.spotlightId}

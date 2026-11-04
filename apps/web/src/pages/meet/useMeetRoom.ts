@@ -25,6 +25,10 @@ import * as meetApi from './api';
  * them into three hooks would mean three copies of the same synchronisation.
  */
 
+/** How long a poor line lasts before video is dropped, and a good one before it returns. */
+const AUDIO_ONLY_AFTER_MS = 8_000;
+const VIDEO_BACK_AFTER_MS = 20_000;
+
 export type RoomPhase = 'connecting' | 'lobby' | 'active' | 'ended' | 'removed' | 'error';
 
 export interface FloatingReaction {
@@ -77,6 +81,13 @@ export interface MeetRoomState {
   /** Set by the host's data-saver, by a poor connection, or by the user. */
   publishQuality: VideoQuality;
   dataSaver: boolean;
+  /**
+   * Audio only: no incoming video except a shared screen, outgoing at the
+   * lowest rung. Set by the user, or by a connection that stays poor
+   * (`audioOnlyAuto`), in which case it lifts itself once the line recovers.
+   */
+  audioOnly: boolean;
+  audioOnlyAuto: boolean;
   startedAt: string | null;
 }
 
@@ -105,6 +116,8 @@ export interface MeetRoomActions {
   shareNote: (note: MeetNote, shared: boolean) => void;
   setPinned: (participantId: string | null) => void;
   setDataSaver: (on: boolean) => void;
+  /** `auto` marks a switch made for a poor line, which lifts itself. */
+  setAudioOnly: (on: boolean, auto?: boolean) => void;
   createPoll: (p: {
     question: string; options: string[]; kind: 'poll' | 'quiz';
     correctOptionIndex?: number; anonymous: boolean; multipleChoice: boolean;
@@ -179,6 +192,8 @@ export function useMeetRoom(
     quality: 'good',
     publishQuality: 'high',
     dataSaver: false,
+    audioOnly: false,
+    audioOnlyAuto: false,
     startedAt: null,
   }));
 
@@ -319,32 +334,84 @@ export function useMeetRoom(
     });
     socketRef.current = socket;
 
+    // A dropped connection is a banner, never the error page: like a phone
+    // call on a bad line, the call holds while the app keeps trying. Only a
+    // refusal (signed out, not allowed) or a join that keeps failing ends it.
     let connectedOnce = false;
-    socket.on('connect', () => {
-      connectedOnce = true;
-      patch(() => ({ reconnecting: false }));
+    let firstFailures = 0;
+    let joinFailures = 0;
+    let finished = false;
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const later = (fn: () => void, ms: number) => {
+      const t = setTimeout(() => { timers.delete(t); if (!finished) fn(); }, ms);
+      timers.add(t);
+    };
+    const refused = (message: string) => /^(unauthorized|forbidden)/i.test(message);
+
+    const join = () => {
       // Also on every reconnect: the gateway restores an admitted participant
       // straight into the call (a fresh meet:state follows).
       socket.emit('meet:join', {
         meetingId: ticket.meeting.meetingId,
         participantId: ticket.participantId,
       }, (res: { ok: boolean; message?: string }) => {
-        if (!res?.ok) patch(() => ({ phase: 'error', error: res?.message ?? 'Could not join.' }));
+        if (res?.ok) { joinFailures = 0; patch(() => ({ reconnecting: false })); return; }
+        // A gateway that has just restarted can answer before the meeting is
+        // back in its memory: mid-call, try again before giving up.
+        if (connectedOnce && ++joinFailures <= 3 && socket.connected) {
+          patch(() => ({ reconnecting: true }));
+          later(join, 1_500 * joinFailures);
+          return;
+        }
+        patch(() => ({ phase: 'error', error: res?.message ?? 'Could not join.' }));
       });
+    };
+
+    socket.on('connect', () => {
+      connectedOnce = true;
+      firstFailures = 0;
+      join();
     });
 
     socket.on('connect_error', (err: Error) => {
-      // Mid-call, a failed reconnect attempt is just "still reconnecting" —
-      // socket.io keeps trying. Only a first connection that fails is fatal.
-      if (connectedOnce && !/^(unauthorized|forbidden)/.test(err.message)) {
-        patch(() => ({ reconnecting: true }));
+      if (refused(err.message)) {
+        patch(() => ({ phase: 'error', error: err.message || 'You cannot join this meeting.' }));
+        return;
+      }
+      // Mid-call, a failed attempt is just "still reconnecting": socket.io
+      // keeps trying. A first connection gets a few tries before the error
+      // page, so one blip while joining does not end it.
+      if (connectedOnce || ++firstFailures < 4) {
+        patch(() => ({ reconnecting: connectedOnce }));
         return;
       }
       patch(() => ({ phase: 'error', error: err.message || 'Could not reach the meeting server.' }));
     });
+    // The gateway announces a restart before it closes every socket. Any other
+    // server-side close is deliberate (removed, not admitted) and final.
+    let restarting = false;
+    socket.on('system:reconnect_required', () => { restarting = true; });
     socket.on('disconnect', (reason) => {
-      if (reason !== 'io client disconnect') patch(() => ({ reconnecting: true }));
+      if (reason === 'io client disconnect') return;
+      if (reason === 'io server disconnect' && !restarting) return;
+      patch((s) => (s.phase === 'ended' || s.phase === 'removed' ? {} : { reconnecting: true }));
+      // socket.io does not retry on its own after a server-side close. Spread
+      // out, so a room of forty does not all knock in the same instant.
+      if (reason === 'io server disconnect') {
+        restarting = false;
+        later(() => { if (socket.disconnected) socket.connect(); }, 500 + Math.random() * 3_000);
+      }
     });
+    // The device says it is offline: say so now, not after the socket's
+    // heartbeat times out. Back online: try at once rather than waiting out
+    // socket.io's backoff, or clear the banner if the socket never dropped.
+    const onOffline = () => patch((s) => (s.phase === 'active' || s.phase === 'lobby' ? { reconnecting: true } : {}));
+    const onOnline = () => {
+      if (socket.disconnected) socket.connect();
+      else patch(() => ({ reconnecting: false }));
+    };
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('online', onOnline);
 
     socket.on('meet:state', (p: {
       you: MeetParticipant; participants: MeetParticipant[]; lobby: MeetParticipant[];
@@ -614,6 +681,10 @@ export function useMeetRoom(
     });
 
     return () => {
+      finished = true;
+      timers.forEach(clearTimeout);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
       socket.removeAllListeners();
       socket.disconnect();
       socketRef.current = null;
@@ -1034,6 +1105,38 @@ export function useMeetRoom(
     void transportRef.current?.setPublishQuality(on ? 'low' : 'high');
   }, [patch]);
 
+  const audioOnlyRef = useRef(false);
+  const setAudioOnly = useCallback((on: boolean, auto = false) => {
+    audioOnlyRef.current = on;
+    patch((s) => ({ audioOnly: on, audioOnlyAuto: on && auto, publishQuality: on || s.dataSaver ? 'low' : 'high' }));
+    void transportRef.current?.setPublishQuality(on || stateRef.current?.dataSaver ? 'low' : 'high');
+    // Re-declare what is wanted now, from what is on screen.
+    const visible = lastVisibleRef.current;
+    const wanted = on
+      ? visible.filter((v) => (stateRef.current?.participants ?? []).some((p) => p.id === v.participantId && p.screenSharing))
+      : visible;
+    void transportRef.current?.setSubscriptions(wanted);
+    socketRef.current?.emit('meet:subscriptions', { visible: wanted });
+  }, [patch]);
+
+  // A line that stays poor drops to audio only, the way a phone call keeps
+  // the voice when the picture cannot keep up; it comes back by itself once
+  // the line has been good for a while. Only the automatic switch lifts
+  // itself: audio only chosen by hand stays until it is turned off.
+  useEffect(() => {
+    if (state.phase !== 'active') return;
+    const bad = state.quality === 'poor' || state.quality === 'lost';
+    if (bad && !state.audioOnly) {
+      const t = setTimeout(() => setAudioOnly(true, true), AUDIO_ONLY_AFTER_MS);
+      return () => clearTimeout(t);
+    }
+    if (!bad && state.audioOnly && state.audioOnlyAuto) {
+      const t = setTimeout(() => setAudioOnly(false), VIDEO_BACK_AFTER_MS);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [state.phase, state.quality, state.audioOnly, state.audioOnlyAuto, setAudioOnly]);
+
   const createPoll = useCallback((p: {
     question: string; options: string[]; kind: 'poll' | 'quiz';
     correctOptionIndex?: number; anonymous: boolean; multipleChoice: boolean;
@@ -1098,8 +1201,11 @@ export function useMeetRoom(
       quality: qualityForWidth(v.width, held.get(v.participantId)),
     }));
     lastVisibleRef.current = mapped;
-    void transportRef.current?.setSubscriptions(mapped);
-    socketRef.current?.emit('meet:subscriptions', { visible: mapped });
+    const wanted = audioOnlyRef.current
+      ? mapped.filter((v) => (stateRef.current?.participants ?? []).some((p) => p.id === v.participantId && p.screenSharing))
+      : mapped;
+    void transportRef.current?.setSubscriptions(wanted);
+    socketRef.current?.emit('meet:subscriptions', { visible: wanted });
   }, []);
 
   const leave = useCallback(async () => {
@@ -1142,18 +1248,20 @@ export function useMeetRoom(
       return 7;
     };
     return [...state.participants]
+      // Audio only keeps a shared screen and your own preview (it costs nothing).
+      .filter((p) => !state.audioOnly || p.screenSharing || p.id === state.you?.id)
       .sort((a, b) => rank(a) - rank(b))
       .slice(0, state.dataSaver ? 4 : MAX_VIDEO_TILES)
       .map((p) => p.id);
   }, [state.participants, state.spotlightId, state.pinnedId, state.activeSpeakerId,
-    state.presenterId, state.speakingIds, state.dataSaver]);
+    state.presenterId, state.speakingIds, state.dataSaver, state.audioOnly, state.you?.id]);
 
   return {
     ...state,
     videoTileIds,
     toggleMic, toggleCamera, toggleScreenShare, startScreenShare, stopScreenShare,
     toggleHand, react, sendChat, sendCaption,
-    hostCommand, patchSettings, setLayout, setNotes, shareNote, setPinned, setDataSaver,
+    hostCommand, patchSettings, setLayout, setNotes, shareNote, setPinned, setDataSaver, setAudioOnly,
     createPoll, votePoll, closePoll, askQuestion, upvoteQuestion, answerQuestion,
     openBreakouts, closeBreakouts, broadcastToBreakouts, setRecording,
     reportVisible, leave,

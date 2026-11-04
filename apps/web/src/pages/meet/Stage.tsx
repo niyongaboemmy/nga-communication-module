@@ -27,6 +27,8 @@ export interface StageProps {
   reactions: FloatingReaction[];
   /** Whoever is sharing a screen. Their share, not their face, fills the stage. */
   presenterId: string | null;
+  /** Audio only: the featured tile gets no video unless it is in videoTileIds. */
+  audioOnly?: boolean;
   onPin: (participantId: string | null) => void;
   onVisible: (visible: Array<{ participantId: string; width: number }>) => void;
 }
@@ -42,7 +44,7 @@ function gridColumns(count: number): string {
 
 export const Stage: React.FC<StageProps> = ({
   layout, participants, you, media, localStream, videoTileIds, speakingIds,
-  activeSpeakerId, spotlightId, pinnedId, reactions, presenterId, onPin, onVisible,
+  activeSpeakerId, spotlightId, pinnedId, reactions, presenterId, audioOnly = false, onPin, onVisible,
 }) => {
   const perPage = typeof window !== 'undefined' && window.matchMedia?.('(max-width: 640px)').matches ? 4 : 16;
   const pages = Math.max(1, Math.ceil(participants.length / perPage));
@@ -95,7 +97,7 @@ export const Stage: React.FC<StageProps> = ({
       speaking={speakingIds.includes(participant.id)}
       pinned={pinnedId === participant.id}
       spotlighted={spotlightId === participant.id}
-      videoAllowed={videoAllowed.has(participant.id) || participant.id === featured?.id}
+      videoAllowed={videoAllowed.has(participant.id) || (!audioOnly && participant.id === featured?.id)}
       // The featured tile shows the share; the filmstrip copy shows the face,
       // so a presenter is still visible while their slides are on the stage.
       showScreen={participant.id === presenterId && !compact}

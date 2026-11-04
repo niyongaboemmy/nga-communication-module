@@ -27,7 +27,7 @@ import {
   Volume2,
   VolumeX,
   MessageCircleMore,
-  MicVocal, PictureInPicture2,
+  MicVocal, PictureInPicture2, Headphones,
 } from 'lucide-react';
 import { PresentPicker } from './PresentationBar';
 import { useNotify } from '../../context/NotificationContext';
@@ -55,6 +55,7 @@ export interface ControlBarProps {
   captionsOn: boolean;
   captionsSupported: boolean;
   dataSaver: boolean;
+  audioOnly?: boolean;
   layout: MeetLayout;
   isHost: boolean;
   canShare: boolean;
@@ -75,6 +76,7 @@ export interface ControlBarProps {
   onReact: (reaction: MeetReaction) => void;
   onToggleCaptions: () => void;
   onToggleDataSaver: () => void;
+  onToggleAudioOnly?: () => void;
   onToggleRecording: () => void;
   onSetLayout: (layout: MeetLayout) => void;
   onOpenPanel: (panel: PanelKey | null) => void;
@@ -356,6 +358,18 @@ export const ControlBar: React.FC<ControlBarProps> = (p) => {
                     active={voiceOn}
                     onClick={() => {
                       setVoiceOn(!voiceOn);
+                      setOverflowOpen(false);
+                    }}
+                  />
+                )}
+                {p.onToggleAudioOnly && (
+                  <SheetItem
+                    Icon={Headphones}
+                    label={p.audioOnly ? 'Audio only on' : 'Audio only'}
+                    hint="Sound without video, for a weak connection"
+                    active={p.audioOnly}
+                    onClick={() => {
+                      p.onToggleAudioOnly?.();
                       setOverflowOpen(false);
                     }}
                   />

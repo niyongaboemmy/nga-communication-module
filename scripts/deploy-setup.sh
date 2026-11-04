@@ -64,6 +64,15 @@ share_secret() {
 }
 share_secret FILES_INTERNAL_SECRET "$FILES_ENV" "$WORKER_ENV"
 share_secret MAIL_LINK_SECRET "$API_ENV" "$WORKER_ENV"
+# The address people open Tupo at: links in emails (digests, unsubscribe)
+# point there. Unset, they fell back to localhost. The first CORS origin is it.
+if ! has APP_PUBLIC_URL "$API_ENV" && has CORS_ORIGINS "$API_ENV"; then
+  ORIGIN="$(grep '^CORS_ORIGINS=' "$API_ENV" | tail -n 1 | cut -d= -f2- | cut -d, -f1 | tr -d '"'"'"' ')"
+  if [ -n "$ORIGIN" ]; then
+    printf '\n# Added by scripts/deploy-setup.sh (links in emails)\nAPP_PUBLIC_URL=%s\n' "$ORIGIN" >> "$API_ENV"
+    echo "setup: APP_PUBLIC_URL added to $API_ENV"
+  fi
+fi
 if ! has APP_PUBLIC_URL "$WORKER_ENV" && has APP_PUBLIC_URL "$API_ENV"; then
   printf '\n# Added by scripts/deploy-setup.sh (unsubscribe links)\n%s\n' "$(grep '^APP_PUBLIC_URL=' "$API_ENV" | tail -n 1)" >> "$WORKER_ENV"
   echo "setup: APP_PUBLIC_URL added to $WORKER_ENV"

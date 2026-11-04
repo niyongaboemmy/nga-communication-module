@@ -589,6 +589,7 @@ const shutdown = async (signal: string) => {
   // reconnects after its own random delay so they do not all return at once
   // (R-02). A short pause lets the notice leave before the sockets close.
   io.emit('system:reconnect_required', { reason: 'server restarting' });
+  io.of('/meet').emit('system:reconnect_required', { reason: 'server restarting' });
   await new Promise((r) => setTimeout(r, 250));
   setTimeout(() => process.exit(0), 8_000).unref();
   // A server-side disconnect, not a dropped transport: socket.io's own retry

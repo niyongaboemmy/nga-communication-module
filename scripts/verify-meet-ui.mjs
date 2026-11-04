@@ -94,7 +94,8 @@ async function newPage(user) {
   page.on('pageerror', (e) => errors.push(`${user.name}: ${e.message}`));
   page.on('console', (m) => {
     const text = m.text();
-    if (m.type() === 'error') errors.push(`${user.name}: ${text}`);
+    // A failed request's console line has no URL; name it so a failure says which.
+    if (m.type() === 'error') errors.push(`${user.name}: ${text}${m.location()?.url ? ` (${m.location().url.replace(/[?#].*/, '')})` : ''}`);
     if (/\[mesh\]|\[cf\]|mesh:|peer_joined|transport|subscribe|Cloudflare/i.test(text)) {
       console.log(`  ·  ${user.name}: ${text}`);
     }
@@ -751,6 +752,44 @@ try {
     null, { timeout: 10000 },
   ).then(() => true).catch(() => false);
   check('the call was never interrupted — video is still painting', stillPainting);
+
+  // ---- a dead media path is rebuilt (SFU) ----
+  if (await hostP.page.evaluate(() => typeof window.__sfuRebuild === 'function')) {
+    const inbound = (page) => page.evaluate(async () => (await window.__meshStats?.cloudflare?.()) ?? 0);
+    await hostP.page.evaluate(() => window.__sfuRebuild());
+    await hostP.page.waitForTimeout(4000);
+    const [h1, p1] = [await inbound(hostP.page), await inbound(pupilP.page)];
+    await hostP.page.waitForTimeout(3000);
+    const [h2, p2] = [await inbound(hostP.page), await inbound(pupilP.page)];
+    check('after the host\'s media session is rebuilt, the host receives video again', h2 > h1, `${h1} → ${h2} bytes`);
+    check('and the other side re-pulls the host\'s new session', p2 > p1, `${p1} → ${p2} bytes`);
+    const painting = await pupilP.page.waitForFunction(
+      () => [...document.querySelectorAll('[data-meet-video="remote"]')].some((v) => v.videoWidth > 0),
+      null, { timeout: 10000 }).then(() => true).catch(() => false);
+    check('and sees the host\'s video', painting);
+  }
+
+  // ---- audio only ----
+  {
+    const page = hostP.page;
+    const remoteVideo = page.locator('[data-meet-video="remote"]');
+    const hadVideo = await remoteVideo.count() > 0;
+    await page.locator('div', { has: page.getByRole('button', { name: 'Leave the meeting' }) }).last()
+      .getByRole('button', { name: 'More', exact: true }).click();
+    await page.getByRole('button', { name: /^Audio only/ }).first().click();
+    const audioBanner = page.getByText('Audio only — video is paused.');
+    const bannerShown = await audioBanner.waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+    await page.waitForTimeout(800);
+    check('audio only pauses the other person\'s video and says so',
+      hadVideo && bannerShown && await remoteVideo.count() === 0,
+      `had video ${hadVideo}, banner ${bannerShown}, remote videos now ${await remoteVideo.count()}`);
+    check('your own preview stays', await page.locator('[data-meet-video="local"]').count() > 0);
+    await page.getByRole('button', { name: 'Turn video back on' }).click();
+    const back = await page.waitForFunction(
+      () => [...document.querySelectorAll('[data-meet-video="remote"]')].some((v) => v.videoWidth > 0),
+      null, { timeout: 10000 }).then(() => true).catch(() => false);
+    check('and "Turn video back on" brings it back', back && !(await audioBanner.isVisible().catch(() => false)));
+  }
 
   // ---- post-meeting summary ----
   await hostP.page.getByRole('button', { name: /End for everyone/i }).click();
