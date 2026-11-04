@@ -753,6 +753,22 @@ try {
   ).then(() => true).catch(() => false);
   check('the call was never interrupted — video is still painting', stillPainting);
 
+  // ---- a dead media path is rebuilt (SFU) ----
+  if (await hostP.page.evaluate(() => typeof window.__sfuRebuild === 'function')) {
+    const inbound = (page) => page.evaluate(async () => (await window.__meshStats?.cloudflare?.()) ?? 0);
+    await hostP.page.evaluate(() => window.__sfuRebuild());
+    await hostP.page.waitForTimeout(4000);
+    const [h1, p1] = [await inbound(hostP.page), await inbound(pupilP.page)];
+    await hostP.page.waitForTimeout(3000);
+    const [h2, p2] = [await inbound(hostP.page), await inbound(pupilP.page)];
+    check('after the host\'s media session is rebuilt, the host receives video again', h2 > h1, `${h1} → ${h2} bytes`);
+    check('and the other side re-pulls the host\'s new session', p2 > p1, `${p1} → ${p2} bytes`);
+    const painting = await pupilP.page.waitForFunction(
+      () => [...document.querySelectorAll('[data-meet-video="remote"]')].some((v) => v.videoWidth > 0),
+      null, { timeout: 10000 }).then(() => true).catch(() => false);
+    check('and sees the host\'s video', painting);
+  }
+
   // ---- audio only ----
   {
     const page = hostP.page;

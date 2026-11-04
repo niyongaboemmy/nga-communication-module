@@ -7,6 +7,11 @@ import type { VideoQuality } from '@tupo/shared';
 import { apiPost, apiPut } from '../../../lib/api';
 import type { MediaTransport, TransportInit } from './types.js';
 
+/** How long a `disconnected` media path may try to heal before it is rebuilt. */
+const SFU_DISCONNECTED_GRACE_MS = 6_000;
+/** Between rebuild attempts while the network is still down. */
+const SFU_REBUILD_RETRY_MS = 4_000;
+
 /**
  * Cloudflare Realtime SFU transport.
  *
@@ -144,7 +149,22 @@ export class CloudflareTransport implements MediaTransport {
 
   async connect(local: MediaStream | null): Promise<void> {
     this.local = local;
+    await this.openSession();
 
+    // Cloudflare drops a session after 30 seconds without media, so someone
+    // sitting muted with their camera off would be collected while still in
+    // the meeting. One cheap GET holds it open.
+    this.keepAlive = setInterval(() => {
+      void fetch(`${this.endpoint}/session`, {
+        headers: authHeader(),
+      }).catch(() => {});
+    }, SFU_KEEPALIVE_MS);
+
+    this.statsTimer = setInterval(() => void this.sampleStats(), 5000);
+  }
+
+  /** A session, its PeerConnection, our published tracks, and the announcement. */
+  private async openSession(): Promise<void> {
     const session = await apiPost<{ sessionId: string; participantId: string }>(
       `${this.endpoint}/session`);
     this.sessionId = session.data!.sessionId;
@@ -170,6 +190,8 @@ export class CloudflareTransport implements MediaTransport {
       w.__meshStats ??= {};
       w.__meshState ??= {};
 
+      // Lets a test force the recovery path a failed ICE connection takes.
+      (window as unknown as { __sfuRebuild?: () => Promise<void> }).__sfuRebuild = () => this.rebuild();
       w.__meshPeers.cloudflare = () => ({
         connection: pc.connectionState,
         publishers: this.sessions.size,
@@ -192,31 +214,82 @@ export class CloudflareTransport implements MediaTransport {
     }
 
     pc.ontrack = (event) => this.onTrack(event);
+    // A media path that has failed does not come back on its own here:
+    // restartIce() only takes effect through a fresh offer, and Cloudflare
+    // takes offers per track, not per session. What does work is a new
+    // session. `disconnected` often heals by itself (a Wi-Fi hand-over), so it
+    // gets a grace period; `failed` is final.
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'failed') pc.restartIce();
+      if (this.pc !== pc) return;
+      const state = pc.iceConnectionState;
+      if (state === 'failed') this.scheduleRebuild(0);
+      else if (state === 'disconnected') this.scheduleRebuild(SFU_DISCONNECTED_GRACE_MS);
+      else if (state === 'connected' || state === 'completed') this.cancelRebuild();
     };
 
-    this.bindRoster();
+    if (!this.rosterBound) { this.bindRoster(); this.rosterBound = true; }
     await this.publishLocal();
-
-    // Cloudflare drops a session after 30 seconds without media, so someone
-    // sitting muted with their camera off would be collected while still in
-    // the meeting. One cheap GET holds it open.
-    this.keepAlive = setInterval(() => {
-      void fetch(`${this.endpoint}/session`, {
-        headers: authHeader(),
-      }).catch(() => {});
-    }, SFU_KEEPALIVE_MS);
-
-    this.statsTimer = setInterval(() => void this.sampleStats(), 5000);
 
     // Tell the room where to find us. Only now — announcing before the tracks
     // exist invites subscriptions to nothing.
     this.socket.emit('meet:sfu:publish', { sessionId: this.sessionId });
   }
 
+  private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+  private rebuilding = false;
+  private rosterBound = false;
+
+  private scheduleRebuild(afterMs: number): void {
+    if (this.closed || this.rebuilding || this.rebuildTimer) return;
+    this.rebuildTimer = setTimeout(() => { this.rebuildTimer = null; void this.rebuild(); }, afterMs);
+  }
+
+  private cancelRebuild(): void {
+    if (this.rebuildTimer) clearTimeout(this.rebuildTimer);
+    this.rebuildTimer = null;
+  }
+
+  /**
+   * Replace a dead media path with a new session, keeping everything the
+   * person had: their camera and mic, a screen they were sharing, and what
+   * they were watching. Peers see the new session announced and re-pull it.
+   */
+  private async rebuild(): Promise<void> {
+    if (this.closed || this.rebuilding) return;
+    this.rebuilding = true;
+    const sharing = this.screen;
+    try {
+      await this.serialise(async () => {
+        const old = this.pc;
+        this.pc = null;
+        if (old) { old.oniceconnectionstatechange = null; old.ontrack = null; old.close(); }
+        for (const participantId of this.remote.keys()) this.init.events.onRemoteGone(participantId);
+        this.remote.clear();
+        this.subscriptions.clear();
+        this.midMap.clear();
+        this.closing.clear();
+        this.micSender = this.camSender = this.screenSender = null;
+        this.screen = null;
+      });
+      await this.openSession();
+      if (sharing && sharing.getVideoTracks().some((t) => t.readyState === 'live')) await this.startScreenShare(sharing);
+      await this.setSubscriptions(this.lastVisible);
+      await this.applyEncodings();
+    } catch (err) {
+      this.rebuilding = false;
+      // Refused (no longer in the meeting, meeting gone): nothing to rebuild.
+      const status = (err as { status?: number }).status ?? 0;
+      if (status >= 400 && status < 500) return;
+      // The network is still down: try again shortly.
+      this.scheduleRebuild(SFU_REBUILD_RETRY_MS);
+      return;
+    }
+    this.rebuilding = false;
+  }
+
   async disconnect(): Promise<void> {
     this.closed = true;
+    this.cancelRebuild();
     if (this.keepAlive) clearInterval(this.keepAlive);
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.unbindRoster();
@@ -243,6 +316,12 @@ export class CloudflareTransport implements MediaTransport {
       const known = this.sessions.get(p.participantId);
       this.sessions.set(p.participantId, p.sessionId);
       if (known === p.sessionId) return;
+      // A new session for someone already known: their media path was rebuilt.
+      // What we pulled came from the old one and is dead; pull it afresh.
+      if (known) {
+        void this.unsubscribeParticipant(p.participantId).then(() => this.setSubscriptions(this.lastVisible));
+        return;
+      }
       // Someone started publishing. The stage has nothing new to say about
       // visibility, so nothing else would ever trigger the subscription.
       void this.setSubscriptions(this.lastVisible);
