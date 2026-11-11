@@ -13,6 +13,7 @@
   "dependencies": {
     "@tupo/db": "*",
     "@tupo/shared": "*",
+    "@tupo/tenancy": "*",
     "blurhash": "2.0.5",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

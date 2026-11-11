@@ -5,7 +5,7 @@ const DEFAULT_JWT_SECRET = 'local_dev_secret_change_in_production';
 export const config = {
   env: process.env.NODE_ENV ?? 'development',
   port: parseInt(process.env.PORT ?? '5192', 10),
-  databaseUrl: process.env.DATABASE_URL ?? 'postgres://localhost:5432/tupo_dev',
+  databaseUrl: process.env.DATABASE_URL ?? 'postgres://tupo:tupo@localhost:5432/tupo_dev',
   jwtSecret: process.env.JWT_SECRET ?? DEFAULT_JWT_SECRET,
   corsOrigins: (process.env.CORS_ORIGINS ?? 'http://localhost:5194,http://127.0.0.1:5194')
     .split(',').map((o) => o.trim()).filter(Boolean),

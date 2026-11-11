@@ -2,8 +2,10 @@ import 'dotenv/config';
 import express from 'express';
 import { Queue, Worker, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
-import { pingDb, installProcessGuards, startProcessMetrics, recordError, RELEASE } from '@tupo/db';
+import { parseTid, runWithoutTenant } from '@tupo/tenancy';
+import { pingDb, installProcessGuards, startProcessMetrics, recordError, RELEASE, guardDbRole } from '@tupo/db';
 import { runMeetWrapUp, type MeetWrapUpData } from './jobs/meetWrapUp.js';
+import { dispatchTenantJob } from './tenantJobs.js';
 import { runScheduledMessages } from './jobs/scheduledMessages.js';
 import { runChatSweeps } from './jobs/chatSweeps.js';
 import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
@@ -21,6 +23,15 @@ import * as chat from '@tupo/chat';
 // Last-resort guards, shared by every service: logged, recorded on the
 // System page, and an uncaught exception exits so pm2 restarts the worker.
 installProcessGuards('worker');
+
+// Before any job runs: a superuser / BYPASSRLS role would skip row-level
+// security. TENANCY_MODE=enforce refuses to start, shadow warns loudly.
+try {
+  await guardDbRole('worker');
+} catch (err) {
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+}
 
 const port = parseInt(process.env.PORT ?? '5193', 10);
 // Queues live in Redis db 1, away from the realtime gateway's pub/sub in db 0,
@@ -48,7 +59,12 @@ let lastJobAt: string | null = null;
  */
 const worker = new Worker(
   QUEUE_NAME,
-  async (job: Job) => {
+  // Every job runs in its tenant, or fans out per tenant (tenantJobs.ts).
+  async (job: Job) => dispatchTenantJob(job, queue, () => runJob(job)),
+  { connection, concurrency: 5 }
+);
+
+async function runJob(job: Job): Promise<unknown> {
     switch (job.name) {
       case 'heartbeat':
         processed++;
@@ -182,14 +198,15 @@ const worker = new Worker(
         // Fail loudly rather than silently dropping work we don't recognise.
         throw new Error(`Unknown job type: ${job.name}`);
     }
-  },
-  { connection, concurrency: 5 }
-);
+}
 
 worker.on('failed', (job, err) => {
   console.error(`[worker] job ${job?.id} (${job?.name}) failed:`, err.message);
   metrics.count('jobs_failed');
-  void recordError({ source: 'worker', message: err.message, stack: err.stack, route: `job ${job?.name ?? 'unknown'}`, release: RELEASE });
+  // The job's tid was stamped by server code (withJobTenant / the sweep fan-out):
+  // the failure belongs to that school; a global job's is process-level.
+  void recordError({ source: 'worker', message: err.message, stack: err.stack, route: `job ${job?.name ?? 'unknown'}`, release: RELEASE,
+    tenantId: parseTid((job?.data as { tid?: unknown } | undefined)?.tid) ?? null });
 });
 worker.on('completed', () => metrics.count('jobs_done'));
 
@@ -361,7 +378,7 @@ app.get('/health', async (_req, res) => {
 
   // Months of partitions in hand. Under 2 means partitions:ensure has stopped
   // running, and writes will start landing in the default partitions.
-  const ahead = await partitionsAhead();
+  const ahead = await runWithoutTenant('health check', () => partitionsAhead());
   checks.partitionsAheadMonths = ahead === null ? 'unknown' : String(ahead);
   if (ahead !== null && ahead < 2) healthy = false;
 

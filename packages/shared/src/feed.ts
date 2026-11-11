@@ -1,3 +1,4 @@
+import { scopedRoom } from './tenantRooms.js';
 /**
  * Tupo Feed — the shared contract (SRS §6.7, FR-FEED-1…12).
  *
@@ -454,10 +455,10 @@ export interface FeedPageAnalytics {
  * Rooms
  * ────────────────────────────────────────────────────────────────────────── */
 
-export const feedPostRoom = (postId: string) => `feedpost:${postId}`;
+export const feedPostRoom = (postId: string, tid?: number) => scopedRoom(`feedpost:${postId}`, tid);
 
 /** Live like/comment/view counters for one reel's detail view. */
-export const feedReelRoom = (reelId: string) => `feedreel:${reelId}`;
+export const feedReelRoom = (reelId: string, tid?: number) => scopedRoom(`feedreel:${reelId}`, tid);
 
 /**
  * Broadcast room for every published post in a given audience band. A client
@@ -465,7 +466,7 @@ export const feedReelRoom = (reelId: string) => `feedreel:${reelId}`;
  * from *anyone* the viewer follows or not lands live, not just posts from
  * pages they already follow — the home feed shows everyone (FR-FEED-7).
  */
-export const feedAudienceRoom = (audience: FeedAudience) => `feedaudience:${audience}`;
+export const feedAudienceRoom = (audience: FeedAudience, tid?: number) => scopedRoom(`feedaudience:${audience}`, tid);
 
 /** Which audience bands a session role may see — mirrors `visibleAudiences`
  *  in `@tupo/feed`, kept here too since the socket gateway has no DB access

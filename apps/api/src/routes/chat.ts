@@ -4,7 +4,7 @@ import { getPool, activeUserSql } from '@tupo/db';
 import { ok, fail } from '@tupo/shared';
 import type { NotificationLevel } from '@tupo/shared';
 import { NOTIFICATION_LEVELS, CONVERSATION_TYPES, MEMBER_ROLES } from '@tupo/shared';
-import { lastSeenKey, presenceKey } from '@tupo/shared';
+import { conversationRoom, lastSeenKey, presenceKey } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
 import { config } from '../config.js';
@@ -1284,7 +1284,7 @@ router.delete('/conversations/:id/members/:userId', wrap(async (req, res) => {
     conversationId: id, userId, action: leaving ? 'left' : 'removed', memberCount,
   });
   // Out of the room on every device now, not at their next reconnect.
-  evictFromRooms([userId], [`conv:${id}`]);
+  evictFromRooms([userId], [conversationRoom(id)]);
   emitToUsers([userId], 'conversation:removed', { conversationId: id, reason: leaving ? 'left' : 'removed' });
 
   if (!leaving) {

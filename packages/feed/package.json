@@ -18,8 +18,9 @@
   },
   "dependencies": {
     "@tupo/db": "*",
-    "@tupo/shared": "*",
     "@tupo/notify": "*",
+    "@tupo/shared": "*",
+    "@tupo/tenancy": "*",
     "pg": "^8.13.1"
   },
   "devDependencies": {

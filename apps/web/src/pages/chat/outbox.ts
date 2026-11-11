@@ -45,8 +45,16 @@ export interface OutboxEntry {
 }
 
 let owner: string | null = null;
-/** Set by ChatProvider when a session starts; entries are tagged and filtered by it. */
-export function setOutboxOwner(userId: string | null): void { owner = userId; }
+/** Entries queued before tenancy were tagged with the bare user id: tenant 1's. */
+let legacyOwner: string | null = null;
+/**
+ * Set by ChatProvider when a session starts; entries are tagged `<tid>:<userId>`
+ * and filtered by it, so a queue never replays into another school's account.
+ */
+export function setOutboxOwner(userId: string | null, tid = 1): void {
+  owner = userId ? `${tid}:${userId}` : null;
+  legacyOwner = userId && tid === 1 ? userId : null;
+}
 
 /** After this many failed attempts an entry is surfaced as failed, not retried. */
 export const MAX_ATTEMPTS = 5;
@@ -112,7 +120,7 @@ export async function dequeue(nonce: string): Promise<void> {
 export async function pending(): Promise<OutboxEntry[]> {
   const all = await tx<OutboxEntry[]>('readonly', (s) => s.getAll() as IDBRequest<OutboxEntry[]>);
   return (all ?? [])
-    .filter((e) => owner !== null && e.ownerId === owner)
+    .filter((e) => owner !== null && (e.ownerId === owner || (legacyOwner !== null && e.ownerId === legacyOwner)))
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 

@@ -9,6 +9,7 @@ import { noteAiRoutesVersion } from '../services/myAiGateway.js';
 import { attachAccess } from '../access/gate.js';
 import { noteAccessVersion } from '../access/snapshot.js';
 import type { AuthenticatedRequest } from './auth.js';
+import { misTokenTid, withRequestTenant } from './tenant.js';
 
 /**
  * Authentication for `/api/integration/*` — server-to-server calls the MIS
@@ -38,6 +39,7 @@ const VERIFY_TTL_MS = 60_000;
 const MAX_CACHED = 5_000;
 /** Longer than any real MIS JWT. */
 const MAX_TOKEN_LENGTH = 4096;
+/** Keyed by a hash of the token, which already pins one tenant (its `tid` claim). */
 const verified = new Map<string, { misUserId: string; expiresAt: number }>();
 
 /** Sliding-window limit per MIS user, like the SSO exchange limiter. */
@@ -70,7 +72,7 @@ export function __resetMisBearerAuth(): void {
 export function __misBearerState() {
   return {
     cacheSize: verified.size,
-    rateEntries: (misUserId: string) => calls.get(misUserId)?.length ?? 0,
+    rateEntries: (misUserId: string, tid = 1) => calls.get(`${tid}:${misUserId}`)?.length ?? 0,
   };
 }
 
@@ -104,19 +106,38 @@ export async function misBearerAuth(req: Request, res: Response, next: NextFunct
   const misToken = match?.[1] ?? '';
   if (!misToken || misToken.length > MAX_TOKEN_LENGTH) return invalid(res);
 
+  // MIS ids repeat across tenant databases (ADR-7): everything below -- the
+  // verification cache side effects, the user lookup -- runs in the school
+  // the token speaks for (contract §6).
+  try {
+    await withRequestTenant(misTokenTid(misToken), res, () => misBearerInTenant(req, res, next, misToken));
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function misBearerInTenant(req: Request, res: Response, next: NextFunction, misToken: string) {
   try {
     const misUserId = await misUserIdFor(misToken);
     if (misUserId === 'invalid') return invalid(res);
     if (misUserId === 'unreachable') {
       return res.status(503).json({ ...fail('Could not reach the NGA MIS to verify this session.'), code: 'MIS_UNREACHABLE' });
     }
-    if (rateLimited(misUserId)) {
+    if (rateLimited(`${misTokenTid(misToken) ?? 0}:${misUserId}`)) {
       return res.status(429).json({ ...fail('Too many requests. Please wait a minute.'), code: 'RATE_LIMITED' });
     }
 
     const request = req as MisBearerRequest;
     request.misUserId = misUserId;
 
+    await attachMisUser(request, res, next, misUserId, misToken);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function attachMisUser(request: MisBearerRequest, res: Response, next: NextFunction, misUserId: string, misToken: string) {
+  try {
     const pool = getPool();
     const { rows } = await pool.query<{
       id: string; mis_user_id: string; name: string; email: string; role: Role; status: string;

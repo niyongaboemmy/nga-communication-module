@@ -1,3 +1,5 @@
+import { conversationRoom } from '@tupo/shared';
+import { effectiveTid } from '@tupo/tenancy';
 import { Redis } from 'ioredis';
 import * as chat from '@tupo/chat';
 
@@ -47,7 +49,8 @@ export async function runUnfurl(data: UnfurlJobData, redisUrl: string): Promise<
 
   const client = getPublisher(redisUrl);
   await client?.publish(CHAT_CHANNEL, JSON.stringify({
-    rooms: [`conv:${data.conversationId}`],
+    rooms: [conversationRoom(data.conversationId)],
+    tid: effectiveTid('socket relay'),
     event: 'message:updated',
     payload: { conversationId: data.conversationId, message },
   })).catch(() => {});

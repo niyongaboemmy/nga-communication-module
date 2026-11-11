@@ -1,4 +1,5 @@
 import type { AccessSnapshot } from '../vendor/nga-access/index.js';
+import { effectiveTid, tenantKeyFor } from '@tupo/tenancy';
 import { fetchAccessSnapshot } from './misAccess.js';
 
 /**
@@ -26,6 +27,8 @@ const FRESH_MS = () => Number(process.env.ACCESS_SNAPSHOT_TTL_MS ?? 5 * 60_000);
 export const LAST_GOOD_MS = 24 * 60 * 60_000;
 const MAX_ENTRIES = 20_000;
 
+/** MIS ids repeat across tenants (ADR-7): every key is `t<tid>:<misUserId>`. */
+const tkey = (misUserId: string | number) => tenantKeyFor(effectiveTid('access snapshot cache'), String(misUserId));
 const cache = new Map<string, Entry>();
 const inflight = new Map<string, Promise<SnapshotResult>>();
 /**
@@ -55,7 +58,7 @@ function lastGood(e: Entry | undefined): SnapshotResult {
 
 /** The user's snapshot, from cache or MIS. Never throws. */
 export async function getAccessSnapshot(subject: SnapshotSubject): Promise<SnapshotResult> {
-  const key = String(subject.misUserId ?? '');
+  const key = subject.misUserId ? tkey(subject.misUserId) : '';
   if (!key) return { snapshot: null, status: 'unavailable' };
   const e = cache.get(key);
   if (e && !e.outdated && Date.now() - e.fetchedAt < FRESH_MS()) {
@@ -89,7 +92,7 @@ export async function getAccessSnapshot(subject: SnapshotSubject): Promise<Snaps
 
 /** What is cached right now, without any network call (null if nothing usable). */
 export function peekAccessSnapshot(misUserId: string): AccessSnapshot | null {
-  const e = cache.get(String(misUserId));
+  const e = cache.get(tkey(misUserId));
   return e && Date.now() - e.fetchedAt < LAST_GOOD_MS ? e.snap : null;
 }
 
@@ -101,10 +104,10 @@ export function peekAccessSnapshot(misUserId: string): AccessSnapshot | null {
 export function noteAccessVersion(misUserId: string, version: unknown): boolean {
   const v = Number(version);
   if (!Number.isFinite(v)) return false;
-  const e = cache.get(String(misUserId));
+  const e = cache.get(tkey(misUserId));
   if (!e || e.snap.v === v) return false;
   e.outdated = true;
-  failedAt.delete(String(misUserId));
+  failedAt.delete(tkey(misUserId));
   return true;
 }
 
@@ -117,6 +120,6 @@ export function __resetAccessSnapshots(): void {
 
 /** Tests only: age an entry (ms since it was fetched). */
 export function __ageAccessSnapshot(misUserId: string, ageMs: number): void {
-  const e = cache.get(String(misUserId));
+  const e = cache.get(tkey(misUserId));
   if (e) e.fetchedAt = Date.now() - ageMs;
 }

@@ -9,7 +9,7 @@
  *
  * Rules that keep it safe:
  *
- * - **One database per account** (`tupo-cache-<userId>`). Nothing one person
+ * - **One database per account** (`tupo-cache-<tid>-<userId>`, per school and person). Nothing one person
  *   saw can render for whoever signs in next on a shared device, and sign-out
  *   deletes the database outright.
  * - **Display only.** Nothing here is ever sent to the server or trusted for a

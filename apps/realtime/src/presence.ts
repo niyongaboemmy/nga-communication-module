@@ -1,3 +1,4 @@
+import { scopedRoom } from '@tupo/shared';
 import type { Server } from 'socket.io';
 import type { Redis } from 'ioredis';
 import * as chat from '@tupo/chat';
@@ -146,7 +147,7 @@ export async function broadcastPresence(
     const all = await chat.dmPeerIdsOf(userId);
     const hidden = await chat.separatedFrom(userId, all);
     const peers = all.filter((id) => !hidden.has(id));
-    if (peers.length) io.to(peers.map(userRoom)).emit('presence:update', payload);
+    if (peers.length) io.to(peers.map((id) => userRoom(id))).emit('presence:update', payload);
 
     // The person's own other devices, so a status set on the phone shows on
     // the laptop. Deliberately separate from the fan-out above: they are not a
@@ -196,7 +197,7 @@ export async function emitConversationPresence(
  */
 
 /** Meet sockets of signed-in people join this room, so "in a meeting" can be read. */
-export const meetUserRoom = (userId: string) => `meetuser:${userId}`;
+export const meetUserRoom = (userId: string) => scopedRoom(`meetuser:${userId}`);
 
 export function toChoice(raw: unknown): PresenceChoice {
   return PRESENCE_CHOICES.includes(raw as PresenceChoice) ? raw as PresenceChoice : 'auto';

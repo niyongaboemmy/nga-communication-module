@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { suppress, verifyUnsubscribe } from '@tupo/mail';
+import { PRIMARY_TENANT_ID, parseTid, runWithTid } from '@tupo/tenancy';
 
 /**
  * The link in a campaign email's List-Unsubscribe header (RFC 8058). Public:
@@ -18,7 +19,10 @@ button{font:inherit;padding:.6rem 1.2rem;border-radius:.5rem;border:0;background
 </head><body><h1>${title}</h1>${body}</body></html>`;
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
-const addressOf = (req: Request) => verifyUnsubscribe(String(req.query.a ?? ''), String(req.query.t ?? ''));
+/** Links name their school (`tid`, signed with the address); older links are tenant 1. */
+const tidOfLink = (req: Request) => parseTid(req.query.tid) ?? PRIMARY_TENANT_ID;
+const addressOf = (req: Request) =>
+  verifyUnsubscribe(String(req.query.a ?? ''), String(req.query.t ?? ''), process.env, tidOfLink(req));
 
 router.get('/', (req: Request, res: Response) => {
   const address = addressOf(req);
@@ -31,7 +35,7 @@ router.get('/', (req: Request, res: Response) => {
 router.post('/', async (req: Request, res: Response) => {
   const address = addressOf(req);
   if (!address) return res.status(400).type('html').send(page('Link not valid', '<p>This unsubscribe link is not valid.</p>'));
-  await suppress(address, 'unsubscribe', 'one-click unsubscribe link');
+  await runWithTid(tidOfLink(req), () => suppress(address, 'unsubscribe', 'one-click unsubscribe link'));
   res.type('html').send(page('Unsubscribed', `<p><strong>${esc(address)}</strong> will not get school announcement emails any more.</p>`));
 });
 

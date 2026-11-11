@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { tenantHeaders } from '@tupo/tenancy';
 import type { AccessSnapshot, Depth, Manifest, Target } from '../vendor/nga-access/index.js';
 
 /**
@@ -66,7 +67,7 @@ export async function fetchHolders(
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
     }
     if (minDepth) url.searchParams.set('minDepth', minDepth);
-    const res = await timedFetch(url.toString(), { headers: { Authorization: basicAuth() } });
+    const res = await timedFetch(url.toString(), { headers: { Authorization: basicAuth(), ...tenantHeaders() } });
     if (!res.ok) return null;
     const body = (await res.json()) as { success?: boolean; data?: Holder[] };
     return Array.isArray(body?.data) ? body.data : null;
@@ -88,7 +89,7 @@ export async function postCentralAudit(entry: CentralAuditEntry): Promise<boolea
   try {
     const res = await timedFetch(`${config.misBaseUrl}/access/audit`, {
       method: 'POST',
-      headers: { Authorization: basicAuth(), 'Content-Type': 'application/json' },
+      headers: { Authorization: basicAuth(), 'Content-Type': 'application/json', ...tenantHeaders() },
       body: JSON.stringify(entry),
     });
     return res.ok;
@@ -101,7 +102,7 @@ export async function postCentralAudit(entry: CentralAuditEntry): Promise<boolea
 export async function publishManifest(manifest: Manifest): Promise<{ status: number; body: unknown }> {
   const res = await timedFetch(`${config.misBaseUrl}/access/manifests/${ACCESS_APP}`, {
     method: 'PUT',
-    headers: { Authorization: basicAuth(), 'Content-Type': 'application/json' },
+    headers: { Authorization: basicAuth(), 'Content-Type': 'application/json', ...tenantHeaders() },
     body: JSON.stringify(manifest),
   }, 15_000);
   let body: unknown = null;

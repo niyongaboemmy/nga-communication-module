@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { getPool, closeDb, seedRbac, snowflake, recordError, writeSamples } from '@tupo/db';
+import { primaryTenantCtx, runAsPlatform, runWithTenant } from '@tupo/tenancy';
 import { app } from '../app.js';
 import { config } from '../config.js';
 // The worker's alert rules, loaded at run time: a static import would pull the
@@ -31,7 +32,8 @@ async function user(name: string, role: string) {
 let admin: { id: string; auth: string };
 let staff: { id: string; auth: string };
 beforeEach(async () => {
-  await getPool().query('DELETE FROM error_events');
+  // error_events has RLS (0047): clear every tenant's rows and the process-level ones.
+  await runAsPlatform('test clean-up', () => getPool().query('DELETE FROM error_events'));
   await getPool().query('DELETE FROM metric_samples');
   await getPool().query('DELETE FROM alert_state');
   await getPool().query('DELETE FROM users');
@@ -46,11 +48,12 @@ describe('browser errors', () => {
     const crash = { message: 'Cannot read properties of undefined (reading "id")', stack: 'TypeError\n    at Thread (src/pages/chat/MessageThread.tsx:10:2)', route: '/app/chat' };
     expect((await request(app).post('/api/system/client-errors').set('Authorization', staff.auth).send(crash)).status).toBe(202);
     // The in-process throttle lets one write through per 10 s; the next carries the count.
-    await recordError({ source: 'web', ...crash });
+    // Same tenant as the signed-in reporter (a legacy token = tenant 1).
+    await runWithTenant(primaryTenantCtx(), () => recordError({ source: 'web', ...crash }));
     await new Promise((r) => setTimeout(r, 100));
-    const { rows } = await getPool().query('SELECT source, count, route FROM error_events');
+    const { rows } = await runAsPlatform('test', () => getPool().query('SELECT source, count, route, tenant_id FROM error_events'));
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ source: 'web', route: '/app/chat' });
+    expect(rows[0]).toMatchObject({ source: 'web', route: '/app/chat', tenant_id: '1' });
   });
 
   it('needs a message, and a session', async () => {
@@ -88,7 +91,7 @@ describe('the System page endpoints', () => {
 
   it('an error row keeps the route pattern it was recorded with', async () => {
     await recordError({ source: 'api', message: 'Simulated failure', route: 'GET /api/chat/conversations/:id' });
-    const { rows } = await getPool().query("SELECT route FROM error_events WHERE message = 'Simulated failure'");
+    const { rows } = await runAsPlatform('test', () => getPool().query("SELECT route FROM error_events WHERE message = 'Simulated failure'"));
     expect(rows[0].route).toBe('GET /api/chat/conversations/:id');
   });
 });

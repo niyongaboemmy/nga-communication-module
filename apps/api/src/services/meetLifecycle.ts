@@ -1,4 +1,5 @@
 import { getPool } from '@tupo/db';
+import { forEachActiveTenant, tenantRegistry } from '@tupo/tenancy';
 import type { SessionClaims } from '@tupo/shared';
 import * as notifications from '@tupo/notify';
 import { reminders } from '@tupo/notify';
@@ -114,9 +115,11 @@ export async function sweepMeetings(): Promise<{ ended: string[]; expired: numbe
 
 export function startMeetSweep(): NodeJS.Timeout {
   const timer = setInterval(() => {
-    void sweepMeetings()
-      .then((r) => { if (r.ended.length || r.expired || r.wrapped) console.log('[meet] sweep:', JSON.stringify(r)); })
-      .catch((e) => console.error('[meet] sweep failed:', e instanceof Error ? e.message : e));
+    // Once per school, each inside its own tenant (one failing never stops the rest).
+    void forEachActiveTenant(tenantRegistry(), async (t) => {
+      const r = await sweepMeetings();
+      if (r.ended.length || r.expired || r.wrapped) console.log(`[meet] sweep t${t.tid}:`, JSON.stringify(r));
+    }).catch((e) => console.error('[meet] sweep failed:', e instanceof Error ? e.message : e));
   }, 60_000);
   timer.unref();
   return timer;

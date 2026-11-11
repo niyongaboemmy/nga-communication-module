@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { effectiveTid, tenantHeaders } from '@tupo/tenancy';
 import {
   AI_REASON_MESSAGES, aiAppEnabled, decideAi, normalizeAiPolicy,
   type AiPolicy, type AiReason,
@@ -29,9 +30,19 @@ const RETRY_AFTER_MS = 30_000;
 
 interface Entry { policy: AiPolicy; fetchedAt: number }
 
-let cached: Entry | null = null;
-let inflight: Promise<AiPolicy | null> | null = null;
-let failedAt = 0;
+/**
+ * One cache per school (multi-tenancy: the MIS policy is a tenant's own
+ * setting, read with X-NGA-Tenant). `cached`/`inflight`/`failedAt` below are
+ * the current tenant's slots.
+ */
+interface TenantSlot { cached: Entry | null; inflight: Promise<AiPolicy | null> | null; failedAt: number }
+const slots = new Map<number, TenantSlot>();
+function slot(): TenantSlot {
+  const tid = effectiveTid('AI policy cache');
+  let s = slots.get(tid);
+  if (!s) { s = { cached: null, inflight: null, failedAt: 0 }; slots.set(tid, s); }
+  return s;
+}
 /** Set by tests; `undefined` means "use the MIS". */
 let injected: AiPolicy | null | undefined;
 
@@ -39,23 +50,23 @@ async function fetchFromMis(): Promise<AiPolicy | null> {
   try {
     const auth = Buffer.from(`${config.ssoClientId}:${config.ssoClientSecret}`).toString('base64');
     const response = await fetch(`${config.misBaseUrl}/integrations/ai-policy`, {
-      headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' },
+      headers: { Authorization: `Basic ${auth}`, Accept: 'application/json', ...tenantHeaders() },
       signal: AbortSignal.timeout(TIMEOUT_MS()),
     });
     if (!response.ok) {
       console.warn('[ai-policy] MIS refused the policy read:', response.status);
-      failedAt = Date.now();
+      slot().failedAt = Date.now();
       return null;
     }
     const body = (await response.json()) as { success?: boolean; data?: { policy?: unknown } };
-    if (!body?.success || !body.data?.policy) { failedAt = Date.now(); return null; }
+    if (!body?.success || !body.data?.policy) { slot().failedAt = Date.now(); return null; }
     const policy = normalizeAiPolicy(body.data.policy);
-    cached = { policy, fetchedAt: Date.now() };
-    failedAt = 0;
+    slot().cached = { policy, fetchedAt: Date.now() };
+    slot().failedAt = 0;
     return policy;
   } catch (err) {
     console.warn('[ai-policy] MIS unreachable:', err instanceof Error ? err.message : err);
-    failedAt = Date.now();
+    slot().failedAt = Date.now();
     return null;
   }
 }
@@ -64,29 +75,33 @@ async function fetchFromMis(): Promise<AiPolicy | null> {
 export async function getAiPolicy(): Promise<AiPolicy | null> {
   if (injected !== undefined) return injected;
   const now = Date.now();
-  if (cached && now - cached.fetchedAt < FRESH_MS) return cached.policy;
+  const hit = slot().cached;
+  if (hit && now - hit.fetchedAt < FRESH_MS) return hit.policy;
 
   // Just failed: do not make every request wait on a MIS that is down.
-  if (!failedAt || now - failedAt >= RETRY_AFTER_MS) {
-    inflight ??= fetchFromMis().finally(() => { inflight = null; });
-    const fresh = await inflight;
+  if (!slot().failedAt || now - slot().failedAt >= RETRY_AFTER_MS) {
+    const sl = slot();
+    sl.inflight ??= fetchFromMis().finally(() => { sl.inflight = null; });
+    const fresh = await sl.inflight;
     if (fresh) return fresh;
   }
   // MIS is down or refused: a recent copy is still the school's decision.
-  if (cached && now - cached.fetchedAt < STALE_GRACE_MS) return cached.policy;
+  const stale = slot().cached;
+  if (stale && now - stale.fetchedAt < STALE_GRACE_MS) return stale.policy;
   return null;
 }
 
 /**
- * The verify poll saw this `ai_policy_v`. A different version from the cached
+ * The verify poll saw this `ai_policy_v`. A different version from the slot().cached
  * copy means the super admin changed something: refetch on the next call.
  */
 export function noteAiPolicyVersion(version: unknown): boolean {
   if (version === null || version === undefined) return false;
   const v = Number(version);
-  if (!Number.isFinite(v) || !cached || cached.policy.v === v) return false;
-  cached = { ...cached, fetchedAt: 0 };
-  failedAt = 0;
+  const sl = slot();
+  if (!Number.isFinite(v) || !sl.cached || sl.cached.policy.v === v) return false;
+  sl.cached = { ...sl.cached, fetchedAt: 0 };
+  slot().failedAt = 0;
   return true;
 }
 
@@ -148,12 +163,11 @@ export function setAiPolicyForTests(policy: AiPolicy | Record<string, unknown> |
 }
 
 export function __resetAiPolicyCache(): void {
-  cached = null;
-  inflight = null;
-  failedAt = 0;
+  slots.clear();
   injected = undefined;
 }
 
 export function __ageAiPolicy(ageMs: number): void {
-  if (cached) cached = { ...cached, fetchedAt: Date.now() - ageMs };
+  const sl = slot();
+  if (sl.cached) sl.cached = { ...sl.cached, fetchedAt: Date.now() - ageMs };
 }

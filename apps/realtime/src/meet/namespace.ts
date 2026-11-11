@@ -1,6 +1,9 @@
 import type { Namespace, Server, Socket } from 'socket.io';
 import { meetUserRoom } from '../presence.js';
 import { hardenSocket } from '../utils/safeSocket.js';
+import { scopedRoom } from '@tupo/shared';
+import { runWithTid } from '@tupo/tenancy';
+import { bindSocketTenant, socketTid } from '../tenancy.js';
 import jwt from 'jsonwebtoken';
 import {
   parseMeetSettings, severityFor, meetRoleAtLeast, MEET_REACTIONS,
@@ -91,6 +94,8 @@ export function registerMeetNamespace(
           participantId: claims.participantId,
           meetingId: claims.meetingId,
         };
+        // The ticket names the meeting's tenant (none on older tickets: tenant 1).
+        socket.data.guestClaims = { tid: (claims as { tid?: number }).tid };
       } else {
         socket.data.user = claims;
       }
@@ -193,7 +198,10 @@ export function registerMeetNamespace(
 
   /* ---------------- connection ---------------- */
 
-  nsp.on('connection', (raw) => {
+  nsp.on('connection', (raw) => runWithTid(socketTid(raw), () => {
+    // Every listener runs in the socket's tenant (tenancy.ts); bind first,
+    // so hardenSocket's wrapper sits inside it.
+    if (raw.data.tenant) bindSocketTenant(raw, raw.data.tenant);
     const socket = hardenSocket(raw, 'realtime/meet') as MeetSocket;
     const user = socket.data.user;
 
@@ -1014,7 +1022,7 @@ export function registerMeetNamespace(
               const s = nsp.sockets.get(sid) as MeetSocket | undefined;
               if (!s) continue;
               s.data.breakoutRoomId = r.id;
-              void s.join(`meet:breakout:${r.id}`);
+              void s.join(scopedRoom(`meet:breakout:${r.id}`));
               s.emit('meet:breakout_assigned', {
                 roomId: r.id, roomName: r.name,
                 closesAt: closesAt ? closesAt.toISOString() : null,
@@ -1045,7 +1053,7 @@ export function registerMeetNamespace(
           const s = nsp.sockets.get(sid) as MeetSocket | undefined;
           if (!s) continue;
           s.data.breakoutRoomId = null;
-          void s.leave(`meet:breakout:${roomId}`);
+          void s.leave(scopedRoom(`meet:breakout:${roomId}`));
         }
       }
       emitToRoom(meetingId, 'meet:breakouts', { rooms: [] });
@@ -1207,7 +1215,7 @@ export function registerMeetNamespace(
 
     socket.on('meet:leave', () => { void departure(socket, 'left'); });
     socket.on('disconnect', () => { void departure(socket, 'disconnected'); });
-  });
+  }));
 
   /* ---------------- shared helpers over the namespace ---------------- */
 
@@ -1321,7 +1329,7 @@ export function registerMeetNamespace(
   const flushTimer = setInterval(() => {
     for (const room of rooms.values()) {
       const drained = room.drainSpeakingSeconds();
-      if (drained.length) db.addSpeakingSeconds(drained);
+      if (drained.length) runWithTid(room.tid, () => db.addSpeakingSeconds(drained));
     }
   }, SPEAKING_FLUSH_MS);
   flushTimer.unref();

@@ -77,11 +77,25 @@ const rememberJti = (jti: string, until: number) => {
 
 export class LogoutTokenError extends Error {}
 
+/** What a valid logout token names: the MIS user and, since tenancy, its school. */
+export interface LogoutSubject {
+  sub: string;
+  /** The `tid` claim (contract §2), or null for a token minted before tenancy. */
+  tid: number | null;
+}
+
 /**
  * Validate a logout token per spec section 2.6. Returns the MIS user id
  * (`sub`) whose sessions must end. Throws LogoutTokenError when invalid.
  */
-export const verifyLogoutToken = async (token: unknown, cfg: LogoutVerifierConfig): Promise<string> => {
+export const verifyLogoutToken = async (token: unknown, cfg: LogoutVerifierConfig): Promise<string> =>
+  (await verifyLogoutTokenSubject(token, cfg)).sub;
+
+/**
+ * Same validation as verifyLogoutToken, also returning the token's `tid`:
+ * spokes revoke on (tid, sub) (nga_central_mis/packages/tenancy/CONTRACT.md §2).
+ */
+export const verifyLogoutTokenSubject = async (token: unknown, cfg: LogoutVerifierConfig): Promise<LogoutSubject> => {
   if (typeof token !== "string" || token.split(".").length !== 3) throw new LogoutTokenError("missing logout_token");
   let header: { alg?: string; kid?: string };
   try {
@@ -112,7 +126,9 @@ export const verifyLogoutToken = async (token: unknown, cfg: LogoutVerifierConfi
   if (!claims.jti || !rememberJti(String(claims.jti), (Number(claims.exp) || 0) * 1000 + 120_000)) {
     throw new LogoutTokenError("logout_token already used");
   }
-  return String(claims.sub);
+  const tidNum = Number(claims.tid);
+  const tid = Number.isSafeInteger(tidNum) && tidNum > 0 ? tidNum : null;
+  return { sub: String(claims.sub), tid };
 };
 
 /**

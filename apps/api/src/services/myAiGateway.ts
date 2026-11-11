@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import { effectiveTid, tenantHeaders, tenantKeyFor } from '@tupo/tenancy';
 import { isAiRouteValue, type AiAnswer, type MyAiRoutes } from '@tupo/shared';
 import { config } from '../config.js';
 import { AiDisabledError, getAiPolicy } from './aiPolicy.js';
@@ -113,10 +114,13 @@ function headers(misUserId: string): Record<string, string> {
     Accept: 'application/json',
     'Content-Type': 'application/json',
     'X-Nga-On-Behalf-Of': misUserId,
+    ...tenantHeaders(),
   };
 }
 
 interface RoutesEntry { data: MyAiRoutes; fetchedAt: number }
+/** Per tenant: `t<tid>:<misUserId>`. */
+const rkey = (misUserId: string) => tenantKeyFor(effectiveTid('My AI routes cache'), misUserId);
 const routesCache = new Map<string, RoutesEntry>();
 const routesFailedAt = new Map<string, number>();
 const routesInflight = new Map<string, Promise<MyAiRoutes | null>>();
@@ -128,11 +132,11 @@ async function fetchRoutes(misUserId: string): Promise<MyAiRoutes | null> {
       signal: AbortSignal.timeout(ROUTES_TIMEOUT_MS()),
     });
     if (!res.ok) {
-      routesFailedAt.set(misUserId, Date.now());
+      routesFailedAt.set(rkey(misUserId), Date.now());
       return null;
     }
     const body = (await res.json()) as { success?: boolean; data?: Partial<MyAiRoutes> };
-    if (!body?.success || !body.data) { routesFailedAt.set(misUserId, Date.now()); return null; }
+    if (!body?.success || !body.data) { routesFailedAt.set(rkey(misUserId), Date.now()); return null; }
     const d = body.data;
     const data: MyAiRoutes = {
       enabled: d.enabled === true,
@@ -142,12 +146,12 @@ async function fetchRoutes(misUserId: string): Promise<MyAiRoutes | null> {
       choices: Array.isArray(d.choices) ? d.choices : [],
     };
     if (routesCache.size >= MAX_CACHED) routesCache.delete(routesCache.keys().next().value!);
-    routesCache.set(misUserId, { data, fetchedAt: Date.now() });
-    routesFailedAt.delete(misUserId);
+    routesCache.set(rkey(misUserId), { data, fetchedAt: Date.now() });
+    routesFailedAt.delete(rkey(misUserId));
     return data;
   } catch (err) {
     console.warn('[my-ai] MIS routes unreachable:', err instanceof Error ? err.message : err);
-    routesFailedAt.set(misUserId, Date.now());
+    routesFailedAt.set(rkey(misUserId), Date.now());
     return null;
   }
 }
@@ -155,14 +159,14 @@ async function fetchRoutes(misUserId: string): Promise<MyAiRoutes | null> {
 /** What answers this person in Tupo (cached 60 s), or null when the MIS cannot say. */
 export async function getRoutes(misUserId: string): Promise<MyAiRoutes | null> {
   const now = Date.now();
-  const hit = routesCache.get(misUserId);
+  const hit = routesCache.get(rkey(misUserId));
   if (hit && now - hit.fetchedAt < ROUTES_FRESH_MS) return hit.data;
-  const failed = routesFailedAt.get(misUserId);
+  const failed = routesFailedAt.get(rkey(misUserId));
   if (failed && now - failed < ROUTES_RETRY_MS) return null;
-  let p = routesInflight.get(misUserId);
+  let p = routesInflight.get(rkey(misUserId));
   if (!p) {
-    p = fetchRoutes(misUserId).finally(() => routesInflight.delete(misUserId));
-    routesInflight.set(misUserId, p);
+    p = fetchRoutes(misUserId).finally(() => routesInflight.delete(rkey(misUserId)));
+    routesInflight.set(rkey(misUserId), p);
   }
   return p;
 }
@@ -174,7 +178,7 @@ export async function getRoutes(misUserId: string): Promise<MyAiRoutes | null> {
  */
 export function noteAiRoutesVersion(misUserId: unknown, routesV: unknown, policyV?: unknown): boolean {
   if (misUserId === null || misUserId === undefined) return false;
-  const id = String(misUserId);
+  const id = rkey(String(misUserId));
   const hit = routesCache.get(id);
   if (!hit) return false;
   const differs = (raw: unknown, have: number | undefined) =>
@@ -347,6 +351,6 @@ export function __resetMyAiCache(): void {
 }
 
 export function __ageMyAiRoutes(misUserId: string, ageMs: number): void {
-  const hit = routesCache.get(misUserId);
-  if (hit) routesCache.set(misUserId, { ...hit, fetchedAt: Date.now() - ageMs });
+  const hit = routesCache.get(rkey(misUserId));
+  if (hit) routesCache.set(rkey(misUserId), { ...hit, fetchedAt: Date.now() - ageMs });
 }

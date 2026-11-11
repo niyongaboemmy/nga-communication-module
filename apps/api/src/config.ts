@@ -6,7 +6,7 @@ export const config = {
   env: process.env.NODE_ENV ?? 'development',
   port: parseInt(process.env.PORT ?? '5190', 10),
 
-  databaseUrl: process.env.DATABASE_URL ?? 'postgres://localhost:5432/tupo_dev',
+  databaseUrl: process.env.DATABASE_URL ?? 'postgres://tupo:tupo@localhost:5432/tupo_dev',
 
   /** NGA Central MIS — the only source of identity for this app. */
   misBaseUrl: process.env.NGA_MIS_BASE_URL ?? 'https://mis.amashuri.com',

@@ -4,15 +4,26 @@ import { installProcessGuards } from './utils/asyncErrors.js';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import { timingSafeEqual } from 'node:crypto';
-import { getPool, pingDb, snowflake, closeDb, startProcessMetrics } from '@tupo/db';
+import { getPool, pingDb, snowflake, closeDb, startProcessMetrics, guardDbRole } from '@tupo/db';
 import { ok, fail, MEETING_FOLDER_PATTERN } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
+import { effectiveTenant, effectiveTid, forEachActiveTenant, tenantRegistry } from '@tupo/tenancy';
+import { overTenantQuota, tenantFromCredential, tenantStorageKey } from './tenancy.js';
 import { createStorageDriver } from './storage/driver.js';
 import { canReadFile, canDeleteFile, listConversationFiles } from './access.js';
 import { makeThumbnail, thumbKey, THUMBABLE, type ThumbResult } from './thumbnails.js';
 
 installProcessGuards('files');
+
+// A superuser / BYPASSRLS role would skip row-level security:
+// TENANCY_MODE=enforce refuses to start, shadow warns loudly.
+try {
+  await guardDbRole('files');
+} catch (err) {
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+}
 
 const app = express();
 const storage = createStorageDriver();
@@ -38,6 +49,8 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json({ limit: '256kb' }));
+// Every credentialed request runs inside its school (tenancy.ts).
+app.use(tenantFromCredential);
 
 interface FileRequest extends express.Request { user?: SessionClaims }
 
@@ -133,7 +146,7 @@ app.post('/api/files/:id/ticket', requireSession, requireFilePermission('FILE_DO
   if (!access.allowed) return res.status(404).json(fail('File not found.'));
 
   const token = jwt.sign(
-    { sub: user.id, fid: req.params.id, aud: 'file' },
+    { sub: user.id, fid: req.params.id, aud: 'file', tid: effectiveTid('media ticket') },
     config.jwtSecret,
     { expiresIn: MEDIA_TICKET_TTL_SECONDS },
   );
@@ -203,13 +216,20 @@ app.post('/api/files/tickets', requireSession, requireFilePermission('FILE_UPLOA
     }
   }
 
+  // The school's own allowance (per package), on top of the personal one.
+  const tenant = effectiveTenant('file upload');
+  if (await overTenantQuota(tenant, size)) {
+    return res.status(413).json({ ...fail('Your school has used all of its file storage. Ask an administrator to free some space.'), code: 'TENANT_QUOTA' });
+  }
+
   const id = snowflake();
   const now = new Date();
   // Server-generated key — the client never influences the storage path.
+  // Namespaced by school: `t<tid>/YYYY/MM/<id>/<name>` (TP-8).
   const safeName = name.replace(/[^\w.\-]/g, '_').slice(0, 120);
-  const key = folder
+  const key = tenantStorageKey(tenant.tid, folder
     ? `${folder}/${id}/${safeName}`
-    : `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${id}/${safeName}`;
+    : `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${id}/${safeName}`);
 
   await getPool().query(
     `INSERT INTO files (id, owner_id, storage_driver, storage_key, original_name, mime_type, size_bytes, status)
@@ -588,8 +608,10 @@ async function collectAbandonedUploads(): Promise<void> {
   }
 }
 if (process.env.NODE_ENV !== 'test') {
-  setInterval(() => void collectAbandonedUploads(), 30 * 60_000).unref();
-  setTimeout(() => void collectAbandonedUploads(), 60_000).unref();
+  // Once per school, inside its tenant.
+  const sweep = () => void forEachActiveTenant(tenantRegistry(), () => collectAbandonedUploads());
+  setInterval(sweep, 30 * 60_000).unref();
+  setTimeout(sweep, 60_000).unref();
 }
 
 // Every error a route passes on (including rejected async handlers, see

@@ -5,3 +5,4 @@ export * from './activeUsers.js';
 export * as schema from './schema.js';
 export * from './attendance.js';
 export * from './observability.js';
+export * from './tenants.js';

@@ -280,3 +280,36 @@ describe('vendored relay', () => {
     }
   });
 });
+
+describe('POST /api/activity -- multi-tenancy', () => {
+  it("runs the session lookup in the session's school and stamps its tid on the batch", async () => {
+    const { TenantRegistry, primaryTenantCtx, runWithTenant, setTenantRegistry } = await import('@tupo/tenancy');
+    const school2 = { ...primaryTenantCtx(), tid: 2, slug: 'activity-two', name: 'Activity Two', isPrimary: false };
+    setTenantRegistry(new TenantRegistry({ load: async () => [primaryTenantCtx(), school2] }));
+    const relay = enabledRelay();
+    const before = _setActivityForTests(relay);
+    const id = snowflake();
+    const misUserId = String(nextMisId++);
+    try {
+      await runWithTenant(school2, () => getPool().query(
+        `INSERT INTO users (id, mis_user_id, name, email, role, status)
+         VALUES ($1, $2, 'Tenant Two', $3, 'staff', 'active')`,
+        [id, misUserId, `${id}@school-two.test`],
+      ));
+      const token = jwt.sign({ id, misUserId, tid: 2, role: 'staff' }, config.jwtSecret, { expiresIn: '10m' });
+      sent = [];
+      const res = await request(app).post('/api/activity').set('Authorization', `Bearer ${token}`).send(envelope());
+      expect(res.status).toBe(204);
+      await relay.flush();
+      const batch = sent.find((s) => s.url.endsWith('/activity/ingest'))!.body.batches[0];
+      // Found under tenant 2's RLS scope (tenant 1 cannot see this user) and filed for tenant 2.
+      expect(batch.user_id).toBe(Number(misUserId));
+      expect(batch.tid).toBe(2);
+    } finally {
+      await runWithTenant(school2, () => getPool().query('DELETE FROM users WHERE id = $1', [id]));
+      await relay.stop();
+      _setActivityForTests(before);
+      setTenantRegistry(null);
+    }
+  });
+});

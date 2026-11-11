@@ -22,7 +22,8 @@
     "@tupo/shared": "*",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.45.2",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "@tupo/tenancy": "*"
   },
   "devDependencies": {
     "@types/pg": "^8.11.10",

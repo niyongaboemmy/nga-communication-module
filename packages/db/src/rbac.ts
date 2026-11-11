@@ -12,9 +12,14 @@ import {
  * so a code change to DEFAULT_ROLE_PERMISSIONS actually takes effect.
  *
  * Custom roles created by administrators are never touched.
+ *
+ * Roles are per tenant (0046): this seeds the roles of the tenant in context.
+ * The permission catalog is global. `onlyMissingRoles` (tenant provisioning)
+ * creates absent system roles with their defaults and leaves existing ones --
+ * and any grants an administrator customised -- alone.
  */
-export async function seedRbac(pool: Pool): Promise<{
-  permissions: number; roles: number; removed: number;
+export async function seedRbac(pool: Pool, opts: { onlyMissingRoles?: boolean } = {}): Promise<{
+  permissions: number; roles: number; removed: number; rolesCreated: number;
 }> {
   const client = await pool.connect();
   try {
@@ -39,11 +44,29 @@ export async function seedRbac(pool: Pool): Promise<{
     );
 
     // ---- roles -----------------------------------------------------------
+    let rolesCreated = 0;
     for (const role of SYSTEM_ROLES) {
+      if (opts.onlyMissingRoles) {
+        const inserted = await client.query<{ id: number }>(
+          `INSERT INTO roles (name, level, description, is_system) VALUES ($1, $2, $3, true)
+           ON CONFLICT (tenant_id, name) DO NOTHING RETURNING id`,
+          [role.name, role.level, role.description]);
+        const newId = inserted.rows[0]?.id;
+        if (newId === undefined) continue;
+        rolesCreated++;
+        const defaults = DEFAULT_ROLE_PERMISSIONS[role.name] ?? [];
+        if (defaults.length > 0) {
+          await client.query(
+            `INSERT INTO role_permissions (role_id, permission_id)
+             SELECT $1, id FROM permissions WHERE key = ANY($2::text[])`,
+            [newId, defaults]);
+        }
+        continue;
+      }
       await client.query(
         `INSERT INTO roles (name, level, description, is_system)
          VALUES ($1, $2, $3, true)
-         ON CONFLICT (name) DO UPDATE
+         ON CONFLICT (tenant_id, name) DO UPDATE
            SET level = EXCLUDED.level,
                description = EXCLUDED.description,
                is_system = true,
@@ -70,7 +93,7 @@ export async function seedRbac(pool: Pool): Promise<{
     }
 
     await client.query('COMMIT');
-    return { permissions: PERMISSIONS.length, roles: SYSTEM_ROLES.length, removed: removed ?? 0 };
+    return { permissions: PERMISSIONS.length, roles: SYSTEM_ROLES.length, removed: removed ?? 0, rolesCreated };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
