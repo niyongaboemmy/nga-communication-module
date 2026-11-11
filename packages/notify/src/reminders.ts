@@ -1,4 +1,5 @@
 import { getPool, activeUserSql } from '@tupo/db';
+import { tenantHeaders } from '@tupo/tenancy';
 
 /**
  * Meeting reminders, delivered by the NGA MIS Reminder Hub.
@@ -282,7 +283,7 @@ async function loadMeetings(ids: string[]): Promise<ReminderMeetingRow[]> {
 
 function authHeaders(cfg: ReminderConfig): Record<string, string> {
   const basic = Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`, 'utf8').toString('base64');
-  return { Authorization: `Basic ${basic}`, 'Content-Type': 'application/json', Accept: 'application/json' };
+  return { Authorization: `Basic ${basic}`, 'Content-Type': 'application/json', Accept: 'application/json', ...tenantHeaders('reminder hub call') };
 }
 
 const messageOf = (body: unknown): string => {

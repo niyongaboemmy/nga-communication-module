@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { runWithTenant, primaryTenantCtx } from '@tupo/tenancy';
 import { getPool, closeDb } from './pool.js';
 import { snowflake } from './snowflake.js';
 import { seedRbac } from './rbac.js';
@@ -26,7 +27,7 @@ async function seed(): Promise<void> {
     const res = await pool.query(
       `INSERT INTO spaces (id, slug, name, description)
        VALUES ($1, $2, $3, $4)
-       ON CONFLICT (slug) DO NOTHING
+       ON CONFLICT (tenant_id, slug) DO NOTHING
        RETURNING id`,
       [snowflake(), space.slug, space.name, space.description]
     );
@@ -49,7 +50,7 @@ async function seed(): Promise<void> {
     const res = await pool.query(
       `INSERT INTO feed_pages (id, slug, name, bio, kind, audience, verified, mandatory, accent, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       ON CONFLICT (lower(slug)) WHERE deleted_at IS NULL DO NOTHING
+       ON CONFLICT (tenant_id, lower(slug)) WHERE deleted_at IS NULL DO NOTHING
        RETURNING id`,
       [snowflake(), p.slug, p.name, p.bio, p.kind, p.audience, p.verified, p.mandatory, p.accent, ownerId],
     );
@@ -71,7 +72,9 @@ async function seed(): Promise<void> {
   console.log('\nSeed complete.');
 }
 
-seed()
+// `npm run db:seed` seeds the primary tenant (NGA, tenant 1); other schools are
+// seeded by the provisioning endpoint (seedTenant).
+runWithTenant(primaryTenantCtx(), () => seed())
   .then(() => closeDb())
   .then(() => process.exit(0))
   .catch(async (err) => {

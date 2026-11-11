@@ -1,4 +1,5 @@
 import { getPool, MIS_REMOVED, normaliseMisStatus } from '@tupo/db';
+import { tenantHeaders } from '@tupo/tenancy';
 import { reminderConfigFromEnv, type ReminderConfig } from './reminders.js';
 
 /**
@@ -78,6 +79,7 @@ export async function runProfileMediaSync(opts: {
     Authorization: `Basic ${Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`, 'utf8').toString('base64')}`,
     'Content-Type': 'application/json',
     Accept: 'application/json',
+    ...tenantHeaders('profile media sync'),
   };
 
   for (let i = 0; i < ids.length; i += BATCH) {

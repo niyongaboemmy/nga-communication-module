@@ -18,6 +18,7 @@
   "dependencies": {
     "@tupo/db": "*",
     "@tupo/shared": "*",
+    "@tupo/tenancy": "*",
     "ioredis": "^5.4.2",
     "web-push": "^3.6.7"
   },

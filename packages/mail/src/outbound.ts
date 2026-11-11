@@ -1,3 +1,4 @@
+import { PRIMARY_TENANT_ID, effectiveTid } from '@tupo/tenancy';
 /**
  * What an email copy needs beyond its body: the attachments' bytes, the
  * headers that thread it in the recipient's mail app, and a one-click
@@ -93,25 +94,32 @@ export async function threadHeaders(
 /* ── One-click unsubscribe (RFC 8058) ─────────────────────────────────── */
 
 const b64url = (s: string) => Buffer.from(s).toString('base64url');
-const sign = (address: string, secret: string) =>
-  createHmac('sha256', secret).update(`unsubscribe:${address.toLowerCase()}`).digest('base64url');
+// The school is part of what is signed (multi-tenancy: a suppression belongs
+// to one tenant). Tenant 1 keeps the original form, so links already sent
+// keep working.
+const sign = (address: string, secret: string, tid = PRIMARY_TENANT_ID) =>
+  createHmac('sha256', secret)
+    .update(tid === PRIMARY_TENANT_ID ? `unsubscribe:${address.toLowerCase()}` : `unsubscribe:t${tid}:${address.toLowerCase()}`)
+    .digest('base64url');
 
 /** The link, or null when MAIL_LINK_SECRET or APP_PUBLIC_URL is not set. */
 export function unsubscribeUrl(address: string, env: NodeJS.ProcessEnv = process.env): string | null {
   const secret = env.MAIL_LINK_SECRET;
   const base = env.APP_PUBLIC_URL?.replace(/\/$/, '');
   if (!secret || !base) return null;
-  return `${base}/api/mail/unsubscribe?a=${b64url(address.toLowerCase())}&t=${sign(address, secret)}`;
+  const tid = effectiveTid('unsubscribe link');
+  const scope = tid === PRIMARY_TENANT_ID ? '' : `&tid=${tid}`;
+  return `${base}/api/mail/unsubscribe?a=${b64url(address.toLowerCase())}&t=${sign(address, secret, tid)}${scope}`;
 }
 
 /** The address a link was made for, or null if the link is not genuine. */
-export function verifyUnsubscribe(a: string, t: string, env: NodeJS.ProcessEnv = process.env): string | null {
+export function verifyUnsubscribe(a: string, t: string, env: NodeJS.ProcessEnv = process.env, tid = PRIMARY_TENANT_ID): string | null {
   const secret = env.MAIL_LINK_SECRET;
   if (!secret || !a || !t) return null;
   let address: string;
   try { address = Buffer.from(a, 'base64url').toString('utf8'); } catch { return null; }
   if (!/^[^\s@]+@[^\s@]+$/.test(address)) return null;
-  const want = Buffer.from(sign(address, secret));
+  const want = Buffer.from(sign(address, secret, tid));
   const given = Buffer.from(t);
   return want.length === given.length && timingSafeEqual(want, given) ? address.toLowerCase() : null;
 }

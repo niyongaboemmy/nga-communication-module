@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runWithoutTenant } from '@tupo/tenancy';
 import { getPool, closeDb } from './pool.js';
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
@@ -78,7 +79,9 @@ async function migrate(): Promise<void> {
   console.log(count === 0 ? '\nDatabase already up to date.' : `\nApplied ${count} migration(s).`);
 }
 
-migrate()
+// Migrations run with no tenant: DDL is unaffected by RLS, and since 0046 a
+// data fix that must span tenants says so with `SET LOCAL ROLE tupo_platform`.
+runWithoutTenant('migrations', () => migrate())
   .then(() => closeDb())
   .then(() => process.exit(0))
   .catch(async (err) => {

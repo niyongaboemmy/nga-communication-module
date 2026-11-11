@@ -1,11 +1,16 @@
 import express, { Router, type Request, type Response } from 'express';
-import { LogoutTokenError, verifyLogoutToken } from '../utils/ssoLogout.js';
+import { LogoutTokenError, verifyLogoutTokenSubject } from '../utils/ssoLogout.js';
 import { publishSessionEnd } from '../services/chatRealtime.js';
 import { removeAllSubscriptions } from '@tupo/notify';
 import jwt from 'jsonwebtoken';
 import { ok, fail, resolveMisRole, ssoExchangeSchema } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
-import { getPool, normaliseMisStatus, resolveUserPermissions } from '@tupo/db';
+import { ensureTenantProvisioned, getPool, normaliseMisStatus, resolveUserPermissions } from '@tupo/db';
+import {
+  PRIMARY_TENANT_ID, gateTenant, normalizeTenant, parseTid, primaryTenantCtx, runWithTenant, tenantRegistry,
+  type TenantClaims, type TenantCtx, type TenantGate,
+} from '@tupo/tenancy';
+import { misTokenTid, sendTenantMismatch, sendTenantRefusal, tidOf } from '../middleware/tenant.js';
 import { recheckMisStatus } from '../services/misStatus.js';
 import { config } from '../config.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
@@ -83,6 +88,20 @@ export function readAcademic(me: Record<string, unknown> | null, forceAdmin: boo
 const router = Router();
 
 /**
+ * The tenant a sign-in lands in. MIS is authoritative: a `tenant` it sent
+ * with the token is used as is (and refreshes the registry), otherwise the
+ * registry decides. Status rules as for every request (contract §6).
+ */
+async function gateTenantForSignIn(tid: number | null, announced: TenantCtx | null): Promise<TenantGate> {
+  if (announced && tid === announced.tid) {
+    const known = await tenantRegistry().get(announced.tid).catch(() => null);
+    if (!known) tenantRegistry().invalidate();
+    return gateTenant(announced.tid, { get: async () => announced });
+  }
+  return gateTenant(tid);
+}
+
+/**
  * Sliding-window rate limiter on the token exchange, so authorization codes
  * cannot be brute-forced. Counted in Redis (R-01): with two API instances an
  * in-memory count would let each one allow its own 10.
@@ -127,6 +146,21 @@ router.post('/exchange', async (req: Request, res: Response) => {
 
     const { token: misToken, user: misUser, permissions = [] } = body.data;
 
+    // Multi-tenancy (contract §2): the school comes from the MIS SSO token's
+    // `tid` claim, or the `tenant` MIS now returns beside it. An older MIS
+    // sends neither: tenant 1, while TENANCY_LEGACY_DEFAULT_TID allows it.
+    const misTenant = (body.data as { tenant?: Record<string, unknown> }).tenant;
+    const announced = misTenant && typeof misTenant === 'object' ? normalizeTenant(misTenant) : null;
+    const explicitTokenTid = parseTid((jwt.decode(misToken) as TenantClaims | null)?.tid);
+    if (announced && explicitTokenTid && explicitTokenTid !== announced.tid) return sendTenantMismatch(res);
+    const tid = announced?.tid ?? misTokenTid(misToken);
+    const gate = await gateTenantForSignIn(tid, announced);
+    if (!gate.ok) return sendTenantRefusal(res, gate);
+    const tenant = gate.tenant;
+    await ensureTenantProvisioned(tenant);
+
+    return await runWithTenant(tenant, async () => {
+
     // Hydrate the full profile; a failure here degrades the login rather than
     // breaking it (SRS FR-AUTH-2). The access v2 snapshot is fetched alongside
     // (shadow/enforce only; short timeout, never fails the login) — it primes
@@ -168,9 +202,11 @@ router.post('/exchange', async (req: Request, res: Response) => {
     const preferredTheme =
       rawTheme === 'light' || rawTheme === 'dark' ? (rawTheme as 'light' | 'dark') : undefined;
 
-    const forceAdmin =
+    // The bootstrap allowlists name NGA accounts: they elevate in the
+    // primary tenant only, never in another school (TP-10).
+    const forceAdmin = tenant.tid === PRIMARY_TENANT_ID && (
       config.adminUsernames.includes(String(misUser.username ?? name).toLowerCase()) ||
-      config.adminEmails.includes(email.toLowerCase());
+      config.adminEmails.includes(email.toLowerCase()));
 
     // Placement cache (users.mis_*): derived from the v2 snapshot when v2 is
     // enforcing and MIS supplied one; otherwise from /users/me as before. In
@@ -227,7 +263,7 @@ router.post('/exchange', async (req: Request, res: Response) => {
     // Tupo's own session, with the MIS token nested inside so this app can act
     // on the user's behalf against MIS APIs. Note for ops: this makes the
     // Authorization header large — see the nginx buffer settings in infra/.
-    const claims: SessionClaims = { ...user, misToken };
+    const claims: SessionClaims = { ...user, misToken, tid: tenant.tid, tslug: tenant.slug };
     const token = jwt.sign(claims, config.jwtSecret, { expiresIn: config.sessionTtl } as jwt.SignOptions);
 
     // Tupo's OWN permission set for this user — distinct from the MIS
@@ -248,7 +284,9 @@ router.post('/exchange', async (req: Request, res: Response) => {
       rolePermissions: Array.from(resolved?.permissions ?? []).sort(),
       roleName: resolved?.roleName ?? null,
       roleLevel: resolved?.roleLevel ?? null,
+      tenant: { tid: tenant.tid, slug: tenant.slug, name: tenant.name, status: tenant.status },
     }));
+    });
   } catch (err) {
     console.error('[sso] exchange error:', err);
     return res.status(502).json(fail('Could not reach the NGA MIS authentication server. Please try again.'));
@@ -274,7 +312,7 @@ router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: 
   res.set('Cache-Control', 'no-store');
   try {
     const logoutToken = (req.body || {}).logout_token;
-    const misUserId = await verifyLogoutToken(logoutToken, {
+    const { sub: misUserId, tid: logoutClaimTid } = await verifyLogoutTokenSubject(logoutToken, {
       misBaseUrl: config.misBaseUrl,
       clientId: config.ssoClientId,
     });
@@ -286,6 +324,15 @@ router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: 
     if (!jti || !(await claimOnce(`logout-jti:${jti}`, ttl))) {
       throw new LogoutTokenError('logout_token already used');
     }
+    // Spokes revoke on (tid, sub) (contract §2): the person is looked up in
+    // the school the token names, never by MIS id alone.
+    // Any status: a suspended school's sign-outs still have to land.
+    // A token minted before tenancy (no tid) is tenant 1.
+    const logoutTid = logoutClaimTid ?? PRIMARY_TENANT_ID;
+    const known = logoutTid ? await tenantRegistry().get(logoutTid).catch(() => null) : null;
+    const tenant = known ?? (logoutTid === PRIMARY_TENANT_ID ? primaryTenantCtx() : null);
+    if (!tenant) throw new LogoutTokenError('logout_token names an unknown school');
+    await runWithTenant(tenant, async () => {
     const { rows } = await getPool().query<{ id: string }>(
       `INSERT INTO session_revocations (user_id, revoked_at)
          SELECT id, now() FROM users WHERE mis_user_id = $1
@@ -305,6 +352,7 @@ router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: 
         console.error('[sso] status re-check after back-channel logout failed:', err instanceof Error ? err.message : err);
       });
     }
+    });
     return res.status(200).json({ success: true });
   } catch (error) {
     if (error instanceof LogoutTokenError) {

@@ -1,6 +1,7 @@
 import type { Socket } from 'socket.io';
 import { createActivityRelay, type ActivityRelay } from './vendor/nga-activity-relay/relay.js';
 import { config } from './config.js';
+import { currentTenantOrNull } from '@tupo/tenancy';
 
 /**
  * Platform usage analytics from the realtime gateway
@@ -26,6 +27,8 @@ const relay: ActivityRelay | null = misBaseUrl && clientId && clientSecret
     // Browser batches never reach this process; nothing here takes them.
     origins: [],
     getUserId: () => null,
+    // Socket handlers run in their tenant: stamp each key event with it.
+    currentTenant: currentTenantOrNull,
   })
   : null;
 

@@ -1,5 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { effectiveTid } from '@tupo/tenancy';
+import { misTokenTid, sendTenantMismatch, tidOf, withRequestTenant } from './tenant.js';
 import { getPool, resolveUserPermissions, snowflake, isActiveUser } from '@tupo/db';
 import { fail, GUEST_PERMISSIONS } from '@tupo/shared';
 import type { Role, RoleLevel, SessionClaims } from '@tupo/shared';
@@ -37,6 +39,8 @@ export interface GuestClaims {
   participantId: string;
   meetingId: string;
   name: string;
+  /** The school the meeting belongs to (absent on tickets issued before tenancy: tenant 1). */
+  tid?: number;
 }
 
 export interface MeetRequest extends AuthenticatedRequest {
@@ -57,6 +61,7 @@ export function issueGuestToken(claims: {
       meetingId: claims.meetingId,
       name: claims.name,
       jti: claims.tokenId,
+      tid: effectiveTid('guest ticket'),
     },
     config.jwtSecret,
     { expiresIn: GUEST_TTL },
@@ -74,6 +79,28 @@ export const newGuestTokenId = (): string => `g_${snowflake()}`;
  * snowflake user id, and `roleId` is null so nothing treats it as a real role.
  */
 export async function meetAuth(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) {
+    return res.status(401).json(fail('Access denied. No authorization token provided.'));
+  }
+  let peek: (SessionClaims & { tid?: number }) | null = null;
+  try {
+    peek = jwt.verify(header.slice(7), config.jwtSecret) as never;
+  } catch {
+    return res.status(401).json(fail('Invalid or expired authorization token.'));
+  }
+  // A real session goes through the same tenant gate as authMiddleware,
+  // including the MIS-token mismatch rule; a guest ticket names its tenant.
+  const sessionTid = tidOf(peek);
+  const misToken = (peek as { guest?: unknown }).guest === true ? undefined : (peek as { misToken?: string }).misToken;
+  if (misToken) {
+    const misTid = misTokenTid(misToken);
+    if (misTid !== null && misTid !== sessionTid) return sendTenantMismatch(res);
+  }
+  await withRequestTenant(sessionTid, res, () => meetAuthInTenant(req, res, next));
+}
+
+async function meetAuthInTenant(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) {
     return res.status(401).json(fail('Access denied. No authorization token provided.'));

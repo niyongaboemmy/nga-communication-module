@@ -30,6 +30,13 @@ export interface SessionClaims extends SessionUser {
    * work with no person waiting. Such calls always use the school AI, never My AI.
    */
   system?: boolean;
+  /**
+   * Multi-tenancy: the school this session belongs to (MIS `Tenant.tenant_id`),
+   * copied from the MIS SSO token at sign-in. Sessions minted before tenancy
+   * carry none and count as tenant 1 while TENANCY_LEGACY_DEFAULT_TID allows.
+   */
+  tid?: number;
+  tslug?: string;
 }
 
 export const ssoExchangeSchema = z.object({ code: z.string().min(1, 'Authorization code is required') });

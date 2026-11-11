@@ -14,7 +14,7 @@ export const config = {
   /** The /meet namespace writes captions, chat and participant state directly.
    *  Same database as the API — the gateway is a second reader/writer of the
    *  meeting tables, not a service with a store of its own. */
-  databaseUrl: process.env.DATABASE_URL ?? 'postgres://localhost:5432/tupo_dev',
+  databaseUrl: process.env.DATABASE_URL ?? 'postgres://tupo:tupo@localhost:5432/tupo_dev',
 };
 
 // Same rule as the API (RT-05): never verify production sessions against the

@@ -226,7 +226,7 @@ export async function seedDefaultLists(): Promise<void> {
     const { rows } = await getPool().query(
       `INSERT INTO mail_distribution_lists (id, name, slug, description, origin)
        VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (lower(slug)) DO NOTHING
+       ON CONFLICT (tenant_id, lower(slug)) DO NOTHING
        RETURNING id`,
       [snowflake(), d.name, slugify(d.name), d.description, d.origin],
     );

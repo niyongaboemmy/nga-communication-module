@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { currentTenantOrNull, runAsPlatform, runWithoutTenant } from '@tupo/tenancy';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { getPool } from './pool.js';
 
@@ -91,7 +92,8 @@ export async function writeSamples(service: string, rows: Array<[string, number]
     return `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`;
   });
   try {
-    await getPool().query(`INSERT INTO metric_samples (service, metric, value) VALUES ${values.join(', ')}`, params);
+    // Global tables (no tenant rows): written with no tenant context.
+    await runWithoutTenant('metrics', () => getPool().query(`INSERT INTO metric_samples (service, metric, value) VALUES ${values.join(', ')}`, params));
   } catch { /* the table may not exist yet (before the migration), or the DB is down */ }
 }
 
@@ -107,6 +109,13 @@ export interface ErrorReport {
   release?: string | null;
   userId?: string | null;
   userAgent?: string | null;
+  /**
+   * The tenant the error belongs to. Defaults to the current tenant context
+   * (the request or job that raised it); null/absent with no context = a
+   * process-level error, visible to the primary tenant's System page only.
+   * Pass it only from server-stamped data (a job's tid), never from input.
+   */
+  tenantId?: number | null;
 }
 
 /**
@@ -137,21 +146,28 @@ const pendingCounts = new Map<string, number>();
 export async function recordError(r: ErrorReport): Promise<void> {
   const message = (r.message || 'Unknown error').slice(0, 1000);
   const fingerprint = errorFingerprint({ ...r, message });
+  // Whose error it is (migration 0047): the explicit tenant, else the context's.
+  const tenantId = r.tenantId !== undefined ? r.tenantId : currentTenantOrNull()?.tid ?? null;
+  // Throttle per tenant: one school's crash loop must not swallow another's report.
+  const key = `${tenantId ?? '-'}|${fingerprint}`;
   const now = Date.now();
   // A crash loop on one route must not become a write storm on the database.
-  if (now - (lastRecorded.get(fingerprint) ?? 0) < RECORD_EVERY_MS) {
-    pendingCounts.set(fingerprint, (pendingCounts.get(fingerprint) ?? 0) + 1);
+  if (now - (lastRecorded.get(key) ?? 0) < RECORD_EVERY_MS) {
+    pendingCounts.set(key, (pendingCounts.get(key) ?? 0) + 1);
     return;
   }
-  lastRecorded.set(fingerprint, now);
+  lastRecorded.set(key, now);
   if (lastRecorded.size > 5_000) lastRecorded.clear();
-  const extra = pendingCounts.get(fingerprint) ?? 0;
-  pendingCounts.delete(fingerprint);
+  const extra = pendingCounts.get(key) ?? 0;
+  pendingCounts.delete(key);
   try {
-    await getPool().query(
-      `INSERT INTO error_events (fingerprint, source, message, stack, route, release, count, last_user_id, last_user_agent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (fingerprint) DO UPDATE SET
+    // Written as the platform with tenant_id named explicitly: the same path
+    // for a tenant's error and a process-level one (tenant_id NULL), whatever
+    // scope the failing code was in.
+    await runAsPlatform('error log', () => getPool().query(
+      `INSERT INTO error_events (fingerprint, source, message, stack, route, release, count, last_user_id, last_user_agent, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (tenant_id, fingerprint) DO UPDATE SET
          count = error_events.count + EXCLUDED.count,
          last_at = now(),
          message = EXCLUDED.message,
@@ -163,8 +179,8 @@ export async function recordError(r: ErrorReport): Promise<void> {
          -- A resolved error that comes back is open again; an ignored one stays ignored.
          status = CASE WHEN error_events.status = 'resolved' THEN 'open' ELSE error_events.status END`,
       [fingerprint, r.source, message, r.stack?.slice(0, 4000) ?? null, r.route?.slice(0, 300) ?? null,
-        r.release?.slice(0, 60) ?? null, 1 + extra, r.userId ?? null, r.userAgent?.slice(0, 300) ?? null],
-    );
+        r.release?.slice(0, 60) ?? null, 1 + extra, r.userId ?? null, r.userAgent?.slice(0, 300) ?? null, tenantId],
+    ));
   } catch { /* monitoring must never take the service down */ }
 }
 

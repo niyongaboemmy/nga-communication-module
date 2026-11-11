@@ -10,6 +10,7 @@ import {
 import { beginSsoState } from '../lib/ssoState';
 import { endActivity } from '../activity';
 import { setCacheOwner } from '../lib/localStore';
+import { storageOwner, tidOfToken } from '../lib/tenant';
 import { setSwSessionToken } from '../lib/swSession';
 
 type Theme = 'light' | 'dark';
@@ -57,7 +58,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<SessionUser | null>(null);
   // The on-device cache is per account (P-02). Set during render, not in an
   // effect, so providers' first reads already go to the right database.
-  setCacheOwner(user?.id ?? null);
+  // Keyed by school too (tupo-cache-<tid>-<userId>): ids repeat across tenants' MIS.
+  setCacheOwner(storageOwner(user?.id, tidOfToken(token)));
   const [permissions, setPermissions] = useState<string[]>([]);
   const [rolePermissions, setRolePermissions] = useState<string[]>([]);
   const [roleName, setRoleName] = useState<string | null>(null);

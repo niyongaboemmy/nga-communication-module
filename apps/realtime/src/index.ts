@@ -18,10 +18,22 @@ import { registerFeedHandlers } from './feed/handlers.js';
 import { createAccessCache, findInactiveUsers, revocationsFor, sessionEnded } from './access.js';
 import { issuedBeforeRevocation } from './utils/ssoLogout.js';
 import { stopActivity } from './activity.js';
-import { startProcessMetrics } from '@tupo/db';
+import { startProcessMetrics, guardDbRole } from '@tupo/db';
+import { userRoom } from '@tupo/shared';
+import { runWithTid, type TenantCtx } from '@tupo/tenancy';
+import { bindSocketTenant, relayRooms, relayTid, socketTid, tenantForSession } from './tenancy.js';
 import {
   broadcastPresence, markOffline, readPresence, recomputePresence, toChoice, toStatus, writeChoice,
 } from './presence.js';
+
+// Both pools (meet/db and @tupo/db's) use the same login role; a superuser /
+// BYPASSRLS one would skip row-level security. Enforce refuses, shadow warns.
+try {
+  await guardDbRole('realtime', { pool: getMeetPool() });
+} catch (err) {
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -89,13 +101,16 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
 {
     notifySub.on('message', (_channel, payload) => {
       try {
-        const { userIds, notification } = JSON.parse(payload) as {
-          userIds: string[]; notification: AppNotification;
+        const parsed = JSON.parse(payload) as {
+          userIds: string[]; notification: AppNotification; tid?: number;
         };
+        const { userIds, notification } = parsed;
         // Delivery is per-user-room, so a notification reaches every device
-        // that person has open and nobody else's.
+        // that person has open and nobody else's -- in the tenant it was
+        // raised in (`t<tid>:user:<id>`).
+        const tid = relayTid(parsed);
         for (const id of userIds ?? []) {
-          io.local.to(`user:${id}`).emit('notification:new', notification);
+          io.local.to(userRoom(id, tid)).emit('notification:new', notification);
         }
       } catch {
         // A malformed message must not take the gateway down with it.
@@ -106,13 +121,16 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
       try {
         const parsed = JSON.parse(payload) as {
           rooms: string[]; event: string; payload: unknown; exceptSocketId?: string;
-          leave?: { userIds: string[]; rooms: string[] };
+          leave?: { userIds: string[]; rooms: string[] }; tid?: number;
         };
+        // Everything below stays inside the tenant the message names: rooms of
+        // any other tenant are dropped (relayRooms), never delivered.
+        const tid = relayTid(parsed);
         // A meeting ended outside the room: tell whoever is still in it here,
         // and drop this node's in-memory state for it (E-04).
         const ended = (parsed as { meetEnded?: { meetingId?: string; by?: string | null } }).meetEnded;
         if (ended?.meetingId) {
-          meetNsp.local.to(meetRoomKey(ended.meetingId)).emit('meet:ended' as never, {
+          meetNsp.local.to(runWithTid(tid, () => meetRoomKey(ended.meetingId!))).emit('meet:ended' as never, {
             by: ended.by ?? null, at: new Date().toISOString(),
             summaryUrl: `/app/meet/${ended.meetingId}/summary`,
           } as never);
@@ -121,11 +139,13 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
         }
         // Eviction: these people's sockets leave these rooms, everywhere.
         if (parsed.leave && Array.isArray(parsed.leave.userIds) && Array.isArray(parsed.leave.rooms)) {
-          io.local.in(parsed.leave.userIds.map((id) => `user:${id}`)).socketsLeave(parsed.leave.rooms);
+          const leaveRooms = relayRooms(parsed.leave.rooms, tid);
+          if (leaveRooms.length) io.local.in(parsed.leave.userIds.map((id) => userRoom(id, tid))).socketsLeave(leaveRooms);
           return;
         }
-        const { rooms, event, payload: data, exceptSocketId } = parsed;
-        if (!Array.isArray(rooms) || !event) return;
+        const { event, payload: data, exceptSocketId } = parsed;
+        const rooms = relayRooms(parsed.rooms, tid);
+        if (!rooms.length || !event) return;
         const target = exceptSocketId ? io.local.except(exceptSocketId) : io.local;
         // Rooms are named by the publisher, which is our own API — the payload
         // is not client-controlled, so relaying it verbatim is safe.
@@ -139,8 +159,9 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
     logoutSub.on('message', (_channel, payload) => {
       void (async () => {
         try {
-          const { userIds } = JSON.parse(payload) as { userIds: string[] };
-          const ended = new Set(userIds ?? []);
+          const parsed = JSON.parse(payload) as { userIds: string[]; tid?: number };
+          const ended = new Set(parsed.userIds ?? []);
+          const tid = relayTid(parsed);
           if (ended.size === 0) return;
           const sockets = [
             ...(await io.local.fetchSockets()),
@@ -148,7 +169,7 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
           ];
           for (const s of sockets) {
             const u = s.data.user as SessionClaims | undefined;
-            if (!u?.id || s.data.guest || !ended.has(u.id)) continue;
+            if (!u?.id || s.data.guest || !ended.has(u.id) || socketTid(s) !== tid) continue;
             s.disconnect(true);
           }
         } catch {
@@ -240,14 +261,20 @@ io.use((socket, next) => {
     return next(new Error('unauthorized: invalid or expired session token'));
   }
 
-  // A valid signature is not enough: the account must still exist and be
-  // active, exactly as the API's auth middleware requires on every request.
-  void admitUser(claims.id).then(async (err) => {
+  // The session's school first (contract §6): status gates and the
+  // MIS-token mismatch rule, exactly as the API applies them. Then, inside
+  // that tenant, a valid signature is not enough: the account must still
+  // exist and be active, as the API's auth middleware requires.
+  void (async () => {
+    const t = await tenantForSession(claims);
+    if (!t.ok) return next(new Error(t.message));
+    socket.data.tenant = t.tenant;
+    const err = await runWithTid(t.tenant.tid, () => admitUser(claims.id));
     if (err) return next(err);
-    if (await sessionEnded(claims.id, (claims as { iat?: number }).iat)) return next(new Error(SESSION_ENDED));
+    if (await runWithTid(t.tenant.tid, () => sessionEnded(claims.id, (claims as { iat?: number }).iat))) return next(new Error(SESSION_ENDED));
     socket.data.user = claims;
     next();
-  });
+  })().catch(() => next(new Error('unauthorized: could not check the session')));
 });
 
 /**
@@ -264,13 +291,19 @@ const meetNsp = registerMeetNamespace(io, {
 // Runs after the namespace's own JWT middleware has set `socket.data.user`.
 // Guests hold a meeting ticket, not an account, so they have no row to check.
 meetNsp.use((socket, next) => {
-  if (socket.data.guest) return next();
-  const user = socket.data.user as SessionClaims | undefined;
-  void admitUser(user?.id).then(async (err) => {
+  void (async () => {
+    // Guests' tickets name the meeting's tenant; sessions go through the gate.
+    const claims = socket.data.guestClaims ?? socket.data.user;
+    const t = await tenantForSession((claims ?? {}) as SessionClaims);
+    if (!t.ok) return next(new Error(t.message));
+    socket.data.tenant = t.tenant;
+    if (socket.data.guest) return next();
+    const user = socket.data.user as SessionClaims | undefined;
+    const err = await runWithTid(t.tenant.tid, () => admitUser(user?.id));
     if (err) return next(err);
-    if (user?.id && await sessionEnded(user.id, (user as { iat?: number }).iat)) return next(new Error(SESSION_ENDED));
+    if (user?.id && await runWithTid(t.tenant.tid, () => sessionEnded(user.id, (user as { iat?: number }).iat))) return next(new Error(SESSION_ENDED));
     next();
-  });
+  })().catch(() => next(new Error('unauthorized: could not check the session')));
 });
 
 /**
@@ -287,13 +320,24 @@ function startAccessSweep(): NodeJS.Timeout {
           ...(await io.local.fetchSockets()),
           ...(await meetNsp.local.fetchSockets()),
         ];
-        const ids = new Set<string>();
+        // Grouped by tenant: each school's users are read inside its own
+        // context (RLS would hide every other school's rows).
+        const idsByTenant = new Map<number, Set<string>>();
         for (const s of sockets) {
           const u = s.data.user as SessionClaims | undefined;
-          if (u?.id && !s.data.guest) ids.add(u.id);
+          if (!u?.id || s.data.guest) continue;
+          const tid = socketTid(s);
+          if (!idsByTenant.has(tid)) idsByTenant.set(tid, new Set());
+          idsByTenant.get(tid)!.add(u.id);
         }
-        const inactive = await findInactiveUsers([...ids]);
-        const revokedAt = await revocationsFor([...ids]);
+        const inactive = new Set<string>();
+        const revokedAt = new Map<string, Date>();
+        for (const [tid, ids] of idsByTenant) {
+          await runWithTid(tid, async () => {
+            for (const id of await findInactiveUsers([...ids])) inactive.add(`${tid}:${id}`);
+            for (const [id, at] of await revocationsFor([...ids])) revokedAt.set(`${tid}:${id}`, at);
+          });
+        }
         const nowSec = Date.now() / 1000;
         for (const s of sockets) {
           const u = s.data.user as (SessionClaims & { iat?: number; exp?: number }) | undefined;
@@ -301,8 +345,9 @@ function startAccessSweep(): NodeJS.Timeout {
           // The JWT is checked at the handshake; a socket lives for hours, so
           // the sweep also ends sessions that expired or were revoked since
           // (single sign-out, suspension) — RT-04.
-          const reason = inactive.has(u.id) ? 'suspended'
-            : issuedBeforeRevocation(u.iat, revokedAt.get(u.id) ?? null) ? 'signed_out'
+          const key = `${socketTid(s)}:${u.id}`;
+          const reason = inactive.has(key) ? 'suspended'
+            : issuedBeforeRevocation(u.iat, revokedAt.get(key) ?? null) ? 'signed_out'
             : u.exp && u.exp < nowSec ? 'expired'
             : null;
           if (!reason) continue;
@@ -375,6 +420,13 @@ metrics.gauge('sockets', () => io.engine.clientsCount);
 metrics.gauge('meet_sockets', () => meetNsp.sockets.size);
 
 io.on('connection', (socket) => {
+  // Every listener below runs inside the socket's tenant (see tenancy.ts).
+  const tenant = socket.data.tenant as TenantCtx;
+  bindSocketTenant(socket, tenant);
+  runWithTid(tenant.tid, () => onConnection(socket));
+});
+
+function onConnection(socket: Parameters<Parameters<typeof io.on<'connection'>>[1]>[0]) {
   metrics.count('connections');
   hardenSocket(socket);
   const user = socket.data.user as SessionClaims;
@@ -430,7 +482,7 @@ io.on('connection', (socket) => {
    * setting was flicked to hide.
    */
   socket.data.presenceReady = (async () => {
-    await socket.join(`user:${user.id}`);
+    await socket.join(userRoom(user.id));
     const visible = await chat.showsPresence(user.id).catch(() => true);
     socket.data.presenceVisible = visible;
     if (socket.disconnected) return;
@@ -529,7 +581,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', async () => {
     // Only clear presence when this was the user's last socket — a second tab
     // closing must not show them offline.
-    const remaining = await io.in(`user:${user.id}`).fetchSockets();
+    const remaining = await io.in(userRoom(user.id)).fetchSockets();
     if (remaining.length === 0) {
       const at = new Date();
       if (redisReady) await presence.del(connectedKey(user.id)).catch(() => 0);
@@ -545,7 +597,7 @@ io.on('connection', (socket) => {
       await recomputePresence(io, redisReady ? presence : null, user.id).catch(() => {});
     }
   });
-});
+}
 
 app.get('/health', async (_req, res) => {
   const checks: Record<string, string> = { socketio: 'ok' };

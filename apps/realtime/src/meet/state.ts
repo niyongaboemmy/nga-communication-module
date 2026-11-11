@@ -1,3 +1,5 @@
+import { scopedRoom } from '@tupo/shared';
+import { effectiveTid } from '@tupo/tenancy';
 import type { MeetParticipant, MeetRole, MeetReaction, MeetSettings } from '@tupo/shared';
 import { DEFAULT_MEET_SETTINGS, MAX_CONCURRENT_SHARES } from '@tupo/shared';
 
@@ -43,6 +45,9 @@ export class MeetRoom {
   activeSpeakerId: string | null = null;
   lastSummaryAt = 0;
   lastSummarySegments = 0;
+
+  /** The tenant the meeting belongs to: timers that touch the database re-enter it. */
+  readonly tid: number = effectiveTid('meet room');
 
   constructor(readonly meetingId: string) {}
 
@@ -159,7 +164,8 @@ export function dropRoomIfEmpty(meetingId: string): void {
   if (room?.isEmpty) rooms.delete(meetingId);
 }
 
-export const roomKey = (meetingId: string) => `meet:${meetingId}`;
+/** `t<tid>:meet:<id>` -- tenant-scoped like every room (contract §8). */
+export const roomKey = (meetingId: string, tid?: number) => scopedRoom(`meet:${meetingId}`, tid);
 export const hostKey = (meetingId: string) => `meet:${meetingId}:hosts`;
 export const breakoutKey = (breakoutId: string) => `meet:breakout:${breakoutId}`;
 

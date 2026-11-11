@@ -1,4 +1,6 @@
 import { Redis } from 'ioredis';
+import { conversationRoom, userRoom } from '@tupo/shared';
+import { effectiveTid } from '@tupo/tenancy';
 import { config } from '../config.js';
 
 /**
@@ -19,8 +21,10 @@ export const CHAT_CHANNEL = 'tupo:chat';
 
 /** What the gateway subscribes to. Rooms are addressed by name, not by socket. */
 export interface ChatRelayMessage {
-  /** `conv:<id>` or `user:<id>` room names to deliver to. */
+  /** `t<tid>:conv:<id>` or `t<tid>:user:<id>` room names to deliver to. */
   rooms: string[];
+  /** The tenant the rooms belong to; the gateway drops any room outside it. */
+  tid?: number;
   event: string;
   payload: unknown;
   /** A socket id to skip — the sender's own, when it already applied the change
@@ -79,7 +83,7 @@ export function publishSessionEnd(userIds: string[]): void {
   if (!userIds.length) return;
   const client = getPublisher();
   if (!client) return;
-  void publishWhenReady(client, LOGOUT_CHANNEL, JSON.stringify({ userIds })).catch(() => {});
+  void publishWhenReady(client, LOGOUT_CHANNEL, JSON.stringify({ userIds, tid: effectiveTid('socket relay') })).catch(() => {});
 }
 
 function relay(msg: ChatRelayMessage): void {
@@ -88,19 +92,19 @@ function relay(msg: ChatRelayMessage): void {
   if (!client) return;
   // Deliberately not awaited: an emit is best-effort and must not add latency
   // to the request that triggered it.
-  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify(msg)).catch(() => {});
+  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ ...msg, tid: effectiveTid('socket relay') })).catch(() => {});
 }
 
 /** Everyone with this conversation open. */
 export function emitToConversation(
   conversationId: string, event: string, payload: unknown, exceptSocketId?: string,
 ): void {
-  relay({ rooms: [`conv:${conversationId}`], event, payload, exceptSocketId });
+  relay({ rooms: [conversationRoom(conversationId)], event, payload, exceptSocketId });
 }
 
 /** Every device belonging to these people, whatever they have open. */
 export function emitToUsers(userIds: string[], event: string, payload: unknown): void {
-  relay({ rooms: [...new Set(userIds)].filter(Boolean).map((id) => `user:${id}`), event, payload });
+  relay({ rooms: [...new Set(userIds)].filter(Boolean).map((id) => userRoom(id)), event, payload });
 }
 
 /**
@@ -123,7 +127,7 @@ export function evictFromRooms(userIds: string[], rooms: string[]): void {
   if (!userIds.length || !rooms.length) return;
   const client = getPublisher();
   if (!client) return;
-  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ leave: { userIds, rooms } })).catch(() => {});
+  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ leave: { userIds, rooms }, tid: effectiveTid('socket relay') })).catch(() => {});
 }
 
 /**
@@ -133,7 +137,7 @@ export function evictFromRooms(userIds: string[], rooms: string[]): void {
 export function publishMeetEnded(meetingId: string, by: string | null): void {
   const client = getPublisher();
   if (!client) return;
-  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ meetEnded: { meetingId, by } })).catch(() => {});
+  void publishWhenReady(client, CHAT_CHANNEL, JSON.stringify({ meetEnded: { meetingId, by }, tid: effectiveTid('socket relay') })).catch(() => {});
 }
 
 export async function closeChatRealtime(): Promise<void> {

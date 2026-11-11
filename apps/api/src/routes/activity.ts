@@ -1,5 +1,27 @@
 import express, { Router, type Request, type Response, type NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+import { gateTenant, runWithTenant } from '@tupo/tenancy';
 import { activity } from '../activity/relay.js';
+import { config } from '../config.js';
+import { tidOf } from '../middleware/tenant.js';
+
+/**
+ * No auth middleware here, so enter the session's school ourselves: the
+ * session lookup reads users under RLS, and the relay stamps each event with
+ * that school's tid. Visitors (no or invalid session) run without one.
+ */
+async function inSessionTenant(req: Request, fn: () => unknown): Promise<unknown> {
+  try {
+    const header = req.headers.authorization;
+    if (header?.startsWith('Bearer ')) {
+      const gate = await gateTenant(tidOf(jwt.verify(header.slice(7), config.jwtSecret) as any));
+      if (gate.ok) return await runWithTenant(gate.tenant, fn);
+    }
+  } catch {
+    /* visitor */
+  }
+  return fn();
+}
 
 /**
  * Platform usage analytics intake (USAGE_ANALYTICS_IMPLEMENTATION_PLAN.md §5.2).
@@ -16,7 +38,7 @@ const router = Router();
 router.post(
   '/',
   express.json({ limit: '256kb', type: ['application/json', 'text/plain'] }),
-  (req: Request, res: Response) => activity().handler(req, res),
+  (req: Request, res: Response) => inSessionTenant(req, () => activity().handler(req, res)),
 );
 
 router.get('/config', (req: Request, res: Response) => activity().configHandler(req, res));

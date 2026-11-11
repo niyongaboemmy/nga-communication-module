@@ -37,7 +37,7 @@ export async function saveSubscription(userId: string, sub: PushSubscriptionInpu
   await getPool().query(
     `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, user_agent)
      VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (endpoint) DO UPDATE SET user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh,
+     ON CONFLICT (tenant_id, endpoint) DO UPDATE SET user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh,
        auth = EXCLUDED.auth, user_agent = EXCLUDED.user_agent, failures = 0`,
     [snowflake(), userId, sub.endpoint, sub.keys.p256dh, sub.keys.auth, userAgent?.slice(0, 300) ?? null],
   );

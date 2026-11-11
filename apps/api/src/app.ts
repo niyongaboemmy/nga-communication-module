@@ -24,6 +24,7 @@ import oversightRoutes from './routes/oversight.js';
 import dashboardRoutes from './routes/dashboard.js';
 import accessRoutes from './routes/access.js';
 import integrationRoutes from './routes/integration.js';
+import tenantRoutes from './routes/tenants.js';
 import activityRoutes from './routes/activity.js';
 import aiRoutes from './routes/ai.js';
 import systemRoutes from './routes/system.js';
@@ -99,6 +100,7 @@ app.use('/api/access', accessRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/system', systemRoutes);
 // Called by the MIS server with the user's MIS token, not a Tupo session.
+app.use('/api/integration/tenants', tenantRoutes);
 app.use('/api/integration', integrationRoutes);
 
 app.use((_req, res) => res.status(404).json(fail('Not found')));
@@ -123,6 +125,11 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
     const issue = (err as unknown as { issues?: Array<{ path: unknown[]; message: string }> }).issues?.[0];
     const where = issue?.path?.length ? `${issue.path.join('.')}: ` : '';
     return res.status(400).json(fail(`Invalid request — ${where}${issue?.message ?? 'check the values sent'}.`));
+  }
+  // Fail closed (TENANCY_MODE=enforce): a code path that reached the data
+  // layer without a tenant is refused, not run against some school.
+  if ((err as { code?: unknown }).code === 'TENANT_CONTEXT_MISSING') {
+    return res.status(401).json({ ...fail('No school is associated with this request.'), code: 'TENANT_REQUIRED' });
   }
   // Domain errors (ChatError, FeedError, MailError, …) carry their own status.
   const status = (err as { status?: unknown }).status;

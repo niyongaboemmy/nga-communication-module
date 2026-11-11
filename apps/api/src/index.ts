@@ -1,4 +1,4 @@
-import { pingDb, closeDb } from '@tupo/db';
+import { pingDb, closeDb, guardDbRole } from '@tupo/db';
 import { config } from './config.js';
 import { app } from './app.js';
 import { installProcessGuards } from './utils/asyncErrors.js';
@@ -24,6 +24,13 @@ async function start(): Promise<void> {
     console.log('[api] database connection ok');
   } catch (err) {
     console.error('[api] cannot reach the database:', err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+  // A superuser / BYPASSRLS role skips row-level security: enforce refuses, shadow warns.
+  try {
+    await guardDbRole('api');
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : err);
     process.exit(1);
   }
 

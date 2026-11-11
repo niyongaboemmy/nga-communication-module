@@ -1,6 +1,6 @@
 // VENDORED from nga_central_mis/packages/activity/src/relay.ts -- do not edit.
 // Re-sync with: node nga_central_mis/packages/activity/sync.mjs --relay <this dir>
-// sha256:b9e5e8d13a755d9aa3805b5910515d5d0d84a36b126dbfd0a3f09fba96343934
+// sha256:19b2429e15dc328368076a83a45b239f65f5e43c1a67d8b9ff6b618c79768dbd
 /**
  * nga-activity relay: the server half each satellite app mounts
  * (USAGE_ANALYTICS_IMPLEMENTATION_PLAN.md §5.2).
@@ -14,6 +14,12 @@
  *      gzipped, with the app's SSO client credentials;
  *   5. answers the browser at once, so analytics never slows the app down.
  * A MIS outage costs at most `maxQueue` batches. The app itself is never affected.
+ *
+ * Multi-tenancy (packages/tenancy/CONTRACT.md): every batch and server event carries
+ * the `tid` of the school it happened in, read from `currentTenant` (pass the app's
+ * vendored `currentTenantOrNull`) when it is queued. One flush may mix schools; MIS
+ * groups by `tid` and checks this app is enabled for each. When a flush holds a single
+ * school, X-NGA-Tenant is sent as well (older MIS builds read only the header).
  *
  * Framework-agnostic: handlers take Express-like (req, res).
  */
@@ -34,6 +40,8 @@ export interface RelayOptions {
   origins: string[];
   /** The MIS user id behind this request's session, or null. Must never throw. */
   getUserId: (req: any) => number | null | Promise<number | null>;
+  /** The school the current request/job runs for: pass the vendored `currentTenantOrNull`. */
+  currentTenant?: () => { tid: number } | null | undefined;
   flushMs?: number;
   maxQueue?: number;
   timeoutMs?: number;
@@ -42,6 +50,7 @@ export interface RelayOptions {
 }
 
 interface Batch {
+  tid?: number;
   user_id: number | null;
   ip: string | null;
   ua: string | null;
@@ -49,6 +58,7 @@ interface Batch {
   envelope: any;
 }
 interface ServerEvent {
+  tid?: number;
   id: string;
   n: string;
   t: number;
@@ -104,6 +114,15 @@ export const createActivityRelay = (opts: RelayOptions) => {
   const maxQueue = opts.maxQueue ?? 10_000;
   const anon = new Bucket(30, 30 / 60_000);
   const origins = new Set(opts.origins.map((o) => o.replace(/\/$/, "")));
+  /** The current school's id, or undefined (MIS then uses the header / tenant 1). */
+  const tidNow = (): number | undefined => {
+    try {
+      const tid = Number(opts.currentTenant?.()?.tid);
+      return Number.isSafeInteger(tid) && tid > 0 ? tid : undefined;
+    } catch {
+      return undefined;
+    }
+  };
 
   let batches: Batch[] = [];
   let serverEvents: ServerEvent[] = [];
@@ -115,7 +134,7 @@ export const createActivityRelay = (opts: RelayOptions) => {
     // Coalesce presence: keep only the newest beat per tab inside the window.
     const tab = b.envelope?.tab;
     if (tab && b.envelope?.beat && !(b.envelope.events?.length)) {
-      const i = batches.findIndex((x) => x.envelope?.tab === tab && x.envelope?.did === b.envelope.did && !(x.envelope.events?.length));
+      const i = batches.findIndex((x) => x.tid === b.tid && x.envelope?.tab === tab && x.envelope?.did === b.envelope.did && !(x.envelope.events?.length));
       if (i >= 0) batches.splice(i, 1);
     }
     batches.push(b);
@@ -132,11 +151,18 @@ export const createActivityRelay = (opts: RelayOptions) => {
     const sendS = serverEvents.splice(0, 500);
     try {
       const body = gzipSync(Buffer.from(JSON.stringify({ app: opts.app, batches: sendB, server_events: sendS })));
+      const tids = new Set([...sendB, ...sendS].map((x) => x.tid ?? 0));
+      const only = tids.size === 1 ? [...tids][0] : 0;
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 5_000);
       const res = await doFetch(`${base}/activity/ingest`, {
         method: "POST",
-        headers: { Authorization: auth, "Content-Type": "application/json", "Content-Encoding": "gzip" },
+        headers: {
+          Authorization: auth,
+          "Content-Type": "application/json",
+          "Content-Encoding": "gzip",
+          ...(only ? { "X-NGA-Tenant": String(only) } : {}),
+        },
         body,
         signal: ctrl.signal,
       } as any).finally(() => clearTimeout(timer));
@@ -191,7 +217,9 @@ export const createActivityRelay = (opts: RelayOptions) => {
         if (!anon.take(ip ?? "unknown")) return res.status(204).end();
       }
       delete env.user_id;
+      const tid = tidNow();
       enqueue({
+        ...(tid ? { tid } : {}),
         user_id: userId,
         ip,
         ua: String(req.get?.("User-Agent") || req.headers?.["user-agent"] || "").slice(0, 512) || null,
@@ -229,7 +257,8 @@ export const createActivityRelay = (opts: RelayOptions) => {
   /** Server-side key event (counted even if the browser closed). */
   const track = (userId: number | null, deviceId: string | null, name: string, params?: Record<string, unknown>, ip?: string | null) => {
     if (!/^[a-z][a-z0-9_.]{0,63}$/.test(name)) return;
-    serverEvents.push({ id: ulid(), n: name, t: Date.now(), user_id: userId, did: deviceId && /^[A-Za-z0-9_-]{22}$/.test(deviceId) ? deviceId : null, ip: ip ?? null, p: params });
+    const tid = tidNow();
+    serverEvents.push({ ...(tid ? { tid } : {}), id: ulid(), n: name, t: Date.now(), user_id: userId, did: deviceId && /^[A-Za-z0-9_-]{22}$/.test(deviceId) ? deviceId : null, ip: ip ?? null, p: params });
     if (serverEvents.length > maxQueue) serverEvents.shift();
   };
 

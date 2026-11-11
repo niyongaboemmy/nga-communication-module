@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { config } from '../config.js';
-import { closeAttendanceLegs, OPEN_ATTENDANCE_LEG } from '@tupo/db';
+import { closeAttendanceLegs, OPEN_ATTENDANCE_LEG, TenantPool } from '@tupo/db';
+import { runWithoutTenant } from '@tupo/tenancy';
 
 /**
  * The realtime gateway's own database handle.
@@ -19,7 +20,9 @@ let pool: pg.Pool | null = null;
 
 export function getPool(): pg.Pool {
   if (!pool) {
-    pool = new pg.Pool({
+    // Tenant-scoped like @tupo/db's pool: every connection carries
+    // app.tenant_id for the RLS policies (packages/db/src/pool.ts).
+    pool = new TenantPool({
       connectionString: config.databaseUrl,
       max: 8,
       idleTimeoutMillis: 30_000,
@@ -32,7 +35,7 @@ export function getPool(): pg.Pool {
 
 export async function ping(): Promise<boolean> {
   try {
-    await getPool().query('SELECT 1');
+    await runWithoutTenant('health check', () => getPool().query('SELECT 1'));
     return true;
   } catch {
     return false;

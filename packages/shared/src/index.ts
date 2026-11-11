@@ -13,3 +13,4 @@ export * from './feedEvents.js';
 export * from './emoji.js';
 export * from './audit.js';
 export * from './myAi.js';
+export * from './tenantRooms.js';

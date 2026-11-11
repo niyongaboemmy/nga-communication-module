@@ -14,8 +14,13 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
+    "@tupo/chat": "*",
     "@tupo/db": "*",
+    "@tupo/feed": "*",
+    "@tupo/mail": "*",
+    "@tupo/notify": "*",
     "@tupo/shared": "*",
+    "@tupo/tenancy": "*",
     "bullmq": "^5.81.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
@@ -23,11 +28,7 @@
     "ioredis": "^5.11.1",
     "jsonwebtoken": "^9.0.2",
     "openai": "^4.104.0",
-    "zod": "^3.24.1",
-    "@tupo/chat": "*",
-    "@tupo/notify": "*",
-    "@tupo/mail": "*",
-    "@tupo/feed": "*"
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

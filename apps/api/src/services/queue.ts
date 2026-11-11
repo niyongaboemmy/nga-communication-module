@@ -1,4 +1,5 @@
 import { Queue } from 'bullmq';
+import { withJobTenant } from '@tupo/tenancy';
 import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
 import type { SessionClaims } from '@tupo/shared';
@@ -69,11 +70,11 @@ export async function enqueueMeetWrapUp(meetingId: string, host: SessionClaims):
   const q = getQueue();
   if (!q) return false;
   try {
-    await q.add('meet:wrap-up', {
+    await q.add('meet:wrap-up', withJobTenant({
       meetingId,
       actorId: host.id,
       token: serviceToken(host),
-    }, {
+    }), {
       // At most one wrap-up per meeting in the queue at a time.
       jobId: `meet-wrapup-${meetingId}`,
       // The models are the slow, flaky part; retry with backoff rather than
@@ -105,7 +106,7 @@ export async function enqueueUnfurl(data: {
   const q = getQueue();
   if (!q) return false;
   try {
-    await q.add('chat:unfurl', data, {
+    await q.add('chat:unfurl', withJobTenant(data), {
       // One retry. If somebody's server is down now it will probably still be
       // down in a minute, and a preview is not worth a retry storm.
       attempts: 2,
@@ -132,7 +133,7 @@ export async function enqueueMailSend(messageId: string): Promise<boolean> {
   const q = getQueue();
   if (!q) return false;
   try {
-    await q.add('mail:send', { messageId }, {
+    await q.add('mail:send', withJobTenant({ messageId }), {
       attempts: 4,
       backoff: { type: 'exponential', delay: 15_000 },
       removeOnComplete: 200,
@@ -149,7 +150,7 @@ export async function enqueueMailCampaign(campaignId: string): Promise<boolean> 
   const q = getQueue();
   if (!q) return false;
   try {
-    await q.add('mail:campaign', { campaignId }, {
+    await q.add('mail:campaign', withJobTenant({ campaignId }), {
       attempts: 3,
       backoff: { type: 'exponential', delay: 30_000 },
       removeOnComplete: 100,
@@ -166,7 +167,7 @@ export async function enqueueMailListSync(listId: string): Promise<boolean> {
   const q = getQueue();
   if (!q) return false;
   try {
-    await q.add('mail:list-sync', { listId }, {
+    await q.add('mail:list-sync', withJobTenant({ listId }), {
       attempts: 2, removeOnComplete: 50, removeOnFail: 20,
     });
     return true;
@@ -180,7 +181,7 @@ export async function enqueueFeedAnnounce(postId: string): Promise<boolean> {
   const q = getQueue();
   if (!q) return false;
   try {
-    await q.add('feed:announce', { postId }, {
+    await q.add('feed:announce', withJobTenant({ postId }), {
       jobId: `feed-announce-${postId}`,
       attempts: 3,
       backoff: { type: 'exponential', delay: 5_000 },

@@ -2,6 +2,7 @@ import os from 'node:os';
 import { statfs } from 'node:fs/promises';
 import type { Redis } from 'ioredis';
 import { getPool, writeSamples } from '@tupo/db';
+import { runAsPlatform } from '@tupo/tenancy';
 import { smtpConfigFromEnv, sendSmtp } from '@tupo/mail';
 import { partitionsAhead } from './partitions.js';
 
@@ -120,9 +121,10 @@ export function alertRules(): Rule[] {
       name: 'error_spike',
       describe: (v) => `${v} new errors were recorded in the last 10 minutes. See System › Errors.`,
       read: async () => {
-        const { rows } = await getPool().query<{ n: number }>(
+        // Every school's errors and the process-level ones (error_events has RLS, 0047).
+        const { rows } = await runAsPlatform('error spike alert', () => getPool().query<{ n: number }>(
           `SELECT COALESCE(sum(count), 0)::int AS n FROM error_events
-            WHERE last_at > now() - interval '10 minutes' AND status = 'open'`);
+            WHERE last_at > now() - interval '10 minutes' AND status = 'open'`));
         return rows[0]?.n ?? 0;
       },
       firing: (v) => v > T.errorSpike,
@@ -250,5 +252,6 @@ export async function evaluateAlerts(notify: Notifier = defaultNotifier(), rules
 /** What monitoring keeps, trimmed hourly. */
 export async function pruneMonitoring(): Promise<void> {
   await getPool().query(`DELETE FROM metric_samples WHERE at < now() - interval '14 days'`);
-  await getPool().query(`DELETE FROM error_events WHERE status <> 'open' AND last_at < now() - interval '90 days'`);
+  await runAsPlatform('monitoring prune', () =>
+    getPool().query(`DELETE FROM error_events WHERE status <> 'open' AND last_at < now() - interval '90 days'`));
 }

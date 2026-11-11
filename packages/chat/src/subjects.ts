@@ -1,4 +1,4 @@
-import { getPool, snowflake, activeUserSql } from '@tupo/db';
+import { getPool, snowflake, activeUserSql, subjectSpaceId } from '@tupo/db';
 import type { PoolClient } from 'pg';
 import type { ConversationSummary, MemberRole, SubjectSummary } from '@tupo/shared';
 import { ChatError, getConversation } from './service.js';
@@ -13,7 +13,6 @@ import { ChatError, getConversation } from './service.js';
  * as members, so the chat engine's own moderation rules apply unchanged.
  */
 
-const SUBJECT_SPACE = 'subjects';
 
 export interface MisSubject {
   id: string;
@@ -60,7 +59,7 @@ async function ensureGeneral(client: PoolClient, subjectId: string, createdBy: s
     `INSERT INTO conversations (id, space_id, type, slug, name, topic, is_private, created_by, member_count, subject_id, origin)
      VALUES ($1, $2, 'channel', $3, 'general', 'Everything about this subject', false, $4, 0, $5, 'subject')
      ON CONFLICT DO NOTHING`,
-    [snowflake(), SUBJECT_SPACE, slugFor(subjectId, 'general'), createdBy, subjectId],
+    [snowflake(), subjectSpaceId(), slugFor(subjectId, 'general'), createdBy, subjectId],
   );
 }
 
@@ -115,7 +114,7 @@ export async function syncUserSubjects(userId: string, subjects: MisSubject[]): 
     for (const s of list) {
       await client.query(
         `INSERT INTO subjects (id, name, code) VALUES ($1,$2,$3)
-         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, code = EXCLUDED.code, updated_at = now()`,
+         ON CONFLICT (tenant_id, id) DO UPDATE SET name = EXCLUDED.name, code = EXCLUDED.code, updated_at = now()`,
         [s.id, s.name, s.code],
       );
       await client.query(
@@ -204,14 +203,14 @@ export async function createSubjectChannel(
     await client.query('BEGIN');
     const { rows: clash } = await client.query(
       'SELECT 1 FROM conversations WHERE space_id = $1 AND lower(slug) = lower($2) AND deleted_at IS NULL',
-      [SUBJECT_SPACE, slug],
+      [subjectSpaceId(), slug],
     );
     if (clash.length) throw new ChatError('This subject already has a channel with that name.', 409);
 
     await client.query(
       `INSERT INTO conversations (id, space_id, type, slug, name, topic, is_private, created_by, member_count, subject_id, origin)
        VALUES ($1, $2, 'channel', $3, $4, $5, false, $6, 0, $7, 'subject')`,
-      [id, SUBJECT_SPACE, slug, name.toLowerCase().replace(/\s+/g, '-'), input.topic?.trim() || null, actorId, subjectId],
+      [id, subjectSpaceId(), slug, name.toLowerCase().replace(/\s+/g, '-'), input.topic?.trim() || null, actorId, subjectId],
     );
     const { rows: people } = await client.query<{ user_id: string; role: 'teacher' | 'student' }>(
       `SELECT us.user_id, us.role FROM user_subjects us

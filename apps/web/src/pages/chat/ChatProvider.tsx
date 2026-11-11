@@ -1,3 +1,4 @@
+import { currentSessionTid } from '../../lib/tenant';
 import React, {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from 'react';
@@ -388,7 +389,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (listFromNetwork.current) saveConversations(conversations);
   }, [conversations, saveConversations]);
   // The offline queue belongs to whoever is signed in.
-  useEffect(() => { outbox.setOutboxOwner(user?.id ?? null); }, [user]);
+  useEffect(() => { outbox.setOutboxOwner(user?.id ?? null, currentSessionTid()); }, [user]);
 
   /** Seed the per-thread counters from the Threads inbox. */
   const refreshThreadUnread = useCallback(async () => {

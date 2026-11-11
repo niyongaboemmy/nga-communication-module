@@ -1,4 +1,6 @@
 import { Router, type Request, type Response } from 'express';
+import { meetingTenant, withRequestTenant } from '../middleware/tenant.js';
+import { runWithoutTenant } from '@tupo/tenancy';
 import { getPool, snowflake, activeUserSql, filterActiveUserIds } from '@tupo/db';
 import {
   ok, fail, parseMeetSettings, meetRoleAtLeast, normalizeJoinCode,
@@ -72,8 +74,22 @@ async function guestRateLimited(ip: string): Promise<boolean> {
   return (await slidingHit('meet-guest-join', `ip:${ip}`, GUEST_WINDOW_SEC)) > GUEST_MAX_PER_WINDOW;
 }
 
+/**
+ * The two public guest routes have no session: they run in the tenant that
+ * owns the meeting (ids and join codes are unique across tenants). An
+ * unknown code falls through to the handlers' own 404.
+ */
+async function inMeetingTenant(req: Request, res: Response, next: () => void) {
+  const raw = req.params.idOrCode ?? '';
+  const tid = await meetingTenant(raw.includes('-') ? normalizeJoinCode(raw) : raw);
+  // Unknown: the handler runs with no tenant, finds nothing and answers its
+  // own 404 (after its rate limit, as before).
+  if (tid === null) return runWithoutTenant('unknown guest meeting', () => next());
+  await withRequestTenant(tid, res, () => next());
+}
+
 /** What a guest is told about a meeting *before* they commit to joining it. */
-router.get('/:idOrCode/public', async (req: Request, res: Response) => {
+router.get('/:idOrCode/public', inMeetingTenant, async (req: Request, res: Response) => {
   const raw = req.params.idOrCode ?? '';
   const m = await meet.findMeeting(raw.includes('-') ? normalizeJoinCode(raw) : raw);
   // A meeting that is not public is indistinguishable from one that does not
@@ -98,7 +114,7 @@ router.get('/:idOrCode/public', async (req: Request, res: Response) => {
   }));
 });
 
-router.post('/:idOrCode/guest', async (req: Request, res: Response) => {
+router.post('/:idOrCode/guest', inMeetingTenant, async (req: Request, res: Response) => {
   if (await guestRateLimited(req.ip ?? 'unknown')) {
     return res.status(429).json(fail('Too many attempts. Please wait a few minutes.'));
   }

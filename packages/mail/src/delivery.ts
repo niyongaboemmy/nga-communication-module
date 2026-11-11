@@ -44,7 +44,7 @@ export async function suppress(
   await getPool().query(
     `INSERT INTO mail_suppressions (address, reason, note, source_message_id, created_by)
      VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (address) DO UPDATE SET reason = EXCLUDED.reason, note = EXCLUDED.note`,
+     ON CONFLICT (tenant_id, address) DO UPDATE SET reason = EXCLUDED.reason, note = EXCLUDED.note`,
     [address.toLowerCase(), reason, note, sourceMessageId ?? null, by ?? null],
   );
 }

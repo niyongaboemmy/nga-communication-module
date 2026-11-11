@@ -1,3 +1,5 @@
+import { conversationRoom, userRoom } from '@tupo/shared';
+import { effectiveTid } from '@tupo/tenancy';
 import { Redis } from 'ioredis';
 import * as chat from '@tupo/chat';
 
@@ -81,7 +83,8 @@ export async function runScheduledMessages(redisUrl: string): Promise<ScheduledS
       if (client && result.created) {
         const members = await chat.memberIdsOf(item.conversationId);
         await client.publish(CHAT_CHANNEL, JSON.stringify({
-          rooms: [`conv:${item.conversationId}`],
+          rooms: [conversationRoom(item.conversationId)],
+          tid: effectiveTid('socket relay'),
           event: 'message:new',
           payload: { conversationId: item.conversationId, message: result.message },
         })).catch(() => {});
@@ -90,7 +93,8 @@ export async function runScheduledMessages(redisUrl: string): Promise<ScheduledS
           members.filter((m) => m !== item.senderId), item.conversationId);
         for (const [userId, c] of Object.entries(counts)) {
           await client.publish(CHAT_CHANNEL, JSON.stringify({
-            rooms: [`user:${userId}`],
+            rooms: [userRoom(userId)],
+            tid: effectiveTid('socket relay'),
             event: 'conversation:unread',
             payload: {
               conversationId: item.conversationId,

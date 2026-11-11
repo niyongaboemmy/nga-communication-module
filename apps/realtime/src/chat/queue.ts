@@ -1,4 +1,5 @@
 import { Queue } from 'bullmq';
+import { withJobTenant } from '@tupo/tenancy';
 import { Redis } from 'ioredis';
 
 /**
@@ -41,7 +42,7 @@ export async function enqueueUnfurl(data: {
 }): Promise<void> {
   if (!data.body || !/https?:\/\//.test(data.body)) return;
   try {
-    await getQueue()?.add('chat:unfurl', data, {
+    await getQueue()?.add('chat:unfurl', withJobTenant(data), {
       attempts: 2,
       backoff: { type: 'fixed', delay: 20_000 },
       removeOnComplete: 50,

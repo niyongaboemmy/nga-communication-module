@@ -1,3 +1,4 @@
+import { effectiveTid } from '@tupo/tenancy';
 import { getPool, snowflake } from '@tupo/db';
 import { Redis } from 'ioredis';
 import { sendWebPush } from './webPush.js';
@@ -349,6 +350,8 @@ export async function push(rows: NotificationRow[]): Promise<void> {
     try {
       await publishWhenReady(client, NOTIFY_CHANNEL, JSON.stringify({
         userIds, notification: toWire(row),
+        // The gateway delivers only into this tenant's `t<tid>:user:` rooms.
+        tid: effectiveTid('notification relay'),
       }));
     } catch {
       // Stored but not pushed: the client picks it up on its next fetch.
@@ -384,7 +387,7 @@ export async function relay(rooms: string[], event: string, payload: unknown): P
   const client = getPublisher();
   if (!client) return;
   try {
-    await publishWhenReady(client, 'tupo:chat', JSON.stringify({ rooms, event, payload }));
+    await publishWhenReady(client, 'tupo:chat', JSON.stringify({ rooms, event, payload, tid: effectiveTid('socket relay') }));
   } catch {
     // Live delivery is best effort; the feed is read from the database anyway.
   }

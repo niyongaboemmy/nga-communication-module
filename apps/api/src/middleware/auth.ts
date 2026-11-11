@@ -6,6 +6,7 @@ import type { Role, RoleLevel, SessionClaims } from '@tupo/shared';
 import { config } from '../config.js';
 import { attachAccess, type RequestAccess } from '../access/gate.js';
 import { issuedBeforeRevocation } from '../utils/ssoLogout.js';
+import { misTokenTid, sendTenantMismatch, tidOf, withRequestTenant } from './tenant.js';
 
 export interface AuthenticatedRequest extends Request {
   user?: SessionClaims & {
@@ -37,6 +38,24 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     return res.status(401).json(fail('Invalid or expired authorization token.'));
   }
 
+  // Multi-tenancy (contract §6): the session names its school (`tid`, copied
+  // from the MIS SSO token at sign-in; legacy sessions -> tenant 1 while
+  // TENANCY_LEGACY_DEFAULT_TID allows it). The MIS token nested in it must
+  // speak for the same school. Everything below runs inside that tenant.
+  const sessionTid = tidOf(decoded);
+  if (decoded.misToken) {
+    const misTid = misTokenTid(decoded.misToken);
+    if (misTid !== null && misTid !== sessionTid) return sendTenantMismatch(res);
+  }
+  try {
+    await withRequestTenant(sessionTid, res, () => authenticateInTenant(req, res, next, decoded));
+  } catch (err) {
+    console.error('[api] tenant check failed:', err);
+    return res.status(503).json(fail('The service is busy. Please try again in a moment.'));
+  }
+}
+
+async function authenticateInTenant(req: Request, res: Response, next: NextFunction, decoded: SessionClaims) {
   const pool = getPool();
   // Everything below touches the database. A blip there is "try again", never
   // a crash — and never a 401 that would sign the person out for nothing.

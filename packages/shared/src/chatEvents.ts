@@ -1,3 +1,4 @@
+import { scopedRoom } from './tenantRooms.js';
 /**
  * The chat socket catalogue (SRS §9.2).
  *
@@ -249,5 +250,6 @@ export interface ChatServerToClientEvents {
  *  userId → name, each field refreshed on every keystroke burst. */
 export const typingKey = (conversationId: string) => `typing:${conversationId}`;
 
-export const conversationRoom = (conversationId: string) => `conv:${conversationId}`;
-export const userRoom = (userId: string) => `user:${userId}`;
+/** Room names carry the tenant (`t<tid>:conv:<id>`) — see tenantRooms.ts. */
+export const conversationRoom = (conversationId: string, tid?: number) => scopedRoom(`conv:${conversationId}`, tid);
+export const userRoom = (userId: string, tid?: number) => scopedRoom(`user:${userId}`, tid);

@@ -5,6 +5,7 @@ import {
   createActivityRelay, type ActivityRelay, type RelayOptions,
 } from '../vendor/nga-activity-relay/relay.js';
 import { config } from '../config.js';
+import { currentTenantOrNull } from '@tupo/tenancy';
 import { issuedBeforeRevocation } from '../utils/ssoLogout.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 
@@ -114,6 +115,8 @@ export function buildActivity(env: ActivityEnv, overrides: Partial<RelayOptions>
     clientSecret,
     origins: (env.origins?.trim() || DEFAULT_ACTIVITY_ORIGINS).split(',').map((o) => o.trim()).filter(Boolean),
     getUserId: misUserIdFromSession,
+    // Each event carries the school it happened in (MIS files it there).
+    currentTenant: currentTenantOrNull,
     ...overrides,
   });
   const track: TupoActivity['track'] = (misUserId, req, name, params) => {
