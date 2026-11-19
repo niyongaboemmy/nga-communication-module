@@ -52,13 +52,21 @@ export function decryptSecret(stored: string, env: NodeJS.ProcessEnv = process.e
 /* ── The school's mail server ────────────────────────────────────────────── */
 
 export interface MailServerConfig {
+  /** The mailbox server tried first (shown to people). */
   imapHost: string | null;
   imapPort: number;
   imapSecure: boolean;
+  /** Sending as a person: this host when set, otherwise the mailbox server that accepted their login. */
   smtpHost: string | null;
   smtpPort: number;
   smtpSecure: boolean;
-  /** Hosts a person may connect to. */
+  /**
+   * Hosts a person may connect to, in the order they are tried. A school's
+   * provider can run more than one: NGA's relay (mail.hackflix.net) is the
+   * incoming exchanger and refuses mailbox logins, while the mailboxes live on
+   * mail.supremecenter.com. Trying the list means one wrong guess in the
+   * settings does not lock everyone out.
+   */
   allowedHosts: string[];
   domain: string | null;
 }
@@ -68,8 +76,8 @@ const bool = (v: string | undefined, dflt: boolean) => (v === undefined || v ===
 export function mailServerConfig(env: NodeJS.ProcessEnv = process.env): MailServerConfig {
   const imapHost = (env.MAIL_IMAP_HOST || env.SMTP_HOST || '').trim() || null;
   const imapPort = parseInt(env.MAIL_IMAP_PORT ?? '', 10) || 993;
-  const smtpHost = (env.MAIL_ACCOUNT_SMTP_HOST || env.SMTP_HOST || imapHost || '').trim() || null;
-  const smtpPort = parseInt(env.MAIL_ACCOUNT_SMTP_PORT ?? env.SMTP_PORT ?? '', 10) || 465;
+  const smtpHost = (env.MAIL_ACCOUNT_SMTP_HOST || '').trim() || null;
+  const smtpPort = parseInt(env.MAIL_ACCOUNT_SMTP_PORT ?? '', 10) || 465;
   const from = env.MAIL_FROM || env.SMTP_USER || '';
   const domain = (env.MAIL_ACCOUNT_DOMAIN || bareAddress(from).split('@')[1] || '').trim().toLowerCase() || null;
   const extra = (env.MAIL_IMAP_HOSTS ?? '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
@@ -77,7 +85,7 @@ export function mailServerConfig(env: NodeJS.ProcessEnv = process.env): MailServ
     imapHost, imapPort,
     imapSecure: bool(env.MAIL_IMAP_SECURE, imapPort === 993),
     smtpHost, smtpPort,
-    smtpSecure: bool(env.MAIL_ACCOUNT_SMTP_SECURE ?? env.SMTP_SECURE, smtpPort === 465),
+    smtpSecure: bool(env.MAIL_ACCOUNT_SMTP_SECURE, smtpPort === 465),
     allowedHosts: [...new Set([...(imapHost ? [imapHost.toLowerCase()] : []), ...extra])],
     domain,
   };
@@ -106,24 +114,29 @@ export function imapClient(l: ImapLogin): ImapFlow {
   });
 }
 
-/** Log in and out. Returns null when it works, otherwise words for the person. */
-export async function checkImapLogin(l: ImapLogin): Promise<string | null> {
+export type ImapLoginCheck =
+  | { ok: true }
+  | { ok: false; kind: 'auth' | 'unreachable' | 'other'; message: string; detail: string };
+
+/** Log in and out. Says why it failed, in words for the person and in detail for the log. */
+export async function checkImapLogin(l: ImapLogin): Promise<ImapLoginCheck> {
   const client = imapClient(l);
   client.on('error', () => { /* reported through the promise */ });
   try {
     await client.connect();
     await client.logout().catch(() => {});
-    return null;
+    return { ok: true };
   } catch (e) {
-    const err = e as { authenticationFailed?: boolean; code?: string; message?: string; responseText?: string };
+    const err = e as { authenticationFailed?: boolean; code?: string; message?: string; responseText?: string; serverResponseCode?: string };
     client.close();
+    const detail = [err.code, err.serverResponseCode, err.responseText, err.message].filter(Boolean).join(' | ').slice(0, 300);
     if (err.authenticationFailed || /auth|login|credentials|password/i.test(`${err.responseText ?? ''} ${err.message ?? ''}`)) {
-      return 'The email address or password is not right.';
+      return { ok: false, kind: 'auth', message: 'The email address or password is not right.', detail };
     }
     if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || /timeout/i.test(err.message ?? '')) {
-      return 'The mail server could not be reached. Try again in a moment.';
+      return { ok: false, kind: 'unreachable', message: 'The mail server could not be reached. Try again in a moment.', detail };
     }
-    return `The mail server refused the connection${err.message ? ` (${err.message.slice(0, 120)})` : ''}.`;
+    return { ok: false, kind: 'other', message: `The mail server refused the connection${err.message ? ` (${err.message.slice(0, 120)})` : ''}.`, detail };
   }
 }
 
@@ -187,16 +200,26 @@ export async function connectMailAccount(
   const username = String(payload.username ?? '').trim() || address;
   if (!EMAIL.test(address) || address.length > 254) throw new MailError('Enter your full email address.');
   if (!password || password.length > 512) throw new MailError('Enter your email password.');
-  if (!cfg.allowedHosts.includes(cfg.imapHost.toLowerCase())) throw new MailError('That mail server is not allowed.', 400);
-
-  const login: ImapLogin = { host: cfg.imapHost, port: cfg.imapPort, secure: cfg.imapSecure, user: username, pass: password };
-  const problem = await checkImapLogin(login);
-  if (problem) throw new MailError(problem, 400);
-  // Sending as the person needs their SMTP login too; a server that refuses
-  // it still allows receiving, so it only turns "send as me" off.
-  const canSend = cfg.smtpHost
-    ? await checkSmtpLogin(cfg.smtpHost, cfg.smtpPort, cfg.smtpSecure, username, password)
-    : false;
+  // Each allowed mailbox server in turn; the first that accepts the login is
+  // the person's. Refusals are logged with the server's own words (never the
+  // password), so a wrong server setting is visible in the logs.
+  let accepted: string | null = null;
+  const failures: Array<Extract<ImapLoginCheck, { ok: false }>> = [];
+  for (const host of cfg.allowedHosts) {
+    const r = await checkImapLogin({ host, port: cfg.imapPort, secure: cfg.imapSecure, user: username, pass: password });
+    if (r.ok) { accepted = host; break; }
+    console.warn(`[mail] mailbox login for ${address} refused by ${host}: ${r.detail}`);
+    failures.push(r);
+  }
+  if (!accepted) {
+    const shown = failures.find((f) => f.kind === 'auth') ?? failures.find((f) => f.kind === 'other') ?? failures[0];
+    throw new MailError(shown?.message ?? 'The mail server could not be reached.', 400);
+  }
+  // Sending as the person needs their SMTP login too: on the configured host,
+  // or the mailbox server that just accepted them. A refusal only turns
+  // "send from my address" off; receiving still works.
+  const smtpHost = cfg.smtpHost ?? accepted;
+  const canSend = await checkSmtpLogin(smtpHost, cfg.smtpPort, cfg.smtpSecure, username, password);
 
   const secret = encryptSecret(password, env);
   const { rows } = await getPool().query<MailAccountRow>(
@@ -212,8 +235,8 @@ export async function connectMailAccount(
        uid_validity = CASE WHEN mail_accounts.address = EXCLUDED.address THEN mail_accounts.uid_validity END,
        last_uid = CASE WHEN mail_accounts.address = EXCLUDED.address THEN mail_accounts.last_uid ELSE 0 END
      RETURNING *`,
-    [snowflake(), userId, address, username, secret, cfg.imapHost, cfg.imapPort, cfg.imapSecure,
-     canSend ? cfg.smtpHost : null, canSend ? cfg.smtpPort : null, cfg.smtpSecure,
+    [snowflake(), userId, address, username, secret, accepted, cfg.imapPort, cfg.imapSecure,
+     canSend ? smtpHost : null, canSend ? cfg.smtpPort : null, cfg.smtpSecure,
      canSend && payload.sendAs !== false],
   );
   return toView(rows[0]!);

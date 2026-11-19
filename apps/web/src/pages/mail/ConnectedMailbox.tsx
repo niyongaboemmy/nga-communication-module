@@ -215,7 +215,7 @@ export const ConnectedMailbox: React.FC = () => {
               </button>
             </div>
             <p className="mt-1 text-xs text-text-secondary-light dark:text-text-secondary-dark">
-              The password of your mailbox on {settings.imapHost}, not your Tupo sign-in. It is checked with the mail server, then kept encrypted.
+              Your school email password: the one you use for webmail, not your Tupo sign-in. It is checked with the mail server, then kept encrypted.
             </p>
           </div>
           <label className="flex items-center gap-2 text-sm">
