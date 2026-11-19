@@ -69,15 +69,27 @@ share_secret MAIL_LINK_SECRET "$API_ENV" "$WORKER_ENV"
 # The key that encrypts connected mailboxes' passwords: the api stores them,
 # the worker reads mailboxes with them, so both hold the same key.
 share_secret MAIL_ACCOUNT_KEY "$API_ENV" "$WORKER_ENV"
-# The school's mail server is the relay's host (mail.hackflix.net for NGA):
-# it also speaks IMAP on 993. The api never had SMTP_HOST (only the worker
-# sends), so it learns the host, and the domain to suggest, from here.
+# The mailbox server. NOT the relay: NGA's relay (mail.hackflix.net) is the
+# incoming exchanger and refuses mailbox logins; the mailboxes (and webmail)
+# live on the provider's server, mail.supremecenter.com (= imap/smtp.hackflix.net).
+# Another school sets TUPO_MAILBOX_HOST. The relay stays as a fallback host,
+# tried second (MAIL_IMAP_HOSTS). The first release copied the relay's host
+# into MAIL_IMAP_HOST; that copy is corrected here, a hand-set value is not.
+MAILBOX_HOST="${TUPO_MAILBOX_HOST:-mail.supremecenter.com}"
 if has SMTP_HOST "$WORKER_ENV"; then
-  MAILHOST="$(grep '^SMTP_HOST=' "$WORKER_ENV" | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
+  RELAYHOST="$(grep '^SMTP_HOST=' "$WORKER_ENV" | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
   for f in "$API_ENV" "$WORKER_ENV"; do
-    if [ -n "$MAILHOST" ] && ! has MAIL_IMAP_HOST "$f"; then
-      printf '\n# Added by scripts/deploy-setup.sh (connected mailboxes)\nMAIL_IMAP_HOST=%s\n' "$MAILHOST" >> "$f"
+    CUR="$(grep '^MAIL_IMAP_HOST=' "$f" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
+    if [ -z "$CUR" ]; then
+      printf '\n# Added by scripts/deploy-setup.sh (connected mailboxes)\nMAIL_IMAP_HOST=%s\n' "$MAILBOX_HOST" >> "$f"
       echo "setup: MAIL_IMAP_HOST added to $f"
+    elif [ "$CUR" = "$RELAYHOST" ] && [ "$CUR" != "$MAILBOX_HOST" ]; then
+      sed -i "s|^MAIL_IMAP_HOST=.*|MAIL_IMAP_HOST=$MAILBOX_HOST|" "$f"
+      echo "setup: MAIL_IMAP_HOST corrected to the mailbox server in $f"
+    fi
+    if [ -n "$RELAYHOST" ] && [ "$RELAYHOST" != "$MAILBOX_HOST" ] && ! has MAIL_IMAP_HOSTS "$f"; then
+      printf '\n# Added by scripts/deploy-setup.sh (fallback mailbox host)\nMAIL_IMAP_HOSTS=%s\n' "$RELAYHOST" >> "$f"
+      echo "setup: MAIL_IMAP_HOSTS added to $f"
     fi
   done
   if ! has MAIL_ACCOUNT_DOMAIN "$API_ENV" && has MAIL_FROM "$WORKER_ENV"; then

@@ -91,6 +91,15 @@ describe('the school mail server', () => {
     expect(cfg).toMatchObject({ imapHost: 'mail.hackflix.net', imapPort: 993, imapSecure: true, domain: 'nga.ac.rw' });
     expect(cfg.allowedHosts).toEqual(['mail.hackflix.net']);
   });
+  it('tries the mailbox server first, then the fallbacks; sending follows the login unless set', () => {
+    const cfg = mailServerConfig({
+      SMTP_HOST: 'mail.hackflix.net', MAIL_IMAP_HOST: 'mail.supremecenter.com', MAIL_IMAP_HOSTS: 'mail.hackflix.net, Mail.Hackflix.net',
+    } as NodeJS.ProcessEnv);
+    expect(cfg.allowedHosts).toEqual(['mail.supremecenter.com', 'mail.hackflix.net']);
+    // Not the relay: the relay refuses people's own logins.
+    expect(cfg.smtpHost).toBeNull();
+    expect(cfg).toMatchObject({ smtpPort: 465, smtpSecure: true });
+  });
   it('has no server, and reply capture is off, unless configured', () => {
     expect(mailServerConfig({} as NodeJS.ProcessEnv).imapHost).toBeNull();
     expect(replyCaptureEnabled({} as NodeJS.ProcessEnv)).toBe(false);
