@@ -1,6 +1,7 @@
 import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from '../../lib/api';
 import type { AiHandoffRequest } from '../../lib/handoff';
 import type {
+  MailAccountSettings, MailAccountView, MailAccountConnectPayload,
   MailThreadSummary, MailThreadView, MailLabel, MailboxCounts, MailFolder, MailPrefs,
   MailRecipientDelivery, MailDistributionList, MailTemplate, MailCampaignView, MailComposePayload,
   MailCampaignPayload, MailPerson, MailAiAction, MailAiComposeResult, MailAiSubjectResult,
@@ -77,6 +78,18 @@ export const getPrefs = () =>
 
 export const updatePrefs = (patch: Partial<MailPrefs>) =>
   apiPut<{ prefs: MailPrefs }>('/api/mail/prefs', patch).then((r) => r.data!.prefs);
+
+/* Connected school mailbox (docs/MAIL_INBOUND_PLAN_2026-11.md). */
+export const getMailAccount = () =>
+  apiGet<{ settings: MailAccountSettings }>('/api/mail/account').then((r) => r.data!.settings);
+export const connectMailAccount = (payload: MailAccountConnectPayload) =>
+  apiPost<{ account: MailAccountView }>('/api/mail/account', payload).then((r) => r.data!.account);
+export const updateMailAccount = (patch: { sendAs?: boolean; paused?: boolean }) =>
+  apiPatch<{ account: MailAccountView }>('/api/mail/account', patch).then((r) => r.data!.account);
+export const syncMailAccount = () =>
+  apiPost<{ queued: boolean }>('/api/mail/account/sync', {}).then((r) => r.data!);
+export const disconnectMailAccount = (purge: boolean) =>
+  apiDelete<{ removed: number }>(`/api/mail/account${purge ? '?purge=1' : ''}`);
 
 export const searchDirectory = (q: string) =>
   apiGet<{ people: MailPerson[] }>(`/api/mail/directory?q=${encodeURIComponent(q)}`)

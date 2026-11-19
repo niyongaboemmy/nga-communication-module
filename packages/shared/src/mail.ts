@@ -27,7 +27,8 @@ export const MAIL_DELIVERY_STATUSES = [
 ] as const;
 export type MailDeliveryStatus = (typeof MAIL_DELIVERY_STATUSES)[number];
 
-export const MAIL_CHANNELS = ['in_app', 'smtp'] as const;
+/** `inbound`: the copy of an email that came from outside (a connected mailbox or a caught reply). */
+export const MAIL_CHANNELS = ['in_app', 'smtp', 'inbound'] as const;
 export type MailChannel = (typeof MAIL_CHANNELS)[number];
 
 export const MAIL_LIST_ORIGINS = ['manual', 'mis:all', 'mis:role:Student', 'mis:role:Parent',
@@ -114,8 +115,13 @@ export interface MailThreadSummary {
   isDraft?: boolean;
 }
 
+/** Where a message came from: written in Tupo, imported from a connected mailbox, or an outside reply caught by the relay. */
+export type MailSource = 'tupo' | 'imap' | 'reply';
+
 export interface MailMessageView {
   id: string;
+  /** Absent on older payloads: treat as 'tupo'. */
+  source?: MailSource;
   threadId: string;
   from: MailPerson;
   to: MailPerson[];
@@ -366,4 +372,45 @@ export function normalizeSubject(subject: string): string {
     .trim()
     .toLowerCase()
     .slice(0, MAIL_MAX_SUBJECT);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Connected mailbox (docs/MAIL_INBOUND_PLAN_2026-11.md)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export interface MailAccountView {
+  address: string;
+  username: string;
+  imapHost: string;
+  imapPort: number;
+  sendAs: boolean;
+  /** Whether outgoing mail can use this account (SMTP checked at connect). */
+  canSend: boolean;
+  status: 'active' | 'error' | 'paused';
+  lastError: string | null;
+  lastSyncAt: string | null;
+  importedCount: number;
+  createdAt: string;
+}
+
+export interface MailAccountSettings {
+  /** False when the server has no mail server or no encryption key configured. */
+  available: boolean;
+  /** Why it is unavailable, in words for the person. */
+  unavailableReason: string | null;
+  imapHost: string | null;
+  imapPort: number;
+  /** The school's email domain, to suggest the address. */
+  domain: string | null;
+  /** Outside replies to Tupo mail are caught in the relay's mailbox. */
+  replyCapture: boolean;
+  account: MailAccountView | null;
+}
+
+export interface MailAccountConnectPayload {
+  address: string;
+  password: string;
+  /** Defaults to the address. */
+  username?: string;
+  sendAs?: boolean;
 }

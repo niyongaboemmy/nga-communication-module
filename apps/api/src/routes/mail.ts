@@ -18,7 +18,7 @@ const countsChanged = (userId: string) => emitToUsers([userId], 'mail:counts', {
 import { hasPermission } from '../access/gate.js';
 import { routeCampaignForApproval } from '../access/approvers.js';
 import { audit } from '../services/userService.js';
-import { enqueueMailSend, enqueueMailCampaign, enqueueMailListSync } from '../services/queue.js';
+import { enqueueMailSend, enqueueMailCampaign, enqueueMailListSync, enqueueMailAccountSync } from '../services/queue.js';
 import { clearMailThreadNotifications } from '../services/notificationSync.js';
 import { activity } from '../activity/relay.js';
 
@@ -217,6 +217,72 @@ router.get('/messages/:id/delivery', authorizePermission('MAIL_READ'), wrap(asyn
 /* ────────────────────────────────────────────────────────────────────────── *
  * Preferences & directory
  * ────────────────────────────────────────────────────────────────────────── */
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * Connected mailbox (docs/MAIL_INBOUND_PLAN_2026-11.md)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/*
+ * Connect tries are limited per person: every try is a login against the
+ * school's real mail server, and Tupo must not become a way to guess a
+ * colleague's password (or get the server to lock the account).
+ */
+const connectTries = new Map<string, number[]>();
+const CONNECT_WINDOW_MS = 10 * 60_000;
+const CONNECT_MAX = 5;
+
+router.get('/account', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  res.json(ok({ settings: await mail.mailAccountSettings(actor(req).id) }));
+}));
+
+router.post('/account', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  const now = Date.now();
+  const tries = (connectTries.get(me.id) ?? []).filter((t) => now - t < CONNECT_WINDOW_MS);
+  if (tries.length >= CONNECT_MAX) {
+    return res.status(429).json(fail('Too many tries. Wait ten minutes, then try again.'));
+  }
+  connectTries.set(me.id, [...tries, now]);
+  const b = req.body ?? {};
+  const account = await mail.connectMailAccount(me.id, {
+    address: str(b.address, 254), password: str(b.password, 512),
+    username: str(b.username, 254) || undefined, sendAs: b.sendAs !== false,
+  });
+  connectTries.delete(me.id);
+  await audit({ actorId: me.id, action: 'mail.account.connect', targetType: 'mail_account', targetId: me.id, metadata: { address: account.address, sendAs: account.sendAs } }).catch(() => {});
+  const row = await mail.accountRowFor(me.id);
+  if (row && !(await enqueueMailAccountSync(row.id))) {
+    // No queue (a dev box without the worker): read it here, in the background.
+    void mail.syncMailAccount(row.id).catch(() => {});
+  }
+  res.json(ok({ account }));
+}));
+
+router.patch('/account', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  const b = req.body ?? {};
+  const account = await mail.updateMailAccount(actor(req).id, {
+    sendAs: typeof b.sendAs === 'boolean' ? b.sendAs : undefined,
+    paused: typeof b.paused === 'boolean' ? b.paused : undefined,
+  });
+  res.json(ok({ account }));
+}));
+
+router.post('/account/sync', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  const row = await mail.accountRowFor(actor(req).id);
+  if (!row) return res.status(404).json(fail('No mailbox is connected.'));
+  if (row.status === 'paused') return res.status(409).json(fail('Syncing is paused. Resume it first.'));
+  if (await enqueueMailAccountSync(row.id)) return res.json(ok({ queued: true }));
+  const result = await mail.syncMailAccount(row.id);
+  res.json(ok({ queued: false, result }));
+}));
+
+router.delete('/account', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
+  const me = actor(req);
+  const result = await mail.disconnectMailAccount(me.id, { purge: req.query.purge === '1' });
+  await audit({ actorId: me.id, action: 'mail.account.disconnect', targetType: 'mail_account', targetId: me.id, metadata: { purged: result.removed } }).catch(() => {});
+  countsChanged(me.id);
+  res.json(ok(result));
+}));
 
 router.get('/prefs', authorizePermission('MAIL_READ'), wrap(async (req, res) => {
   res.json(ok({ prefs: await mail.getPrefs(actor(req).id) }));

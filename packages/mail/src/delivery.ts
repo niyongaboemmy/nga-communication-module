@@ -13,6 +13,8 @@ import type { PoolClient } from 'pg';
 import { getPool, snowflake } from '@tupo/db';
 import { notify, push } from '@tupo/notify';
 import { smtpConfigFromEnv, sendSmtp, bareAddress, type OutboundMail } from './smtp.js';
+import { sendAsLogin } from './accounts.js';
+import { replyCaptureLogin } from './inbound.js';
 import { wrapEmailHtml } from './render.js';
 import {
   emailAttachments, omittedNote, emailMessageId, threadHeaders, unsubscribeUrl,
@@ -63,7 +65,7 @@ export async function unsuppress(address: string): Promise<boolean> {
 export async function deliverInApp(messageId: string): Promise<number> {
   const pool = getPool();
   const { rows: msg } = await pool.query<{
-    from_user_id: string; from_name: string; subject: string; thread_id: string; snippet: string;
+    from_user_id: string | null; from_name: string; subject: string; thread_id: string; snippet: string;
     is_draft: boolean; scheduled_at: string | null; sent_at: string | null;
   }>(
     `SELECT from_user_id, from_name, subject, thread_id, snippet, is_draft, scheduled_at, sent_at
@@ -131,10 +133,10 @@ export async function deliverSmtp(
   const cfg = smtpConfigFromEnv(env);
 
   const { rows: msg } = await pool.query<{
-    from_name: string; from_address: string; subject: string; body_html: string; body_text: string;
+    from_user_id: string | null; from_name: string; from_address: string; subject: string; body_html: string; body_text: string;
     is_draft: boolean; scheduled_at: string | null; campaign_id: string | null;
   }>(
-    `SELECT from_name, from_address, subject, body_html, body_text, is_draft, scheduled_at, campaign_id
+    `SELECT from_user_id, from_name, from_address, subject, body_html, body_text, is_draft, scheduled_at, campaign_id
        FROM mail_messages WHERE id = $1`, [messageId],
   );
   const m = msg[0];
@@ -174,13 +176,28 @@ export async function deliverSmtp(
 
   // Built once per message, and only when a copy is really about to go out:
   // the attachments' bytes, and the headers that thread it.
+  /*
+   * Who the email is from, and where replies go (docs/MAIL_INBOUND_PLAN_2026-11.md):
+   *  - the sender connected their mailbox and chose "send from my address":
+   *    it goes through their own account, as them; replies reach their
+   *    mailbox, and from there Tupo;
+   *  - shared reply capture is on: replies go to the relay's mailbox, which
+   *    Tupo reads and threads back into this conversation;
+   *  - otherwise, as before: Reply-To the sender's own address.
+   * Campaigns always use the relay.
+   */
+  const sendAs = m.from_user_id && !m.campaign_id ? await sendAsLogin(m.from_user_id, env).catch(() => null) : null;
+  const capture = !sendAs ? replyCaptureLogin(env) : null;
+  const replyTo = sendAs ? undefined
+    : capture ? `"${m.from_name.replace(/["\r\n]/g, '')} via Tupo" <${capture.address}>`
+    : m.from_address || undefined;
   let prepared: Promise<Omit<OutboundMail, 'to' | 'toName' | 'headers'>> | null = null;
   const prepare = (domain: string) => (prepared ??= (async () => {
     const [files, thread] = await Promise.all([emailAttachments(messageId, env), threadHeaders(messageId, domain)]);
     const note = omittedNote(files.omitted);
     return {
       fromName: m.from_name,
-      replyTo: m.from_address || undefined,
+      replyTo,
       subject: m.subject,
       html: wrapEmailHtml(m.body_html + (note?.html ?? '')),
       text: m.body_text + (note?.text ?? ''),
@@ -227,14 +244,21 @@ export async function deliverSmtp(
     // Bulk mail carries a one-click unsubscribe (RFC 8058): mail providers
     // expect it, and without it a campaign is far more likely to land in spam.
     const unsubscribe = m.campaign_id ? unsubscribeUrl(r.address, env) : null;
-    const result = await sendSmtp(cfg, {
+    const outbound: OutboundMail = {
       ...base,
       to: r.address,
       toName: r.name,
       headers: unsubscribe
         ? { 'List-Unsubscribe': `<${unsubscribe}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }
         : undefined,
-    });
+    };
+    let result = sendAs ? await sendSmtp(cfg, outbound, sendAs) : await sendSmtp(cfg, outbound);
+    if (sendAs && !result.ok && result.failure === 'transport') {
+      // Their own account would not send (password changed, server busy):
+      // the message still goes, through the relay, with replies to them.
+      await recordEvent(pool, r.id, messageId, 'send_as_failed', { error: result.error });
+      result = await sendSmtp(cfg, { ...outbound, replyTo: sendAs.address });
+    }
 
     if (result.ok) {
       await pool.query(

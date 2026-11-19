@@ -9,7 +9,7 @@ import { dispatchTenantJob } from './tenantJobs.js';
 import { runScheduledMessages } from './jobs/scheduledMessages.js';
 import { runChatSweeps } from './jobs/chatSweeps.js';
 import { runUnfurl, type UnfurlJobData } from './jobs/unfurlLinks.js';
-import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps } from './jobs/mail.js';
+import { runMailSend, runMailCampaign, runMailListSync, runMailSweeps, runMailInbound, runMailAccountSync } from './jobs/mail.js';
 import { runFeedSweeps, runStorySweeps } from './jobs/feed.js';
 import { announcePost } from '@tupo/feed';
 import { runReminderSync, borrowApiCredentials } from './jobs/reminders.js';
@@ -141,6 +141,17 @@ async function runJob(job: Job): Promise<unknown> {
         lastJobAt = new Date().toISOString();
         return runMailListSync(job.data as { listId: string });
       }
+      // Receiving outside email (docs/MAIL_INBOUND_PLAN_2026-11.md).
+      case 'mail:inbound': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runMailInbound();
+      }
+      case 'mail:account-sync': {
+        processed++;
+        lastJobAt = new Date().toISOString();
+        return runMailAccountSync(job.data as { accountId: string });
+      }
       case 'mail:sweep': {
         processed++;
         lastJobAt = new Date().toISOString();
@@ -250,6 +261,19 @@ queue.add('mail:sweep', {}, {
   removeOnComplete: 20,
   removeOnFail: 20,
 }).catch((err) => console.error('[worker] could not register the mail sweep:', err.message));
+
+/**
+ * Outside email in, every minute (MAIL_INBOUND_EVERY_SECONDS): each connected
+ * mailbox not read in the last interval, and the relay's mailbox when shared
+ * reply capture is on. Each school is its own child job (TENANT_SWEEPS).
+ */
+const INBOUND_EVERY_MS = Math.max(15, parseInt(process.env.MAIL_INBOUND_EVERY_SECONDS ?? '', 10) || 60) * 1000;
+queue.add('mail:inbound', {}, {
+  jobId: 'mail-inbound',
+  repeat: { every: INBOUND_EVERY_MS },
+  removeOnComplete: 20,
+  removeOnFail: 20,
+}).catch((err) => console.error('[worker] could not register the inbound mail sweep:', err.message));
 
 /**
  * The feed sweep, every 30 seconds — the same cadence as mail's, and for the

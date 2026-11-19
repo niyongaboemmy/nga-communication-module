@@ -121,13 +121,20 @@ export function classifySmtpError(e: {
  * bounce handling starts here, at the synchronous rejection, and is completed
  * by any webhook the relay calls back.
  */
-export async function sendSmtp(cfg: SmtpConfig, mail: OutboundMail): Promise<SmtpResult> {
+export interface SendAsLogin { host: string; port: number; secure: boolean; user: string; pass: string; address: string }
+
+export async function sendSmtp(cfg: SmtpConfig, mail: OutboundMail, as?: SendAsLogin): Promise<SmtpResult> {
+  // Sending as a person (their connected mailbox): a one-off connection with
+  // their login, never the pooled relay transport.
+  const transport = as
+    ? nodemailer.createTransport({ host: as.host, port: as.port, secure: as.secure, auth: { user: as.user, pass: as.pass }, connectionTimeout: 20_000 })
+    : getTransport(cfg);
   try {
-    const info = await getTransport(cfg).sendMail({
+    const info = await transport.sendMail({
       // Objects, not hand-built strings: MAIL_FROM is often "Name <addr>" in
       // production, and wrapping that in another "<…>" sent every message with
       // a stray ">" in the sender's name.
-      from: { name: sanitizeName(mail.fromName), address: bareAddress(cfg.from) },
+      from: { name: sanitizeName(mail.fromName), address: as ? as.address : bareAddress(cfg.from) },
       to: mail.toName ? { name: sanitizeName(mail.toName), address: bareAddress(mail.to) } : mail.to,
       replyTo: mail.replyTo,
       subject: mail.subject,
@@ -149,6 +156,8 @@ export async function sendSmtp(cfg: SmtpConfig, mail: OutboundMail): Promise<Smt
       permanent: failure === 'recipient',
       error: (e.message ?? 'SMTP send failed').slice(0, 500),
     };
+  } finally {
+    if (as) transport.close();
   }
 }
 

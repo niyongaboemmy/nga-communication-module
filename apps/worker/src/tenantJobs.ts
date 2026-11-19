@@ -17,7 +17,7 @@ import {
  *    process metrics) and run with no tenant at all.
  */
 export const TENANT_SWEEPS = new Set([
-  'avatars:sync', 'chat:scheduled-sweep', 'chat:sweep', 'mail:sweep',
+  'avatars:sync', 'chat:scheduled-sweep', 'chat:sweep', 'mail:sweep', 'mail:inbound',
   'feed:sweep', 'story:sweep', 'reminders:sync', 'notify:digest',
 ]);
 

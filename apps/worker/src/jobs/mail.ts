@@ -14,6 +14,7 @@
 import {
   deliverSmtp, runCampaign, runDueCampaigns, syncList, syncAllLists,
   dispatchPendingSmtp, sendDueScheduled, wakeDueSnoozes,
+  syncDueMailAccounts, syncMailAccount, syncReplyMailbox,
 } from '@tupo/mail';
 import { notifyAndPush } from '@tupo/notify';
 
@@ -57,4 +58,19 @@ export async function runMailSweeps(): Promise<unknown> {
   }
 
   return { scheduled, smtp, campaigns, lists };
+}
+
+/**
+ * Outside email in (docs/MAIL_INBOUND_PLAN_2026-11.md): connected mailboxes
+ * due a read, then the relay's mailbox for replies and bounces. One failing
+ * mailbox is recorded on its account and never stops the others.
+ */
+export async function runMailInbound(): Promise<unknown> {
+  const accounts = await syncDueMailAccounts().catch((e) => ({ error: String(e) }));
+  const replies = await syncReplyMailbox().catch((e) => ({ error: String(e) }));
+  return { accounts, replies };
+}
+
+export async function runMailAccountSync(data: { accountId: string }): Promise<unknown> {
+  return syncMailAccount(data.accountId);
 }

@@ -3,9 +3,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft, Reply, ReplyAll, Forward, Archive, Trash2, Star, Tag, MoreVertical,
   Paperclip, Download, ChevronDown, ChevronRight, BarChart3, Clock, X, Send, Edit3, Loader2,
-  Sparkles, ListChecks, CheckCircle2, RotateCcw, Inbox, Mail as MailIcon, Printer, AlarmClock,
+  Sparkles, ListChecks, CheckCircle2, RotateCcw, Inbox, Mail as MailIcon, Printer, AlarmClock, AtSign,
 } from 'lucide-react';
 import { usePermissions } from '../../hooks/usePermissions';
+import { useAuth } from '../../context/AuthContext';
 import { useNotify } from '../../context/NotificationContext';
 import type { MailAiThreadSummary } from '@tupo/shared';
 import { HandoffControl, handoffPrompt, importHandoff } from '../../components/Handoff';
@@ -48,6 +49,7 @@ const AttachmentChip: React.FC<{ a: MailMessageView['attachments'][number] }> = 
 const InlineReply: React.FC<{
   message: MailMessageView; kind: MailMessageKind; initialBody?: string; onDone: () => void; onCancel: () => void;
 }> = ({ message, kind, initialBody, onDone, onCancel }) => {
+  const { user } = useAuth();
   const [body, setBody] = useState(initialBody ? `<p>${escapeText(initialBody)}</p>` : '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,8 +57,13 @@ const InlineReply: React.FC<{
   const send = async () => {
     setBusy(true); setError(null);
     try {
+      // Reply all: everyone on the message but me. An email from outside
+      // lists my own address among its recipients, and that is not someone
+      // to write to.
+      const notMe = (p: { userId: string | null; address: string }) =>
+        !(p.userId && p.userId === user?.id) && !(user?.email && p.address.toLowerCase() === user.email.toLowerCase());
       const to = kind === 'reply' ? [recip(message.from)]
-        : [recip(message.from), ...message.to.map(recip), ...message.cc.map(recip)];
+        : [recip(message.from), ...[...message.to, ...message.cc].filter(notMe).map(recip)];
       await api.compose({
         to: [...new Set(to)], subject: replySubject(message.subject),
         bodyHtml: body, threadId: message.threadId, parentId: message.id, kind,
@@ -103,6 +110,13 @@ const MessageCard: React.FC<{
             <span className="truncate text-sm font-semibold">{message.from.name}</span>
             {/* The real address, always: a display name is chosen by the sender. */}
             <span className="hidden truncate text-xs text-text-secondary-light sm:inline dark:text-text-secondary-dark">&lt;{message.from.address}&gt;</span>
+            {/* Came from outside Tupo: a connected mailbox, or a reply caught by email. */}
+            {message.source && message.source !== 'tupo' && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-blue-50 px-1.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+                title={message.source === 'imap' ? 'Received in your school mailbox' : 'A reply sent by email'}>
+                <AtSign size={10} /> via email
+              </span>
+            )}
             {message.isDraft && <span className="rounded bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">Draft</span>}
             {message.scheduledAt && !message.sentAt && <span className="inline-flex items-center gap-1 rounded bg-blue-100 px-1.5 text-[10px] text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"><Clock size={10} /> {when(message.scheduledAt)}</span>}
             <span className="ml-auto shrink-0 text-xs text-text-secondary-light dark:text-text-secondary-dark">{when(message.sentAt ?? message.createdAt)}</span>
