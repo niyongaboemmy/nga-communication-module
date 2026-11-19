@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Paperclip, Smile, AtSign, Send, Mic, Lock, Archive, CloudOff, X, Quote,
-  FileText, AlertCircle, Upload, Clock, Slash, CalendarPlus, Ban,
+  Paperclip, Smile, AtSign, Send, Mic, Lock, Archive, CloudOff, X, Quote, FileText,
+  AlertCircle, Upload, Clock, Slash, CalendarPlus, Ban,
 } from 'lucide-react';
 import { IconButton } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -10,7 +10,7 @@ import { useNavigate } from 'react-router-dom';
 import { useNotify } from '../../context/NotificationContext';
 import { useChat } from './ChatProvider';
 import { EmojiPicker, rememberEmoji } from './EmojiPicker';
-import { useUploads, MAX_ATTACHMENTS } from './useUploads';
+import { useUploads } from './useUploads';
 import { MentionAutocomplete, findMentionQuery } from './MentionAutocomplete';
 import type { MentionQuery } from './MentionAutocomplete';
 import * as chatApi from './api';
@@ -681,7 +681,7 @@ export const Composer: React.FC<{
         {/* The slash hint list. Shown only while the whole message is still
             just "/word" — once there are arguments, the list is in the way. */}
         {slashMatches.length > 0 && (
-          <div role="listbox" aria-label="Commands" className="absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-2xl border border-border-light bg-white py-1 shadow-2xl dark:border-border-dark/50 dark:bg-elevated-dark">
+          <div role="listbox" aria-label="Commands" className="absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-2xl border border-border-light bg-white py-1 dark:border-border-dark/50 dark:bg-elevated-dark">
             {slashMatches.map((c, i) => (
               <button
                 key={c.name}

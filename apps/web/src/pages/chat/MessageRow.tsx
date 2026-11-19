@@ -1,49 +1,44 @@
-import { MessageActionSheet } from './MessageActionSheet';
 import { useFlag } from '../../lib/flags';
 import { useConfirmDialog } from '../../components/ConfirmDialog';
 import { jumpHistory } from './jumpHistory';
 import { ThreadSummary } from './ThreadSummary';
-import { InlineThread } from './InlineThread';
 import { isInlineOpen, setInlineOpen } from './inlineThreadState';
 import { QuotePreview } from './QuotePreview';
 import { isComposing, isSubmitEnter } from './composerKeys';
 import { noteRowRender } from '../../lib/perf';
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useStartCall } from './useStartCall';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+
+/*
+ * Loaded on first use, not with the chat (bundle budget, P-01): the replies
+ * under a message and the phone sheet appear only when asked for, and every
+ * row in the log would otherwise carry them in the first download.
+ */
+const InlineThread = lazy(() => import('./InlineThread').then((m) => ({ default: m.InlineThread })));
+const MessageActionSheet = lazy(() => import('./MessageActionSheet').then((m) => ({ default: m.MessageActionSheet })));
 import {
-  Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
-  SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
-  RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
-  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag, Timer, Copy, Mail,
-  CornerDownRight, CornerUpLeft,
+  Info, Pin, SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
+  RotateCcw, MessageSquare, Pencil, Trash2, Bookmark, Forward, PinOff, Link2, Quote,
+  Flag, Copy, Mail, CornerDownRight, CornerUpLeft,
 } from 'lucide-react';
 import { useNotify } from '../../context/NotificationContext';
-import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
+import { Avatar, IconButton } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
-import {
-  dayLabel, startsNewGroup, timeOf, formatBytes, firstUnreadId, typingLabel, emojiOnly,
-  lastSeenLabel,
-} from './data';
+import { timeOf, emojiOnly } from './data';
 import { useChatActions } from './ChatProvider';
-import * as chatApi from './api';
-import { ConversationAvatar } from './ConversationAvatar';
-import { toPresence } from './types';
-import type { Conversation, Message } from './types';
+import type { Message } from './types';
 import { RichText } from './RichText';
 import { EmojiPicker } from './EmojiPicker';
 import { ForwardDialog } from './ForwardDialog';
 import { ReportDialog } from './ReportDialog';
 import { ProfileCard } from './ProfileCard';
 import { MessageAttachments } from './Attachments';
-import { PinnedBar } from './PinnedBar';
 import { PollCard } from './PollCard';
 import { MeetCard } from './MeetCard';
 import { LinkPreviewCard } from './LinkPreviewCard';
 import { TranslateControl } from './TranslateButton';
-import { useVirtualWindow } from './useVirtualWindow';
 import type { MeetMessageMetadata } from './MeetCard';
-import { QUICK_REACTIONS, EDIT_WINDOW_MS, PRESENCE_REFRESH_MS } from '@tupo/shared';
+import { QUICK_REACTIONS, EDIT_WINDOW_MS } from '@tupo/shared';
 import { useTouchGestures } from '../../hooks/useTouchGestures';
 import { MessageInfoDialog } from './MessageInfoDialog';
 
@@ -674,7 +669,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
                 <div
                   role="dialog"
                   aria-label="Confirm deletion"
-                  className="absolute right-0 top-full z-50 mt-1 w-56 rounded-xl border border-border-light bg-white p-3 shadow-xl dark:border-border-dark/50 dark:bg-elevated-dark"
+                  className="absolute right-0 top-full z-50 mt-1 w-56 rounded-xl border border-border-light bg-white p-3 dark:border-border-dark/50 dark:bg-elevated-dark"
                 >
                   <p className="mb-2 text-xs text-text-primary-light dark:text-text-primary-dark">
                     {mine ? 'Delete this message?' : "Delete someone else's message? This is recorded."}
@@ -705,7 +700,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
             {menuOpen && (
               <div
                 role="menu"
-                className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-xl border border-border-light bg-white py-1 shadow-xl dark:border-border-dark/50 dark:bg-elevated-dark"
+                className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-xl border border-border-light bg-white py-1 dark:border-border-dark/50 dark:bg-elevated-dark"
                 onMouseLeave={() => setMenuOpen(false)}
               >
                 {m.body && (
@@ -786,6 +781,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
       )}
 
       {sheetOpen && (
+        <Suspense fallback={null}>
         <MessageActionSheet
           message={m}
           mine={right}
@@ -823,6 +819,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
             ...(!mine ? [{ key: 'report', label: 'Report', icon: Flag, tone: 'danger' as const, onSelect: () => setReporting(true) }] : []),
           ]}
         />
+        </Suspense>
       )}
       {confirmDialog}
 
@@ -841,7 +838,9 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
         light up the root's toolbar (R-03). Indented to the bubble column. */}
     {threadable && threadOpen && (
       <li data-inline-thread-for={m.id} className="pb-1 pl-[3.375rem] pr-2 sm:pl-[3.875rem] sm:pr-4">
-        <InlineThread root={m} canReply={canReply} names={names} focusRequest={focusReply} replying={replying} />
+        <Suspense fallback={<div className="mt-1.5 h-16 animate-pulse rounded-2xl bg-white/70 dark:bg-elevated-dark/40" aria-busy="true" aria-label="Loading replies" />}>
+          <InlineThread root={m} canReply={canReply} names={names} focusRequest={focusReply} replying={replying} />
+        </Suspense>
       </li>
     )}
     </>

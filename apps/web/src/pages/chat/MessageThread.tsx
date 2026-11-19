@@ -1,46 +1,24 @@
-import { QuotePreview } from './QuotePreview';
-import { isComposing, isSubmitEnter } from './composerKeys';
-import { noteRowRender } from '../../lib/perf';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useStartCall } from './useStartCall';
 import {
-  Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
-  SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
-  RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
-  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag, Timer, Copy, Mail, CornerUpLeft,
+  Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search, ChevronDown,
+  MessageSquare, Lock, Settings, Timer, CornerUpLeft,
 } from 'lucide-react';
-import { useNotify } from '../../context/NotificationContext';
 import { MessageRow } from './MessageRow';
 import { jumpHistory, useJumpDepth } from './jumpHistory';
 import { useFlag } from '../../lib/flags';
-import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
+import { IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
-import {
-  dayLabel, startsNewGroup, timeOf, formatBytes, firstUnreadId, typingLabel, emojiOnly,
-  lastSeenLabel,
-} from './data';
+import { dayLabel, startsNewGroup, firstUnreadId, typingLabel, lastSeenLabel } from './data';
 import { useChat, useChatActions } from './ChatProvider';
 import * as chatApi from './api';
 import { ConversationAvatar } from './ConversationAvatar';
 import { toPresence } from './types';
-import type { Conversation, Message } from './types';
-import { RichText } from './RichText';
-import { EmojiPicker } from './EmojiPicker';
-import { ForwardDialog } from './ForwardDialog';
-import { ReportDialog } from './ReportDialog';
-import { ProfileCard } from './ProfileCard';
-import { MessageAttachments } from './Attachments';
+import type { Conversation } from './types';
 import { PinnedBar } from './PinnedBar';
-import { PollCard } from './PollCard';
-import { MeetCard } from './MeetCard';
-import { LinkPreviewCard } from './LinkPreviewCard';
-import { TranslateControl } from './TranslateButton';
 import { useVirtualWindow } from './useVirtualWindow';
-import type { MeetMessageMetadata } from './MeetCard';
-import { QUICK_REACTIONS, EDIT_WINDOW_MS, PRESENCE_REFRESH_MS } from '@tupo/shared';
-import { useTouchGestures } from '../../hooks/useTouchGestures';
-import { MessageInfoDialog } from './MessageInfoDialog';
+import { PRESENCE_REFRESH_MS } from '@tupo/shared';
 
 /**
  * The message pane: header, scrollback, composer slot.

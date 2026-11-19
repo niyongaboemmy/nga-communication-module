@@ -204,6 +204,7 @@ try {
   const sheetOpen = await sheet.waitFor({ timeout: 4000 }).then(() => true).catch(() => false);
   S.check('long-press opens the action sheet', sheetOpen);
   if (sheetOpen) {
+    await sleep(500); // the slide-up finishes before anything is measured
     await Q.screenshot({ path: `${SHOTS}/action-sheet-390.png` });
     for (const name of ['Reply', 'Forward', 'Copy text']) {
       S.check(`sheet offers "${name}"`, await sheet.getByRole('button', { name, exact: true }).count() > 0);

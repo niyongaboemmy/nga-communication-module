@@ -8,7 +8,7 @@ import type { ActivityKind,
 import { TYPING_THROTTLE_MS, EDIT_WINDOW_MS } from '@tupo/shared';
 import { getSocket, onSocket } from '../../lib/socket';
 import { useAuth } from '../../context/AuthContext';
-import { apiGet, TAB_ID } from '../../lib/api';
+import { apiGet } from '../../lib/api';
 import { count } from '../../lib/clientCounters';
 import * as chatApi from './api';
 import * as outbox from './outbox';

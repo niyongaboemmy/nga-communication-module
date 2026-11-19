@@ -15,7 +15,7 @@ import { purgeUsers } from './purge.mjs';
 import { prepareBrowser } from './uiHarness.mjs';
 
 export const API = 'http://localhost:5190';
-export const BASE = 'http://localhost:5194';
+export const BASE = process.env.CHAT_BASE ?? 'http://localhost:5194';
 
 export const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
