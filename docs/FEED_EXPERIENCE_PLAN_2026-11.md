@@ -61,11 +61,19 @@ Severity: **High** = broken or misleading · **Medium** = missing interaction pe
 
 ## 5. Status
 
+All phases are implemented on `feat/feed-experience`. Not pushed or deployed.
+
 | Phase | Commit | Result |
 |---|---|---|
-| P1 | | |
-| P2 | | |
-| P3 | | |
-| P4 | | |
-| P5 | | |
-| P6 | | |
+| P1–P2 | dbd94cb | A page photo reaches the sidebar and posts with no reload. In-app delete; drafts with "Open drafts". Try again on every list. See less. |
+| P3 | (P3 commit) | In-post video: unmute/mute, time left, progress, buffering. The viewer continues from the inline position. |
+| P4 | (P4 commit) | Composer link previews via `POST /api/feed/link-preview`. A server-side sanitiser refuses `javascript:` links (unit-tested). PDF preview in a sheet; download progress; KB/MB sizes. |
+| P5 | 61e18b0 | Share sheet: send in chat, copy-link fallback, device share, open post. Chat renders `post_share` cards with the reader's own rights. |
+| P6 | this commit | **Found while testing:** chat's `fetchPreview` connected to `https://<ip>`, so TLS failed and **every https link preview, in chat too, came back empty**. It now pins the validated address through node's `lookup` and keeps the hostname for SNI and the certificate. Private addresses are still blocked; chat unfurl tests pass 14/14. |
+
+**Test results:**
+- **New suite:** `verify:feed:experience` 33/33.
+- **Existing feed suites:** `verify:feed` 17/17, `verify:feed:ui` 9/9, `verify:feed:media` 50/50, `verify:feed:touch` 6/6.
+- **Chat:** `verify:chat:replies` 37/37.
+- **Package and API tests:** feed package 16/16, chat package 28/28, API feed tests 55/55, web unit tests 31/31.
+- **Build checks:** typecheck clean; initial JS 203.3 KB (budget 250).

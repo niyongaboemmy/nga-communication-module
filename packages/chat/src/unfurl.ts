@@ -1,3 +1,6 @@
+import https from 'node:https';
+import http from 'node:http';
+import { Readable } from 'node:stream';
 import { createHash } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
@@ -139,31 +142,46 @@ function normalise(raw: string): URL | null {
  * applied.
  */
 async function fetchHop(url: URL, address: string): Promise<Response | null> {
-  const pinned = new URL(url.toString());
-  // Literal IPv6 in a URL needs brackets.
-  pinned.hostname = isIP(address) === 6 ? `[${address}]` : address;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    return await fetch(pinned.toString(), {
+  /*
+   * The connection is pinned to the address that passed resolveSafely (no
+   * second DNS answer can swap in a private one), but the URL keeps its
+   * hostname. It used to connect to `https://<ip>`: TLS then validated the
+   * certificate against the IP and every https preview failed — chat's and
+   * the feed's. `lookup` is node's own hook for exactly this.
+   */
+  const family = isIP(address) === 6 ? 6 : 4;
+  const transport = url.protocol === 'https:' ? https : http;
+  return new Promise<Response | null>((resolve) => {
+    let settled = false;
+    const done = (r: Response | null) => { if (!settled) { settled = true; resolve(r); } };
+    const req = transport.request(url, {
       method: 'GET',
-      redirect: 'manual',
-      signal: controller.signal,
+      lookup: (_host, opts, cb) => {
+        if ((opts as { all?: boolean }).all) (cb as unknown as (e: null, a: Array<{ address: string; family: number }>) => void)(null, [{ address, family }]);
+        else cb(null, address, family);
+      },
       headers: {
-        // The Host header keeps virtual hosting working even though the
-        // connection went to an IP.
-        Host: url.host,
         'User-Agent': 'TupoBot/1.0 (+link preview)',
         Accept: 'text/html,application/xhtml+xml',
         'Accept-Language': 'en',
       },
+      timeout: FETCH_TIMEOUT_MS,
+    }, (incoming) => {
+      const headers = new Headers();
+      for (const [k, v] of Object.entries(incoming.headers)) {
+        if (v !== undefined) headers.set(k, Array.isArray(v) ? v.join(', ') : String(v));
+      }
+      const status = incoming.statusCode ?? 0;
+      if (status < 200 || status > 599) { incoming.resume(); done(null); return; }
+      const noBody = status === 204 || status === 205 || status === 304;
+      if (noBody) incoming.resume();
+      const body = noBody ? null : (Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>);
+      done(new Response(body, { status, headers }));
     });
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+    req.on('timeout', () => { req.destroy(); done(null); });
+    req.on('error', () => done(null));
+    req.end();
+  });
 }
 
 /** Read at most MAX_BYTES, so a huge or endless body cannot exhaust memory. */

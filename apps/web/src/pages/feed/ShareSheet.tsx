@@ -98,6 +98,7 @@ export const ShareSheet: React.FC<{ post: FeedPostView; onClose: () => void }> =
     } catch { /* cancelled: nothing to say */ }
   };
 
+  const canDeviceShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   const snippet = post.body.trim().slice(0, 120) || (post.media.length ? 'Photo or video' : 'Post');
 
   return createPortal(
@@ -119,14 +120,14 @@ export const ShareSheet: React.FC<{ post: FeedPostView; onClose: () => void }> =
           <span className="font-semibold text-text-primary-light dark:text-text-primary-dark">{post.page.name}</span> · {snippet}
         </p>
 
-        <div className="grid grid-cols-3 gap-2 px-4 py-3">
+        <div className={`grid gap-2 px-4 py-3 ${canDeviceShare ? 'grid-cols-3' : 'grid-cols-2'}`}>
           <button onClick={() => void copy()} className={shareBtn}>
             {copied ? <Check size={20} className="text-blue-600" /> : <Copy size={20} />}
             {copied ? 'Copied' : 'Copy link'}
           </button>
-          {typeof navigator !== 'undefined' && typeof navigator.share === 'function' ? (
+          {canDeviceShare && (
             <button onClick={() => void viaDevice()} className={shareBtn}><Share2 size={20} /> Share via…</button>
-          ) : <span />}
+          )}
           <Link to={`/app/feed/post/${post.id}`} onClick={onClose} className={shareBtn}><ExternalLink size={20} /> Open post</Link>
         </div>
         {manualCopy && (
