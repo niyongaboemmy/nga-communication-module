@@ -7,10 +7,12 @@ import {
   Hash, Megaphone, Users, ArrowLeft, Phone, Video, Info, Pin, Search,
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
   RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
-  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag, Timer, Copy, Mail,
+  X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag, Timer, Copy, Mail, CornerUpLeft,
 } from 'lucide-react';
 import { useNotify } from '../../context/NotificationContext';
 import { MessageRow } from './MessageRow';
+import { jumpHistory, useJumpDepth } from './jumpHistory';
+import { useFlag } from '../../lib/flags';
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useAuth } from '../../context/AuthContext';
@@ -18,7 +20,7 @@ import {
   dayLabel, startsNewGroup, timeOf, formatBytes, firstUnreadId, typingLabel, emojiOnly,
   lastSeenLabel,
 } from './data';
-import { useChat } from './ChatProvider';
+import { useChat, useChatActions } from './ChatProvider';
 import * as chatApi from './api';
 import { ConversationAvatar } from './ConversationAvatar';
 import { toPresence } from './types';
@@ -245,6 +247,17 @@ export const MessageThread: React.FC<{
   } = useChat();
   // A channel's own owner, admins and moderators may remove what is posted
   // there (B-13) — the server always allowed it; the menu never offered it.
+  const { can } = usePermissions();
+  // Facebook-style replies under each message (R-02/R-03), behind its flag.
+  const inlineReplies = useFlag('chat.inlineReplies');
+  // The server's assertCanPost: an announcement channel's threads are for announcers too.
+  const canReply = can('MESSAGE_SEND') && !conversation.isArchived
+    && (conversation.type !== 'announcement' || can('CHANNEL_ANNOUNCE')
+        || conversation.myRole === 'owner' || conversation.myRole === 'admin');
+  // "Back to reply" after following a quote (R-10); stale once the room changes.
+  const jumpDepth = useJumpDepth();
+  const { jumpTo } = useChatActions();
+  useEffect(() => () => jumpHistory.clear(), [conversation.id]);
   const runsThisRoom = conversation.type !== 'dm'
     && (conversation.myRole === 'owner' || conversation.myRole === 'admin' || conversation.myRole === 'moderator');
 
@@ -473,6 +486,9 @@ export const MessageThread: React.FC<{
                       newReplies={threadUnread[m.id] ?? 0}
                       senderBlocked={blockedIds.has(m.senderId)}
                       runsThisRoom={runsThisRoom}
+                      isDm={conversation.type === 'dm'}
+                      canReply={canReply}
+                      inlineReplies={inlineReplies}
                     />
                   </React.Fragment>
                 );
@@ -486,6 +502,16 @@ export const MessageThread: React.FC<{
         </div>
 
         {/* UX-3 */}
+        {/* R-10: back to the reply a quote was followed from. */}
+        {jumpDepth > 0 && (
+          <button
+            onClick={() => { const id = jumpHistory.pop(); if (id) void jumpTo(id); }}
+            className="animate-fade-in absolute bottom-3 left-1/2 z-20 flex min-h-10 -translate-x-1/2 items-center gap-1.5 rounded-full border border-border-light bg-white px-4 text-xs font-semibold text-blue-700 hover:bg-blue-50 dark:border-border-dark/60 dark:bg-elevated-dark dark:text-blue-300 dark:hover:bg-blue-900/30"
+          >
+            <CornerUpLeft size={14} aria-hidden="true" /> Back to reply
+          </button>
+        )}
+
         {/* C-04: a round button in the corner rather than a pill across the
             middle of the text it was covering; the unread count rides on it. */}
         {(!atBottom || hasNewer) && !loading && messages.length > 0 && (

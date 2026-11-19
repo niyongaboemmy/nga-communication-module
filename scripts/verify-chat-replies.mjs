@@ -96,7 +96,7 @@ try {
     const box = await summary.boundingBox();
     S.check('summary is a comfortable target', (box?.height ?? 0) >= 28, `${box?.height}px`);
     await summary.click();
-    const inline = rootRow.locator('[data-inline-thread]');
+    const inline = P.locator(`[data-inline-thread-for="${root.id}"] [data-inline-thread]`);
     const opened = await inline.waitFor({ timeout: 6000 }).then(() => true).catch(() => false);
     S.check('one tap expands replies in place', opened);
     if (opened) {
@@ -112,7 +112,8 @@ try {
       await P.screenshot({ path: `${SHOTS}/inline-thread-1440.png` });
     }
   }
-  const echoRow = P.locator('li[data-message-row]').filter({ hasText: 'many people got it wrong' }).first();
+  // The main log's copy, not the same words inside the expanded inline thread.
+  const echoRow = P.locator('li[data-message-row]:not([data-inline-thread] li)').filter({ hasText: 'many people got it wrong' }).first();
   S.check('thread copy in the channel says where it came from (R-07)',
     await echoRow.getByText(/Replied in a thread/i).isVisible().catch(() => false));
 

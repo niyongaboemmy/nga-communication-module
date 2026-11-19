@@ -239,13 +239,18 @@ export function registerChatHandlers(
       const perms = await permissions();
       if (perms && !perms.has('MESSAGE_EDIT_OWN')) throw deny();
       const membership = await chat.requireMembership(user.id, p.conversationId);
-      const { message, newlyMentioned } = await chat.editMessage(
+      const { message, newlyMentioned, threadRoot } = await chat.editMessage(
         user.id, p.conversationId, p.messageId, p.body,
       );
       ack?.({ ok: true, message });
       io.to(conversationRoom(p.conversationId)).emit('message:updated', {
         conversationId: p.conversationId, message,
       });
+      if (threadRoot) {
+        io.to(conversationRoom(p.conversationId)).emit('message:updated', {
+          conversationId: p.conversationId, message: threadRoot,
+        });
+      }
       if (newlyMentioned.length) {
         await chat.notifyMention(message, newlyMentioned, membership.name ?? 'a conversation')
           .catch(() => {});
@@ -270,6 +275,11 @@ export function registerChatHandlers(
         conversationId: p.conversationId, messageId: p.messageId,
         deletedBy: user.id, byModerator: result.byModerator,
       });
+      if (result.threadRoot) {
+        io.to(conversationRoom(p.conversationId)).emit('message:updated', {
+          conversationId: p.conversationId, message: result.threadRoot,
+        });
+      }
       await pushUnread(io, p.conversationId);
     } catch (err) {
       ack?.({ ok: false, error: err instanceof ChatError ? err.message : 'Could not delete.' });

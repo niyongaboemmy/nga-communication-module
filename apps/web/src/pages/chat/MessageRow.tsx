@@ -1,3 +1,7 @@
+import { jumpHistory } from './jumpHistory';
+import { ThreadSummary } from './ThreadSummary';
+import { InlineThread } from './InlineThread';
+import { isInlineOpen, setInlineOpen } from './inlineThreadState';
 import { QuotePreview } from './QuotePreview';
 import { isComposing, isSubmitEnter } from './composerKeys';
 import { noteRowRender } from '../../lib/perf';
@@ -8,6 +12,7 @@ import {
   SmilePlus, Reply, MoreHorizontal, Clock, Check, CheckCheck, AlertCircle,
   RotateCcw, ChevronDown, FileText, MessageSquare, Lock, Pencil, Trash2,
   X, Bookmark, Forward, PinOff, Link2, Quote, Settings, Flag, Timer, Copy, Mail,
+  CornerDownRight, CornerUpLeft,
 } from 'lucide-react';
 import { useNotify } from '../../context/NotificationContext';
 import { Avatar, IconButton, Skeleton, EmptyState, Spinner } from '../../components/ui';
@@ -45,7 +50,7 @@ const StatusIcon: React.FC<{ status: Message['delivery'] }> = ({ status }) => {
     case 'pending': return <Clock size={12} aria-label="Sending" className="opacity-70" />;
     case 'sent': return <Check size={13} aria-label="Sent" className="opacity-70" />;
     case 'delivered': return <CheckCheck size={13} aria-label="Delivered" className="opacity-70" />;
-    case 'read': return <CheckCheck size={13} aria-label="Read" className="text-sky-200" />;
+    case 'read': return <CheckCheck size={13} aria-label="Read" className="text-blue-200" />;
     case 'failed': return <AlertCircle size={13} aria-label="Failed to send" className="text-red-300" />;
     default: return null;
   }
@@ -94,6 +99,19 @@ export interface MessageRowProps {
   senderBlocked?: boolean;
   /** The reader owns, admins or moderates this room (B-13). */
   runsThisRoom?: boolean;
+  /** A direct message: Reply quotes, there is no thread line (R-06). */
+  isDm?: boolean;
+  /** The reader may post here; gates the inline reply box. */
+  canReply?: boolean;
+  /** Facebook-style replies are on (flag chat.inlineReplies). */
+  inlineReplies?: boolean;
+  /**
+   * `compact`: a reply inside a thread (panel or inline) — left-aligned for
+   * everyone, a lighter bubble, a smaller face (R-04).
+   */
+  variant?: 'default' | 'compact';
+  /** Overrides Reply (a reply inside a thread answers with "@Name"). */
+  onReply?: (m: Message) => void;
 }
 
 /**
@@ -104,6 +122,7 @@ export interface MessageRowProps {
 const MessageRowInner: React.FC<MessageRowProps> = ({
   message: m, newGroup, names, isHighlighted = false, editRequested = false,
   newReplies = 0, senderBlocked = false, runsThisRoom = false,
+  isDm = false, canReply = true, inlineReplies = false, variant = 'default', onReply,
 }) => {
   noteRowRender();
   const { can } = usePermissions();
@@ -112,6 +131,26 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
     react, edit, remove, pin, save, openThread, setReplyTarget, jumpTo,
     setEditingId, discard, markUnread, retry: onRetry,
   } = useChatActions();
+  const compact = variant === 'compact';
+  // The thread line and inline replies belong to a top-level message in a room.
+  const threadable = !compact && !isDm && inlineReplies && !m.threadRootId;
+  const [threadOpen, setThreadOpenState] = useState(() => threadable && isInlineOpen(m.id));
+  const [focusReply, setFocusReply] = useState(0);
+  const setThreadOpen = (open: boolean) => { setThreadOpenState(open); setInlineOpen(m.id, open); };
+  // Unread replies open the thread in place (R-03): what is new is shown, not hinted at.
+  useEffect(() => { if (threadable && newReplies > 0) setThreadOpenState(true); }, [threadable, newReplies]);
+  /*
+   * One Reply (R-06). Inside a thread: "@Name" in the same thread. In a direct
+   * message: a quote. In a room: the replies open under the message, caret
+   * in the box. With the flag off, the old thread pane.
+   */
+  const reply = () => {
+    if (onReply) { onReply(m); return; }
+    if (isDm || m.threadRootId) { setReplyTarget(m); return; }
+    if (!inlineReplies) { openThread(m.id); return; }
+    setThreadOpen(true);
+    setFocusReply((n) => n + 1);
+  };
   const { notify, confirm: confirmed } = useNotify();
   /** Every action says so when it fails (B-10) — they used to fail silently. */
   const attempt = (what: () => Promise<unknown>, failed: string, done?: string) => {
@@ -136,13 +175,18 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
   const [menuOpen, setMenuOpen] = useState(false);
   // Phones (U-01): swipe right to reply, long-press for the actions menu.
   const gestures = useTouchGestures({
-    onSwipe: () => setReplyTarget(m),
+    onSwipe: () => reply(),
     onLongPress: () => setMenuOpen(true),
     disabled: m.type === 'system' || Boolean(m.deletedAt),
   });
   const editRef = useRef<HTMLTextAreaElement>(null);
 
   const mine = m.senderId === user?.id;
+  // Own messages sit on the right in a bubble of their own colour — except
+  // inside a thread, where every reply reads left to right like a comment.
+  const right = mine && !compact;
+  const onDark = mine && !compact;
+  const fromThread = typeof m.metadata?.fromThread === 'string' ? m.metadata.fromThread as string : null;
 
   // ↑ in the composer names a message; this is the row that answers.
   useEffect(() => {
@@ -237,40 +281,41 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
   };
 
   return (
+    <>
     <li
       id={`msg-${m.id}`}
       data-message-row=""
       {...gestures.handlers}
       style={gestures.dx ? { transform: `translateX(${gestures.dx}px)`, transition: 'none' } : { transition: 'transform 150ms ease-out' }}
-      className={`group relative flex gap-2.5 px-2 sm:px-4 [touch-action:pan-y] ${newGroup ? 'mt-3' : 'mt-0.5'} ${
-        mine ? 'flex-row-reverse' : ''
+      className={`group relative flex ${compact ? 'gap-2 px-1' : 'gap-2.5 px-2 sm:px-4'} [touch-action:pan-y] ${newGroup ? (compact ? 'mt-1.5' : 'mt-3') : 'mt-0.5'} ${
+        right ? 'flex-row-reverse' : ''
       } ${m.mentionsMe ? 'bg-amber-50/60 dark:bg-amber-500/5' : ''} ${
         isHighlighted ? 'animate-fade-in rounded-xl bg-blue-100/70 dark:bg-blue-500/15' : ''
       }`}
     >
       {/* The gutter keeps its width when the avatar is hidden, so a grouped run
           stays aligned instead of stepping left. */}
-      <span className="relative w-9 shrink-0">
+      <span className={`relative shrink-0 ${compact ? 'w-6' : 'w-9'}`}>
         {newGroup && (
           <button
             onClick={() => setProfileOpen((v) => !v)}
             aria-label={`${m.senderName}, profile`}
             className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
-            <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={36} />
+            <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={compact ? 24 : 36} />
           </button>
         )}
         {profileOpen && (
-          <ProfileCard userId={m.senderId} anchor={mine ? 'right' : 'left'} onClose={() => setProfileOpen(false)} />
+          <ProfileCard userId={m.senderId} anchor={right ? 'right' : 'left'} onClose={() => setProfileOpen(false)} />
         )}
       </span>
 
-      <div className={`min-w-0 max-w-[min(46rem,85%)] ${mine ? 'items-end' : 'items-start'} flex flex-col`}>
+      <div className={`min-w-0 ${compact ? 'max-w-full flex-1' : 'max-w-[min(46rem,85%)]'} ${right ? 'items-end' : 'items-start'} flex flex-col`}>
         {newGroup && (
-          <div className={`mb-1 flex items-baseline gap-2 ${mine ? 'flex-row-reverse' : ''}`}>
+          <div className={`${compact ? 'mb-0.5' : 'mb-1'} flex items-baseline gap-2 ${right ? 'flex-row-reverse' : ''}`}>
             <button
               onClick={() => setProfileOpen((v) => !v)}
-              className="text-sm font-semibold text-text-primary-light hover:underline dark:text-text-primary-dark"
+              className={`${compact ? 'text-xs' : 'text-sm'} font-semibold text-text-primary-light hover:underline dark:text-text-primary-dark`}
             >
               {mine ? 'You' : m.senderName}
             </button>
@@ -283,6 +328,16 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
               {timeOf(m.createdAt)}
             </span>
           </div>
+        )}
+
+        {/* Messenger's label (R-08): a reply says whom it answers, so it never
+            reads as a forward or a pasted note. */}
+        {m.replyTo && !fromThread && !compact && !m.deletedAt && (
+          <p className="mb-0.5 flex items-center gap-1 text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
+            <CornerUpLeft size={11} aria-hidden="true" />
+            {mine ? 'You' : m.senderName.split(' ')[0]} replied to{' '}
+            {m.replyTo.senderId === user?.id ? (mine ? 'yourself' : 'you') : m.replyTo.senderName.split(' ')[0]}
+          </p>
         )}
 
         {editing ? (
@@ -322,25 +377,37 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
                 // No bubble, no padding: the emoji *is* the message.
                 ? `text-4xl leading-tight ${pending ? 'opacity-75' : ''}`
                 // `min-w-0 max-w-full`: nothing inside may widen the bubble past its column (R-01).
-                : `message-body min-w-0 max-w-full px-3.5 py-2 text-sm [overflow-wrap:anywhere] ${
-                    mine
+                : `message-body min-w-0 max-w-full ${compact ? 'px-3 py-1.5' : 'px-3.5 py-2'} text-sm [overflow-wrap:anywhere] ${
+                    compact
+                      ? 'rounded-2xl bg-surface-light text-text-primary-light dark:bg-elevated-dark dark:text-text-primary-dark'
+                      : mine
                       ? 'bubble-out bg-blue-600 text-white'
                       : 'bubble-in border border-border-light bg-white text-text-primary-light dark:border-border-dark/40 dark:bg-elevated-dark dark:text-text-primary-dark'
                   } ${failed ? 'ring-1 ring-red-400' : ''} ${pending ? 'opacity-75' : ''}`
             }
           >
+            {/* A thread reply also sent to the room says where it came from (R-07). */}
+            {fromThread && (
+              <button
+                type="button"
+                onClick={() => openThread(fromThread)}
+                className={`mb-1.5 flex items-center gap-1 text-[11px] font-semibold hover:underline ${onDark ? 'text-white/90' : 'text-blue-700 dark:text-blue-300'}`}
+              >
+                <CornerDownRight size={12} aria-hidden="true" /> Replied in a thread · View thread
+              </button>
+            )}
             {/* Quote-reply context, rendered above the message it answers. */}
-            {m.replyTo && (
+            {m.replyTo && !fromThread && (
               /* Tappable, and it *jumps* rather than following an anchor: the
                  original may not be loaded, in which case the surrounding page
                  has to be fetched first (FR-MSG-7). */
-              <QuotePreview replyTo={m.replyTo} onDark={mine} onJump={() => void jumpTo(m.replyTo!.id)} />
+              <QuotePreview replyTo={m.replyTo} onDark={onDark} onJump={() => { jumpHistory.push(m.id); void jumpTo(m.replyTo!.id); }} />
             )}
 
             {/* FR-MSG-10: attribution travels with a forward, so it can never be
                 passed off as the forwarder's own words. */}
             {m.forwardedFrom && (
-              <p className={`mb-1 flex items-center gap-1 text-[11px] italic ${mine ? 'text-white/75' : 'text-text-secondary-light dark:text-text-secondary-dark'}`}>
+              <p className={`mb-1 flex items-center gap-1 text-[11px] italic ${onDark ? 'text-white/75' : 'text-text-secondary-light dark:text-text-secondary-dark'}`}>
                 <Forward size={11} />
                 Forwarded from {m.forwardedFrom.senderName}
                 {m.forwardedFrom.conversationName ? ` in #${m.forwardedFrom.conversationName}` : ''}
@@ -360,7 +427,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
                 text={m.body}
                 names={{ ...names, ...m.mentionNames }}
                 meId={user?.id}
-                onDark={mine}
+                onDark={onDark}
               />
             )}
             {m.editedAt && (
@@ -369,20 +436,20 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
               </span>
             )}
 
-            {meetMeta && <MeetCard meta={meetMeta} onDark={mine} />}
+            {meetMeta && <MeetCard meta={meetMeta} onDark={onDark} />}
 
             {/* Only the first. A message with three links unfurled into three
                 cards is a wall, and the links themselves are still in the text. */}
             {m.linkPreviews.length > 0 && m.linkPreviews[0] && (
-              <LinkPreviewCard preview={m.linkPreviews[0]} onDark={mine} />
+              <LinkPreviewCard preview={m.linkPreviews[0]} onDark={onDark} />
             )}
 
             {m.type === 'poll' && (
-              <PollCard conversationId={m.conversationId} messageId={m.id} onDark={mine} />
+              <PollCard conversationId={m.conversationId} messageId={m.id} onDark={onDark} />
             )}
 
             {m.attachments.length > 0 && (
-              <MessageAttachments attachments={m.attachments} onDark={mine} />
+              <MessageAttachments attachments={m.attachments} onDark={onDark} />
             )}
 
             {/* Ticks live inside the sender's own bubble — nobody needs delivery
@@ -405,12 +472,12 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
           />
         )}
 
-        {pending && <PendingNote createdAt={m.createdAt} mine={mine} />}
+        {pending && <PendingNote createdAt={m.createdAt} mine={right} />}
 
         {/* UX-1: a failure is never silent, and the retry sits on the message
             itself rather than in a toast that scrolls out of reach. */}
         {failed && m.nonce && (
-          <div className={`mt-1 flex items-center gap-3 text-[11px] font-medium ${mine ? 'justify-end' : ''}`}>
+          <div className={`mt-1 flex items-center gap-3 text-[11px] font-medium ${right ? 'justify-end' : ''}`}>
             <button
               onClick={() => onRetry(m.nonce!)}
               className="flex items-center gap-1 text-red-600 hover:underline dark:text-red-400"
@@ -426,8 +493,8 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
           </div>
         )}
 
-        {(m.reactions.length > 0 || m.replyCount > 0) && (
-          <div className={`mt-1.5 flex flex-wrap items-center gap-1.5 ${mine ? 'justify-end' : ''}`}>
+        {(m.reactions.length > 0 || (m.replyCount > 0 && !threadable && !compact)) && (
+          <div className={`mt-1.5 flex flex-wrap items-center gap-1.5 ${right ? 'justify-end' : ''}`}>
             {m.reactions.map((r) => (
               <button
                 key={r.emoji}
@@ -444,7 +511,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
                 <span className="font-medium tabular-nums">{r.count}</span>
               </button>
             ))}
-            {m.replyCount > 0 && (
+            {m.replyCount > 0 && !threadable && !compact && (
               <button
                 onClick={() => openThread(m.id)}
                 aria-label={`${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}${
@@ -465,6 +532,17 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
             )}
           </div>
         )}
+
+        {/* Who replied, how many, how long ago — one tap opens them here (R-02, R-03). */}
+        {threadable && m.replyCount > 0 && !m.deletedAt && (
+          <ThreadSummary
+            message={m}
+            newReplies={newReplies}
+            open={threadOpen}
+            meId={user?.id}
+            onToggle={() => setThreadOpen(!threadOpen)}
+          />
+        )}
       </div>
 
       {/* UX-7: hover actions. Hidden until hover on pointer devices; the `…`
@@ -477,7 +555,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
                own message put the toolbar at the far left of a full-width row,
                half a screen away from the message it acted on — easy to miss,
                and easy to hit for the wrong message. */
-            mine ? 'right-14' : 'left-14'
+            compact ? 'right-1' : mine ? 'right-14' : 'left-14'
           } ${picking || menuOpen ? 'pointer-events-auto opacity-100' : ''}`}
         >
           {/* One tap for the common few, the picker for everything else. Most
@@ -507,13 +585,21 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
             )}
           </div>
 
-          <IconButton label="Quote reply" size="sm" onClick={() => setReplyTarget(m)}>
-            <Quote size={15} />
-          </IconButton>
-
-          <IconButton label="Reply in thread" size="sm" onClick={() => openThread(m.id)}>
-            <Reply size={15} />
-          </IconButton>
+          {inlineReplies || compact ? (
+            /* One Reply (R-06): what it does depends on where you are. */
+            <IconButton label="Reply" size="sm" onClick={reply}>
+              <Reply size={15} />
+            </IconButton>
+          ) : (
+            <>
+              <IconButton label="Quote reply" size="sm" onClick={() => setReplyTarget(m)}>
+                <Quote size={15} />
+              </IconButton>
+              <IconButton label="Reply in thread" size="sm" onClick={() => openThread(m.id)}>
+                <Reply size={15} />
+              </IconButton>
+            </>
+          )}
 
           <IconButton
             label={m.saved ? 'Remove from saved items' : 'Save message'}
@@ -612,6 +698,24 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
                     <Copy size={13} /> Copy text
                   </button>
                 )}
+                {inlineReplies && !compact && !isDm && !m.threadRootId && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); setReplyTarget(m); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
+                  >
+                    <Quote size={13} /> Quote in channel
+                  </button>
+                )}
+                {inlineReplies && !compact && isDm && !m.threadRootId && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); openThread(m.id); }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-primary-light hover:bg-surface-light dark:text-text-primary-dark dark:hover:bg-surface-dark"
+                  >
+                    <MessageSquare size={13} /> Reply in thread
+                  </button>
+                )}
                 <button
                   role="menuitem"
                   onClick={() => {
@@ -673,6 +777,14 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
         />
       )}
     </li>
+    {/* The replies, in place, as a sibling row: hovering a reply must not
+        light up the root's toolbar (R-03). Indented to the bubble column. */}
+    {threadable && threadOpen && (
+      <li data-inline-thread-for={m.id} className="pb-1 pl-[3.375rem] pr-2 sm:pl-[3.875rem] sm:pr-4">
+        <InlineThread root={m} canReply={canReply} names={names} focusRequest={focusReply} />
+      </li>
+    )}
+    </>
   );
 };
 

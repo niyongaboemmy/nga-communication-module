@@ -704,11 +704,13 @@ router.patch('/conversations/:id/messages/:messageId', authorizePermission('MESS
       return res.status(409).json(fail('This conversation is archived.'));
     }
 
-    const { message, newlyMentioned } = await chat.editMessage(
+    const { message, newlyMentioned, threadRoot } = await chat.editMessage(
       me.id, id, messageId, String(req.body?.body ?? ''),
     );
 
     emitToConversation(id, 'message:updated', { conversationId: id, message });
+    // The root's summary line quotes its newest reply (R-02).
+    if (threadRoot) emitToConversation(id, 'message:updated', { conversationId: id, message: threadRoot });
     // Editing a message to add an @mention has to reach the person mentioned —
     // otherwise "sorry, meant to tag you" silently never arrives.
     const deniedMentions = await contactDenied(me, newlyMentioned, 'mention');
@@ -753,6 +755,8 @@ router.delete('/conversations/:id/messages/:messageId', wrap(async (req, res) =>
   emitToConversation(id, 'message:deleted', {
     conversationId: id, messageId, deletedBy: me.id, byModerator: result.byModerator,
   });
+  // A deleted reply leaves its root's summary line at once (R-02).
+  if (result.threadRoot) emitToConversation(id, 'message:updated', { conversationId: id, message: result.threadRoot });
 
   // Deleting a message changes everyone's unread arithmetic.
   const members = await chat.memberIdsOf(id);

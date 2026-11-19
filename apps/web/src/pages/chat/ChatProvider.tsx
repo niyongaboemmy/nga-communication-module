@@ -89,6 +89,8 @@ interface ChatValue {
   threadMessages: WireMessage[];
   threadLoading: boolean;
   openThread: (rootId: string | null) => void;
+  /** An inline thread follows its root's replies (sends, arrivals, edits). Returns unsubscribe. */
+  subscribeThread: (rootId: string, listener: (fn: (prev: WireMessage[]) => WireMessage[]) => void) => () => void;
   /** `rootId`: a thread other than the one open in the panel (an inline thread). */
   sendThreadReply: (body: string, alsoSendToChannel: boolean, attachments?: string[], rootId?: string) => Promise<void>;
 
@@ -201,7 +203,7 @@ async function deliverRest(p: SendPayload): Promise<{ message: WireMessage; root
 export type ChatActions = Pick<ChatValue,
   'send' | 'retry' | 'discard' | 'react' | 'edit' | 'remove' | 'pin' | 'save' | 'forward'
   | 'openThread' | 'setReplyTarget' | 'jumpTo' | 'setEditingId' | 'markUnread' | 'sendThreadReply'
-  | 'markThreadRead' | 'notifyTyping' | 'stopTyping'>;
+  | 'markThreadRead' | 'notifyTyping' | 'stopTyping' | 'subscribeThread'>;
 const ChatActionsContext = createContext<ChatActions | null>(null);
 
 /** Stable wrappers around changing callbacks: same object for the provider's whole life. */
@@ -378,6 +380,26 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [applyToLists]);
   /** Inline threads (P4) listen for sends to their root here. */
   const threadListeners = useRef(new Map<string, Set<(fn: (prev: WireMessage[]) => WireMessage[]) => void>>());
+  /**
+   * A change to messages wherever they are shown: the main log, the thread
+   * panel, and every inline thread (edits, deletions, reactions).
+   */
+  const everywhere = useCallback((fn: (prev: WireMessage[]) => WireMessage[]) => {
+    setMessages(fn);
+    setThreadMessages(fn);
+    threadListeners.current.forEach((set) => set.forEach((l) => l(fn)));
+  }, []);
+  const subscribeThread = useCallback((
+    rootId: string, listener: (fn: (prev: WireMessage[]) => WireMessage[]) => void,
+  ) => {
+    let set = threadListeners.current.get(rootId);
+    if (!set) { set = new Set(); threadListeners.current.set(rootId, set); }
+    set.add(listener);
+    return () => {
+      set!.delete(listener);
+      if (set!.size === 0) threadListeners.current.delete(rootId);
+    };
+  }, []);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [enterToSend, setEnterToSend] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -799,10 +821,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     function onThreadReply(
       { conversationId, rootId, message }: { conversationId: string; rootId: string; message: WireMessage },
     ) {
-      if (conversationId === activeIdRef.current && rootId === threadRootRef.current) {
-        setThreadMessages((prev) => reconcile(prev, message.senderId === meId
-          ? message : personalise(message, meId)));
-      }
+      if (conversationId !== activeIdRef.current) return;
+      const mineOrTheirs = message.senderId === meId ? message : personalise(message, meId);
+      if (rootId === threadRootRef.current) setThreadMessages((prev) => reconcile(prev, mineOrTheirs));
+      // An inline thread under its root in the channel (R-03) hears it too.
+      threadListeners.current.get(rootId)?.forEach((l) => l((prev) => reconcile(prev, mineOrTheirs)));
     }
 
     const onThreadUnread = (
@@ -820,10 +843,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     // Edits, deletions and reactions apply to the open thread too — a reply
     // edited or removed must not stay stale in the thread pane.
-    const inBoth = (fn: (list: WireMessage[]) => WireMessage[]) => {
-      setMessages(fn);
-      setThreadMessages(fn);
-    };
+    const inBoth = everywhere;
 
     const onUpdated = ({ conversationId, message }: { conversationId: string; message: WireMessage }) => {
       if (conversationId !== activeIdRef.current) return;
@@ -1323,9 +1343,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const putBack = () => {
       if (!before) return;
       const restore = before;
-      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, reactions: restore } : m)));
+      everywhere((prev) => prev.map((m) => (m.id === messageId ? { ...m, reactions: restore } : m)));
     };
-    setMessages((prev) => prev.map((m) => {
+    everywhere((prev) => prev.map((m) => {
       if (m.id !== messageId) return m;
       before = m.reactions;
       const existing = m.reactions.find((r) => r.emoji === emoji);
@@ -1344,7 +1364,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (socket?.connected) {
       socket.emit('message:react', { conversationId, messageId, emoji }, (r) => {
         if (r?.ok && r.reactions) {
-          setMessages((prev) => prev.map((m) => (m.id === messageId
+          everywhere((prev) => prev.map((m) => (m.id === messageId
             ? { ...m, reactions: r.reactions! } : m)));
         } else {
           // Refused (rate limit, archived conversation): it bounces back.
@@ -1355,7 +1375,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     try {
       const r = await chatApi.toggleReaction(conversationId, messageId, emoji);
-      setMessages((prev) => prev.map((m) => (m.id === messageId
+      everywhere((prev) => prev.map((m) => (m.id === messageId
         ? { ...m, reactions: r.reactions } : m)));
     } catch {
       // Put it back. A reaction that silently did not stick is worse than one
@@ -1374,7 +1394,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!conversationId) return;
     const before = messagesRef.current.find((m) => m.id === messageId)
       ?? threadMessagesRef.current.find((m) => m.id === messageId);
-    const both = (fn: (prev: WireMessage[]) => WireMessage[]) => { setMessages(fn); setThreadMessages(fn); };
+    const both = everywhere;
     both((prev) => prev.map((m) => (m.id === messageId ? { ...m, body, editedAt: new Date().toISOString() } : m)));
     try {
       const message = await chatApi.editMessage(conversationId, messageId, body);
@@ -1398,7 +1418,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const before = messagesRef.current.find((m) => m.id === messageId)
       ?? threadMessagesRef.current.find((m) => m.id === messageId);
     if (!before || pendingDeletes.current.has(messageId)) return;
-    const both = (fn: (prev: WireMessage[]) => WireMessage[]) => { setMessages(fn); setThreadMessages(fn); };
+    const both = everywhere;
     const restore = () => both((prev) => prev.map((m) => (m.id === messageId ? before : m)));
     both((prev) => prev.map((m) => (m.id === messageId
       ? { ...m, deletedAt: new Date().toISOString(), body: null, attachments: [], reactions: [] }
@@ -1738,12 +1758,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     draftFor, setDraft, toggleStar, setNotificationLevel, muteUntil, hideConversation,
     totalUnread, totalMentions, threadUnread, threadsUnreadTotal,
     markThreadRead, markUnread, markConversationRead,
-    refresh, enterToSend, blockedIds, setBlocked,
+    refresh, enterToSend, blockedIds, setBlocked, subscribeThread,
   };
 
   const actions = useStableActions<ChatActions>({
     send, retry, discard, react, edit, remove, pin, save, forward, openThread, setReplyTarget,
     jumpTo, setEditingId, markUnread, sendThreadReply, markThreadRead, notifyTyping, stopTyping,
+    subscribeThread,
   });
 
   return (
