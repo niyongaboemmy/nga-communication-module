@@ -21,12 +21,15 @@
     "@tupo/notify": "*",
     "@tupo/shared": "*",
     "@tupo/tenancy": "*",
+    "imapflow": "^1.0.191",
     "ioredis": "^5.4.2",
+    "mailparser": "^3.7.4",
     "nodemailer": "10.1.7",
     "pg": "^8.13.1",
     "sanitize-html": "^2.17.0"
   },
   "devDependencies": {
+    "@types/mailparser": "^3.4.6",
     "@types/nodemailer": "^6.4.17",
     "@types/pg": "^8.11.10",
     "@types/sanitize-html": "^2.16.0",

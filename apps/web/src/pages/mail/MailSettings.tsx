@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Save, Loader2 } from 'lucide-react';
 import { Button, Spinner, PageHeader } from '../../components/ui';
 import { RichTextEditor } from './RichTextEditor';
+import { ConnectedMailbox } from './ConnectedMailbox';
 import * as api from './api';
 import { useAuth } from '../../context/AuthContext';
 import type { MailPrefs } from '@tupo/shared';
@@ -28,9 +29,11 @@ export const MailSettings: React.FC = () => {
   return (
     <div className="mx-auto max-w-2xl px-4 pb-24 pt-5 sm:px-6 sm:pt-6">
       <button onClick={() => navigate('/app/mail')} className="mb-3 inline-flex items-center gap-1 text-sm text-blue-600"><ArrowLeft size={15} /> Back to mail</button>
-      <PageHeader title="Mail settings" subtitle="Your signature and delivery preferences." />
+      <PageHeader title="Mail settings" subtitle="Your mailbox, signature and delivery preferences." />
 
       <div className="space-y-5">
+        <ConnectedMailbox />
+
         <div>
           <p className="mb-1 block text-sm font-medium">Sent as</p>
           <p className="rounded-xl border border-border-light px-3 py-2 text-sm dark:border-border-dark/60">{user?.name}</p>

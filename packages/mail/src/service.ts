@@ -517,10 +517,10 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
   if (!tRows[0]) throw new MailError('Thread not found.', 404);
 
   const { rows: msgs } = await db.query<{
-    id: string; thread_id: string; from_user_id: string; from_name: string; from_address: string;
+    id: string; thread_id: string; from_user_id: string | null; from_name: string; from_address: string;
     from_avatar: string | null; subject: string; body_html: string; body_text: string; snippet: string;
     kind: string; parent_id: string | null; is_draft: boolean; scheduled_at: string | null;
-    sent_at: string | null; created_at: string; campaign_id: string | null;
+    sent_at: string | null; created_at: string; campaign_id: string | null; source: string | null;
   }>(
     `SELECT m.*, u.avatar_url AS from_avatar
        FROM mail_messages m LEFT JOIN users u ON u.id = m.from_user_id
@@ -598,6 +598,7 @@ export async function getThread(userId: string, threadId: string): Promise<MailT
 
     messages.push({
       id: m.id, threadId: m.thread_id,
+      source: (m.source ?? 'tupo') as MailMessageView['source'],
       from: { userId: m.from_user_id, name: m.from_name, address: m.from_address, avatarUrl: m.from_avatar },
       // One entry per person: an in-app and an email copy are the same recipient.
       to: onePerPerson(visibleRecips.filter((r) => r.kind === 'to')).map(asPerson),
@@ -956,7 +957,7 @@ export async function cancelScheduled(userId: string, messageId: string): Promis
  */
 export async function releaseMessage(db: PoolClient | ReturnType<typeof getPool>, messageId: string): Promise<void> {
   const { rows } = await db.query<{
-    thread_id: string; from_user_id: string; from_name: string; snippet: string; subject: string; has_attachments: boolean;
+    thread_id: string; from_user_id: string | null; from_name: string; snippet: string; subject: string; has_attachments: boolean;
   }>(
     `UPDATE mail_messages SET sent_at = COALESCE(sent_at, now()), updated_at = now()
       WHERE id = $1 AND NOT is_draft
@@ -986,7 +987,7 @@ export async function releaseMessage(db: PoolClient | ReturnType<typeof getPool>
  * new mail there, and otherwise a new message brings an archived
  * conversation back to the Inbox, whole.
  */
-async function inheritThreadState(db: PoolClient | ReturnType<typeof getPool>, messageId: string, threadId: string): Promise<void> {
+export async function inheritThreadState(db: PoolClient | ReturnType<typeof getPool>, messageId: string, threadId: string): Promise<void> {
   await db.query(
     `WITH prior AS (
        SELECT r.user_id,

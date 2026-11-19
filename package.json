@@ -2,7 +2,7 @@
   "name": "tupo",
   "version": "0.1.0",
   "private": true,
-  "description": "Tupo — NGA unified communication platform (chat, meet, files, mail, feed)",
+  "description": "Tupo \u2014 NGA unified communication platform (chat, meet, files, mail, feed)",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -83,11 +83,13 @@
     "verify:errors": "node scripts/verify-load-errors.mjs",
     "verify:access:ui": "node scripts/verify-access-ux.mjs",
     "verify:admin:ui": "node scripts/verify-admin-ui.mjs",
-    "verify:sessions": "node scripts/verify-sessions.mjs"
+    "verify:sessions": "node scripts/verify-sessions.mjs",
+    "verify:mail:inbound": "node scripts/verify-mail-inbound.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
-    "typescript": "^5.7.2",
-    "playwright": "^1.60.0"
+    "hoodiecrow-imap": "^2.1.0",
+    "playwright": "^1.60.0",
+    "typescript": "^5.7.2"
   }
 }

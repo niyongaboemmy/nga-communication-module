@@ -77,8 +77,10 @@ export const emailMessageId = (id: string, domain: string) => `<${id}@${domain}>
 export async function threadHeaders(
   messageId: string, domain: string,
 ): Promise<{ inReplyTo?: string; references: string[] }> {
-  const { rows } = await getPool().query<{ id: string; parent_id: string | null }>(
-    `SELECT p.id, m.parent_id
+  // An email that came from outside keeps its own Message-ID: a reply must
+  // name that one, or the outsider's mail app cannot thread it.
+  const { rows } = await getPool().query<{ id: string; parent_id: string | null; external_message_id: string | null }>(
+    `SELECT p.id, m.parent_id, p.external_message_id
        FROM mail_messages m
        JOIN mail_messages p ON p.thread_id = m.thread_id AND p.id <> m.id
                            AND NOT p.is_draft AND p.created_at <= m.created_at
@@ -86,9 +88,10 @@ export async function threadHeaders(
       ORDER BY p.created_at DESC
       LIMIT 20`, [messageId]);
   if (!rows.length) return { references: [] };
-  const references = rows.map((r) => emailMessageId(r.id, domain)).reverse();
-  const parent = rows[0]!.parent_id && rows.some((r) => r.id === rows[0]!.parent_id) ? rows[0]!.parent_id : rows[0]!.id;
-  return { inReplyTo: emailMessageId(parent, domain), references };
+  const idOf = (r: { id: string; external_message_id: string | null }) => r.external_message_id || emailMessageId(r.id, domain);
+  const references = rows.map(idOf).reverse();
+  const parentRow = (rows[0]!.parent_id && rows.find((r) => r.id === rows[0]!.parent_id)) || rows[0]!;
+  return { inReplyTo: idOf(parentRow), references };
 }
 
 /* ── One-click unsubscribe (RFC 8058) ─────────────────────────────────── */

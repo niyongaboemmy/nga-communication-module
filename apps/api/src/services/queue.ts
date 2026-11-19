@@ -176,6 +176,22 @@ export async function enqueueMailListSync(listId: string): Promise<boolean> {
   }
 }
 
+/** Read one connected mailbox now ("Sync now", and right after connecting). False if the queue is unavailable. */
+export async function enqueueMailAccountSync(accountId: string): Promise<boolean> {
+  const q = getQueue();
+  if (!q) return false;
+  try {
+    await q.add('mail:account-sync', withJobTenant({ accountId }), {
+      // A burst of "Sync now" taps is one sync.
+      jobId: `mail-account-sync-${accountId}-${Math.floor(Date.now() / 10_000)}`,
+      attempts: 1, removeOnComplete: 50, removeOnFail: 20,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Announce a published post from the worker (FEED-P4). False if the queue is unavailable. */
 export async function enqueueFeedAnnounce(postId: string): Promise<boolean> {
   const q = getQueue();

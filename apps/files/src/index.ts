@@ -8,7 +8,7 @@ import { getPool, pingDb, snowflake, closeDb, startProcessMetrics, guardDbRole }
 import { ok, fail, MEETING_FOLDER_PATTERN } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
-import { effectiveTenant, effectiveTid, forEachActiveTenant, tenantRegistry } from '@tupo/tenancy';
+import { effectiveTenant, effectiveTid, forEachActiveTenant, tenantRegistry, gateTenant, runWithTenant } from '@tupo/tenancy';
 import { overTenantQuota, tenantFromCredential, tenantStorageKey } from './tenancy.js';
 import { createStorageDriver } from './storage/driver.js';
 import { canReadFile, canDeleteFile, listConversationFiles } from './access.js';
@@ -513,6 +513,49 @@ app.get('/internal/files/:id/content', async (req, res) => {
   res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
   res.setHeader('Content-Length', file.size_bytes);
   (await storage.get(file.storage_key)).on('error', () => res.destroy()).pipe(res);
+});
+
+/**
+ * Service-to-service upload (attachments of received email, written by the
+ * worker: docs/MAIL_INBOUND_PLAN_2026-11.md). Same gate as the read above:
+ * loopback, shared secret, never proxied. The tenant and the owner are named
+ * by the caller, which is trusted exactly as far as the secret is.
+ */
+app.post('/internal/files', async (req, res) => {
+  const given = Buffer.from(String(req.headers['x-internal-secret'] ?? ''));
+  const want = Buffer.from(config.internalSecret);
+  const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '');
+  if (!want.length || !loopback || given.length !== want.length || !timingSafeEqual(given, want)) {
+    return res.status(404).json(fail('Not found'));
+  }
+  const tid = Number(req.headers['x-tenant-id']);
+  const ownerId = String(req.headers['x-owner-id'] ?? '');
+  let name = 'attachment';
+  try { name = decodeURIComponent(String(req.headers['x-file-name'] ?? 'attachment')).slice(0, 200) || 'attachment'; } catch { /* keep the default */ }
+  // The body is always sent as octet-stream (the JSON body parser above would
+  // swallow a .json attachment); its real type comes in x-file-mime.
+  const mime = String(req.headers['x-file-mime'] ?? 'application/octet-stream').slice(0, 200);
+  if (!Number.isInteger(tid) || tid < 1 || !ownerId) return res.status(400).json(fail('tenant and owner are required'));
+  const gate = await gateTenant(tid);
+  if (!gate.ok) return res.status(gate.status).json(fail(gate.message));
+  await runWithTenant(gate.tenant, async () => {
+    const id = snowflake();
+    const now = new Date();
+    const safeName = name.replace(/[^\w.\-]/g, '_').slice(0, 120);
+    const key = tenantStorageKey(tid, `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${id}/${safeName}`);
+    await getPool().query(
+      `INSERT INTO files (id, owner_id, storage_driver, storage_key, original_name, mime_type, size_bytes, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 0, 'pending')`,
+      [id, ownerId, storage.name, key, name, mime]);
+    try {
+      const { sizeBytes, checksum } = await storage.put(key, req, { maxBytes: Math.min(config.maxFileSizeBytes, 30 * 1024 * 1024) });
+      await getPool().query(`UPDATE files SET size_bytes = $2, checksum = $3, status = 'ready' WHERE id = $1`, [id, sizeBytes, checksum]);
+      res.json(ok({ fileId: id, sizeBytes }));
+    } catch (e) {
+      await getPool().query(`UPDATE files SET status = 'failed' WHERE id = $1`, [id]);
+      res.status(413).json(fail((e as Error).message || 'Upload failed'));
+    }
+  });
 });
 
 app.get('/api/files/conversations/:conversationId', requireSession, async (req, res) => {

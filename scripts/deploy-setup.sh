@@ -64,6 +64,32 @@ share_secret() {
 }
 share_secret FILES_INTERNAL_SECRET "$FILES_ENV" "$WORKER_ENV"
 share_secret MAIL_LINK_SECRET "$API_ENV" "$WORKER_ENV"
+
+# ── Receiving outside email (docs/MAIL_INBOUND_PLAN_2026-11.md) ──────────
+# The key that encrypts connected mailboxes' passwords: the api stores them,
+# the worker reads mailboxes with them, so both hold the same key.
+share_secret MAIL_ACCOUNT_KEY "$API_ENV" "$WORKER_ENV"
+# The school's mail server is the relay's host (mail.hackflix.net for NGA):
+# it also speaks IMAP on 993. The api never had SMTP_HOST (only the worker
+# sends), so it learns the host, and the domain to suggest, from here.
+if has SMTP_HOST "$WORKER_ENV"; then
+  MAILHOST="$(grep '^SMTP_HOST=' "$WORKER_ENV" | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
+  for f in "$API_ENV" "$WORKER_ENV"; do
+    if [ -n "$MAILHOST" ] && ! has MAIL_IMAP_HOST "$f"; then
+      printf '\n# Added by scripts/deploy-setup.sh (connected mailboxes)\nMAIL_IMAP_HOST=%s\n' "$MAILHOST" >> "$f"
+      echo "setup: MAIL_IMAP_HOST added to $f"
+    fi
+  done
+  if ! has MAIL_ACCOUNT_DOMAIN "$API_ENV" && has MAIL_FROM "$WORKER_ENV"; then
+    DOMAIN="$(grep '^MAIL_FROM=' "$WORKER_ENV" | tail -n 1 | sed -E 's/.*@([A-Za-z0-9.-]+).*/\1/')"
+    if [ -n "$DOMAIN" ]; then
+      printf '\n# Added by scripts/deploy-setup.sh (connected mailboxes)\nMAIL_ACCOUNT_DOMAIN=%s\n' "$DOMAIN" >> "$API_ENV"
+      echo "setup: MAIL_ACCOUNT_DOMAIN added to $API_ENV"
+    fi
+  fi
+fi
+# Shared reply capture (MAIL_REPLY_CAPTURE=on in BOTH files) is left to the
+# school: it reads the relay's mailbox, which the MIS shares.
 # The address people open Tupo at: links in emails (digests, unsubscribe)
 # point there. Unset, they fell back to localhost. The first CORS origin is it.
 if ! has APP_PUBLIC_URL "$API_ENV" && has CORS_ORIGINS "$API_ENV"; then
