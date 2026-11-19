@@ -427,11 +427,16 @@ router.put('/conversations/:id/draft', wrap(async (req, res) => {
   const id = req.params.id!;
   await chat.requireMembership(me.id, id);
   const draft = typeof req.body?.draft === 'string' ? req.body.draft : null;
-  await chat.saveDraft(me.id, id, draft);
-  emitToUsers([me.id], 'conversation:draft', {
-    conversationId: id, draft, at: new Date().toISOString(),
-  });
-  res.json(ok({ saved: true }));
+  const rawAt = req.body?.clientSavedAt;
+  const clientSavedAt = typeof rawAt === 'string' || typeof rawAt === 'number' ? new Date(rawAt) : null;
+  const result = await chat.saveDraft(me.id, id, draft, clientSavedAt);
+  // A save that lost to a newer one is not news to anyone (G-01). The echo
+  // names the tab that saved, so that tab can ignore its own words coming back.
+  if (result.saved) {
+    const origin = typeof req.get('x-tupo-tab') === 'string' ? req.get('x-tupo-tab')!.slice(0, 64) : null;
+    emitToUsers([me.id], 'conversation:draft', { conversationId: id, draft, at: result.at, origin });
+  }
+  res.json(ok({ saved: result.saved, at: result.at }));
 }));
 
 /** Links shared here, newest first (B-12). */

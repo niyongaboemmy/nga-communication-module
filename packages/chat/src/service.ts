@@ -1560,16 +1560,32 @@ export async function setMemberPrefs(
   );
 }
 
+/**
+ * Save a draft, newest write wins (G-01).
+ *
+ * `clientSavedAt` is when the browser captured the text. A save that arrives
+ * after a newer one (two requests overtaking each other on a slow line, or a
+ * stale tab) is refused rather than overwriting newer text; the caller then
+ * does not broadcast it. Clamped to the server's clock + 5 s so a device with
+ * a clock far in the future cannot freeze the draft. Without a client time
+ * (an old client) the server's own clock is used, as before.
+ */
 export async function saveDraft(
-  userId: string, conversationId: string, draft: string | null,
-): Promise<void> {
+  userId: string, conversationId: string, draft: string | null, clientSavedAt?: Date | null,
+): Promise<{ saved: boolean; at: string }> {
   if (draft && draft.length > MAX_MESSAGE_LENGTH * 2) throw new ChatError('That draft is too long to save.', 400);
-  await getPool().query(
+  const at = clientSavedAt && Number.isFinite(clientSavedAt.getTime()) ? clientSavedAt.toISOString() : null;
+  const { rows } = await getPool().query<{ at: Date }>(
     `UPDATE conversation_members
-        SET draft = $3, draft_updated_at = now()
-      WHERE conversation_id = $1 AND user_id = $2`,
-    [conversationId, userId, draft && draft.trim() ? draft : null],
+        SET draft = $3,
+            draft_updated_at = LEAST(COALESCE($4::timestamptz, now()), now() + interval '5 seconds')
+      WHERE conversation_id = $1 AND user_id = $2
+        AND (draft_updated_at IS NULL
+             OR draft_updated_at <= LEAST(COALESCE($4::timestamptz, now()), now() + interval '5 seconds'))
+      RETURNING draft_updated_at AS at`,
+    [conversationId, userId, draft && draft.trim() ? draft : null, at],
   );
+  return rows[0] ? { saved: true, at: rows[0].at.toISOString() } : { saved: false, at: at ?? new Date().toISOString() };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *

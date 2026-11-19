@@ -84,8 +84,13 @@ export const setPrefs = (
   `/api/chat/conversations/${id}/prefs`, prefs,
 ).then((r) => r.data!.conversation);
 
-export const saveDraft = (id: string, draft: string | null) =>
-  apiPut<{ saved: boolean }>(`/api/chat/conversations/${id}/draft`, { draft });
+/** `clientSavedAt`: when the text was captured — the server keeps the newest (G-01). */
+export const saveDraft = (
+  id: string, draft: string | null, clientSavedAt = Date.now(),
+  init: { signal?: AbortSignal; keepalive?: boolean } = {},
+) => apiPut<{ saved: boolean; at: string }>(
+  `/api/chat/conversations/${id}/draft`, { draft, clientSavedAt: new Date(clientSavedAt).toISOString() }, init,
+);
 
 export const openDirect = (userId: string) =>
   apiPost<{ conversation: ConversationSummary }>('/api/chat/conversations/direct', { userId })

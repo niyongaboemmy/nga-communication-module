@@ -1,3 +1,5 @@
+import { isSubmitEnter } from './composerKeys';
+import { MAX_MESSAGE_LENGTH } from '@tupo/shared';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X, Send, CornerDownRight, Paperclip, FileText } from 'lucide-react';
 import { Avatar, IconButton, Skeleton } from '../../components/ui';
@@ -99,7 +101,6 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
   // Another thread opened in the same panel: show that thread's draft.
   useEffect(() => { setValueState(threadRootId ? threadDrafts.get(threadRootId) ?? '' : ''); }, [threadRootId]);
   const [alsoSend, setAlsoSend] = useState(false);
-  const [sending, setSending] = useState(false);
   const tray = useUploads();
   const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -156,20 +157,29 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
   const root = threadMessages.find((m) => m.id === threadRootId);
   const replies = threadMessages.filter((m) => m.id !== threadRootId);
 
+  /*
+   * Take the text out of the box at send time, not when the server answers
+   * (G-03). On a slow line the person starts the next reply while the first
+   * is in flight; clearing on the answer erased it. On failure the text comes
+   * back — but only into an empty box, never over something new.
+   */
   const submit = async () => {
     const text = value.trim();
-    if ((!text && tray.readyIds.length === 0) || sending || tray.busy) return;
-    setSending(true);
+    if ((!text && tray.readyIds.length === 0) || tray.busy) return;
+    if (text.length > MAX_MESSAGE_LENGTH) {
+      notify({ title: `Messages can be up to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters`, tone: 'warning' });
+      return;
+    }
+    const attachments = tray.readyIds;
+    const wasAlsoSend = alsoSend;
+    setValue('');
+    setAlsoSend(false);
+    tray.clear();
     try {
-      await sendThreadReply(text, alsoSend, tray.readyIds);
-      setValue('');
-      setAlsoSend(false);
-      tray.clear();
+      await sendThreadReply(text, wasAlsoSend, attachments);
     } catch (err) {
-      // The reply stays in the box to try again (B-10: failures are said).
+      if (!inputRef.current?.value.trim()) setValue(text);
       notify({ title: 'Your reply was not sent', body: err instanceof Error ? err.message : undefined, tone: 'error' });
-    } finally {
-      setSending(false);
     }
   };
 
@@ -276,7 +286,7 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
                 if (files.length) { e.preventDefault(); tray.add(files); }
               }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !window.matchMedia('(pointer: coarse)').matches) {
+                if (isSubmitEnter(e)) {
                   e.preventDefault();
                   void submit();
                 }
@@ -286,7 +296,7 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
             />
             <button
               onClick={() => void submit()}
-              disabled={(!value.trim() && tray.readyIds.length === 0) || sending || tray.busy}
+              disabled={(!value.trim() && tray.readyIds.length === 0) || tray.busy || value.length > MAX_MESSAGE_LENGTH}
               aria-label="Send reply"
               className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-blue-600 text-white transition-colors duration-150 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
             >

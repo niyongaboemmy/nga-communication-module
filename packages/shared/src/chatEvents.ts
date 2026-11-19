@@ -240,9 +240,12 @@ export interface ChatServerToClientEvents {
   /** You blocked or unblocked someone (on another device, or this one). Never sent to the blocked person. */
   'block:changed': (p: { userId: string; blocked: boolean }) => void;
 
-  /** A draft saved on another device (FR-MSG-17). */
+  /**
+   * A draft was saved (FR-MSG-17). Sent to every socket of the user;
+   * `origin` is the saving tab's id, so that tab ignores its own echo (G-01).
+   */
   'conversation:draft': (
-    p: { conversationId: string; draft: string | null; at: string },
+    p: { conversationId: string; draft: string | null; at: string; origin?: string | null },
   ) => void;
 }
 

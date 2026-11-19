@@ -27,6 +27,16 @@ export function clearSession(): void {
   localStorage.removeItem(ROLE_PERMISSIONS_KEY);
 }
 
+/**
+ * This tab's id (G-01). Sent with every request so the server can name the
+ * tab a broadcast came from, and the tab can recognise its own echo. Per tab,
+ * not per device: two tabs of the same person are two writers.
+ */
+export const TAB_ID: string = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+  ? crypto.randomUUID()
+  // Not in sessionStorage: a duplicated tab copies it, and two writers would share an id.
+  : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<Envelope<T>> {
   // A signed-in session always wins; the guest ticket is only used by someone
   // who has no session at all, and only reaches Meet routes.
@@ -40,6 +50,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<Envelop
       ...(init.body ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(deviceId ? { 'X-NGA-Device': deviceId } : {}),
+      'X-Tupo-Tab': TAB_ID,
       ...(init.headers ?? {}),
     },
   });
@@ -78,8 +89,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<Envelop
 export const apiGet = <T>(path: string) => request<T>(path, { method: 'GET' });
 export const apiPost = <T>(path: string, data?: unknown) =>
   request<T>(path, { method: 'POST', body: data !== undefined ? JSON.stringify(data) : undefined });
-export const apiPut = <T>(path: string, data?: unknown) =>
-  request<T>(path, { method: 'PUT', body: data !== undefined ? JSON.stringify(data) : undefined });
+export const apiPut = <T>(path: string, data?: unknown, init: Pick<RequestInit, 'signal' | 'keepalive'> = {}) =>
+  request<T>(path, { ...init, method: 'PUT', body: data !== undefined ? JSON.stringify(data) : undefined });
 export const apiPatch = <T>(path: string, data?: unknown) =>
   request<T>(path, { method: 'PATCH', body: data !== undefined ? JSON.stringify(data) : undefined });
 export const apiDelete = <T>(path: string, data?: unknown) =>

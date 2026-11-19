@@ -1,3 +1,6 @@
+import { QuotePreview } from './QuotePreview';
+import { isComposing, isSubmitEnter } from './composerKeys';
+import { noteRowRender } from '../../lib/perf';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useStartCall } from './useStartCall';
 import {
@@ -223,6 +226,7 @@ const MessageRow: React.FC<{
   names: Record<string, string>;
   onRetry: (nonce: string) => void;
 }> = ({ message: m, newGroup, names, onRetry }) => {
+  noteRowRender();
   const { can } = usePermissions();
   const { user } = useAuth();
   const {
@@ -398,8 +402,10 @@ const MessageRow: React.FC<{
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
+                if (isComposing(e)) return;
                 if (e.key === 'Escape') { e.preventDefault(); setEditing(false); }
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void submitEdit(); }
+                // Same rule as the composer (G-08): on a phone Enter is a new line.
+                if (isSubmitEnter(e)) { e.preventDefault(); void submitEdit(); }
               }}
               rows={Math.min((draft.match(/\n/g)?.length ?? 0) + 1, 8)}
               aria-label="Edit message text"
@@ -412,7 +418,7 @@ const MessageRow: React.FC<{
               <button onClick={() => setEditing(false)} className="text-text-secondary-light hover:underline dark:text-text-secondary-dark">
                 Cancel
               </button>
-              <span className="text-text-secondary-light/70 dark:text-text-secondary-dark/60">
+              <span className="hidden text-text-secondary-light/70 [@media(pointer:fine)]:inline dark:text-text-secondary-dark/60">
                 Escape to cancel · Enter to save
               </span>
             </div>
@@ -423,7 +429,8 @@ const MessageRow: React.FC<{
               bigEmoji
                 // No bubble, no padding: the emoji *is* the message.
                 ? `text-4xl leading-tight ${pending ? 'opacity-75' : ''}`
-                : `message-body px-3.5 py-2 text-sm ${
+                // `min-w-0 max-w-full`: nothing inside may widen the bubble past its column (R-01).
+                : `message-body min-w-0 max-w-full px-3.5 py-2 text-sm [overflow-wrap:anywhere] ${
                     mine
                       ? 'bubble-out bg-blue-600 text-white'
                       : 'bubble-in border border-border-light bg-white text-text-primary-light dark:border-border-dark/40 dark:bg-elevated-dark dark:text-text-primary-dark'
@@ -435,17 +442,7 @@ const MessageRow: React.FC<{
               /* Tappable, and it *jumps* rather than following an anchor: the
                  original may not be loaded, in which case the surrounding page
                  has to be fetched first (FR-MSG-7). */
-              <button
-                onClick={() => void jumpTo(m.replyTo!.id)}
-                className={`mb-1.5 block w-full truncate border-l-2 pl-2 text-left text-xs transition-opacity hover:opacity-80 ${
-                  mine ? 'border-white/50 text-white/80' : 'border-blue-400 text-text-secondary-light dark:text-text-secondary-dark'
-                }`}
-              >
-                <span className="font-medium">{m.replyTo.senderName}</span>
-                <span className="ml-1 opacity-80">
-                  {m.replyTo.deleted ? 'message deleted' : (m.replyTo.body ?? 'attachment')}
-                </span>
-              </button>
+              <QuotePreview replyTo={m.replyTo} onDark={mine} onJump={() => void jumpTo(m.replyTo!.id)} />
             )}
 
             {/* FR-MSG-10: attribution travels with a forward, so it can never be
@@ -953,7 +950,7 @@ export const MessageThread: React.FC<{
       <PinnedBar conversation={conversation} />
 
       <div className="relative min-h-0 flex-1">
-        <div ref={scrollRef} className="h-full overflow-y-auto overscroll-contain py-4">
+        <div ref={scrollRef} className="h-full overflow-y-auto overscroll-contain pb-16 pt-4 [scroll-padding-bottom:4rem]">
           <div ref={topSentinel} />
 
           {loadingMore && (
@@ -1004,8 +1001,10 @@ export const MessageThread: React.FC<{
                 return (
                   <React.Fragment key={m.id}>
                     {showDay && (
-                      <li className="sticky top-0 z-10 flex justify-center py-2">
-                        <span className="rounded-full border border-border-light bg-white/90 px-3 py-0.5 text-[11px] font-semibold text-text-secondary-light backdrop-blur dark:border-border-dark/50 dark:bg-elevated-dark/90 dark:text-text-secondary-dark">
+                      /* A full-width strip in the list's own colour (C-01): text
+                         scrolls under the date instead of through it. */
+                      <li className="sticky top-0 z-10 flex justify-center bg-surface-light/95 py-1.5 backdrop-blur-sm dark:bg-background-dark/95">
+                        <span className="rounded-full border border-border-light bg-white px-3 py-0.5 text-[11px] font-semibold text-text-secondary-light dark:border-border-dark/50 dark:bg-elevated-dark dark:text-text-secondary-dark">
                           {day}
                         </span>
                       </li>
@@ -1037,16 +1036,19 @@ export const MessageThread: React.FC<{
         </div>
 
         {/* UX-3 */}
+        {/* C-04: a round button in the corner rather than a pill across the
+            middle of the text it was covering; the unread count rides on it. */}
         {(!atBottom || hasNewer) && !loading && messages.length > 0 && (
           <button
             onClick={() => void jumpToLatest()}
-            className="animate-fade-in absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-slate-900 px-3.5 py-1.5 text-xs font-medium text-white transition-colors duration-150 hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500"
+            aria-label={conversation.unread > 0 ? `Jump to latest, ${conversation.unread} new` : 'Jump to latest'}
+            title="Jump to latest"
+            className="animate-fade-in absolute bottom-3 right-3 z-20 grid h-11 w-11 place-items-center rounded-full border border-border-light bg-white text-blue-600 transition-colors duration-150 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 sm:right-5 dark:border-border-dark/60 dark:bg-elevated-dark dark:text-blue-400 dark:hover:bg-blue-900/30"
           >
-            <ChevronDown size={14} />
-            Jump to latest
+            <ChevronDown size={20} />
             {conversation.unread > 0 && (
-              <span className="ml-0.5 rounded-full bg-white/25 px-1.5 py-0.5 text-[10px] tabular-nums">
-                {conversation.unread}
+              <span className="absolute -top-1.5 left-1/2 min-w-5 -translate-x-1/2 rounded-full bg-blue-600 px-1.5 text-center text-[10px] font-semibold leading-5 tabular-nums text-white">
+                {conversation.unread > 99 ? '99+' : conversation.unread}
               </span>
             )}
           </button>

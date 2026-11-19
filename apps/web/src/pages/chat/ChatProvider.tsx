@@ -8,7 +8,8 @@ import type { ActivityKind,
 import { TYPING_THROTTLE_MS, EDIT_WINDOW_MS } from '@tupo/shared';
 import { getSocket, onSocket } from '../../lib/socket';
 import { useAuth } from '../../context/AuthContext';
-import { apiGet } from '../../lib/api';
+import { apiGet, TAB_ID } from '../../lib/api';
+import { count } from '../../lib/clientCounters';
 import * as chatApi from './api';
 import * as outbox from './outbox';
 import { cacheGet, cacheSet, debouncedWriter } from '../../lib/localStore';
@@ -118,6 +119,12 @@ interface ChatValue {
 
   draftFor: (conversationId: string) => string;
   setDraft: (conversationId: string, text: string) => void;
+  /**
+   * A draft saved on another device while this box was being typed in (G-01):
+   * offered, never applied over live typing. `take` puts it in the box.
+   */
+  remoteDraftFor: (conversationId: string) => string | null;
+  resolveRemoteDraft: (conversationId: string, take: boolean) => void;
 
   toggleStar: (id: string) => Promise<void>;
   setNotificationLevel: (id: string, level: NotificationLevel) => Promise<void>;
@@ -293,6 +300,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /** What each unsent message was, for an exact retry. */
   const pendingPayloads = useRef(new Map<string, Parameters<typeof chatApi.sendMessage>[1]>());
   const draftTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  /** One live draft save per conversation; a newer save aborts the older (G-01). */
+  const draftAborts = useRef<Record<string, AbortController>>({});
+  /** When this tab last changed each draft by hand. */
+  const draftEditedAt = useRef<Record<string, number>>({});
+  /** What was just sent from each box, so a late echo of it is not put back (G-01). */
+  const lastSent = useRef<Record<string, { text: string; at: number }>>({});
+  const [remoteDrafts, setRemoteDrafts] = useState<Record<string, string>>({});
 
   const active = useMemo(
     () => conversations.find((c) => c.id === activeId) ?? null,
@@ -852,8 +866,42 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         : c)));
     };
 
-    const onDraft = ({ conversationId, draft }: { conversationId: string; draft: string | null }) => {
-      setDrafts((prev) => ({ ...prev, [conversationId]: { text: draft ?? '', savedAt: Date.now() } }));
+    /*
+     * A draft saved somewhere (G-01). Applied only when it is genuinely news:
+     *  - this tab's own save coming back is ignored outright;
+     *  - anything older than what this tab holds is dropped;
+     *  - a late echo of a message just sent is not put back in the box;
+     *  - while the box is being typed in, it is offered, never applied.
+     */
+    const onDraft = ({ conversationId, draft, at, origin }: {
+      conversationId: string; draft: string | null; at: string; origin?: string | null;
+    }) => {
+      if (origin && origin === TAB_ID) return;
+      const text = draft ?? '';
+      const remoteAt = Date.parse(at) || Date.now();
+      const sent = lastSent.current[conversationId];
+      if (sent && sent.text.trim() === text.trim() && Date.now() - sent.at < 30_000) {
+        count('chat.draft.conflict_dropped');
+        return;
+      }
+      const editingHere = Date.now() - (draftEditedAt.current[conversationId] ?? 0) < 5_000
+        || (activeIdRef.current === conversationId
+            && typeof document !== 'undefined'
+            && (document.activeElement as HTMLElement | null)?.id === 'composer');
+      let dropped = false;
+      let offered = false;
+      setDrafts((prev) => {
+        const local = prev[conversationId];
+        if (local && local.savedAt >= remoteAt) { dropped = true; return prev; }
+        if (local && local.text === text) return prev;
+        if (editingHere && local && local.text.trim()) { offered = true; return prev; }
+        return { ...prev, [conversationId]: { text, savedAt: remoteAt } };
+      });
+      if (dropped) count('chat.draft.conflict_dropped');
+      if (offered) {
+        count('chat.draft.remote_offered');
+        setRemoteDrafts((prev) => ({ ...prev, [conversationId]: text }));
+      }
     };
 
     // Presence arrives per person, and the sidebar shows it per DM row, so it
@@ -1018,14 +1066,44 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const draftFor = useCallback((id: string) => drafts[id]?.text ?? '', [drafts]);
 
   const setDraft = useCallback((id: string, text: string) => {
-    setDrafts((prev) => ({ ...prev, [id]: { text, savedAt: Date.now() } }));
+    const savedAt = Date.now();
+    draftEditedAt.current[id] = savedAt;
+    setDrafts((prev) => ({ ...prev, [id]: { text, savedAt } }));
     // Debounced to the server. A draft is worth persisting so it survives a
     // reload and follows you to another device — but not on every keystroke.
+    // `savedAt` travels with it, so the server keeps the newest (G-01), and a
+    // newer save aborts the one still in flight.
     clearTimeout(draftTimers.current[id]);
     draftTimers.current[id] = setTimeout(() => {
-      void chatApi.saveDraft(id, text || null).catch(() => {});
+      draftAborts.current[id]?.abort();
+      const ctl = new AbortController();
+      draftAborts.current[id] = ctl;
+      void chatApi.saveDraft(id, text || null, savedAt, { signal: ctl.signal })
+        .catch(() => {})
+        .finally(() => { if (draftAborts.current[id] === ctl) delete draftAborts.current[id]; });
     }, 800);
   }, []);
+
+  /** Sending ends the draft: no pending save, no save in flight, no echo put back (G-01). */
+  const endDraft = useCallback((id: string, sentText: string) => {
+    clearTimeout(draftTimers.current[id]);
+    draftAborts.current[id]?.abort();
+    delete draftAborts.current[id];
+    lastSent.current[id] = { text: sentText, at: Date.now() };
+    setRemoteDrafts((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
+  const remoteDraftFor = useCallback((id: string) => remoteDrafts[id] ?? null, [remoteDrafts]);
+  const resolveRemoteDraft = useCallback((id: string, take: boolean) => {
+    const text = remoteDrafts[id];
+    setRemoteDrafts((prev) => { const next = { ...prev }; delete next[id]; return next; });
+    if (take && text !== undefined) setDraft(id, text);
+  }, [remoteDrafts, setDraft]);
 
 
   const send = useCallback(async (input: {
@@ -1072,7 +1150,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
 
     setMessages((prev) => [...prev, optimistic]);
-    setDraft(conversationId, '');
+    if (!input.threadRootId) {
+      endDraft(conversationId, body);
+      // The cleared box is saved as cleared, stamped after the text it replaces.
+      setDraft(conversationId, '');
+    }
     setReplyTarget(null);
 
     const payload = {
@@ -1133,7 +1215,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       failed();
     }
-  }, [user, setDraft, replyTarget]);
+  }, [user, setDraft, endDraft, replyTarget]);
 
   const retry = useCallback(async (nonce: string) => {
     const failedMsg = messages.find((m) => m.nonce === nonce);
@@ -1546,7 +1628,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     replyTarget, setReplyTarget,
     threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
     pin, save, forward, jumpTo, highlightedId, hasNewer, loadNewer, showLatest,
-    draftFor, setDraft, toggleStar, setNotificationLevel, muteUntil, hideConversation,
+    draftFor, setDraft, remoteDraftFor, resolveRemoteDraft, toggleStar, setNotificationLevel, muteUntil, hideConversation,
     totalUnread, totalMentions, threadUnread, threadsUnreadTotal,
     markThreadRead, markUnread, markConversationRead,
     refresh, enterToSend, blockedIds, setBlocked,
