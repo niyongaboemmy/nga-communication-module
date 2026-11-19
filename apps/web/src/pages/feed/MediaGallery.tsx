@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { X, ChevronLeft, ChevronRight, FileText, Download, Play, ImageOff } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, FileText, Download, Play, ImageOff, Volume2, VolumeX } from 'lucide-react';
 import type { FeedMediaItem } from '@tupo/shared';
 import { FeedImage, useInViewport, useResilientMediaUrl } from './lib';
 import { downloadFile } from '../chat/uploads';
@@ -71,7 +71,19 @@ interface TileProps {
 
 /** One picture or video cell. It always fills the box its parent gives it. */
 const Tile: React.FC<TileProps> = ({ item, onOpen, onDims, anchorTop, overlay, style, className = '' }) => {
-  const label = item.kind === 'video' ? 'Play video' : `Open photo${item.name ? `: ${item.name}` : ''}`;
+  // A video carries its own controls (F-03), which cannot sit inside a button:
+  // its tile is a plain box whose full-area "Play video" button opens the viewer.
+  if (item.kind === 'video') {
+    return (
+      <div data-testid="feed-media-tile" className={`group relative block h-full w-full overflow-hidden bg-slate-100 dark:bg-white/5 ${className}`} style={style}>
+        <VideoFill item={item} onDims={onDims} onOpen={onOpen} />
+        {overlay ? (
+          <span className="pointer-events-none absolute inset-0 grid place-items-center bg-black/50 text-3xl font-semibold text-white">+{overlay}</span>
+        ) : null}
+      </div>
+    );
+  }
+  const label = `Open photo${item.name ? `: ${item.name}` : ''}`;
   return (
     <button
       type="button"
@@ -81,18 +93,14 @@ const Tile: React.FC<TileProps> = ({ item, onOpen, onDims, anchorTop, overlay, s
       className={`group relative block h-full w-full overflow-hidden bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 dark:bg-white/5 ${className}`}
       style={style}
     >
-      {item.kind === 'image' ? (
-        <FeedImage
-          thumb
-          fileId={item.fileId}
-          alt={item.name ?? ''}
-          className="absolute inset-0"
-          imgClassName={`transition-[filter] duration-200 group-hover:brightness-[0.94] ${anchorTop ? 'object-top' : ''}`}
-          onDims={(w, h) => onDims(item.fileId, w, h)}
-        />
-      ) : (
-        <VideoFill item={item} onDims={onDims} />
-      )}
+      <FeedImage
+        thumb
+        fileId={item.fileId}
+        alt={item.name ?? ''}
+        className="absolute inset-0"
+        imgClassName={`transition-[filter] duration-200 group-hover:brightness-[0.94] ${anchorTop ? 'object-top' : ''}`}
+        onDims={(w, h) => onDims(item.fileId, w, h)}
+      />
       {overlay ? (
         <span className="absolute inset-0 grid place-items-center bg-black/50 text-3xl font-semibold text-white">+{overlay}</span>
       ) : null}
@@ -111,21 +119,69 @@ const autoplayAllowed = () => {
   return !(conn?.saveData || conn?.effectiveType === '2g' || conn?.effectiveType === 'slow-2g');
 };
 
-const VideoFill: React.FC<{ item: FeedMediaItem; onDims: TileProps['onDims'] }> = ({ item, onDims }) => {
+/* ── Sound and position, shared by every video in the feed (F-03, F-04) ──
+   One switch for sound, remembered on this device, and at most one video
+   heard at a time. The last position of each video, so the viewer continues
+   where the post left off instead of starting again. */
+const SOUND_KEY = 'tupo.feed.sound';
+let audibleId: string | null = null;
+let soundOn = (() => { try { return localStorage.getItem(SOUND_KEY) === 'on'; } catch { return false; } })();
+const soundListeners = new Set<() => void>();
+let soundVersion = 0;
+function setSound(fileId: string | null, on: boolean) {
+  soundOn = on;
+  audibleId = on ? fileId : null;
+  try { localStorage.setItem(SOUND_KEY, on ? 'on' : 'off'); } catch { /* not remembered */ }
+  soundVersion += 1;
+  soundListeners.forEach((l) => l());
+}
+function useSound(fileId: string): { audible: boolean; toggle: () => void } {
+  useSyncExternalStore((cb) => { soundListeners.add(cb); return () => { soundListeners.delete(cb); }; }, () => soundVersion);
+  const audible = soundOn && audibleId === fileId;
+  return { audible, toggle: () => setSound(fileId, !audible) };
+}
+/** Last known playback position per file, read by the viewer (F-04). */
+export const videoPositions = new Map<string, number>();
+
+const clock = (s: number) => (Number.isFinite(s) && s >= 0 ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '');
+
+const VideoFill: React.FC<{ item: FeedMediaItem; onDims: TileProps['onDims']; onOpen: () => void }> = ({ item, onDims, onOpen }) => {
   const [ref, inView] = useInViewport<HTMLSpanElement>();
   const { url, broken, onError, retry } = useResilientMediaUrl(item.fileId, inView);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
+  const [buffering, setBuffering] = useState(false);
+  const [time, setTime] = useState({ t: 0, d: 0 });
+  const { audible, toggle } = useSound(item.fileId);
+
   useEffect(() => {
     const v = videoRef.current;
-    if (!v || !url || !autoplayAllowed()) return;
+    if (!v || !url) return;
     const io = new IntersectionObserver(([e]) => {
-      if (e && e.intersectionRatio >= 0.6) void v.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
-      else { v.pause(); setPlaying(false); }
+      const visible = Boolean(e && e.intersectionRatio >= 0.6);
+      // Sound left on: the next video to come into view is the one heard.
+      if (visible && soundOn && audibleId === null) setSound(item.fileId, true);
+      if (visible && autoplayAllowed()) void v.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+      else if (!visible) {
+        v.pause();
+        setPlaying(false);
+        // Scrolled away with the sound on: the sound goes with it.
+        if (audibleId === item.fileId) setSound(null, soundOn);
+      }
     }, { threshold: [0, 0.6, 1] });
     io.observe(v);
     return () => { io.disconnect(); v.pause(); };
-  }, [url]);
+  }, [url, item.fileId]);
+
+  // Sound follows the shared switch; turning it on also starts a still video.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = !audible;
+    if (audible && v.paused) void v.play().then(() => setPlaying(true)).catch(() => {});
+  }, [audible, url]);
+
+  const remaining = time.d ? Math.max(0, time.d - time.t) : 0;
   return (
     <span ref={ref} className="absolute inset-0">
       {url && (
@@ -136,26 +192,70 @@ const VideoFill: React.FC<{ item: FeedMediaItem; onDims: TileProps['onDims'] }> 
           muted playsInline loop preload="metadata"
           data-autoplaying={playing ? 'true' : 'false'}
           onError={onError}
-          onLoadedMetadata={(e) => onDims(item.fileId, e.currentTarget.videoWidth, e.currentTarget.videoHeight)}
+          onLoadedMetadata={(e) => {
+            onDims(item.fileId, e.currentTarget.videoWidth, e.currentTarget.videoHeight);
+            setTime({ t: 0, d: e.currentTarget.duration });
+          }}
+          onTimeUpdate={(e) => {
+            const v = e.currentTarget;
+            videoPositions.set(item.fileId, v.currentTime);
+            setTime({ t: v.currentTime, d: v.duration });
+          }}
+          onWaiting={() => setBuffering(true)}
+          onPlaying={() => { setBuffering(false); setPlaying(true); }}
+          onCanPlay={() => setBuffering(false)}
+          onPause={() => setPlaying(false)}
         />
       )}
-      {url && !playing && (
-        <span className="absolute inset-0 grid place-items-center bg-black/20">
-          <span className="grid h-14 w-14 place-items-center rounded-full bg-black/55 text-white ring-2 ring-white/80 backdrop-blur-sm">
-            <Play size={24} className="ml-1" fill="currentColor" />
+      {/* The whole video opens the viewer, at the same moment (F-04). */}
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onOpen(); }}
+        aria-label="Play video"
+        className="absolute inset-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
+      >
+        {url && !playing && !buffering && (
+          <span className="absolute inset-0 grid place-items-center bg-black/20">
+            <span className="grid h-14 w-14 place-items-center rounded-full bg-black/55 text-white ring-2 ring-white/80 backdrop-blur-sm">
+              <Play size={24} className="ml-1" fill="currentColor" />
+            </span>
           </span>
+        )}
+      </button>
+      {buffering && (
+        <span role="status" aria-label="Loading video" className="pointer-events-none absolute inset-0 grid place-items-center">
+          <span className="h-10 w-10 animate-spin rounded-full border-[3px] border-white/40 border-t-white" />
         </span>
+      )}
+      {url && time.d > 0 && (
+        <>
+          {/* Time left and the sound switch, as on Facebook. */}
+          <span data-testid="video-time-left" className="pointer-events-none absolute bottom-2.5 left-2.5 rounded-md bg-black/60 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-white">
+            {clock(remaining)}
+          </span>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); toggle(); }}
+            aria-label={audible ? 'Mute video' : 'Unmute video'}
+            aria-pressed={audible}
+            className="absolute bottom-2 right-2 grid h-9 w-9 place-items-center rounded-full bg-black/60 text-white transition-colors hover:bg-black/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            {audible ? <Volume2 size={17} /> : <VolumeX size={17} />}
+          </button>
+          <span className="pointer-events-none absolute inset-x-0 bottom-0 h-1 bg-white/25" aria-hidden="true">
+            <span data-testid="video-progress" className="block h-full bg-blue-500" style={{ width: `${Math.min(100, (time.t / time.d) * 100)}%` }} />
+          </span>
+        </>
       )}
       {!url && !broken && <span className="feed-skeleton absolute inset-0" />}
       {broken && (
-        <span
-          role="button"
-          tabIndex={0}
+        <button
+          type="button"
           onClick={(e) => { e.stopPropagation(); retry(); }}
-          className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-text-secondary-light dark:text-text-secondary-dark"
+          className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-slate-100 text-text-secondary-light dark:bg-white/5 dark:text-text-secondary-dark"
         >
           <ImageOff size={18} /> <span className="text-[11px] font-medium">Tap to reload</span>
-        </span>
+        </button>
       )}
     </span>
   );
@@ -558,6 +658,7 @@ const Slide: React.FC<{ item: FeedMediaItem; active: boolean; near: boolean; zoo
 }) => {
   const { url, broken, onError, retry } = useResilientMediaUrl(item.fileId, near);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [waiting, setWaiting] = useState(false);
 
   useLayoutEffect(() => {
     const v = videoRef.current;
@@ -588,10 +689,24 @@ const Slide: React.FC<{ item: FeedMediaItem; active: boolean; near: boolean; zoo
           controls
           playsInline
           onError={onError}
+          // Continue where the post's video was (F-04), and with sound.
+          onLoadedMetadata={(e) => {
+            const at = videoPositions.get(item.fileId);
+            if (at && at < e.currentTarget.duration - 0.5) e.currentTarget.currentTime = at;
+            e.currentTarget.muted = false;
+          }}
+          onWaiting={() => setWaiting(true)}
+          onPlaying={() => setWaiting(false)}
+          onCanPlay={() => setWaiting(false)}
           data-viewer-media
           className="max-h-full max-w-full"
           style={{ transform: `scale(${shrink})` }}
         />
+      )}
+      {url && item.kind === 'video' && waiting && active && (
+        <span role="status" aria-label="Loading video" className="pointer-events-none absolute inset-0 grid place-items-center">
+          <span className="h-12 w-12 animate-spin rounded-full border-4 border-white/30 border-t-white" />
+        </span>
       )}
       {!url && !broken && <div className="feed-skeleton aspect-[4/5] w-[min(80vw,24rem)] rounded-lg opacity-30" />}
       {broken && (
