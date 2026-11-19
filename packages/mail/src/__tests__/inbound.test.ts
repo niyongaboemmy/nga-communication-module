@@ -72,7 +72,11 @@ describe('stored passwords', () => {
   });
   it('refuses a tampered value and a wrong key', () => {
     const a = encryptSecret('x', env);
-    const tampered = `${a.slice(0, -2)}${a.endsWith('A') ? 'B' : 'A'}=`;
+    // Flip a real byte of the ciphertext (editing base64 text can land on
+    // padding bits and change nothing).
+    const buf = Buffer.from(a.slice(3), 'base64');
+    buf[buf.length - 1] ^= 0xff;
+    const tampered = `v1:${buf.toString('base64')}`;
     expect(() => decryptSecret(tampered, env)).toThrow();
     expect(() => decryptSecret(a, { MAIL_ACCOUNT_KEY: 'b'.repeat(64) } as NodeJS.ProcessEnv)).toThrow();
   });
