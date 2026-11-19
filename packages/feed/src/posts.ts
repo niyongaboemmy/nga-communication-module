@@ -1,3 +1,4 @@
+import type { FeedLinkPreview } from '@tupo/shared';
 /**
  * Posts — creation, lifecycle, editing, hydration and fan-out (FR-FEED-2…7).
  *
@@ -71,6 +72,33 @@ interface PostRow {
  * the feed, so it can never be someone else's file. `keep` is the value
  * already stored — re-sending it unchanged is not a new grant.
  */
+
+/**
+ * A link preview arrives from the client (the composer fetched it through
+ * /api/feed/link-preview), so it is never stored as sent: only http(s) links
+ * and pictures (a `javascript:` URL would run in every reader's browser from
+ * the card's href) and only short, plain text fields.
+ */
+export function cleanLinkPreview(raw: unknown): FeedLinkPreview | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const httpUrl = (v: unknown): string | null => {
+    if (typeof v !== 'string' || v.length > 2048) return null;
+    try { const u = new URL(v); return u.protocol === 'http:' || u.protocol === 'https:' ? u.toString() : null; } catch { return null; }
+  };
+  const text = (v: unknown, max: number): string | null =>
+    (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
+  const url = httpUrl(r.url);
+  if (!url) return null;
+  return {
+    url,
+    title: text(r.title, 300),
+    description: text(r.description, 600),
+    image: httpUrl(r.image),
+    siteName: text(r.siteName, 120),
+  };
+}
+
 export async function assertOwnImage(
   db: PoolClient | ReturnType<typeof getPool>, fileId: unknown, ownerId: string, keep?: string | null,
 ): Promise<string | null> {
@@ -237,7 +265,7 @@ export async function createPost(actor: FeedActor, payload: ComposePostPayload):
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
       [
         id, payload.pageId, actor.id, body, payload.format === 'rich' ? 'rich' : 'plain',
-        JSON.stringify(media), payload.linkPreview ? JSON.stringify(payload.linkPreview) : null,
+        JSON.stringify(media), cleanLinkPreview(payload.linkPreview) ? JSON.stringify(cleanLinkPreview(payload.linkPreview)) : null,
         type, poll ? JSON.stringify(poll) : null, event ? JSON.stringify(event) : null,
         // Pinning is its own action with its own cap (setPinned), not a create flag.
         audience, status, status === 'scheduled' ? payload.scheduledAt : null, publishedAt,
@@ -418,7 +446,7 @@ export async function editPost(actor: FeedActor, postId: string, patch: EditPost
       const media = await resolveMedia(client, patch.media, actor.id, FEED_LIMITS.MAX_MEDIA, existingIds);
       params.push(JSON.stringify(media)); sets.push(`media = $${params.length}`);
     }
-    if (patch.linkPreview !== undefined) { params.push(patch.linkPreview ? JSON.stringify(patch.linkPreview) : null); sets.push(`link_preview = $${params.length}`); }
+    if (patch.linkPreview !== undefined) { const lp = cleanLinkPreview(patch.linkPreview); params.push(lp ? JSON.stringify(lp) : null); sets.push(`link_preview = $${params.length}`); }
     if (patch.audience !== undefined && (FEED_AUDIENCES as readonly string[]).includes(patch.audience)) {
       if (!canTargetAudience(actor.roleLevel, patch.audience)) throw new FeedError('You cannot post to that audience.', 403);
       const { rows: pg } = await client.query<{ audience: FeedAudience }>(

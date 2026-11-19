@@ -38,6 +38,7 @@
     "verify:composer:slow": "node scripts/verify-composer-slow.mjs",
     "verify:composer:perf": "node scripts/verify-composer-perf.mjs",
     "verify:chat:replies": "node scripts/verify-chat-replies.mjs",
+    "verify:feed:experience": "node scripts/verify-feed-experience.mjs",
     "verify:chat:live": "node scripts/verify-chat-live.mjs",
     "verify:presence": "node scripts/verify-presence.mjs",
     "verify:presence:settings": "node scripts/verify-presence-settings.mjs",

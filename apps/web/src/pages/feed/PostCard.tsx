@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import { useConfirmDialog } from '../../components/ConfirmDialog';
 import {
   MessageCircle, Share2, Bookmark, MoreHorizontal, Megaphone, Pin, BadgeCheck,
   Pencil, Trash2, Flag, EyeOff, Link2, Globe, Users2, X, Loader2,
@@ -13,6 +14,7 @@ import { useFeed } from './FeedProvider';
 import { MediaGallery } from './MediaGallery';
 import { PollBlock, EventBlock } from './PollEventBlocks';
 import { Comments } from './Comments';
+import { ShareSheet } from './ShareSheet';
 import {
   ReactionBurst, ReactionBubbles, ReactionDisc, ReactionIcon, ReactionPicker, fullTime, relativeTime,
   renderRichText, useDismiss, useMediaUrl, usePressToOpen,
@@ -29,7 +31,9 @@ const AUDIENCE_META: Record<string, { icon: React.ReactNode; label: string }> = 
 export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; permalink?: boolean }> = ({
   post, openComments = false, permalink = false,
 }) => {
-  const { react, toggleBookmark, currentUserId, patch } = useFeed();
+  const { react, toggleBookmark, currentUserId, patch, remove, ingest } = useFeed();
+  const navigate = useNavigate();
+  const [askConfirm, confirmDialog] = useConfirmDialog();
   // Renamed on the way in: `confirm` from useNotify is a toast, not the
   // native confirm() dialog the Delete-post handler below still needs.
   const { confirm: toastConfirm, notify } = useNotify();
@@ -74,20 +78,9 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   const primaryReaction: FeedReaction = post.reactions.mine ?? 'like';
   const press = usePressToOpen(() => setPickerOpen(true), () => setPickerOpen(false));
 
-  const share = async () => {
-    const url = `${location.origin}/app/feed/post/${post.id}`;
-    if (navigator.share) {
-      // The OS share sheet is its own feedback — cancelling it (the common
-      // case for the rejection here) needs no toast on top of it.
-      try { await navigator.share({ url, title: `${post.page.name} on Tupo` }); } catch { return; }
-    } else {
-      // Unlike the share sheet, a clipboard write is invisible — with no
-      // confirmation this looked exactly like the button doing nothing.
-      try { await navigator.clipboard.writeText(url); } catch { notify({ title: 'Could not copy the link', tone: 'error' }); return; }
-      toastConfirm('Link copied');
-    }
-    void api.sharePost(post.id).catch(() => {});
-  };
+  // Share opens the share sheet (F-07): send in chat, copy link, device share.
+  const [shareOpen, setShareOpen] = useState(false);
+  const share = () => setShareOpen(true);
 
   const clamp = !expanded && post.body.length > 360;
   const bodyText = clamp ? `${post.body.slice(0, 340).trimEnd()}…` : post.body;
@@ -125,7 +118,7 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
             <MoreHorizontal size={20} />
           </button>
           {menu && (
-            <div role="menu" className="animate-pop absolute right-0 top-full z-30 mt-1 w-52 rounded-xl bg-white p-1 shadow-[0_12px_28px_rgba(0,0,0,0.2)] ring-1 ring-black/5 dark:bg-elevated-dark dark:ring-white/10">
+            <div role="menu" className="animate-pop absolute right-0 top-full z-30 mt-1 w-52 rounded-xl border border-border-light bg-white p-1 dark:border-border-dark/50 dark:bg-elevated-dark dark:ring-white/10">
               <MenuItem icon={<Bookmark size={16} className={post.bookmarked ? 'fill-current text-blue-600' : ''} />} label={post.bookmarked ? 'Remove from saved' : 'Save post'} onClick={() => { void toggleBookmark(post.id); setMenu(false); }} />
               <MenuItem icon={<Link2 size={16} />} label="Copy link" onClick={() => {
                 setMenu(false);
@@ -142,12 +135,31 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
               {post.canEdit && <MenuItem icon={<Pencil size={16} />} label="Edit post" onClick={() => { setMenu(false); window.dispatchEvent(new CustomEvent('feed:edit', { detail: post.id })); }} />}
               {post.canEdit && <MenuItem icon={<EyeOff size={16} />} label="Move to drafts" onClick={() => {
                 setMenu(false);
-                api.unpublishPost(post.id).catch(() => notify({ title: 'Could not move this post to drafts', tone: 'error' }));
+                // Leaves the feed at once and says where it went (F-08).
+                const before = post;
+                remove(post.id);
+                api.unpublishPost(post.id)
+                  .then(() => notify({
+                    title: 'Moved to drafts', body: 'Only the page team can see it now.', tone: 'success',
+                    action: { label: 'Open drafts', onClick: () => navigate(`/app/feed/p/${post.page.slug}?tab=drafts`) },
+                  }))
+                  .catch(() => { ingest([before]); notify({ title: 'Could not move this post to drafts', tone: 'error' }); });
               }} />}
               {(post.canEdit || post.canModerate) && <MenuItem danger icon={<Trash2 size={16} />} label="Delete post" onClick={() => {
                 setMenu(false);
-                if (!window.confirm('Delete this post?')) return;
-                api.deletePost(post.id).catch(() => notify({ title: 'Could not delete this post', tone: 'error' }));
+                // In-app confirmation, then gone at once; back if refused (F-08).
+                void askConfirm({
+                  title: 'Delete this post?',
+                  body: post.canEdit ? 'It is removed for everyone, with its comments and reactions.' : 'You are removing a post as a moderator. This is recorded.',
+                  confirmLabel: 'Delete', tone: 'danger',
+                }).then((ok) => {
+                  if (!ok) return;
+                  const before = post;
+                  remove(post.id);
+                  api.deletePost(post.id)
+                    .then(() => toastConfirm('Post deleted'))
+                    .catch(() => { ingest([before]); notify({ title: 'Could not delete this post', tone: 'error' }); });
+                });
               }} />}
               {post.author.id !== currentUserId && <MenuItem icon={<Flag size={16} />} label="Report post" onClick={() => { setMenu(false); window.dispatchEvent(new CustomEvent('feed:report', { detail: { type: 'post', id: post.id } })); }} />}
             </div>
@@ -159,7 +171,10 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
         <div className="px-3 pt-2 text-[15px] leading-[1.34] text-text-primary-light sm:px-4 dark:text-text-primary-dark">
           <p className="whitespace-pre-wrap break-words">{renderRichText(bodyText)}</p>
           {clamp && (
-            <button onClick={() => setExpanded(true)} className="font-semibold text-text-secondary-light hover:underline dark:text-text-secondary-dark">See more</button>
+            <button onClick={() => setExpanded(true)} aria-expanded={false} className="font-semibold text-text-secondary-light hover:underline dark:text-text-secondary-dark">See more</button>
+          )}
+          {expanded && post.body.length > 360 && (
+            <button onClick={() => setExpanded(false)} aria-expanded className="mt-1 block font-semibold text-text-secondary-light hover:underline dark:text-text-secondary-dark">See less</button>
           )}
         </div>
       )}
@@ -226,12 +241,14 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
         >
           <MessageCircle size={18} /> Comment
         </button>
-        <button onClick={() => void share()} className={actionButton}>
+        <button onClick={share} aria-haspopup="dialog" className={actionButton}>
           <Share2 size={17} /> Share
         </button>
       </div>
 
       {(showComments || permalink) && <Comments post={post} autoFocus={showComments && !permalink} />}
+      {confirmDialog}
+      {shareOpen && <ShareSheet post={post} onClose={() => setShareOpen(false)} />}
       {/* Portalled to <body>: the card's entrance animation makes it the box
           that `fixed` is measured against, which trapped the dialog inside the post. */}
       {reactorsOpen && createPortal(
@@ -327,7 +344,7 @@ const ReactorsDialog: React.FC<{ postId: string; total: number; onClose: () => v
   return (
     <div className="fixed inset-0 z-[110] grid place-items-center bg-black/50 p-4" onClick={onClose}>
       <div role="dialog" aria-modal="true" aria-label="Reactions"
-        className="flex max-h-[80vh] w-full max-w-md animate-pop flex-col overflow-hidden rounded-2xl border border-border-light bg-white shadow-2xl dark:border-border-dark/50 dark:bg-elevated-dark" onClick={(e) => e.stopPropagation()}>
+        className="flex max-h-[80vh] w-full max-w-md animate-pop flex-col overflow-hidden rounded-2xl border border-border-light bg-white dark:border-border-dark/50 dark:bg-elevated-dark" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-1 border-b border-border-light pl-2 pr-3 dark:border-border-dark/40">
           <div className="flex min-w-0 flex-1 overflow-x-auto" role="tablist" aria-label="Filter by reaction">
             <button role="tab" aria-selected={tab === null} onClick={() => setTab(null)} className={tabCls(tab === null)}>All {total}</button>

@@ -4,7 +4,7 @@ import {
   CalendarClock, Megaphone, GripVertical, Sparkles,
 } from 'lucide-react';
 import type {
-  ComposePostPayload, FeedAudience, FeedMediaItem, FeedPageSummary, FeedPostView,
+  ComposePostPayload, FeedAudience, FeedLinkPreview, FeedMediaItem, FeedPageSummary, FeedPostView,
 } from '@tupo/shared';
 import { FEED_AUDIENCES, FEED_LIMITS } from '@tupo/shared';
 import { Avatar } from '../../components/ui';
@@ -41,6 +41,36 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
   const [open, setOpen] = useState(Boolean(editing));
   const [pageId, setPageId] = useState(defaultPageId ?? editing?.page.id ?? postable[0]?.id ?? '');
   const [body, setBody] = useState(editing?.body ?? '');
+  /*
+   * Link preview (F-05): the first link typed gets a card — fetched by the
+   * server a moment after typing stops, shown with a skeleton meanwhile, and
+   * removable. A removed link is not fetched again; a photo or video takes
+   * the card's place, as on Facebook.
+   */
+  const [linkPreview, setLinkPreview] = useState<FeedLinkPreview | null>(editing?.linkPreview ?? null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const dismissedLinks = useRef(new Set<string>());
+  const previewFor = useRef<string | null>(editing?.linkPreview?.url ?? null);
+  useEffect(() => {
+    const url = body.match(/https?:\/\/[^\s<>"']+/i)?.[0]?.replace(/[).,!?;:]+$/, '') ?? null;
+    if (!url) { setLinkPreview(null); previewFor.current = null; setPreviewLoading(false); return; }
+    if (url === previewFor.current || dismissedLinks.current.has(url)) return;
+    let alive = true;
+    const t = setTimeout(() => {
+      previewFor.current = url;
+      setPreviewLoading(true);
+      api.getLinkPreview(url)
+        .then((p) => { if (alive) setLinkPreview(p); })
+        .catch(() => { if (alive) setLinkPreview(null); })
+        .finally(() => { if (alive) setPreviewLoading(false); });
+    }, 600);
+    return () => { alive = false; clearTimeout(t); };
+  }, [body]);
+  const dropPreview = () => {
+    if (previewFor.current) dismissedLinks.current.add(previewFor.current);
+    setLinkPreview(null);
+    setPreviewLoading(false);
+  };
   const [audience, setAudience] = useState<FeedAudience>(editing?.audience ?? 'everyone');
   const [media, setMedia] = useState<PendingMedia[]>(
     (editing?.media ?? []).map((m) => ({ localId: m.fileId, kind: m.kind, name: m.name ?? '', fileId: m.fileId, progress: 1, w: m.w ?? undefined, h: m.h ?? undefined })),
@@ -139,6 +169,7 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
         body: body.trim(),
         media: media.filter((m) => m.fileId).map((m) => ({ fileId: m.fileId!, kind: m.kind, name: m.name, w: m.w ?? null, h: m.h ?? null })),
         audience,
+        linkPreview: media.length === 0 ? linkPreview : null,
         type: isAnnouncement ? 'announcement' : 'standard',
         // "Save draft" saves a draft, whatever time was picked (D-05).
         status: mode === 'draft' ? 'draft' : validSchedule ? 'scheduled' : 'published',
@@ -154,6 +185,7 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
         // Poll and event changes are kept (D-06); clearing a tool clears it.
         const updated = await api.editPost(editing.id, {
           body: payload.body, media: payload.media, audience: payload.audience,
+          linkPreview: payload.linkPreview ?? null,
           poll: validPoll ? payload.poll : (editing.poll && tool !== 'poll' ? null : undefined),
           event: validEvent ? payload.event : (editing.event && tool !== 'event' ? null : undefined),
         });
@@ -242,6 +274,30 @@ export const Composer: React.FC<Props> = ({ pages, defaultPageId, onPublished, e
           className="w-full resize-none bg-transparent text-[15px] leading-relaxed text-text-primary-light outline-none placeholder:text-text-secondary-light/70 dark:text-text-primary-dark"
           rows={3}
         />
+
+        {media.length === 0 && (previewLoading || linkPreview) && (
+          <div data-testid="composer-link-preview" className="relative mt-2 flex overflow-hidden rounded-lg border border-border-light dark:border-border-dark/50" aria-busy={previewLoading}>
+            {previewLoading ? (
+              <div className="flex w-full gap-3 p-3" aria-label="Loading the link preview">
+                <span className="feed-skeleton h-16 w-16 shrink-0 rounded-md" />
+                <span className="flex-1 space-y-2 py-1"><span className="feed-skeleton block h-3 w-1/3 rounded" /><span className="feed-skeleton block h-3 w-2/3 rounded" /></span>
+              </div>
+            ) : linkPreview && (
+              <>
+                {linkPreview.image && <img src={linkPreview.image} alt="" className="h-20 w-20 shrink-0 object-cover" onError={(e) => { e.currentTarget.style.display = 'none'; }} />}
+                <div className="min-w-0 flex-1 p-3 pr-9">
+                  <p className="text-[11px] uppercase tracking-wide text-text-secondary-light dark:text-text-secondary-dark">{linkPreview.siteName ?? (() => { try { return new URL(linkPreview.url).hostname; } catch { return ''; } })()}</p>
+                  <p className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">{linkPreview.title ?? linkPreview.url}</p>
+                  {linkPreview.description && <p className="line-clamp-2 text-xs text-text-secondary-light dark:text-text-secondary-dark">{linkPreview.description}</p>}
+                </div>
+              </>
+            )}
+            <button type="button" onClick={dropPreview} aria-label="Remove link preview"
+              className="absolute right-1.5 top-1.5 grid h-7 w-7 place-items-center rounded-full bg-black/55 text-white hover:bg-black/70">
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
         {media.length > 0 && (
           <div className="mt-2 grid grid-cols-3 gap-2">

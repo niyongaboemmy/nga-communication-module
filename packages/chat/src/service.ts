@@ -864,6 +864,8 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
 /** The one-line summary the sidebar shows. Attachments get a shape, not a name. */
 function previewOf(body: string, attachmentCount: number, type?: MessageType): string {
   // Mentions are expected to be resolved already — see the call site.
+  // A shared feed post reads as what it is, not as a bare link (F-07).
+  if (type === 'post_share') return '📰 Shared a post';
   if (body) return body.slice(0, 200);
   if (type === 'voice_note') return '🎤 Voice message';
   if (type === 'poll') return '📊 Poll';
