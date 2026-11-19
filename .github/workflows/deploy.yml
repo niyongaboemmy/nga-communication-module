@@ -105,8 +105,14 @@ jobs:
             bash scripts/release.sh keep-assets
 
             # A database backup before every migration run (newest 10 kept).
+            # Since 0046 every tenant table has FORCE ROW LEVEL SECURITY, so a
+            # plain dump as the owner is refused ("query would be affected by
+            # row-level security"). Dump as tupo_platform — whose policy on
+            # every tenant table is USING (true) — with row security on, which
+            # reads every school's rows.
             mkdir -p "\$HOME/tupo-backups"
-            PGPASSWORD="\$(cat "\$HOME/.tupo/db_password")" pg_dump -h 127.0.0.1 -U tupo -Fc tupo_prod \\
+            PGPASSWORD="\$(cat "\$HOME/.tupo/db_password")" pg_dump -h 127.0.0.1 -U tupo \\
+              --role=tupo_platform --enable-row-security -Fc tupo_prod \\
               -f "\$HOME/tupo-backups/tupo_prod-\$(date -u +%Y%m%dT%H%M%SZ)-deploy.dump"
             ls -1t "\$HOME"/tupo-backups/*-deploy.dump | tail -n +11 | xargs -r rm -f --
 
