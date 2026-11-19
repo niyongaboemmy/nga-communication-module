@@ -24,7 +24,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const env = Object.fromEntries(readFileSync(`${ROOT}/apps/api/.env`, 'utf8').split('\n')
   .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
   .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')]));
-const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
+const pool = new pg.Pool({ connectionString: env.DATABASE_URL, options: '-c app.tenant_id=1' }); // multi-tenancy: suites run as tenant 1
 const API = 'http://localhost:5190', BASE = 'http://localhost:5194';
 const results = []; const ids = [];
 const check = (n, ok, d = '') => { results.push({ n, ok }); console.log(`  ${ok ? '✅' : '❌'} ${n}${d ? `  — ${d}` : ''}`); };

@@ -57,6 +57,30 @@ for (const [f, n] of lazy) {
   if (n > BUDGET.chunkKb * 1024) failures.push(`${f} ${kb(n)} KB > ${BUDGET.chunkKb} KB`);
 }
 
+/*
+ * Chunk cycles. Two chunks importing each other evaluate in an order the
+ * bundler does not promise: one of them runs before the other has defined
+ * what it needs. Under the dev server (no chunks) it never shows. In
+ * production it crashed Mail on open: `editor` imported ProseMirror helpers
+ * from `mail`, which imports `editor` ("reading 'empty'"). Any cycle fails.
+ */
+const graph = new Map(readdirSync(assets).filter((f) => f.endsWith('.js'))
+  .map((f) => [f, [...new Set([...readFileSync(join(assets, f), 'utf8').matchAll(STATIC)].map((m) => m[1]))]]));
+const state = new Map(); // 1 visiting, 2 done
+const cycles = [];
+const visit = (f, path) => {
+  state.set(f, 1);
+  for (const d of graph.get(f) ?? []) {
+    if (state.get(d) === 1) cycles.push([...path.slice(path.indexOf(d)), d].join(' → '));
+    else if (!state.has(d)) visit(d, [...path, d]);
+  }
+  state.set(f, 2);
+};
+for (const f of graph.keys()) if (!state.has(f)) visit(f, [f]);
+const strip = (c) => c.replace(/-[A-Za-z0-9_-]{8}\.js/g, '');
+for (const c of new Set(cycles.map(strip))) failures.push(`chunk cycle: ${c}`);
+console.log(cycles.length ? `Chunk cycles: ${cycles.length}` : 'No chunk cycles.');
+
 if (failures.length) {
   console.error(`\nOver budget:\n  ${failures.join('\n  ')}`);
   process.exit(1);
