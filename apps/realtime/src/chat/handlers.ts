@@ -178,6 +178,20 @@ export function registerChatHandlers(
         // raise notifications. Fail-soft: a notification that did not fire is a
         // missed buzz, whereas throwing here would lose a delivered message.
         const rootId = result.message.threadRootId;
+        // "Also send to channel" (FR-MSG-6) on the socket path too (G-07):
+        // the same copy the REST route makes — a quote of the root, marked
+        // as coming from the thread so clients can say so (R-07).
+        if (rootId && p.alsoSendToChannel) {
+          const echo = await chat.sendMessage({
+            conversationId: p.conversationId,
+            senderId: user.id,
+            body: String(p.body ?? ''),
+            nonce: `${p.nonce}-echo`,
+            replyToId: rootId,
+            metadata: { fromThread: rootId },
+          }).catch(() => null);
+          if (echo?.created) await fanOutMessage(io, p.conversationId, echo);
+        }
         if (rootId) {
           await chat.notifyThreadReply(result.message, {
             conversationName: membership.name ?? 'a conversation',
@@ -192,6 +206,7 @@ export function registerChatHandlers(
             mentionedUserIds: result.mentionedUserIds,
             broadcast: result.broadcast,
             senderMayBroadcast: chat.canManage(membership.role),
+            repliedToUserId: result.repliedToUserId,
           }).catch(() => {});
         }
       }
@@ -225,13 +240,18 @@ export function registerChatHandlers(
       const perms = await permissions();
       if (perms && !perms.has('MESSAGE_EDIT_OWN')) throw deny();
       const membership = await chat.requireMembership(user.id, p.conversationId);
-      const { message, newlyMentioned } = await chat.editMessage(
+      const { message, newlyMentioned, threadRoot } = await chat.editMessage(
         user.id, p.conversationId, p.messageId, p.body,
       );
       ack?.({ ok: true, message });
       io.to(conversationRoom(p.conversationId)).emit('message:updated', {
         conversationId: p.conversationId, message,
       });
+      if (threadRoot) {
+        io.to(conversationRoom(p.conversationId)).emit('message:updated', {
+          conversationId: p.conversationId, message: threadRoot,
+        });
+      }
       if (newlyMentioned.length) {
         await chat.notifyMention(message, newlyMentioned, membership.name ?? 'a conversation')
           .catch(() => {});
@@ -256,6 +276,11 @@ export function registerChatHandlers(
         conversationId: p.conversationId, messageId: p.messageId,
         deletedBy: user.id, byModerator: result.byModerator,
       });
+      if (result.threadRoot) {
+        io.to(conversationRoom(p.conversationId)).emit('message:updated', {
+          conversationId: p.conversationId, message: result.threadRoot,
+        });
+      }
       await pushUnread(io, p.conversationId);
     } catch (err) {
       ack?.({ ok: false, error: err instanceof ChatError ? err.message : 'Could not delete.' });
@@ -316,12 +341,13 @@ export function registerChatHandlers(
         // blanking the indicator for everyone in the room.
         try {
           const parsed = JSON.parse(value) as
-            { name?: string; avatarUrl?: string | null; kind?: ActivityKind };
+            { name?: string; avatarUrl?: string | null; kind?: ActivityKind; threadRootId?: string | null };
           return {
             userId,
             name: parsed.name ?? 'Someone',
             avatarUrl: parsed.avatarUrl ?? null,
             kind: parsed.kind ?? 'typing',
+            threadRootId: parsed.threadRootId ?? null,
           };
         } catch {
           return { userId, name: value, avatarUrl: null, kind: 'typing' as ActivityKind };
@@ -333,7 +359,7 @@ export function registerChatHandlers(
 
   const ACTIVITY_KINDS = new Set<ActivityKind>(['typing', 'recording', 'uploading']);
 
-  socket.on('typing:start', async ({ conversationId, kind }) => {
+  socket.on('typing:start', async ({ conversationId, kind, threadRootId }) => {
     if (!inRoom(conversationId) || !redis) return;
     try {
       const key = typingKey(conversationId);
@@ -344,6 +370,8 @@ export function registerChatHandlers(
         // socket supply it would let anyone wear anyone else's.
         avatarUrl: user.avatarUrl ?? null,
         kind: ACTIVITY_KINDS.has(kind as ActivityKind) ? kind : 'typing',
+        // Where: a thread's root id (a short opaque id, nothing else is kept).
+        threadRootId: typeof threadRootId === 'string' && /^[\w:-]{1,64}$/.test(threadRootId) ? threadRootId : null,
         at: Date.now(),
       }));
       // Refreshed on every keystroke burst, so the key outlives a pause in
@@ -436,6 +464,11 @@ export async function fanOutMessage(
     io.to(conversationRoom(conversationId)).emit('thread:reply', {
       conversationId, rootId, message: result.message,
     });
+    // The parent's reply count and summary line (who replied, the latest
+    // reply) changed for everyone looking at the main flow, as on the REST
+    // route — thread replies now arrive over the socket too (G-07, R-02).
+    const root = await chat.getMessage(result.message.senderId, conversationId, rootId).catch(() => null);
+    if (root) io.to(conversationRoom(conversationId)).emit('message:updated', { conversationId, message: root });
     const counts = await chat.threadUnreadFor(conversationId, rootId).catch(() => []);
     for (const c of counts) {
       io.to(userRoom(c.userId)).emit('thread:unread', { conversationId, rootId, unread: c.unread });

@@ -8,7 +8,7 @@ import {
 } from '@tupo/shared';
 import type {
   ConversationSummary, ConversationType, DeliveryState, MemberRole, MessagePage,
-  MessageType, NotificationLevel, WireAttachment, WireMember, WireMessage, WireReaction,
+  MessageType, NotificationLevel, WireAttachment, WireMember, WireMessage, WireReaction, WireThreadParticipant,
 } from '@tupo/shared';
 
 /**
@@ -454,6 +454,8 @@ export interface SendResult {
   created: boolean;
   mentionedUserIds: string[];
   broadcast: 'channel' | 'here' | null;
+  /** The author of the quoted message, told "X replied to you" (R-09). */
+  repliedToUserId: string | null;
 }
 
 export async function sendMessage(input: SendMessageInput): Promise<SendResult> {
@@ -478,6 +480,7 @@ export async function sendMessage(input: SendMessageInput): Promise<SendResult> 
     created: written.created,
     mentionedUserIds: written.mentionedUserIds,
     broadcast: written.broadcast,
+    repliedToUserId: written.repliedToUserId,
   };
 }
 
@@ -486,6 +489,7 @@ interface WriteResult {
   created: boolean;
   mentionedUserIds: string[];
   broadcast: 'channel' | 'here' | null;
+  repliedToUserId: string | null;
 }
 
 /** The message kinds a client may send itself. System notices and polls are server-written. */
@@ -649,7 +653,7 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
       await client.query('ROLLBACK');
       if (!rows[0]) throw new ChatError('Duplicate send could not be resolved.', 409);
       return {
-        messageId: rows[0].message_id, created: false, mentionedUserIds: [], broadcast: null,
+        messageId: rows[0].message_id, created: false, mentionedUserIds: [], broadcast: null, repliedToUserId: null,
       };
     }
 
@@ -735,6 +739,8 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
           WHERE conversation_id = $1 AND id = $2`,
         [input.conversationId, input.threadRootId],
       );
+      // Who replied and what was said last, for the summary line (R-02).
+      await client.query(THREAD_PREVIEW_SQL, [input.conversationId, input.threadRootId]);
     }
 
     /*
@@ -758,6 +764,37 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
     }
 
     /*
+     * Being replied to (R-09). A quote of someone's message is addressed to
+     * them: it badges them like a mention (a `reply` mention row, so it shows
+     * in their mentions and lights the message up for them) — unless they are
+     * the sender, have left, are already @mentioned, or turned it off.
+     * Thread replies have their own audience (followers) and are left out.
+     */
+    let repliedToUserId: string | null = null;
+    if (input.replyToId && !input.threadRootId && messageType !== 'system') {
+      const { rows: target } = await client.query<{ user_id: string }>(
+        `SELECT rp.sender_id AS user_id
+           FROM messages rp
+           JOIN conversation_members cm ON cm.conversation_id = rp.conversation_id
+                                       AND cm.user_id = rp.sender_id AND cm.left_at IS NULL
+           LEFT JOIN user_chat_prefs p ON p.user_id = rp.sender_id
+          WHERE rp.conversation_id = $1 AND rp.id = $2 AND rp.deleted_at IS NULL
+            AND rp.sender_id <> $3 AND COALESCE(p.notify_replies, true)`,
+        [input.conversationId, input.replyToId, input.senderId],
+      );
+      const uid = target[0]?.user_id ?? null;
+      if (uid && !mentioned.includes(uid)) {
+        repliedToUserId = uid;
+        await client.query(
+          `INSERT INTO message_mentions (message_id, conversation_id, user_id, kind, seq)
+           VALUES ($1,$2,$3,'reply',$4) ON CONFLICT DO NOTHING`,
+          [messageId, input.conversationId, uid, seq],
+        );
+      }
+    }
+    const badged = repliedToUserId ? [...mentioned, repliedToUserId] : mentioned;
+
+    /*
      * Everyone except the sender gains an unread. The sender's own watermark is
      * advanced instead, because sending something is the strongest possible
      * signal that you have read it.
@@ -776,7 +813,7 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
               -- A hidden DM comes back the moment the other person writes.
               is_hidden = false
         WHERE conversation_id = $1 AND user_id <> $2 AND left_at IS NULL`,
-      [input.conversationId, input.senderId, mentioned,
+      [input.conversationId, input.senderId, badged,
         messageType === 'system' || input.threadRootId ? 0 : 1],
     );
 
@@ -815,7 +852,7 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
 
     await client.query('COMMIT');
 
-    return { messageId, created: true, mentionedUserIds: mentioned, broadcast };
+    return { messageId, created: true, mentionedUserIds: mentioned, broadcast, repliedToUserId };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
@@ -981,8 +1018,61 @@ interface MessageRow {
   reactions: Array<{ emoji: string; user_id: string }> | null;
   reply_body: string | null; reply_sender_id: string | null;
   reply_sender_name: string | null; reply_deleted: boolean | null;
+  reply_attachment?: WireAttachment | null;
+  thread_participants?: WireThreadParticipant[] | null;
+  thread_latest?: WireMessage['threadLatest'];
   mentions_me: boolean; saved: boolean; read_count: string;
   delivered_count?: string; viewer_receipts?: boolean;
+}
+
+/**
+ * Recompute a thread root's preview from its live replies (R-02): the last
+ * three distinct repliers and the newest reply. Recomputed, never patched, so
+ * an edited or deleted reply can never linger in a preview. Indexed by
+ * (thread_root_id, seq). $1 conversation, $2 root id.
+ */
+const THREAD_PREVIEW_SQL = `
+  UPDATE messages root
+     SET thread_participants = COALESCE((
+           SELECT jsonb_agg(jsonb_build_object('id', k.sender_id, 'name', COALESCE(u.name, 'Someone'), 'avatarUrl', u.avatar_url)
+                            ORDER BY k.last_seq DESC)
+             FROM (SELECT r.sender_id, max(r.seq) AS last_seq
+                     FROM messages r
+                    WHERE r.thread_root_id = root.id AND r.conversation_id = root.conversation_id
+                      AND r.deleted_at IS NULL
+                    GROUP BY r.sender_id
+                    ORDER BY max(r.seq) DESC
+                    LIMIT 3) k
+             LEFT JOIN users u ON u.id = k.sender_id
+         ), '[]'::jsonb),
+         thread_latest = (
+           SELECT jsonb_build_object(
+                    'senderId', r.sender_id, 'senderName', COALESCE(u.name, 'Someone'),
+                    'body', left(COALESCE(r.body, ''), 140),
+                    'hasAttachment', jsonb_array_length(COALESCE(r.attachments, '[]'::jsonb)) > 0,
+                    'at', r.created_at)
+             FROM messages r
+             LEFT JOIN users u ON u.id = r.sender_id
+            WHERE r.thread_root_id = root.id AND r.conversation_id = root.conversation_id
+              AND r.deleted_at IS NULL
+            ORDER BY r.seq DESC
+            LIMIT 1)
+   WHERE root.conversation_id = $1 AND root.id = $2`;
+
+/**
+ * After a reply changed (edited, deleted): refresh its root's preview and
+ * return the root as the viewer sees it, for a `message:updated` broadcast.
+ * Null when the message is not a thread reply.
+ */
+async function refreshRootOf(viewerId: string, conversationId: string, messageId: string): Promise<WireMessage | null> {
+  const { rows } = await getPool().query<{ root: string | null }>(
+    'SELECT thread_root_id AS root FROM messages WHERE conversation_id = $1 AND id = $2',
+    [conversationId, messageId],
+  );
+  const rootId = rows[0]?.root;
+  if (!rootId) return null;
+  await getPool().query(THREAD_PREVIEW_SQL, [conversationId, rootId]);
+  return getMessage(viewerId, conversationId, rootId);
 }
 
 /**
@@ -999,11 +1089,13 @@ const MESSAGE_SELECT = `
          m.nonce, m.thread_root_id, m.reply_count,
          m.thread_last_at, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_count,
          m.forwarded_from, m.metadata, m.attachments,
+         m.thread_participants, m.thread_latest,
          u.name AS sender_name, u.avatar_url AS sender_avatar, u.role AS sender_role,
          (SELECT json_agg(json_build_object('emoji', r.emoji, 'user_id', r.user_id))
             FROM message_reactions r WHERE r.message_id = m.id) AS reactions,
          rp.body AS reply_body, rp.sender_id AS reply_sender_id,
          ru.name AS reply_sender_name, (rp.deleted_at IS NOT NULL) AS reply_deleted,
+         rp.attachments -> 0 AS reply_attachment,
          EXISTS (SELECT 1 FROM message_mentions mm
                   WHERE mm.message_id = m.id AND mm.user_id = $1) AS mentions_me,
          EXISTS (SELECT 1 FROM message_saves ms
@@ -1093,6 +1185,8 @@ function toWireMessage(
     threadRootId: r.thread_root_id,
     replyCount: r.reply_count ?? 0,
     threadLastAt: r.thread_last_at,
+    threadParticipants: (r.reply_count ?? 0) > 0 ? (r.thread_participants ?? []) : [],
+    threadLatest: (r.reply_count ?? 0) > 0 ? (r.thread_latest ?? null) : null,
     replyTo: r.reply_to_id
       ? {
           id: r.reply_to_id,
@@ -1100,6 +1194,14 @@ function toWireMessage(
           senderName: r.reply_sender_name ?? 'Unknown',
           body: r.reply_deleted ? null : r.reply_body,
           deleted: Boolean(r.reply_deleted),
+          // What a quoted photo, voice note or file is (R-08) — never for a deleted original.
+          attachment: !r.reply_deleted && r.reply_attachment
+            ? {
+                fileId: r.reply_attachment.fileId, kind: r.reply_attachment.kind,
+                name: r.reply_attachment.name, mime: r.reply_attachment.mime,
+                ...(r.reply_attachment.durationMs ? { durationMs: r.reply_attachment.durationMs } : {}),
+              }
+            : null,
         }
       : null,
     pinnedAt: r.pinned_at,
@@ -1560,16 +1662,32 @@ export async function setMemberPrefs(
   );
 }
 
+/**
+ * Save a draft, newest write wins (G-01).
+ *
+ * `clientSavedAt` is when the browser captured the text. A save that arrives
+ * after a newer one (two requests overtaking each other on a slow line, or a
+ * stale tab) is refused rather than overwriting newer text; the caller then
+ * does not broadcast it. Clamped to the server's clock + 5 s so a device with
+ * a clock far in the future cannot freeze the draft. Without a client time
+ * (an old client) the server's own clock is used, as before.
+ */
 export async function saveDraft(
-  userId: string, conversationId: string, draft: string | null,
-): Promise<void> {
+  userId: string, conversationId: string, draft: string | null, clientSavedAt?: Date | null,
+): Promise<{ saved: boolean; at: string }> {
   if (draft && draft.length > MAX_MESSAGE_LENGTH * 2) throw new ChatError('That draft is too long to save.', 400);
-  await getPool().query(
+  const at = clientSavedAt && Number.isFinite(clientSavedAt.getTime()) ? clientSavedAt.toISOString() : null;
+  const { rows } = await getPool().query<{ at: Date }>(
     `UPDATE conversation_members
-        SET draft = $3, draft_updated_at = now()
-      WHERE conversation_id = $1 AND user_id = $2`,
-    [conversationId, userId, draft && draft.trim() ? draft : null],
+        SET draft = $3,
+            draft_updated_at = LEAST(COALESCE($4::timestamptz, now()), now() + interval '5 seconds')
+      WHERE conversation_id = $1 AND user_id = $2
+        AND (draft_updated_at IS NULL
+             OR draft_updated_at <= LEAST(COALESCE($4::timestamptz, now()), now() + interval '5 seconds'))
+      RETURNING draft_updated_at AS at`,
+    [conversationId, userId, draft && draft.trim() ? draft : null, at],
   );
+  return rows[0] ? { saved: true, at: rows[0].at.toISOString() } : { saved: false, at: at ?? new Date().toISOString() };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -1821,7 +1939,7 @@ export async function reactorNames(conversationId: string, messageId: string, em
  */
 export async function editMessage(
   userId: string, conversationId: string, messageId: string, newBody: string,
-): Promise<{ message: WireMessage; newlyMentioned: string[] }> {
+): Promise<{ message: WireMessage; newlyMentioned: string[]; threadRoot: WireMessage | null }> {
   const body = (newBody ?? '').trim();
   if (!body) throw new ChatError('An edited message cannot be empty. Delete it instead.', 400);
   if (body.length > MAX_MESSAGE_LENGTH) {
@@ -1900,8 +2018,10 @@ export async function editMessage(
   }
 
   const message = await getMessage(userId, conversationId, messageId);
+  // An edited thread reply may be the one its root's preview quotes.
+  const threadRoot = await refreshRootOf(userId, conversationId, messageId).catch(() => null);
   if (!message) throw new ChatError('Message could not be read back.', 500);
-  return { message, newlyMentioned };
+  return { message, newlyMentioned, threadRoot };
 }
 
 /** Every version of a message, newest first (FR-MSG-8). */
@@ -1933,6 +2053,8 @@ export interface DeleteResult {
   byModerator: boolean;
   senderId: string;
   seq: number;
+  /** The thread root whose preview this deletion changed, to re-broadcast (R-02). */
+  threadRoot: WireMessage | null;
 }
 
 /**
@@ -2001,7 +2123,9 @@ export async function deleteMessage(
   // If it was the latest message, the sidebar preview is now a lie.
   await refreshPreview(conversationId);
 
-  return { byModerator: asModerator, senderId: row.sender_id, seq: Number(row.seq) };
+  // A deleted reply must leave its root's preview at once (it may have been the one quoted).
+  const threadRoot = await refreshRootOf(userId, conversationId, messageId).catch(() => null);
+  return { byModerator: asModerator, senderId: row.sender_id, seq: Number(row.seq), threadRoot };
 }
 
 /** Recompute the denormalised sidebar preview from the newest live message. */
@@ -2149,19 +2273,81 @@ export async function threadParticipants(
  */
 
 /**
- * Who follows a thread: the root's author, everyone who has replied, and
- * everyone who has opened it (a thread_reads row).
+ * Who follows a thread (R-11): the root's author, everyone who has replied,
+ * everyone who has opened it (a thread_reads row), everyone @mentioned in it,
+ * the owners and moderators of a room of 50 or fewer (a teacher hears about
+ * the homework thread in their own class channel), and anyone who chose
+ * Follow — minus anyone who chose Mute. The explicit choice always wins.
  */
+const SMALL_ROOM = 50;
 export async function threadFollowers(conversationId: string, rootId: string): Promise<string[]> {
   const { rows } = await getPool().query<{ user_id: string }>(
-    `SELECT sender_id AS user_id FROM messages
-      WHERE conversation_id = $1 AND (id = $2 OR thread_root_id = $2)
-        AND deleted_at IS NULL AND type <> 'system'
-     UNION
-     SELECT user_id FROM thread_reads WHERE conversation_id = $1 AND root_id = $2`,
-    [conversationId, rootId],
+    `WITH base AS (
+       SELECT sender_id AS user_id FROM messages
+        WHERE conversation_id = $1 AND (id = $2 OR thread_root_id = $2)
+          AND deleted_at IS NULL AND type <> 'system'
+       UNION
+       SELECT user_id FROM thread_reads WHERE conversation_id = $1 AND root_id = $2
+       UNION
+       SELECT mm.user_id FROM message_mentions mm
+         JOIN messages x ON x.id = mm.message_id AND x.conversation_id = mm.conversation_id
+        WHERE mm.conversation_id = $1 AND x.thread_root_id = $2 AND mm.kind = 'user'
+       UNION
+       SELECT cm.user_id FROM conversation_members cm
+        WHERE cm.conversation_id = $1 AND cm.left_at IS NULL
+          AND cm.role IN ('owner', 'admin', 'moderator')
+          AND (SELECT count(*) FROM conversation_members c2
+                WHERE c2.conversation_id = $1 AND c2.left_at IS NULL) <= $3
+       UNION
+       SELECT user_id FROM thread_follows WHERE root_id = $2 AND state = 'following'
+     )
+     SELECT b.user_id FROM base b
+      WHERE NOT EXISTS (SELECT 1 FROM thread_follows tf
+                         WHERE tf.root_id = $2 AND tf.user_id = b.user_id AND tf.state = 'muted')`,
+    [conversationId, rootId, SMALL_ROOM],
   );
   return rows.map((r) => r.user_id);
+}
+
+export type ThreadFollowChoice = 'following' | 'muted' | null;
+
+/** One person's standing in a thread: their explicit choice, whether they follow, their place. */
+export async function threadFollowState(
+  userId: string, conversationId: string, rootId: string,
+): Promise<{ choice: ThreadFollowChoice; following: boolean; lastReadSeq: number }> {
+  const [choiceRow, followers, read] = await Promise.all([
+    getPool().query<{ state: 'following' | 'muted' }>(
+      'SELECT state FROM thread_follows WHERE root_id = $1 AND user_id = $2', [rootId, userId]),
+    threadFollowers(conversationId, rootId),
+    getPool().query<{ last_read_seq: string }>(
+      'SELECT last_read_seq FROM thread_reads WHERE root_id = $1 AND user_id = $2', [rootId, userId]),
+  ]);
+  return {
+    choice: choiceRow.rows[0]?.state ?? null,
+    following: followers.includes(userId),
+    lastReadSeq: Number(read.rows[0]?.last_read_seq ?? 0),
+  };
+}
+
+/** Follow, mute, or go back to the implicit rule (null). */
+export async function setThreadFollow(
+  userId: string, conversationId: string, rootId: string, choice: ThreadFollowChoice,
+): Promise<void> {
+  const { rows } = await getPool().query<{ id: string }>(
+    'SELECT id FROM messages WHERE conversation_id = $1 AND id = $2 AND thread_root_id IS NULL',
+    [conversationId, rootId],
+  );
+  if (!rows[0]) throw new ChatError('That thread is not in this conversation.', 404);
+  if (choice === null) {
+    await getPool().query('DELETE FROM thread_follows WHERE root_id = $1 AND user_id = $2', [rootId, userId]);
+    return;
+  }
+  await getPool().query(
+    `INSERT INTO thread_follows (conversation_id, root_id, user_id, state)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (root_id, user_id) DO UPDATE SET state = EXCLUDED.state, updated_at = now()`,
+    [conversationId, rootId, userId, choice],
+  );
 }
 
 /** The reader's place in one thread. Never moves backwards. */
@@ -2193,8 +2379,10 @@ const THREAD_UNREAD_SQL = `
     FROM messages r
     JOIN followers f ON TRUE
     LEFT JOIN thread_reads tr ON tr.user_id = f.user_id AND tr.root_id = r.id
+    LEFT JOIN thread_follows tf ON tf.user_id = f.user_id AND tf.root_id = r.id
    WHERE r.conversation_id = $1 AND r.deleted_at IS NULL AND r.reply_count > 0
-     AND (r.sender_id = f.user_id OR tr.user_id IS NOT NULL)`;
+     AND (r.sender_id = f.user_id OR tr.user_id IS NOT NULL OR tf.state = 'following')
+     AND tf.state IS DISTINCT FROM 'muted'`;
 
 /**
  * New-reply counts per follower of one thread — pushed to each of them after
@@ -2207,6 +2395,7 @@ export async function threadUnreadFor(
     `WITH followers AS (
        SELECT sender_id AS user_id FROM messages WHERE conversation_id = $1 AND id = $2
        UNION SELECT user_id FROM thread_reads WHERE root_id = $2
+       UNION SELECT user_id FROM thread_follows WHERE root_id = $2 AND state = 'following'
      )
      ${THREAD_UNREAD_SQL} AND r.id = $2`,
     [conversationId, rootId],
@@ -2236,6 +2425,9 @@ export interface FollowedThread {
   replyCount: number;
   lastReplyAt: string | null;
   unread: number;
+  /** The newest reply — what the inbox row leads with (R-13). */
+  latest: { senderId: string; senderName: string; body: string; hasAttachment: boolean; at: string } | null;
+  participants: WireThreadParticipant[];
 }
 
 /**
@@ -2247,18 +2439,23 @@ export async function followedThreads(userId: string, limit = 50): Promise<Follo
     conversation_id: string; conversation_name: string | null; conversation_type: string;
     root_id: string; body: string | null; sender_name: string | null; reply_count: number;
     last_reply_at: Date | null; unread: number;
+    thread_latest: FollowedThread['latest']; thread_participants: FollowedThread['participants'] | null;
   }>(
     `WITH mine AS (
        SELECT r.id, r.conversation_id, r.seq, r.sender_id, r.body, r.reply_count,
+              r.thread_latest, r.thread_participants,
               COALESCE(tr.last_read_seq, 0) AS read_seq
          FROM messages r
          JOIN conversation_members cm ON cm.conversation_id = r.conversation_id
                                      AND cm.user_id = $1 AND cm.left_at IS NULL
          LEFT JOIN thread_reads tr ON tr.root_id = r.id AND tr.user_id = $1
+         LEFT JOIN thread_follows tf ON tf.root_id = r.id AND tf.user_id = $1
         WHERE r.deleted_at IS NULL AND r.reply_count > 0 AND r.thread_root_id IS NULL
-          AND (r.sender_id = $1 OR tr.user_id IS NOT NULL)
+          AND (r.sender_id = $1 OR tr.user_id IS NOT NULL OR tf.state = 'following')
+          AND tf.state IS DISTINCT FROM 'muted'
      )
      SELECT m.conversation_id, c.name AS conversation_name, c.type AS conversation_type,
+            m.thread_latest, m.thread_participants,
             m.id AS root_id, m.body, u.name AS sender_name, m.reply_count,
             last.created_at AS last_reply_at,
             (SELECT count(*) FROM messages x
@@ -2289,6 +2486,8 @@ export async function followedThreads(userId: string, limit = 50): Promise<Follo
     replyCount: r.reply_count,
     lastReplyAt: r.last_reply_at ? r.last_reply_at.toISOString() : null,
     unread: r.unread,
+    latest: r.thread_latest ?? null,
+    participants: r.thread_participants ?? [],
   }));
 }
 
@@ -2664,6 +2863,10 @@ export interface ChatPrefs {
   showPresence: boolean;
   /** Email a digest of unseen mentions and DMs (F-04). */
   emailDigest: boolean;
+  /** A quote reply to my message reaches me like a mention (R-09). */
+  notifyReplies: boolean;
+  /** Double-tap a message on a phone to add 👍 (C-02). */
+  doubleTapLike: boolean;
 }
 
 const DEFAULT_PREFS: ChatPrefs = {
@@ -2677,6 +2880,8 @@ const DEFAULT_PREFS: ChatPrefs = {
   timezone: null,
   showPresence: true,
   emailDigest: true,
+  notifyReplies: true,
+  doubleTapLike: true,
 };
 
 export async function getPrefs(userId: string): Promise<ChatPrefs> {
@@ -2685,6 +2890,7 @@ export async function getPrefs(userId: string): Promise<ChatPrefs> {
     sound: boolean; default_level: NotificationLevel;
     quiet_from_minute: number | null; quiet_to_minute: number | null;
     timezone: string | null; show_presence: boolean; email_digest: boolean;
+    notify_replies: boolean | null; double_tap_like: boolean | null;
   }>('SELECT * FROM user_chat_prefs WHERE user_id = $1', [userId]);
 
   const r = rows[0];
@@ -2703,6 +2909,8 @@ export async function getPrefs(userId: string): Promise<ChatPrefs> {
     timezone: r.timezone,
     showPresence: r.show_presence,
     emailDigest: r.email_digest ?? true,
+    notifyReplies: r.notify_replies ?? true,
+    doubleTapLike: r.double_tap_like ?? true,
   };
 }
 
@@ -2720,8 +2928,9 @@ export async function setPrefs(
   await getPool().query(
     `INSERT INTO user_chat_prefs
        (user_id, read_receipts, enter_to_send, desktop_notifications, sound,
-        default_level, quiet_from_minute, quiet_to_minute, timezone, show_presence, email_digest, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+        default_level, quiet_from_minute, quiet_to_minute, timezone, show_presence, email_digest,
+        notify_replies, double_tap_like, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
      ON CONFLICT (user_id) DO UPDATE SET
        read_receipts = EXCLUDED.read_receipts,
        enter_to_send = EXCLUDED.enter_to_send,
@@ -2733,11 +2942,14 @@ export async function setPrefs(
        timezone = EXCLUDED.timezone,
        show_presence = EXCLUDED.show_presence,
        email_digest = EXCLUDED.email_digest,
+       notify_replies = EXCLUDED.notify_replies,
+       double_tap_like = EXCLUDED.double_tap_like,
        updated_at = now()`,
     [userId, next.readReceipts, next.enterToSend, next.desktopNotifications, next.sound,
      NOTIFICATION_LEVELS_SET.has(next.defaultLevel) ? next.defaultLevel : 'all',
      minute(next.quietFromMinute), minute(next.quietToMinute),
-     next.timezone ?? null, next.showPresence, next.emailDigest !== false],
+     next.timezone ?? null, next.showPresence, next.emailDigest !== false,
+     next.notifyReplies !== false, next.doubleTapLike !== false],
   );
 
   /*

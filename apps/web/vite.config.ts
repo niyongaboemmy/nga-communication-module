@@ -39,11 +39,23 @@ export default defineConfig({
          * composer, so it stays out of the first download.
          */
         codeSplitting: {
+          // A group holds the modules its test names, not everything they
+          // import: shared helpers stay where the bundler would put them.
+          includeDependenciesRecursively: false,
           groups: [
             { name: 'react', test: /node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler)[\\/]/, priority: 30 },
             { name: 'icons', test: /node_modules[\\/]lucide-react[\\/]/, priority: 20 },
             { name: 'socket', test: /node_modules[\\/](socket\.io-client|engine\.io-client|socket\.io-parser|engine\.io-parser|@socket\.io)[\\/]/, priority: 20 },
             { name: 'editor', test: /node_modules[\\/](@tiptap|prosemirror-[a-z-]+|linkifyjs)[\\/]/, priority: 20 },
+            /*
+             * The conversation view (message log, rows, composer, thread pane)
+             * as one lazy chunk. Left to itself the bundler merged it into the
+             * chunk the shell's search needs for <Highlighted>, which put the
+             * whole view in every page's first download. Only modules that
+             * lazy pages import belong here — anything the shell imports
+             * statically would drag the group back into the first download.
+             */
+            { name: 'chat-view', test: /src[\\/]pages[\\/]chat[\\/](MessageThread|MessageRow|Composer|ThreadPanel|InlineThread|ThreadSummary|QuotePreview|MessageActionSheet|useComposerBox|jumpHistory|inlineThreadState|MentionAutocomplete|VoiceRecorder|SchedulePopover|MeetSchedulePopover|PinnedBar)\.tsx?$/, priority: 10 },
           ],
         },
       },

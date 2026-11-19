@@ -1,3 +1,4 @@
+import { useDraft } from './drafts';
 import type { ActivityKind } from '@tupo/shared';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -49,8 +50,8 @@ const Row: React.FC<{
   // and seeded from the server. The list's own copy is only as fresh as the
   // last list load, so a draft typed a moment ago never showed and a sent
   // one lingered as "Draft: …".
-  const { draftFor } = useChat();
-  const draft = draftFor(c.id).trim();
+  // Subscribed to this row's draft only: typing re-renders one row (G-02).
+  const draft = useDraft(c.id).trim();
 
   return (
     <li className="group/row relative">

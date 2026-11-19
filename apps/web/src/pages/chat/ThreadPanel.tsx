@@ -1,113 +1,127 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { X, Send, CornerDownRight, Paperclip, FileText } from 'lucide-react';
-import { Avatar, IconButton, Skeleton } from '../../components/ui';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { X, Send, CornerDownRight, Paperclip, FileText, ArrowLeft, Bell, BellOff } from 'lucide-react';
+import { MAX_MESSAGE_LENGTH } from '@tupo/shared';
+import { IconButton, Skeleton } from '../../components/ui';
 import { useNotify } from '../../context/NotificationContext';
-import { MessageAttachments } from './Attachments';
 import { useUploads } from './useUploads';
-import { formatBytes } from './data';
+import { formatBytes, dayLabel } from './data';
 import { useAuth } from '../../context/AuthContext';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useChat } from './ChatProvider';
-import { RichText } from './RichText';
-import { timeOf, dayLabel } from './data';
+import { useComposerBox } from './useComposerBox';
+import { drafts, threadKey } from './drafts';
+import { MessageRow } from './MessageRow';
+import { toWire, type MentionTarget } from './mentionText';
+import * as chatApi from './api';
 import type { Conversation, Message } from './types';
 
 /**
- * A thread, in its own pane.
+ * A thread, in its own pane — full screen on a phone (R-05), beside the
+ * conversation on a wide screen.
  *
- * Threads are the one feature that decides whether a busy class channel stays
- * readable, and they only work if the side conversation is genuinely to one
- * side. Rendering replies inline — indented under the parent — is the version
- * that fails: forty replies still push everything else off the screen, which is
- * exactly what the reader was promised would not happen.
- *
- * The root message is repeated at the top rather than linked to. A thread whose
+ * The root is repeated at the top rather than linked to: a thread whose
  * subject is off-screen is a list of answers to a question you cannot see.
+ * Every reply is a full message row (compact variant), so everything you can
+ * do to a message in the room you can do here (R-04): react, reply with
+ * "@Name", edit, delete, copy, save, report, retry a failed send.
+ *
+ * Opening lands at the first reply you have not seen (R-12). The header says
+ * whether you follow the thread and lets you change it (R-11).
  */
-
-const ThreadMessage: React.FC<{
-  message: Message;
-  isRoot: boolean;
-  names: Record<string, string>;
-}> = ({ message: m, isRoot, names }) => {
-  const { user } = useAuth();
-  const mine = m.senderId === user?.id;
-
-  if (m.deletedAt) {
-    return (
-      <li className="px-3 py-1.5 text-xs italic text-text-secondary-light dark:text-text-secondary-dark">
-        This message was deleted
-      </li>
-    );
-  }
-
-  return (
-    <li className={`flex gap-2.5 px-3 ${isRoot ? 'pb-3' : 'py-1.5'}`}>
-      <Avatar name={m.senderName} src={m.senderAvatarUrl ?? undefined} size={30} />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-2">
-          <span className="truncate text-xs font-semibold text-text-primary-light dark:text-text-primary-dark">
-            {mine ? 'You' : m.senderName}
-          </span>
-          <span className="shrink-0 text-[10px] tabular-nums text-text-secondary-light dark:text-text-secondary-dark">
-            {timeOf(m.createdAt)}
-          </span>
-        </div>
-        <div className="mt-0.5 text-sm leading-relaxed text-text-primary-light dark:text-text-primary-dark">
-          {m.body && <RichText text={m.body} names={{ ...names, ...m.mentionNames }} meId={user?.id} />}
-          {m.editedAt && <span className="ml-1 text-[10px] opacity-70">(edited)</span>}
-        </div>
-        {/* The root's photo is usually what the thread is about (B-08). */}
-        {m.attachments.length > 0 && <MessageAttachments attachments={m.attachments} onDark={false} />}
-        {m.reactions.length > 0 && (
-          <div className="mt-1 flex flex-wrap gap-1">
-            {m.reactions.map((r) => (
-              <span
-                key={r.emoji}
-                className="rounded-full border border-border-light px-1.5 py-0.5 text-[11px] dark:border-border-dark"
-              >
-                {r.emoji} {r.count}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-    </li>
-  );
-};
-
-/**
- * Half-written replies, per thread, for as long as the tab is open (B-08):
- * closing the panel, or switching to another thread and back, keeps them.
- */
-const threadDrafts = new Map<string, string>();
 
 export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversation }) => {
   const { can } = usePermissions();
   const { user } = useAuth();
   const {
-    threadRootId, threadMessages, threadLoading, openThread, sendThreadReply, markThreadRead,
+    threadRootId, threadMessages, threadLoading, openThread, sendThreadReply, markThreadRead, threadUnread,
+    notifyTyping, stopTyping, typingByConversation,
   } = useChat();
-
+  const replying = (typingByConversation[conversation.id] ?? [])
+    .filter((u) => u.threadRootId && u.threadRootId === threadRootId && u.userId !== user?.id)
+    .map((u) => u.name.split(' ')[0]);
   const { notify } = useNotify();
-  const [value, setValueState] = useState(() => (threadRootId ? threadDrafts.get(threadRootId) ?? '' : ''));
-  const setValue = (next: string) => {
-    setValueState(next);
-    if (!threadRootId) return;
-    if (next) threadDrafts.set(threadRootId, next); else threadDrafts.delete(threadRootId);
-  };
-  // Another thread opened in the same panel: show that thread's draft.
-  useEffect(() => { setValueState(threadRootId ? threadDrafts.get(threadRootId) ?? '' : ''); }, [threadRootId]);
+
+  /*
+   * Half-written replies, per thread (B-08), in the draft store: closing the
+   * panel, switching threads, and now a reload or a crash all keep them (G-09).
+   */
+  const submitRef = useRef<() => void>(() => {});
+  const box = useComposerBox({
+    draftKey: threadKey(threadRootId ?? 'none'),
+    maxHeightPx: 128,
+    onSubmit: () => submitRef.current(),
+    onTyping: () => notifyTyping('typing', threadRootId),
+    onTypingStop: stopTyping,
+  });
+  const { value } = box;
+  const inputRef = box.ref;
+  const picked = useRef<MentionTarget[]>([]);
   const [alsoSend, setAlsoSend] = useState(false);
-  const [sending, setSending] = useState(false);
   const tray = useUploads();
   const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const dividerRef = useRef<HTMLLIElement>(null);
 
+  /*
+   * R-12: how many replies were new when the thread was opened, captured
+   * before reading it moves the marker — the divider goes above them.
+   */
+  const [unreadAtOpen, setUnreadAtOpen] = useState(0);
+  const openedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (threadRootId && openedFor.current !== threadRootId) {
+      openedFor.current = threadRootId;
+      setUnreadAtOpen(threadUnread[threadRootId] ?? 0);
+    }
+  }, [threadRootId, threadUnread]);
+
+  // R-11: whether I follow this thread, and the switch.
+  const [follow, setFollow] = useState<chatApi.ThreadFollow | null>(null);
+  useEffect(() => {
+    setFollow(null);
+    if (!threadRootId) return;
+    let live = true;
+    chatApi.getThreadFollow(conversation.id, threadRootId)
+      .then((f) => { if (live) setFollow(f); })
+      .catch(() => { /* the switch simply stays hidden */ });
+    return () => { live = false; };
+  }, [conversation.id, threadRootId]);
+  const toggleFollow = async () => {
+    if (!threadRootId || !follow) return;
+    const next = follow.following ? 'muted' : 'following';
+    const before = follow;
+    setFollow({ ...follow, choice: next, following: next === 'following' });
+    try {
+      setFollow(await chatApi.setThreadFollow(conversation.id, threadRootId, next));
+      notify({
+        title: next === 'following' ? 'Following this thread' : 'Thread muted',
+        body: next === 'following' ? 'New replies will reach you.' : 'You will not be notified of new replies.',
+        tone: 'success', confirmation: true,
+      });
+    } catch (err) {
+      setFollow(before);
+      notify({ title: 'Could not change that', body: err instanceof Error ? err.message : undefined, tone: 'error' });
+    }
+  };
+
+  const root = threadMessages.find((m) => m.id === threadRootId);
+  const replies = threadMessages.filter((m) => m.id !== threadRootId);
+  // The first of the replies that were new at opening (from someone else).
+  const others = replies.filter((m) => m.senderId !== user?.id && m.seq !== Number.MAX_SAFE_INTEGER);
+  const firstNewId = unreadAtOpen > 0 && others.length > 0
+    ? others[Math.max(0, others.length - unreadAtOpen)]?.id ?? null
+    : null;
+
+  // Land at the divider when there is one, else at the newest reply.
+  const landed = useRef<string | null>(null);
   useLayoutEffect(() => {
+    if (threadLoading || !threadRootId) return;
+    if (landed.current !== threadRootId) {
+      landed.current = threadRootId;
+      if (firstNewId && dividerRef.current) { dividerRef.current.scrollIntoView({ block: 'center' }); return; }
+    }
     bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [threadMessages.length]);
+  }, [threadMessages.length, threadLoading, threadRootId, firstNewId]);
 
   /*
    * The thread is read once its newest reply is on screen with the tab
@@ -142,10 +156,28 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
       openThread(null);
     };
     document.addEventListener('keydown', onKey, true);
-    // A thread opened by clicking "3 replies" is opened in order to reply.
+    // Opened in order to reply: the caret goes to the box (and the toolbar
+    // that opened it lets go of focus, C-05). Not on touch: it would throw
+    // up the keyboard over the replies.
     if (!window.matchMedia('(pointer: coarse)').matches) inputRef.current?.focus();
     return () => document.removeEventListener('keydown', onKey, true);
   }, [threadRootId, openThread]);
+
+  /** Reply to a reply: this thread, starting "@Name " (one level deep). */
+  const replyTo = useCallback((m: Message) => {
+    if (!threadRootId) return;
+    const key = threadKey(threadRootId);
+    if (m.senderId !== user?.id) {
+      picked.current = [{ id: m.senderId, name: m.senderName }, ...picked.current.filter((t) => t.id !== m.senderId)];
+      const current = drafts.get(key);
+      if (!current.startsWith(`@${m.senderName}`)) drafts.set(key, `@${m.senderName} ${current}`);
+    }
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      el?.focus();
+      el?.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, [threadRootId, user?.id, inputRef]);
 
   if (!threadRootId) return null;
 
@@ -153,25 +185,34 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
   for (const m of threadMessages) names[m.senderId] = m.senderName;
   if (user) names[user.id] = user.name;
 
-  const root = threadMessages.find((m) => m.id === threadRootId);
-  const replies = threadMessages.filter((m) => m.id !== threadRootId);
-
+  /*
+   * Take the text out of the box at send time, not when the server answers
+   * (G-03). The send itself is optimistic and durable (G-07): a failure shows
+   * on the reply, with Retry, instead of here.
+   */
   const submit = async () => {
     const text = value.trim();
-    if ((!text && tray.readyIds.length === 0) || sending || tray.busy) return;
-    setSending(true);
+    if ((!text && tray.readyIds.length === 0) || tray.busy) return;
+    if (text.length > MAX_MESSAGE_LENGTH) {
+      notify({ title: `Messages can be up to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters`, tone: 'warning' });
+      return;
+    }
+    const attachments = tray.readyIds;
+    const wasAlsoSend = alsoSend;
+    box.takeForSend();
+    setAlsoSend(false);
+    tray.clear();
+    const body = toWire(text, picked.current);
+    picked.current = [];
     try {
-      await sendThreadReply(text, alsoSend, tray.readyIds);
-      setValue('');
-      setAlsoSend(false);
-      tray.clear();
+      await sendThreadReply(body, wasAlsoSend, attachments);
     } catch (err) {
-      // The reply stays in the box to try again (B-10: failures are said).
+      box.restore(text);
       notify({ title: 'Your reply was not sent', body: err instanceof Error ? err.message : undefined, tone: 'error' });
-    } finally {
-      setSending(false);
     }
   };
+
+  submitRef.current = () => { void submit(); };
 
   // The same rule as the server's assertCanPost: an announcement channel's
   // threads are for announcers too.
@@ -184,33 +225,53 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
       aria-label="Thread"
       className="flex h-full min-h-0 w-full flex-col border-l border-border-light bg-white dark:border-border-dark/30 dark:bg-chrome-dark"
     >
-      <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border-light px-3 dark:border-border-dark/30">
-        <div className="min-w-0">
+      <header className="pt-safe flex h-14 shrink-0 items-center gap-1 border-b border-border-light px-2 sm:px-3 dark:border-border-dark/30">
+        {/* A phone's thread is a page: Back, where a page's Back is. */}
+        <IconButton label="Back" className="md:hidden" onClick={() => openThread(null)}>
+          <ArrowLeft size={18} />
+        </IconButton>
+        <div className="min-w-0 flex-1">
           <h2 className="truncate text-sm font-semibold text-text-primary-light dark:text-text-primary-dark">
             Thread
           </h2>
           <p className="truncate text-[11px] text-text-secondary-light dark:text-text-secondary-dark">
             {conversation.type === 'dm' ? conversation.name : `#${conversation.name}`}
+            {root ? ` · ${root.senderName.split(' ')[0]}'s message` : ''}
           </p>
         </div>
-        <IconButton label="Close thread" onClick={() => openThread(null)}>
+        {follow && (
+          <button
+            onClick={() => void toggleFollow()}
+            aria-pressed={follow.following}
+            title={follow.following ? 'You get new replies. Click to mute this thread.' : 'Get notified of new replies'}
+            className={`flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors duration-150 ${
+              follow.following
+                ? 'bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-900/30 dark:text-blue-300'
+                : 'text-text-secondary-light hover:bg-surface-light dark:text-text-secondary-dark dark:hover:bg-surface-dark'
+            }`}
+          >
+            {follow.following ? <Bell size={14} /> : <BellOff size={14} />}
+            {follow.following ? 'Following' : 'Follow'}
+          </button>
+        )}
+        <IconButton label="Close thread" className="hidden md:grid" onClick={() => openThread(null)}>
           <X size={18} />
         </IconButton>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-2">
         {threadLoading ? (
-          <div className="space-y-3 px-3" aria-busy="true">
+          <div className="space-y-3 px-3" aria-busy="true" aria-label="Loading the thread">
             <Skeleton className="h-12 w-full rounded-xl" />
             <Skeleton className="h-10 w-4/5 rounded-xl" />
             <Skeleton className="h-10 w-3/5 rounded-xl" />
           </div>
         ) : (
-          <ul role="log" aria-label="Thread messages" aria-relevant="additions">
+          <ul role="log" aria-label="Thread messages" aria-relevant="additions" className="px-1 sm:px-2">
             {root && (
               <>
-                <ThreadMessage message={root} isRoot names={names} />
-                <li className="mx-3 mb-2 flex items-center gap-2 border-t border-border-light pt-2 dark:border-border-dark/40">
+                <MessageRow message={root} newGroup names={names} variant="compact" onReply={replyTo} />
+                <li className="mx-2 mb-1 mt-2 flex items-center gap-2 border-t border-border-light pt-2 dark:border-border-dark/40">
                   <span className="text-[11px] font-semibold text-text-secondary-light dark:text-text-secondary-dark">
                     {replies.length === 0
                       ? 'No replies yet'
@@ -223,9 +284,25 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
               </>
             )}
             {replies.map((m) => (
-              <ThreadMessage key={m.id} message={m} isRoot={false} names={names} />
+              <React.Fragment key={m.nonce ?? m.id}>
+                {m.id === firstNewId && (
+                  <li ref={dividerRef} className="flex items-center gap-2 px-2 py-1.5" aria-label="New replies">
+                    <span className="h-px flex-1 bg-blue-400/60" />
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+                      {unreadAtOpen} new
+                    </span>
+                    <span className="h-px flex-1 bg-blue-400/60" />
+                  </li>
+                )}
+                <MessageRow message={m} newGroup names={names} variant="compact" onReply={replyTo} />
+              </React.Fragment>
             ))}
           </ul>
+        )}
+        {replying.length > 0 && (
+          <p role="status" className="px-4 pb-1 text-[11px] italic text-text-secondary-light dark:text-text-secondary-dark">
+            {replying.length === 1 ? `${replying[0]} is replying…` : `${replying.slice(0, 2).join(' and ')} are replying…`}
+          </p>
         )}
         <div ref={bottomRef} />
       </div>
@@ -267,26 +344,19 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
             <label className="sr-only" htmlFor="thread-composer">Reply in thread</label>
             <textarea
               id="thread-composer"
-              ref={inputRef}
+              {...box.textareaProps}
               rows={1}
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
               onPaste={(e) => {
                 const files = [...e.clipboardData.files];
                 if (files.length) { e.preventDefault(); tray.add(files); }
               }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !window.matchMedia('(pointer: coarse)').matches) {
-                  e.preventDefault();
-                  void submit();
-                }
-              }}
+              onKeyDown={(e) => { box.handleSubmitKey(e); }}
               placeholder="Reply…"
               className="max-h-32 min-h-8 flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-text-primary-light outline-none placeholder:text-text-secondary-light/80 dark:text-text-primary-dark"
             />
             <button
               onClick={() => void submit()}
-              disabled={(!value.trim() && tray.readyIds.length === 0) || sending || tray.busy}
+              disabled={(!value.trim() && tray.readyIds.length === 0) || tray.busy || value.length > MAX_MESSAGE_LENGTH}
               aria-label="Send reply"
               className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-blue-600 text-white transition-colors duration-150 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
             >

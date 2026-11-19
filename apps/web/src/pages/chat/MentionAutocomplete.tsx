@@ -1,3 +1,4 @@
+import { isComposing } from './composerKeys';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AtSign, Users, Radio } from 'lucide-react';
 import { Avatar } from '../../components/ui';
@@ -125,6 +126,8 @@ export const MentionAutocomplete: React.FC<{
     if (!candidates.length) { onDismiss(); return; }
 
     const onKey = (e: KeyboardEvent) => {
+      // Keys pressed while an input method composes belong to it (G-06).
+      if (isComposing(e)) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setActive((i) => (i + 1) % candidates.length);

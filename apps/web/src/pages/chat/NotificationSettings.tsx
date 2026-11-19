@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Bell, Volume2, Moon, Eye, CornerDownLeft, Check, Ban, Smartphone, Mail as MailIcon } from 'lucide-react';
+import { X, Bell, Volume2, Moon, Eye, CornerDownLeft, Check, Ban, Smartphone, Mail as MailIcon, Reply, ThumbsUp } from 'lucide-react';
 import { disablePush, enablePush, getPushState, type PushState } from '../../lib/push';
 import { Avatar, IconButton, Spinner } from '../../components/ui';
 import { useChat } from './ChatProvider';
@@ -28,6 +28,8 @@ interface Prefs {
   timezone: string | null;
   showPresence: boolean;
   emailDigest?: boolean;
+  notifyReplies?: boolean;
+  doubleTapLike?: boolean;
 }
 
 const toTime = (minutes: number | null) =>
@@ -264,6 +266,20 @@ export const NotificationSettings: React.FC<{ onClose?: () => void; embedded?: b
               label="Show when I am online"
               checked={prefs.showPresence}
               onChange={(v) => void update({ showPresence: v })}
+            />
+            <Toggle
+              icon={<Reply size={15} />}
+              label="Tell me when someone replies to me"
+              hint="A quote of your message reaches you like a mention, even in a room set to mentions only."
+              checked={prefs.notifyReplies !== false}
+              onChange={(v) => void update({ notifyReplies: v })}
+            />
+            <Toggle
+              icon={<ThumbsUp size={15} />}
+              label="Double-tap to like (phone)"
+              hint="Double-tap a message to add 👍."
+              checked={prefs.doubleTapLike !== false}
+              onChange={(v) => void update({ doubleTapLike: v })}
             />
             <Toggle
               icon={<CornerDownLeft size={15} />}

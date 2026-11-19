@@ -82,7 +82,8 @@ export interface ChatClientToServerEvents {
    * because they share every property that matters: short-lived, per
    * conversation, and worthless if stale.
    */
-  'typing:start': (p: { conversationId: string; kind?: ActivityKind }) => void;
+  /** `threadRootId`: the typing is a reply in that thread, not in the room. */
+  'typing:start': (p: { conversationId: string; kind?: ActivityKind; threadRootId?: string | null }) => void;
   'typing:stop': (p: { conversationId: string }) => void;
 
   /**
@@ -240,9 +241,12 @@ export interface ChatServerToClientEvents {
   /** You blocked or unblocked someone (on another device, or this one). Never sent to the blocked person. */
   'block:changed': (p: { userId: string; blocked: boolean }) => void;
 
-  /** A draft saved on another device (FR-MSG-17). */
+  /**
+   * A draft was saved (FR-MSG-17). Sent to every socket of the user;
+   * `origin` is the saving tab's id, so that tab ignores its own echo (G-01).
+   */
   'conversation:draft': (
-    p: { conversationId: string; draft: string | null; at: string },
+    p: { conversationId: string; draft: string | null; at: string; origin?: string | null },
   ) => void;
 }
 

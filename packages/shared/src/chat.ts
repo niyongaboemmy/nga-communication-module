@@ -104,6 +104,9 @@ export interface WireReaction {
   userIds: string[];
 }
 
+/** Someone who replied in a thread, as the summary line shows them. */
+export interface WireThreadParticipant { id: string; name: string; avatarUrl: string | null }
+
 export interface WireAttachment {
   fileId: string;
   name: string;
@@ -146,9 +149,15 @@ export interface WireMessage {
   threadRootId: string | null;
   replyCount: number;
   threadLastAt: string | null;
+  /** The last three distinct repliers, newest first — the faces on the summary line (R-02). */
+  threadParticipants?: WireThreadParticipant[];
+  /** The newest live reply, for the summary line and the Threads inbox (R-02, R-13). */
+  threadLatest?: { senderId: string; senderName: string; body: string; hasAttachment: boolean; at: string } | null;
   /** Quote-reply target, denormalised so the quote block needs no second fetch. */
   replyTo: {
     id: string; senderId: string; senderName: string; body: string | null; deleted: boolean;
+    /** The quoted message's first attachment, so a quote can say "Photo" / "Voice message · 0:12" (R-08). */
+    attachment?: Pick<WireAttachment, 'fileId' | 'kind' | 'name' | 'mime' | 'durationMs'> | null;
   } | null;
 
   pinnedAt: string | null;
@@ -229,6 +238,8 @@ export interface TypingUser {
    */
   avatarUrl?: string | null;
   kind?: ActivityKind;
+  /** Replying in this thread rather than in the room ("Didier is replying…"). */
+  threadRootId?: string | null;
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *

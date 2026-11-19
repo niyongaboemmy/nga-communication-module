@@ -84,8 +84,13 @@ export const setPrefs = (
   `/api/chat/conversations/${id}/prefs`, prefs,
 ).then((r) => r.data!.conversation);
 
-export const saveDraft = (id: string, draft: string | null) =>
-  apiPut<{ saved: boolean }>(`/api/chat/conversations/${id}/draft`, { draft });
+/** `clientSavedAt`: when the text was captured — the server keeps the newest (G-01). */
+export const saveDraft = (
+  id: string, draft: string | null, clientSavedAt = Date.now(),
+  init: { signal?: AbortSignal; keepalive?: boolean } = {},
+) => apiPut<{ saved: boolean; at: string }>(
+  `/api/chat/conversations/${id}/draft`, { draft, clientSavedAt: new Date(clientSavedAt).toISOString() }, init,
+);
 
 export const openDirect = (userId: string) =>
   apiPost<{ conversation: ConversationSummary }>('/api/chat/conversations/direct', { userId })
@@ -149,7 +154,17 @@ export interface FollowedThread {
   replyCount: number;
   lastReplyAt: string | null;
   unread: number;
+  /** The newest reply — what the inbox row leads with (R-13). */
+  latest?: { senderId: string; senderName: string; body: string; hasAttachment: boolean; at: string } | null;
+  participants?: Array<{ id: string; name: string; avatarUrl: string | null }>;
 }
+
+/** Follow state of one thread (R-11). `choice` null: the automatic rule decides. */
+export interface ThreadFollow { choice: 'following' | 'muted' | null; following: boolean; lastReadSeq: number }
+export const getThreadFollow = (conversationId: string, rootId: string) =>
+  apiGet<ThreadFollow>(`/api/chat/conversations/${conversationId}/threads/${rootId}/follow`).then((r) => r.data!);
+export const setThreadFollow = (conversationId: string, rootId: string, state: 'following' | 'muted' | null) =>
+  apiPut<ThreadFollow>(`/api/chat/conversations/${conversationId}/threads/${rootId}/follow`, { state }).then((r) => r.data!);
 
 export const listFollowedThreads = () =>
   apiGet<{ threads: FollowedThread[] }>('/api/chat/threads').then((r) => r.data!.threads);

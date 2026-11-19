@@ -427,11 +427,37 @@ router.put('/conversations/:id/draft', wrap(async (req, res) => {
   const id = req.params.id!;
   await chat.requireMembership(me.id, id);
   const draft = typeof req.body?.draft === 'string' ? req.body.draft : null;
-  await chat.saveDraft(me.id, id, draft);
-  emitToUsers([me.id], 'conversation:draft', {
-    conversationId: id, draft, at: new Date().toISOString(),
-  });
-  res.json(ok({ saved: true }));
+  const rawAt = req.body?.clientSavedAt;
+  const clientSavedAt = typeof rawAt === 'string' || typeof rawAt === 'number' ? new Date(rawAt) : null;
+  const result = await chat.saveDraft(me.id, id, draft, clientSavedAt);
+  // A save that lost to a newer one is not news to anyone (G-01). The echo
+  // names the tab that saved, so that tab can ignore its own words coming back.
+  if (result.saved) {
+    const origin = typeof req.get('x-tupo-tab') === 'string' ? req.get('x-tupo-tab')!.slice(0, 64) : null;
+    emitToUsers([me.id], 'conversation:draft', { conversationId: id, draft, at: result.at, origin });
+  }
+  res.json(ok({ saved: result.saved, at: result.at }));
+}));
+
+/** This person's standing in a thread: follow choice, whether they follow, their place (R-11, R-12). */
+router.get('/conversations/:id/threads/:rootId/follow', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, rootId } = req.params as { id: string; rootId: string };
+  await chat.requireMembership(me.id, id);
+  res.json(ok(await chat.threadFollowState(me.id, id, rootId)));
+}));
+
+/** Follow, mute, or back to automatic (`state: null`) (R-11). */
+router.put('/conversations/:id/threads/:rootId/follow', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, rootId } = req.params as { id: string; rootId: string };
+  await chat.requireMembership(me.id, id);
+  const raw = req.body?.state;
+  if (raw !== null && raw !== 'following' && raw !== 'muted') {
+    return res.status(400).json(fail('state must be "following", "muted" or null.'));
+  }
+  await chat.setThreadFollow(me.id, id, rootId, raw);
+  res.json(ok(await chat.threadFollowState(me.id, id, rootId)));
 }));
 
 /** Links shared here, newest first (B-12). */
@@ -587,6 +613,7 @@ async function fanOutNewMessage(
     mentionedUserIds: result.mentionedUserIds.filter((u) => !deniedMentions.has(u)),
     broadcast: result.broadcast,
     senderMayBroadcast: context.senderMayBroadcast,
+    repliedToUserId: result.repliedToUserId,
   }).catch(() => { /* a missed notification must not fail the send */ });
 
   const members = await chat.memberIdsOf(conversationId);
@@ -699,11 +726,13 @@ router.patch('/conversations/:id/messages/:messageId', authorizePermission('MESS
       return res.status(409).json(fail('This conversation is archived.'));
     }
 
-    const { message, newlyMentioned } = await chat.editMessage(
+    const { message, newlyMentioned, threadRoot } = await chat.editMessage(
       me.id, id, messageId, String(req.body?.body ?? ''),
     );
 
     emitToConversation(id, 'message:updated', { conversationId: id, message });
+    // The root's summary line quotes its newest reply (R-02).
+    if (threadRoot) emitToConversation(id, 'message:updated', { conversationId: id, message: threadRoot });
     // Editing a message to add an @mention has to reach the person mentioned —
     // otherwise "sorry, meant to tag you" silently never arrives.
     const deniedMentions = await contactDenied(me, newlyMentioned, 'mention');
@@ -748,6 +777,8 @@ router.delete('/conversations/:id/messages/:messageId', wrap(async (req, res) =>
   emitToConversation(id, 'message:deleted', {
     conversationId: id, messageId, deletedBy: me.id, byModerator: result.byModerator,
   });
+  // A deleted reply leaves its root's summary line at once (R-02).
+  if (result.threadRoot) emitToConversation(id, 'message:updated', { conversationId: id, message: result.threadRoot });
 
   // Deleting a message changes everyone's unread arithmetic.
   const members = await chat.memberIdsOf(id);
@@ -1048,6 +1079,8 @@ router.patch('/prefs', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, 
   if (bool('sound') !== undefined) patch.sound = bool('sound');
   if (bool('showPresence') !== undefined) patch.showPresence = bool('showPresence');
   if (bool('emailDigest') !== undefined) patch.emailDigest = bool('emailDigest');
+  if (bool('notifyReplies') !== undefined) patch.notifyReplies = bool('notifyReplies');
+  if (bool('doubleTapLike') !== undefined) patch.doubleTapLike = bool('doubleTapLike');
   if (num('quietFromMinute') !== undefined) patch.quietFromMinute = num('quietFromMinute');
   if (num('quietToMinute') !== undefined) patch.quietToMinute = num('quietToMinute');
   if (typeof body.timezone === 'string') patch.timezone = body.timezone.slice(0, 64);

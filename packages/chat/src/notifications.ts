@@ -71,10 +71,13 @@ export async function notifyNewMessage(
     broadcast: 'channel' | 'here' | null;
     /** Whether the sender may address everyone (`CHANNEL_ANNOUNCE`). */
     senderMayBroadcast: boolean;
+    /** The author of the quoted message (R-09): "X replied to you". */
+    repliedToUserId?: string | null;
   },
 ): Promise<string[]> {
   const isDm = opts.conversationType === 'dm';
   const mentioned = new Set(opts.mentionedUserIds);
+  const repliedTo = opts.repliedToUserId ?? null;
 
   const { rows } = await getPool().query<Recipient>(
     `SELECT m.user_id, m.notification, m.muted_until
@@ -89,6 +92,7 @@ export async function notifyNewMessage(
   const now = Date.now();
   const dm: string[] = [];
   const mentions: string[] = [];
+  const replies: string[] = [];
   const plain: string[] = [];
 
   for (const r of rows) {
@@ -103,6 +107,8 @@ export async function notifyNewMessage(
 
     if (isDm) dm.push(r.user_id);
     else if (personallyMentioned || broadcastReaches) mentions.push(r.user_id);
+    // Addressed to them even in a room set to "mentions only" (R-09).
+    else if (r.user_id === repliedTo) replies.push(r.user_id);
     else if (r.notification === 'all') plain.push(r.user_id);
   }
 
@@ -134,6 +140,18 @@ export async function notifyNewMessage(
       subjectId: message.conversationId,
     }, undefined, message.senderId);
     notified.push(...mentions);
+  }
+
+  if (replies.length) {
+    await notifyAndPush(replies, {
+      kind: 'chat.mention',
+      title: `${message.senderName} replied to you`,
+      body: preview,
+      link,
+      subjectType: 'conversation',
+      subjectId: message.conversationId,
+    }, undefined, message.senderId);
+    notified.push(...replies);
   }
 
   if (plain.length) {

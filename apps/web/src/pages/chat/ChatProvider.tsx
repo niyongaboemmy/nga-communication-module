@@ -9,8 +9,11 @@ import { TYPING_THROTTLE_MS, EDIT_WINDOW_MS } from '@tupo/shared';
 import { getSocket, onSocket } from '../../lib/socket';
 import { useAuth } from '../../context/AuthContext';
 import { apiGet } from '../../lib/api';
+import { count } from '../../lib/clientCounters';
 import * as chatApi from './api';
 import * as outbox from './outbox';
+import { drafts } from './drafts';
+import { useNotify } from '../../context/NotificationContext';
 import { cacheGet, cacheSet, debouncedWriter } from '../../lib/localStore';
 import { closeConversationNotifications } from '../../lib/swSession';
 
@@ -35,7 +38,6 @@ const CACHED_MESSAGES = 100;
  * duplicate. That nonce match is the whole reason a retry is safe.
  */
 
-interface Draft { text: string; savedAt: number }
 
 interface ChatValue {
   conversations: ConversationSummary[];
@@ -87,7 +89,10 @@ interface ChatValue {
   threadMessages: WireMessage[];
   threadLoading: boolean;
   openThread: (rootId: string | null) => void;
-  sendThreadReply: (body: string, alsoSendToChannel: boolean, attachments?: string[]) => Promise<void>;
+  /** An inline thread follows its root's replies (sends, arrivals, edits). Returns unsubscribe. */
+  subscribeThread: (rootId: string, listener: (fn: (prev: WireMessage[]) => WireMessage[]) => void) => () => void;
+  /** `rootId`: a thread other than the one open in the panel (an inline thread). */
+  sendThreadReply: (body: string, alsoSendToChannel: boolean, attachments?: string[], rootId?: string) => Promise<void>;
 
   pin: (messageId: string, pinned: boolean) => Promise<void>;
   save: (messageId: string, saved: boolean) => Promise<void>;
@@ -107,7 +112,10 @@ interface ChatValue {
   /** Messages still waiting for a connection (FR-MSG-24). */
   queued: number;
   /** `kind` widens the indicator past typing — see ActivityKind. */
-  notifyTyping: (kind?: ActivityKind) => void;
+  /** `threadRootId`: typing a reply in that thread (shown there, not in the room). */
+  notifyTyping: (kind?: ActivityKind, threadRootId?: string | null) => void;
+  /** Withdraw "typing…" now: the box emptied, lost focus, or was left (G-11). */
+  stopTyping: () => void;
   markReadTo: (seq: number) => void;
   markEverythingRead: () => Promise<void>;
   /** The newest message of mine that can still be edited — what ↑ targets. */
@@ -145,6 +153,8 @@ interface ChatValue {
   markConversationRead: (conversationId: string) => void;
   /** Whether Enter sends, from the user's own preferences (FR-USR-8). */
   enterToSend: boolean;
+  /** Double-tap a message on a phone to add 👍 (C-02, a chat preference). */
+  doubleTapLike: boolean;
   refresh: () => Promise<void>;
   /** People this reader has blocked (B-05). */
   blockedIds: ReadonlySet<string>;
@@ -152,6 +162,66 @@ interface ChatValue {
 }
 
 const ChatContext = createContext<ChatValue | null>(null);
+
+/** How long a socket send waits for its ack before trying REST (G-05). */
+const ACK_TIMEOUT_MS = 8_000;
+/** How long a delete can be taken back before it is sent (G-12). */
+const UNDO_DELETE_MS = 5_000;
+
+interface SendPayload {
+  conversationId: string; body: string; nonce: string; type?: MessageType;
+  threadRootId: string | null; replyToId: string | null;
+  attachments?: string[]; metadata?: Record<string, unknown>;
+  alsoSendToChannel?: boolean;
+}
+
+/**
+ * One delivery over REST. Idempotent by nonce: a message that in fact landed
+ * resolves to itself. Thread replies use the replies route, which also makes
+ * the channel copy and returns the updated root.
+ */
+async function deliverRest(p: SendPayload): Promise<{ message: WireMessage; root?: WireMessage | null }> {
+  if (p.threadRootId) {
+    const r = await chatApi.replyInThread(p.conversationId, p.threadRootId, {
+      body: p.body, nonce: p.nonce, attachments: p.attachments ?? [],
+      ...(p.alsoSendToChannel ? { alsoSendToChannel: true } : {}),
+    });
+    return { message: r.message, root: r.root };
+  }
+  const r = await chatApi.sendMessage(p.conversationId, {
+    body: p.body, nonce: p.nonce, type: p.type, threadRootId: null, replyToId: p.replyToId,
+    attachments: p.attachments ?? [], metadata: p.metadata,
+  });
+  return { message: r.message };
+}
+
+/**
+ * The actions only, with identities that never change (G-02).
+ *
+ * A message row needs to *do* things (react, reply, edit) but must not
+ * re-render because some unrelated state moved. Reading these from the full
+ * context subscribed every row to every change; this context's value is
+ * created once, and each function forwards to the provider's latest version.
+ */
+export type ChatActions = Pick<ChatValue,
+  'send' | 'retry' | 'discard' | 'react' | 'edit' | 'remove' | 'pin' | 'save' | 'forward'
+  | 'openThread' | 'setReplyTarget' | 'jumpTo' | 'setEditingId' | 'markUnread' | 'sendThreadReply'
+  | 'markThreadRead' | 'notifyTyping' | 'stopTyping' | 'subscribeThread'>;
+const ChatActionsContext = createContext<ChatActions | null>(null);
+
+/** Stable wrappers around changing callbacks: same object for the provider's whole life. */
+function useStableActions<T extends Record<string, (...args: never[]) => unknown>>(fns: T): T {
+  const ref = useRef(fns);
+  ref.current = fns;
+  const [stable] = useState(() => {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(fns)) {
+      out[k] = (...args: unknown[]) => (ref.current[k] as (...a: unknown[]) => unknown)(...args);
+    }
+    return out as T;
+  });
+  return stable;
+}
 
 /**
  * Make a broadcast message this reader's own (X-01).
@@ -226,6 +296,7 @@ const newNonce = () =>
 
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user } = useAuth();
+  const { notify } = useNotify();
 
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(true);
@@ -270,7 +341,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     Record<string, { online: string[]; viewing: string[] }>
   >({});
   const [connected, setConnected] = useState(false);
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [queued, setQueued] = useState(0);
   const [replyTarget, setReplyTarget] = useState<WireMessage | null>(null);
   const [threadRootId, setThreadRootId] = useState<string | null>(null);
@@ -279,8 +349,63 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [threadUnread, setThreadUnread] = useState<Record<string, number>>({});
   const threadRootRef = useRef<string | null>(null);
   threadRootRef.current = threadRootId;
+  const threadMessagesRef = useRef<WireMessage[]>([]);
+  threadMessagesRef.current = threadMessages;
+
+  /*
+   * Where a message being sent lives: the main log, or the open thread.
+   * Acks can arrive after the person moved on; they only touch the lists of
+   * the conversation (and thread) they were sent in.
+   */
+  const applyToLists = useCallback((
+    conversationId: string, rootId: string | null, fn: (prev: WireMessage[]) => WireMessage[],
+  ) => {
+    if (activeIdRef.current !== conversationId) return;
+    if (!rootId) { setMessages(fn); return; }
+    if (threadRootRef.current === rootId) setThreadMessages(fn);
+    threadListeners.current.get(rootId)?.forEach((l) => l(fn));
+  }, []);
+  const settleInLists = useCallback((
+    conversationId: string, rootId: string | null, nonce: string,
+    r: { message: WireMessage; root?: WireMessage | null },
+  ) => {
+    applyToLists(conversationId, rootId, (prev) => reconcile(prev, r.message, nonce));
+    // The parent's reply count moved; the main flow has to show it.
+    const root = r.root;
+    if (root && activeIdRef.current === conversationId) {
+      setMessages((prev) => prev.map((m) => (m.id === root.id ? root : m)));
+    }
+  }, [applyToLists]);
+  const markInLists = useCallback((
+    conversationId: string, rootId: string | null, nonce: string, delivery: 'pending' | 'failed',
+  ) => {
+    applyToLists(conversationId, rootId, (prev) => prev.map((m) => (m.nonce === nonce ? { ...m, delivery } : m)));
+  }, [applyToLists]);
+  /** Inline threads (P4) listen for sends to their root here. */
+  const threadListeners = useRef(new Map<string, Set<(fn: (prev: WireMessage[]) => WireMessage[]) => void>>());
+  /**
+   * A change to messages wherever they are shown: the main log, the thread
+   * panel, and every inline thread (edits, deletions, reactions).
+   */
+  const everywhere = useCallback((fn: (prev: WireMessage[]) => WireMessage[]) => {
+    setMessages(fn);
+    setThreadMessages(fn);
+    threadListeners.current.forEach((set) => set.forEach((l) => l(fn)));
+  }, []);
+  const subscribeThread = useCallback((
+    rootId: string, listener: (fn: (prev: WireMessage[]) => WireMessage[]) => void,
+  ) => {
+    let set = threadListeners.current.get(rootId);
+    if (!set) { set = new Set(); threadListeners.current.set(rootId, set); }
+    set.add(listener);
+    return () => {
+      set!.delete(listener);
+      if (set!.size === 0) threadListeners.current.delete(rootId);
+    };
+  }, []);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [enterToSend, setEnterToSend] = useState(true);
+  const [doubleTapLike, setDoubleTapLike] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
 
   /* `activeId` is read inside socket handlers that are registered once. A ref
@@ -291,8 +416,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const lastTypingSentAt = useRef(0);
   /** What each unsent message was, for an exact retry. */
-  const pendingPayloads = useRef(new Map<string, Parameters<typeof chatApi.sendMessage>[1]>());
-  const draftTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const pendingPayloads = useRef(new Map<string, SendPayload>());
 
   const active = useMemo(
     () => conversations.find((c) => c.id === activeId) ?? null,
@@ -349,15 +473,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setConversations(list);
       prefetchUnread(list);
       setConversationsError(false);
-      // Server-side drafts follow the user between devices; seed the local
-      // cache from them, without clobbering something being typed right now.
-      setDrafts((prev) => {
-        const next = { ...prev };
-        for (const c of list) {
-          if (c.draft && !next[c.id]) next[c.id] = { text: c.draft, savedAt: Date.now() };
-        }
-        return next;
-      });
+      // Server-side drafts follow the user between devices; they fill only
+      // boxes this device knows nothing about (the device copy is newer).
+      for (const c of list) drafts.seedFromServer(c.id, c.draft);
     } catch {
       setConversationsError(true);
     } finally {
@@ -389,6 +507,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (listFromNetwork.current) saveConversations(conversations);
   }, [conversations, saveConversations]);
   // The offline queue belongs to whoever is signed in.
+  // The device copy of this person's drafts; nothing of theirs survives sign-out.
+  // Keyed on the id, not the object: a profile refresh must not wipe a draft.
+  const userId = user?.id ?? null;
+  useEffect(() => {
+    if (userId) void drafts.hydrate();
+    return () => drafts.reset();
+  }, [userId]);
   useEffect(() => { outbox.setOutboxOwner(user?.id ?? null, currentSessionTid()); }, [user]);
 
   /** Seed the per-thread counters from the Threads inbox. */
@@ -404,8 +529,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // the notification bridge, which is where they are acted on.
   useEffect(() => {
     if (!user) return;
-    apiGet<{ prefs: { enterToSend: boolean } }>('/api/chat/prefs')
-      .then((r) => setEnterToSend(r.data!.prefs.enterToSend))
+    apiGet<{ prefs: { enterToSend: boolean; doubleTapLike?: boolean } }>('/api/chat/prefs')
+      .then((r) => { setEnterToSend(r.data!.prefs.enterToSend); setDoubleTapLike(r.data!.prefs.doubleTapLike !== false); })
       .catch(() => {});
   }, [user]);
 
@@ -700,10 +825,11 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     function onThreadReply(
       { conversationId, rootId, message }: { conversationId: string; rootId: string; message: WireMessage },
     ) {
-      if (conversationId === activeIdRef.current && rootId === threadRootRef.current) {
-        setThreadMessages((prev) => reconcile(prev, message.senderId === meId
-          ? message : personalise(message, meId)));
-      }
+      if (conversationId !== activeIdRef.current) return;
+      const mineOrTheirs = message.senderId === meId ? message : personalise(message, meId);
+      if (rootId === threadRootRef.current) setThreadMessages((prev) => reconcile(prev, mineOrTheirs));
+      // An inline thread under its root in the channel (R-03) hears it too.
+      threadListeners.current.get(rootId)?.forEach((l) => l((prev) => reconcile(prev, mineOrTheirs)));
     }
 
     const onThreadUnread = (
@@ -721,10 +847,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     // Edits, deletions and reactions apply to the open thread too — a reply
     // edited or removed must not stay stale in the thread pane.
-    const inBoth = (fn: (list: WireMessage[]) => WireMessage[]) => {
-      setMessages(fn);
-      setThreadMessages(fn);
-    };
+    const inBoth = everywhere;
 
     const onUpdated = ({ conversationId, message }: { conversationId: string; message: WireMessage }) => {
       if (conversationId !== activeIdRef.current) return;
@@ -852,8 +975,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         : c)));
     };
 
-    const onDraft = ({ conversationId, draft }: { conversationId: string; draft: string | null }) => {
-      setDrafts((prev) => ({ ...prev, [conversationId]: { text: draft ?? '', savedAt: Date.now() } }));
+    // Drafts saved elsewhere: the store decides whether they are news (G-01).
+    const onDraft = (p: { conversationId: string; draft: string | null; at: string; origin?: string | null }) => {
+      drafts.applyRemote(p);
     };
 
     // Presence arrives per person, and the sidebar shows it per DM row, so it
@@ -931,16 +1055,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const result = await outbox.flush(
       async (entry) => {
         try {
-          const r = await chatApi.sendMessage(entry.conversationId, {
-            body: entry.body, nonce: entry.nonce,
+          const r = await deliverRest({
+            conversationId: entry.conversationId, body: entry.body, nonce: entry.nonce,
             threadRootId: entry.threadRootId, replyToId: entry.replyToId,
             attachments: entry.attachments,
-            ...(entry.type ? { type: entry.type as MessageType } : {}),
-            ...(entry.metadata ? { metadata: entry.metadata } : {}),
+            type: entry.type as MessageType | undefined, metadata: entry.metadata,
+            alsoSendToChannel: entry.alsoSendToChannel,
           });
-          if (entry.conversationId === activeIdRef.current) {
-            setMessages((prev) => reconcile(prev, r.message, entry.nonce));
-          }
+          settleInLists(entry.conversationId, entry.threadRootId, entry.nonce, r);
           return true;
         } catch {
           return false;
@@ -949,9 +1071,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       (entry) => {
         // Out of retries. Show it as failed on the message itself, where the
         // retry button is, rather than dropping it silently.
-        setMessages((prev) => prev.map((m) => (m.nonce === entry.nonce
-          ? { ...m, delivery: 'failed' as const } : m)));
+        markInLists(entry.conversationId, entry.threadRootId, entry.nonce, 'failed');
       },
+      () => count('chat.outbox.flush_joined'),
     );
     setQueued(result.remaining);
   }, []);
@@ -1015,23 +1137,19 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return null;
   }, [messages, user]);
 
-  const draftFor = useCallback((id: string) => drafts[id]?.text ?? '', [drafts]);
-
-  const setDraft = useCallback((id: string, text: string) => {
-    setDrafts((prev) => ({ ...prev, [id]: { text, savedAt: Date.now() } }));
-    // Debounced to the server. A draft is worth persisting so it survives a
-    // reload and follows you to another device — but not on every keystroke.
-    clearTimeout(draftTimers.current[id]);
-    draftTimers.current[id] = setTimeout(() => {
-      void chatApi.saveDraft(id, text || null).catch(() => {});
-    }, 800);
-  }, []);
-
+  /*
+   * Drafts live in their own store (drafts.ts) so typing re-renders only the
+   * box being typed in (G-02). These two stay for callers that read once.
+   */
+  const draftFor = useCallback((id: string) => drafts.get(id), []);
+  const setDraft = useCallback((id: string, text: string) => drafts.set(id, text), []);
 
   const send = useCallback(async (input: {
     body: string; replyToId?: string | null; threadRootId?: string | null;
     attachments?: string[]; type?: MessageType;
     metadata?: Record<string, unknown>;
+    /** A thread reply that also goes to the channel (FR-MSG-6). */
+    alsoSendToChannel?: boolean;
   }) => {
     const conversationId = activeIdRef.current;
     if (!conversationId || !user) return;
@@ -1043,7 +1161,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!body && !(input.attachments?.length)) return;
 
     const nonce = newNonce();
-    const replyToId = input.replyToId ?? replyTarget?.id ?? null;
+    const threadRootId = input.threadRootId ?? null;
+    // A quote belongs to the main flow; a thread reply answers its root.
+    const quote = threadRootId ? null : replyTarget;
+    const replyToId = threadRootId ? null : (input.replyToId ?? quote?.id ?? null);
     const optimistic: WireMessage = {
       id: `pending:${nonce}`,
       conversationId,
@@ -1058,12 +1179,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       createdAt: new Date().toISOString(),
       editedAt: null, deletedAt: null, deletedBy: null, nonce,
       reactions: [], attachments: [],
-      threadRootId: input.threadRootId ?? null,
+      threadRootId,
       replyCount: 0, threadLastAt: null,
-      replyTo: replyTarget && !input.replyToId
+      replyTo: quote && !input.replyToId
         ? {
-            id: replyTarget.id, senderId: replyTarget.senderId,
-            senderName: replyTarget.senderName, body: replyTarget.body, deleted: false,
+            id: quote.id, senderId: quote.senderId,
+            senderName: quote.senderName, body: quote.body, deleted: false,
           }
         : null,
       pinnedAt: null, pinnedBy: null, saved: false, editedCount: 0,
@@ -1071,15 +1192,20 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       delivery: 'pending', readCount: 0, metadata: input.metadata ?? {},
     };
 
-    setMessages((prev) => [...prev, optimistic]);
-    setDraft(conversationId, '');
-    setReplyTarget(null);
+    // Thread replies are optimistic too (G-07): the bubble shows in the thread at once.
+    applyToLists(conversationId, threadRootId, (prev) => [...prev, optimistic]);
+    if (!threadRootId) {
+      // Sending ends the draft: nothing pending, nothing in flight, no echo put back.
+      drafts.end(conversationId, body);
+      setReplyTarget(null);
+    }
 
-    const payload = {
+    const payload: SendPayload = {
       conversationId, body, nonce,
-      type: input.type, threadRootId: input.threadRootId ?? null,
+      type: input.type, threadRootId,
       replyToId, attachments: input.attachments ?? [],
       metadata: input.metadata ?? {},
+      ...(threadRootId && input.alsoSendToChannel ? { alsoSendToChannel: true } : {}),
     };
 
     /*
@@ -1093,88 +1219,107 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
      */
     await outbox.enqueue({
       nonce, conversationId, body,
-      replyToId,
-      threadRootId: input.threadRootId ?? null,
+      replyToId, threadRootId,
       attachments: input.attachments ?? [],
       type: input.type, metadata: input.metadata,
+      alsoSendToChannel: payload.alsoSendToChannel,
     });
     void outbox.pending().then((q) => setQueued(q.length));
-
     pendingPayloads.current.set(nonce, payload);
+
     // Acks can arrive after the person has switched conversation: they belong
     // to the conversation they were sent in, never to whichever one is open.
-    const stillHere = () => activeIdRef.current === conversationId;
-    const settle = async (message: WireMessage) => {
+    const settle = async (r: { message: WireMessage; root?: WireMessage | null }) => {
       await outbox.dequeue(nonce);
       pendingPayloads.current.delete(nonce);
       void outbox.pending().then((q) => setQueued(q.length));
-      if (stillHere()) setMessages((prev) => reconcile(prev, message, nonce));
+      settleInLists(conversationId, threadRootId, nonce, r);
     };
-    const failed = () => {
-      if (!stillHere()) return;
-      setMessages((prev) => prev.map((m) => (m.nonce === nonce
-        ? { ...m, delivery: 'failed' as const } : m)));
+    const viaRest = async () => {
+      try {
+        await settle(await deliverRest(payload));
+      } catch {
+        // Offline: it stays pending and the outbox sends it on reconnect.
+        // Online and refused or broken: it says so, with a retry.
+        if (typeof navigator === 'undefined' || navigator.onLine) markInLists(conversationId, threadRootId, nonce, 'failed');
+      }
     };
+
+    // No network at all: queued, not attempted. The outbox goes on reconnect,
+    // once — trying now only burns a request per message (G-10).
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
     const socket = getSocket();
     if (socket?.connected) {
-      socket.emit('message:send', payload, (r) => {
-        if (r?.ok && r.message) void settle(r.message);
-        else failed();
+      /*
+       * The ack is awaited for 8 s (G-05). A socket can look connected while
+       * its transport is dead (a half-open connection on a weak signal); the
+       * ack then never comes, and the bubble used to sit on its clock until
+       * the ping timeout. After 8 s it goes over REST with the same nonce:
+       * if the socket copy did land, the server answers with that message.
+       */
+      // The typed event declares its ack optional, which Socket.IO's types do not
+      // map to the (err, reply) form a timeout uses; the shape is the same.
+      const timed = socket.timeout(ACK_TIMEOUT_MS) as unknown as {
+        emit: (ev: 'message:send', p: SendPayload, cb: (err: Error | null, r?: { ok: boolean; message?: WireMessage }) => void) => void;
+      };
+      timed.emit('message:send', payload, (err, r) => {
+        if (err) {
+          count('chat.send.ack_timeout');
+          count('chat.send.rest_fallback');
+          void viaRest();
+          return;
+        }
+        if (r?.ok && r.message) void settle({ message: r.message });
+        else markInLists(conversationId, threadRootId, nonce, 'failed');
       });
       return;
     }
 
-    // No socket — fall back to REST with the same nonce, so whichever arrives
-    // first wins and the other resolves to the same message.
-    try {
-      const r = await chatApi.sendMessage(conversationId, payload);
-      await settle(r.message);
-    } catch {
-      failed();
-    }
-  }, [user, setDraft, replyTarget]);
+    // No socket: REST with the same nonce, so whichever arrives first wins.
+    await viaRest();
+  }, [user, replyTarget, applyToLists, settleInLists, markInLists]);
 
   const retry = useCallback(async (nonce: string) => {
-    const failedMsg = messages.find((m) => m.nonce === nonce);
+    const failedMsg = messagesRef.current.find((m) => m.nonce === nonce)
+      ?? threadMessagesRef.current.find((m) => m.nonce === nonce);
     if (!failedMsg) return;
-    setMessages((prev) => prev.map((m) => (m.nonce === nonce
-      ? { ...m, delivery: 'pending' as const } : m)));
-
     const conversationId = failedMsg.conversationId;
+    const threadRootId = failedMsg.threadRootId ?? null;
+    markInLists(conversationId, threadRootId, nonce, 'pending');
+
     // The original payload — attachments, type and metadata included — not a
     // text-only rebuild that would post a voice note as an empty message.
     // After a reload the payload lives only in the outbox: take it from there.
     const queued = pendingPayloads.current.has(nonce)
       ? null : (await outbox.pending().catch(() => [])).find((e) => e.nonce === nonce) ?? null;
-    const original = pendingPayloads.current.get(nonce) ?? (queued ? {
-      body: queued.body, nonce, threadRootId: queued.threadRootId, replyToId: queued.replyToId,
+    const original: SendPayload = pendingPayloads.current.get(nonce) ?? (queued ? {
+      conversationId, body: queued.body, nonce, threadRootId: queued.threadRootId, replyToId: queued.replyToId,
       attachments: queued.attachments,
-      ...(queued.type ? { type: queued.type as MessageType } : {}),
-      ...(queued.metadata ? { metadata: queued.metadata } : {}),
-    } : undefined);
+      type: queued.type as MessageType | undefined, metadata: queued.metadata,
+      alsoSendToChannel: queued.alsoSendToChannel,
+    } : {
+      conversationId, body: failedMsg.body ?? '', nonce,
+      threadRootId, replyToId: failedMsg.replyTo?.id ?? null,
+    });
     try {
       // Same nonce: if the original in fact landed, this resolves to it rather
       // than posting a second copy.
-      const r = await chatApi.sendMessage(conversationId, original ?? {
-        body: failedMsg.body ?? '', nonce,
-        threadRootId: failedMsg.threadRootId, replyToId: failedMsg.replyTo?.id ?? null,
-      });
+      const r = await deliverRest(original);
       await outbox.dequeue(nonce);
       pendingPayloads.current.delete(nonce);
       void outbox.pending().then((q) => setQueued(q.length));
-      if (activeIdRef.current === conversationId) setMessages((prev) => reconcile(prev, r.message, nonce));
+      settleInLists(conversationId, threadRootId, nonce, r);
     } catch {
-      if (activeIdRef.current === conversationId) {
-        setMessages((prev) => prev.map((m) => (m.nonce === nonce
-          ? { ...m, delivery: 'failed' as const } : m)));
-      }
+      markInLists(conversationId, threadRootId, nonce, 'failed');
     }
-  }, [messages]);
+  }, [markInLists, settleInLists]);
 
   /** Give up on a message that did not send: off the screen and out of the queue. */
   const discard = useCallback(async (nonce: string) => {
-    setMessages((prev) => prev.filter((m) => m.nonce !== nonce || m.delivery !== 'failed'));
+    const drop = (prev: WireMessage[]) => prev.filter((m) => m.nonce !== nonce || m.delivery !== 'failed');
+    setMessages(drop);
+    setThreadMessages(drop);
     pendingPayloads.current.delete(nonce);
     await outbox.dequeue(nonce).catch(() => {});
     void outbox.pending().then((q) => setQueued(q.length));
@@ -1202,9 +1347,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const putBack = () => {
       if (!before) return;
       const restore = before;
-      setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, reactions: restore } : m)));
+      everywhere((prev) => prev.map((m) => (m.id === messageId ? { ...m, reactions: restore } : m)));
     };
-    setMessages((prev) => prev.map((m) => {
+    everywhere((prev) => prev.map((m) => {
       if (m.id !== messageId) return m;
       before = m.reactions;
       const existing = m.reactions.find((r) => r.emoji === emoji);
@@ -1223,7 +1368,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (socket?.connected) {
       socket.emit('message:react', { conversationId, messageId, emoji }, (r) => {
         if (r?.ok && r.reactions) {
-          setMessages((prev) => prev.map((m) => (m.id === messageId
+          everywhere((prev) => prev.map((m) => (m.id === messageId
             ? { ...m, reactions: r.reactions! } : m)));
         } else {
           // Refused (rate limit, archived conversation): it bounces back.
@@ -1234,7 +1379,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     try {
       const r = await chatApi.toggleReaction(conversationId, messageId, emoji);
-      setMessages((prev) => prev.map((m) => (m.id === messageId
+      everywhere((prev) => prev.map((m) => (m.id === messageId
         ? { ...m, reactions: r.reactions } : m)));
     } catch {
       // Put it back. A reaction that silently did not stick is worse than one
@@ -1243,22 +1388,83 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
+  /**
+   * Edit, optimistically (G-04). The new text shows at once; a refusal puts
+   * the old text back and is rethrown, so the row can reopen its editor with
+   * what was typed and say so — the correction is never silently lost.
+   */
   const edit = useCallback(async (messageId: string, body: string) => {
     const conversationId = activeIdRef.current;
     if (!conversationId) return;
-    const message = await chatApi.editMessage(conversationId, messageId, body);
-    setMessages((prev) => prev.map((m) => (m.id === messageId ? message : m)));
+    const before = messagesRef.current.find((m) => m.id === messageId)
+      ?? threadMessagesRef.current.find((m) => m.id === messageId);
+    const both = everywhere;
+    both((prev) => prev.map((m) => (m.id === messageId ? { ...m, body, editedAt: new Date().toISOString() } : m)));
+    try {
+      const message = await chatApi.editMessage(conversationId, messageId, body);
+      both((prev) => prev.map((m) => (m.id === messageId ? message : m)));
+    } catch (err) {
+      if (before) both((prev) => prev.map((m) => (m.id === messageId ? before : m)));
+      count('chat.edit.rollback');
+      throw err;
+    }
   }, []);
 
+  /**
+   * Delete, at once, with a few seconds to take it back (G-12). The row turns
+   * into its tombstone on the click; the request goes when the Undo window
+   * closes (or the page is left). A refusal brings the message back and says so.
+   */
+  const pendingDeletes = useRef(new Map<string, { timer: ReturnType<typeof setTimeout>; commit: () => Promise<void> }>());
   const remove = useCallback(async (messageId: string) => {
     const conversationId = activeIdRef.current;
     if (!conversationId) return;
-    await chatApi.deleteMessage(conversationId, messageId);
-    // The socket broadcast tombstones it for everyone including us, but doing
-    // it here too means the row changes on the click rather than on the echo.
-    setMessages((prev) => prev.map((m) => (m.id === messageId
+    const before = messagesRef.current.find((m) => m.id === messageId)
+      ?? threadMessagesRef.current.find((m) => m.id === messageId);
+    if (!before || pendingDeletes.current.has(messageId)) return;
+    const both = everywhere;
+    const restore = () => both((prev) => prev.map((m) => (m.id === messageId ? before : m)));
+    both((prev) => prev.map((m) => (m.id === messageId
       ? { ...m, deletedAt: new Date().toISOString(), body: null, attachments: [], reactions: [] }
       : m)));
+    const commit = async () => {
+      const pending = pendingDeletes.current.get(messageId);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      pendingDeletes.current.delete(messageId);
+      try {
+        await chatApi.deleteMessage(conversationId, messageId);
+      } catch (err) {
+        restore();
+        count('chat.delete.rollback');
+        notify({ title: 'The message could not be deleted', body: err instanceof Error ? err.message : undefined, tone: 'error' });
+      }
+    };
+    pendingDeletes.current.set(messageId, { timer: setTimeout(() => void commit(), UNDO_DELETE_MS), commit });
+    notify({
+      title: 'Message deleted',
+      tone: 'info',
+      confirmation: true,
+      durationMs: UNDO_DELETE_MS,
+      key: `delete-${messageId}`,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          const pending = pendingDeletes.current.get(messageId);
+          if (!pending) return;
+          clearTimeout(pending.timer);
+          pendingDeletes.current.delete(messageId);
+          restore();
+        },
+      },
+    });
+  }, [notify]);
+
+  // Leaving the page closes every Undo window: the deletes go now.
+  useEffect(() => {
+    const flushDeletes = () => { for (const p of [...pendingDeletes.current.values()]) void p.commit(); };
+    window.addEventListener('pagehide', flushDeletes);
+    return () => window.removeEventListener('pagehide', flushDeletes);
   }, []);
 
   /* ────────────────────────────────────────────────────────────────────── *
@@ -1281,19 +1487,18 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       .finally(() => setThreadLoading(false));
   }, []);
 
-  const sendThreadReply = useCallback(async (body: string, alsoSendToChannel: boolean, attachments: string[] = []) => {
-    const conversationId = activeIdRef.current;
-    const rootId = threadRootId;
-    if (!conversationId || !rootId || (!body.trim() && attachments.length === 0)) return;
-
-    const nonce = newNonce();
-    const r = await chatApi.replyInThread(conversationId, rootId, {
-      body: body.trim(), nonce, alsoSendToChannel, ...(attachments.length ? { attachments } : {}),
-    });
-    setThreadMessages((prev) => reconcile(prev, r.message, nonce));
-    // The parent's reply count moved; the main flow has to show it.
-    if (r.root) setMessages((prev) => prev.map((m) => (m.id === r.root!.id ? r.root! : m)));
-  }, [threadRootId]);
+  /*
+   * A thread reply goes through `send` (G-07): an optimistic bubble in the
+   * thread, the durable outbox, the nonce, the ack timeout. `rootId` lets an
+   * inline thread reply to a thread that is not the one open in the panel.
+   */
+  const sendThreadReply = useCallback(async (
+    body: string, alsoSendToChannel: boolean, attachments: string[] = [], rootId?: string,
+  ) => {
+    const root = rootId ?? threadRootRef.current;
+    if (!root || (!body.trim() && attachments.length === 0)) return;
+    await send({ body, threadRootId: root, attachments, alsoSendToChannel });
+  }, [send]);
 
   const pin = useCallback(async (messageId: string, pinned: boolean) => {
     const conversationId = activeIdRef.current;
@@ -1381,7 +1586,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * Typing, reading, drafts
    * ────────────────────────────────────────────────────────────────────── */
 
-  const notifyTyping = useCallback((kind: ActivityKind = 'typing') => {
+  const notifyTyping = useCallback((kind: ActivityKind = 'typing', threadRootId: string | null = null) => {
     const id = activeIdRef.current;
     const socket = getSocket();
     if (!id || !socket?.connected) return;
@@ -1390,7 +1595,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const now = Date.now();
     if (now - lastTypingSentAt.current < TYPING_THROTTLE_MS) return;
     lastTypingSentAt.current = now;
-    socket.emit('typing:start', { conversationId: id, kind });
+    socket.emit('typing:start', { conversationId: id, kind, ...(threadRootId ? { threadRootId } : {}) });
+  }, []);
+
+  const stopTyping = useCallback(() => {
+    const id = activeIdRef.current;
+    if (!id || lastTypingSentAt.current === 0) return;
+    lastTypingSentAt.current = 0;
+    const socket = getSocket();
+    if (socket?.connected) socket.emit('typing:stop', { conversationId: id });
   }, []);
 
   const markReadTo = useCallback((seq: number) => {
@@ -1537,11 +1750,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const value: ChatValue = {
     conversations, conversationsLoading, conversationsError, activeId, setActiveId, active,
     messages, messagesLoading, messagesConversationId, hasMore, loadingMore, loadOlder,
-    typing: (activeId && typingByConv[activeId]) || [],
+    // The room's own typing line leaves out people replying in a thread.
+    typing: ((activeId && typingByConv[activeId]) || []).filter((u) => !u.threadRootId),
     typingByConversation: typingByConv,
     conversationPresence: convPresence,
     connected,
-    send, retry, discard, react, edit, remove, notifyTyping, markReadTo, queued,
+    send, retry, discard, react, edit, remove, notifyTyping, stopTyping, markReadTo, queued,
     markEverythingRead, lastEditableOwnMessage, editingId, setEditingId,
     replyTarget, setReplyTarget,
     threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
@@ -1549,10 +1763,20 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     draftFor, setDraft, toggleStar, setNotificationLevel, muteUntil, hideConversation,
     totalUnread, totalMentions, threadUnread, threadsUnreadTotal,
     markThreadRead, markUnread, markConversationRead,
-    refresh, enterToSend, blockedIds, setBlocked,
+    refresh, enterToSend, doubleTapLike, blockedIds, setBlocked, subscribeThread,
   };
 
-  return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;
+  const actions = useStableActions<ChatActions>({
+    send, retry, discard, react, edit, remove, pin, save, forward, openThread, setReplyTarget,
+    jumpTo, setEditingId, markUnread, sendThreadReply, markThreadRead, notifyTyping, stopTyping,
+    subscribeThread,
+  });
+
+  return (
+    <ChatActionsContext.Provider value={actions}>
+      <ChatContext.Provider value={value}>{children}</ChatContext.Provider>
+    </ChatActionsContext.Provider>
+  );
 };
 
 /**
@@ -1577,6 +1801,12 @@ function reconcile(list: WireMessage[], incoming: WireMessage, nonce?: string): 
   const out = [...list, incoming];
   out.sort((a, b) => a.seq - b.seq);
   return out;
+}
+
+export function useChatActions(): ChatActions {
+  const ctx = useContext(ChatActionsContext);
+  if (!ctx) throw new Error('useChatActions must be used inside <ChatProvider>');
+  return ctx;
 }
 
 export function useChat(): ChatValue {

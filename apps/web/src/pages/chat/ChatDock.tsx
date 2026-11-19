@@ -7,9 +7,30 @@ import { useMeetCall } from '../../context/MeetCallContext';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { useChat } from './ChatProvider';
 import { ConversationList } from './ConversationList';
-import { MessageThread } from './MessageThread';
-import { ThreadPanel } from './ThreadPanel';
-import { Composer } from './Composer';
+import { lazyNamed } from '../../lib/lazyPage';
+
+/*
+ * The conversation view is loaded when the dock first needs it, not with every
+ * page (bundle budget, P-01): the dock lives in the shell, so a static import
+ * put the whole message log, composer and thread pane in the first download
+ * of the feed, mail and meet pages too. It is fetched while the browser is
+ * idle and the moment the launcher is pointed at, so opening stays instant.
+ */
+const MessageThread = lazyNamed(() => import('./MessageThread'), 'MessageThread');
+const ThreadPanel = lazyNamed(() => import('./ThreadPanel'), 'ThreadPanel');
+const Composer = lazyNamed(() => import('./Composer'), 'Composer');
+const preloadConversation = () => {
+  void MessageThread.preload().catch(() => {});
+  void ThreadPanel.preload().catch(() => {});
+  void Composer.preload().catch(() => {});
+};
+const DockSkeleton: React.FC = () => (
+  <div className="space-y-3 p-4" aria-busy="true" aria-label="Loading the conversation">
+    <div className="h-10 w-2/3 animate-pulse rounded-2xl bg-surface-light dark:bg-elevated-dark" />
+    <div className="ml-auto h-10 w-1/2 animate-pulse rounded-2xl bg-surface-light dark:bg-elevated-dark" />
+    <div className="h-10 w-3/5 animate-pulse rounded-2xl bg-surface-light dark:bg-elevated-dark" />
+  </div>
+);
 
 /**
  * The chat dock — a launcher that follows you around the app.
@@ -43,6 +64,12 @@ function suppressedOn(pathname: string): boolean {
 }
 
 const DockInner: React.FC = () => {
+  // Warm the conversation view once the page has settled (see preloadConversation).
+  useEffect(() => {
+    const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number };
+    if (w.requestIdleCallback) w.requestIdleCallback(preloadConversation, { timeout: 8000 });
+    else setTimeout(preloadConversation, 3000);
+  }, []);
   const { user } = useAuth();
   const { pathname } = useLocation();
   const navigate = useNavigate();
@@ -233,6 +260,7 @@ const DockInner: React.FC = () => {
           </header>
 
           <div className="relative min-h-0 flex-1">
+            <React.Suspense fallback={<DockSkeleton />}>
             {/* A thread opens over the conversation, inside the dock (B-08):
                 "Reply in thread" used to set a thread nothing here showed. Its
                 own close button (or Escape) returns to the conversation. */}
@@ -255,7 +283,7 @@ const DockInner: React.FC = () => {
                 onOpenChannelSettings={() => openFullPage('channel')}
                 onOpenPinned={() => openFullPage('pinned')}
               >
-                <Composer conversation={active} onOpenPanel={(p) => openFullPage(p)} />
+                <Composer conversation={active} onOpenPanel={(p: Parameters<typeof openFullPage>[0]) => openFullPage(p)} />
               </MessageThread>
             ) : (
               <ConversationList
@@ -265,6 +293,7 @@ const DockInner: React.FC = () => {
                 onOpenBrowse={() => openFullPage()}
               />
             )}
+            </React.Suspense>
           </div>
         </div>
       )}
@@ -273,6 +302,8 @@ const DockInner: React.FC = () => {
       <button
         ref={launcherRef}
         onClick={() => setOpen((v) => !v)}
+        onPointerEnter={preloadConversation}
+        onFocus={preloadConversation}
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-label={

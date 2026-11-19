@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Paperclip, Smile, AtSign, Send, Mic, Lock, Archive, CloudOff, X, Quote,
-  FileText, AlertCircle, Upload, Clock, Slash, CalendarPlus, Ban,
+  Paperclip, Smile, AtSign, Send, Mic, Lock, Archive, CloudOff, X, Quote, FileText,
+  AlertCircle, Upload, Clock, Slash, CalendarPlus, Ban,
 } from 'lucide-react';
 import { IconButton } from '../../components/ui';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -10,7 +10,7 @@ import { useNavigate } from 'react-router-dom';
 import { useNotify } from '../../context/NotificationContext';
 import { useChat } from './ChatProvider';
 import { EmojiPicker, rememberEmoji } from './EmojiPicker';
-import { useUploads, MAX_ATTACHMENTS } from './useUploads';
+import { useUploads } from './useUploads';
 import { MentionAutocomplete, findMentionQuery } from './MentionAutocomplete';
 import type { MentionQuery } from './MentionAutocomplete';
 import * as chatApi from './api';
@@ -22,6 +22,9 @@ import { toDisplay, toWire, type MentionTarget } from './mentionText';
 import { SchedulePopover } from './SchedulePopover';
 import { MeetSchedulePopover } from './MeetSchedulePopover';
 import type { Conversation } from './types';
+import { isComposing } from './composerKeys';
+import { drafts, useDraftOffer } from './drafts';
+import { useComposerBox } from './useComposerBox';
 
 /**
  * The composer.
@@ -48,12 +51,23 @@ export const Composer: React.FC<{
   const { notify } = useNotify();
   const navigate = useNavigate();
   const {
-    send, notifyTyping, draftFor, setDraft, connected, queued, replyTarget, setReplyTarget,
+    send, notifyTyping, stopTyping, setDraft,
+    connected, queued, replyTarget, setReplyTarget,
     enterToSend, lastEditableOwnMessage, setEditingId, blockedIds, setBlocked,
   } = useChat();
-  const ref = useRef<HTMLTextAreaElement>(null);
-
-  const value = draftFor(conversation.id);
+  // Text, Enter rules, auto-grow and typing come from the shared core: a
+  // keystroke re-renders this box and nothing else (G-02).
+  const submitRef = useRef<() => void>(() => {});
+  const box = useComposerBox({
+    draftKey: conversation.id,
+    maxHeightPx: MAX_ROWS_PX,
+    enterToSend,
+    onSubmit: () => submitRef.current(),
+    onTyping: () => notifyTyping(),
+    onTypingStop: stopTyping,
+  });
+  const { ref, value } = box;
+  const remoteDraft = useDraftOffer(conversation.id);
   const [touch, setTouch] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -131,12 +145,6 @@ export const Composer: React.FC<{
     setTouch(window.matchMedia('(pointer: coarse)').matches);
   }, []);
 
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, MAX_ROWS_PX)}px`;
-  }, [value]);
 
   // Focus follows the open conversation on a pointer device, so switching
   // channels and typing works without a click. Not on touch: focusing there
@@ -284,6 +292,8 @@ export const Composer: React.FC<{
     }
   }, [value, send, tray, conversation.id, setDraft, onOpenPanel, notify, navigate, members]);
 
+  submitRef.current = () => submit();
+
   // The held voice note goes as soon as its upload is done (U-02).
   useEffect(() => {
     if (!sendWhenReady || tray.busy) return;
@@ -311,6 +321,8 @@ export const Composer: React.FC<{
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // An input method is composing: every key belongs to it (G-06).
+    if (isComposing(e)) return;
     if (slashMatches.length > 0 && !mention) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -356,15 +368,8 @@ export const Composer: React.FC<{
       }
     }
 
-    if (e.key === 'Enter' && !e.shiftKey && !touch && enterToSend) {
-      e.preventDefault();
-      submit();
-    }
-    // With enter-to-send off, ⌘/Ctrl+Enter is still the fast path.
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      submit();
-    }
+    // Enter on a pointer device (unless turned off), ⌘/Ctrl+Enter anywhere.
+    box.handleSubmitKey(e);
   };
 
   // Choosing a message to answer is choosing to write; put the caret there.
@@ -549,6 +554,18 @@ export const Composer: React.FC<{
         </div>
       )}
 
+      {/* A draft saved on another device while this box was in use (G-01):
+          offered, never pasted over what is being typed. */}
+      {remoteDraft !== null && (
+        <div role="status" className="mb-1.5 flex items-center gap-2 rounded-xl bg-blue-50 px-2.5 py-1.5 text-xs text-blue-800 dark:bg-blue-900/30 dark:text-blue-200">
+          <span className="min-w-0 flex-1 truncate">
+            Draft from another device: <span className="opacity-80">{remoteDraft || '(empty)'}</span>
+          </span>
+          <button className="font-semibold hover:underline" onClick={() => drafts.resolveOffer(conversation.id, true)}>Use it</button>
+          <button className="opacity-80 hover:underline" onClick={() => drafts.resolveOffer(conversation.id, false)}>Keep mine</button>
+        </div>
+      )}
+
       {/* FR-MSG-7: what you are answering, above what you are writing. */}
       {replyTarget && (
         <div className="mb-1.5 flex items-start gap-2 rounded-xl border-l-2 border-blue-500 bg-surface-light px-2.5 py-1.5 dark:bg-elevated-dark/60">
@@ -598,15 +615,13 @@ export const Composer: React.FC<{
         </label>
         <textarea
           id="composer"
-          ref={ref}
+          {...box.textareaProps}
           rows={1}
-          value={value}
           onChange={(e) => {
-            setDraft(conversation.id, e.target.value);
+            // Typing is announced (throttled in the provider) and withdrawn
+            // when the box empties, by the core.
+            box.onChange(e);
             syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
-            // Throttled inside the provider — one event per keystroke would be
-            // thousands of packets for a fact that is true for six seconds.
-            if (e.target.value) notifyTyping();
           }}
           onKeyUp={(e) => {
             // Arrow keys and clicks move the caret without changing the text,
@@ -618,13 +633,15 @@ export const Composer: React.FC<{
             const el = e.currentTarget;
             syncMention(el.value, el.selectionStart ?? el.value.length);
           }}
-          onBlur={() => setMention(null)}
+          onBlur={() => { box.onBlur(); setMention(null); }}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           placeholder={
             conversation.type === 'dm'
               ? `Message ${conversation.name.split(' ')[0]}`
-              : `Message #${conversation.name}`
+              // A long channel name wrapped the placeholder to two lines on a
+              // phone and doubled the box's height (C-06).
+              : touch ? 'Message' : `Message #${conversation.name}`
           }
           className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-1 py-2 text-sm leading-relaxed text-text-primary-light outline-none placeholder:text-text-secondary-light/80 dark:text-text-primary-dark dark:placeholder:text-text-secondary-dark/70"
         />
@@ -664,7 +681,7 @@ export const Composer: React.FC<{
         {/* The slash hint list. Shown only while the whole message is still
             just "/word" — once there are arguments, the list is in the way. */}
         {slashMatches.length > 0 && (
-          <div role="listbox" aria-label="Commands" className="absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-2xl border border-border-light bg-white py-1 shadow-2xl dark:border-border-dark/50 dark:bg-elevated-dark">
+          <div role="listbox" aria-label="Commands" className="absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-2xl border border-border-light bg-white py-1 dark:border-border-dark/50 dark:bg-elevated-dark">
             {slashMatches.map((c, i) => (
               <button
                 key={c.name}

@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
-import { getPool, recordError } from '@tupo/db';
+import { getPool, recordError, writeSamples } from '@tupo/db';
+import { flagsFor, CLIENT_COUNTERS } from '../clientFlags.js';
 import { ok, fail } from '@tupo/shared';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { authorizePermission } from '../middleware/authorize.js';
@@ -9,6 +10,8 @@ import { effectiveTenant, runAsPlatform } from '@tupo/tenancy';
  * Monitoring for the System page (R-04, R-05).
  *
  *   POST  /api/system/client-errors     any signed-in person's browser reports a crash
+ *   GET   /api/system/client-config     runtime UI flags for this person
+ *   POST  /api/system/client-counters   batched client counters (chat reliability)
  *   GET   /api/system/metrics           per-minute series for the charts
  *   GET   /api/system/errors            grouped errors, newest first
  *   PATCH /api/system/errors/:fp        resolve or ignore one
@@ -46,6 +49,29 @@ router.post('/client-errors', async (req: Request, res: Response) => {
   return res.status(202).json(ok({ recorded: true }));
 });
 
+/** Which runtime UI flags are on for this person (chat experience plan, 0.6). */
+router.get('/client-config', (req: Request, res: Response) => {
+  const role = (req as AuthenticatedRequest).user?.role ?? null;
+  res.set('Cache-Control', 'private, max-age=60');
+  return res.json(ok({ flags: flagsFor(role) }));
+});
+
+/**
+ * Client counters (0.7): how often a fix actually fires in the field — a draft
+ * echo dropped, an ack that timed out, an edit rolled back. Batched by the
+ * browser, summed per minute on the System page.
+ */
+router.post('/client-counters', (req: Request, res: Response) => {
+  const counters = (req.body?.counters ?? {}) as Record<string, unknown>;
+  const rows: Array<[string, number]> = [];
+  for (const name of CLIENT_COUNTERS) {
+    const n = Number(counters[name]);
+    if (Number.isFinite(n) && n > 0) rows.push([`client.${name}`, Math.min(Math.floor(n), 1000)]);
+  }
+  if (rows.length) void writeSamples('web', rows).catch(() => {});
+  return res.status(202).json(ok({ recorded: rows.length }));
+});
+
 const VIEW = authorizePermission('SYSTEM_HEALTH_VIEW');
 
 /** The primary tenant runs the shared servers; only it sees process-level data. */
@@ -65,7 +91,7 @@ router.get('/metrics', VIEW, async (req: Request, res: Response) => {
     `SELECT date_trunc('minute', at) AS minute,
             CASE WHEN service LIKE 'api#%' THEN 'api' ELSE service END AS service,
             metric,
-            CASE WHEN metric IN ('http_requests', 'http_4xx', 'http_5xx', 'http_429') THEN sum(value)
+            CASE WHEN metric IN ('http_requests', 'http_4xx', 'http_5xx', 'http_429') OR metric LIKE 'client.%' THEN sum(value)
                  ELSE max(value) END AS value
        FROM metric_samples
       WHERE at > now() - make_interval(mins => $1)
