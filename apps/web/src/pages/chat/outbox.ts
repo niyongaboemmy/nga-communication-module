@@ -39,6 +39,8 @@ export interface OutboxEntry {
   /** Kept so a poll, a call card or a /me survives the queue as what it was (CHAT-M12). */
   type?: string;
   metadata?: Record<string, unknown>;
+  /** A thread reply that should also be posted to the channel (FR-MSG-6, G-07). */
+  alsoSendToChannel?: boolean;
   createdAt: number;
   /** Bumped on each failed flush, so a poisonous entry cannot loop forever. */
   attempts: number;
@@ -144,7 +146,26 @@ export async function recordAttempt(nonce: string): Promise<number> {
  * before earlier ones, and a conversation whose replies arrive before their
  * questions is worse than one that is briefly behind.
  */
-export async function flush(
+let inFlight: Promise<{ sent: number; remaining: number }> | null = null;
+
+/**
+ * Single-flight (G-10): coming back online fires both the socket's `connect`
+ * and the window's `online`, and each used to start its own flush — every
+ * queued message went twice over the link that had only just recovered, and
+ * each failure was counted twice. A second caller now joins the run in
+ * progress. `onJoin` lets the caller count that it happened.
+ */
+export function flush(
+  send: (entry: OutboxEntry) => Promise<boolean>,
+  onGiveUp?: (entry: OutboxEntry) => void,
+  onJoin?: () => void,
+): Promise<{ sent: number; remaining: number }> {
+  if (inFlight) { onJoin?.(); return inFlight; }
+  inFlight = flushOnce(send, onGiveUp).finally(() => { inFlight = null; });
+  return inFlight;
+}
+
+async function flushOnce(
   send: (entry: OutboxEntry) => Promise<boolean>,
   onGiveUp?: (entry: OutboxEntry) => void,
 ): Promise<{ sent: number; remaining: number }> {

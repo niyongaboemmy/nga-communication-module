@@ -147,8 +147,34 @@ try {
     S.check('editor reopens with the attempted text', reopened);
     const told = await page.getByText(/edit was not saved|could not save/i).first().isVisible().catch(() => false);
     S.check('a toast says the edit failed', told);
+    await page.getByLabel('Edit message text').press('Escape');
+    await sleep(300);
     const rowText = await page.locator(`#msg-${mine.id}`).innerText();
-    S.check("the row still shows the original until saved", /Original/.test(rowText));
+    S.check("the failed edit is rolled back on the row", /Original/.test(rowText));
+  }
+
+  /* ── 6b. G-12: delete is instant, with Undo ── */
+  S.step('G-12 delete with Undo');
+  {
+    const conv = await S.channel(ada, [bosco], 'slow');
+    const a = await S.post(ada, conv, `Undo me ${Date.now()}`);
+    const b = await S.post(ada, conv, `Delete me ${Date.now()}`);
+    const { page } = await S.openAs(ada, conv);
+    const del = async (id) => {
+      const row = page.locator(`#msg-${id}`);
+      await row.hover();
+      await row.getByRole('button', { name: 'Delete message' }).click();
+    };
+    await del(a.id);
+    S.check('row becomes a tombstone at once', await page.locator(`#msg-${a.id}, li`).filter({ hasText: 'This message was deleted' }).first().isVisible().catch(() => false));
+    await page.getByRole('button', { name: 'Undo' }).first().click();
+    const back = await page.getByText(a.body).first().waitFor({ timeout: 3000 }).then(() => true).catch(() => false);
+    S.check('Undo brings the message back', back);
+    await del(b.id);
+    await sleep(6500);
+    const { rows } = await S.pool.query('SELECT deleted_at, (SELECT deleted_at FROM messages WHERE id = $2) AS kept FROM messages WHERE id = $1', [b.id, a.id]);
+    S.check('without Undo the server deletes it after the window', Boolean(rows[0]?.deleted_at));
+    S.check('the undone message was never deleted', rows[0] && !rows[0].kept);
   }
 
   /* ── 7. G-10: reconnect sends each queued message once ── */

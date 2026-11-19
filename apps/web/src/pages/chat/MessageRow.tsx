@@ -51,6 +51,35 @@ const StatusIcon: React.FC<{ status: Message['delivery'] }> = ({ status }) => {
   }
 };
 
+/**
+ * What a message still waiting to send says about itself (G-13). Nothing for
+ * the first 3 s (most sends land well inside that); then "Sending…"; after
+ * 15 s, that the line is slow and it is still trying; offline, that it will
+ * go when the connection is back. A 1 s ticker runs only while it is pending.
+ */
+const PendingNote: React.FC<{ createdAt: string; mine: boolean }> = ({ createdAt, mine }) => {
+  const [now, setNow] = useState(() => Date.now());
+  const [online, setOnline] = useState(() => (typeof navigator === 'undefined' ? true : navigator.onLine));
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => { clearInterval(t); window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+  }, []);
+  const age = now - new Date(createdAt).getTime();
+  const text = !online ? 'Waiting for a connection — it will send by itself'
+    : age > 15_000 ? 'Slow connection — still trying'
+      : age > 3_000 ? 'Sending…' : null;
+  if (!text) return null;
+  return (
+    <p role="status" className={`mt-1 text-[11px] text-text-secondary-light dark:text-text-secondary-dark ${mine ? 'text-right' : ''}`}>
+      {text}
+    </p>
+  );
+};
+
 export interface MessageRowProps {
   message: Message;
   newGroup: boolean;
@@ -184,11 +213,27 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
   // there (B-13) — the server always allowed it; the menu never offered it.
   const canDelete = (mine && can('MESSAGE_DELETE_OWN')) || can('MESSAGE_DELETE_ANY') || (!mine && runsThisRoom);
 
-  const submitEdit = async () => {
-    const next = draft.trim();
+  /*
+   * The edit shows at once (the provider applies it optimistically). If the
+   * server refuses, the old text comes back and the editor reopens holding
+   * what was typed, with a toast that can retry it (G-04).
+   */
+  const submitEdit = async (text: string = draft) => {
+    const next = text.trim();
     setEditing(false);
     if (!next || next === (m.body ?? '')) return;
-    try { await edit(m.id, next); } catch { /* the row simply does not change */ }
+    try {
+      await edit(m.id, next);
+    } catch (err) {
+      setDraft(next);
+      setEditing(true);
+      notify({
+        title: 'Your edit was not saved',
+        body: err instanceof Error ? err.message : undefined,
+        tone: 'error',
+        action: { label: 'Retry', onClick: () => { void submitEdit(next); } },
+      });
+    }
   };
 
   return (
@@ -360,6 +405,8 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
           />
         )}
 
+        {pending && <PendingNote createdAt={m.createdAt} mine={mine} />}
+
         {/* UX-1: a failure is never silent, and the retry sits on the message
             itself rather than in a toast that scrolls out of reach. */}
         {failed && m.nonce && (
@@ -506,7 +553,13 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
 
           {canDelete && (
             <div className="relative">
-              <IconButton label="Delete message" size="sm" onClick={() => setConfirmDelete(true)}>
+              <IconButton
+                label="Delete message"
+                size="sm"
+                // Your own message goes at once, with Undo (G-12); someone
+                // else's is recorded, so it still asks first.
+                onClick={() => { if (mine) void remove(m.id); else setConfirmDelete(true); }}
+              >
                 <Trash2 size={15} />
               </IconButton>
               {confirmDelete && (

@@ -178,6 +178,20 @@ export function registerChatHandlers(
         // raise notifications. Fail-soft: a notification that did not fire is a
         // missed buzz, whereas throwing here would lose a delivered message.
         const rootId = result.message.threadRootId;
+        // "Also send to channel" (FR-MSG-6) on the socket path too (G-07):
+        // the same copy the REST route makes — a quote of the root, marked
+        // as coming from the thread so clients can say so (R-07).
+        if (rootId && p.alsoSendToChannel) {
+          const echo = await chat.sendMessage({
+            conversationId: p.conversationId,
+            senderId: user.id,
+            body: String(p.body ?? ''),
+            nonce: `${p.nonce}-echo`,
+            replyToId: rootId,
+            metadata: { fromThread: rootId },
+          }).catch(() => null);
+          if (echo?.created) await fanOutMessage(io, p.conversationId, echo);
+        }
         if (rootId) {
           await chat.notifyThreadReply(result.message, {
             conversationName: membership.name ?? 'a conversation',

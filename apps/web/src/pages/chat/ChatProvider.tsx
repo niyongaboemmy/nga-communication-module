@@ -13,6 +13,7 @@ import { count } from '../../lib/clientCounters';
 import * as chatApi from './api';
 import * as outbox from './outbox';
 import { drafts } from './drafts';
+import { useNotify } from '../../context/NotificationContext';
 import { cacheGet, cacheSet, debouncedWriter } from '../../lib/localStore';
 import { closeConversationNotifications } from '../../lib/swSession';
 
@@ -88,7 +89,8 @@ interface ChatValue {
   threadMessages: WireMessage[];
   threadLoading: boolean;
   openThread: (rootId: string | null) => void;
-  sendThreadReply: (body: string, alsoSendToChannel: boolean, attachments?: string[]) => Promise<void>;
+  /** `rootId`: a thread other than the one open in the panel (an inline thread). */
+  sendThreadReply: (body: string, alsoSendToChannel: boolean, attachments?: string[], rootId?: string) => Promise<void>;
 
   pin: (messageId: string, pinned: boolean) => Promise<void>;
   save: (messageId: string, saved: boolean) => Promise<void>;
@@ -155,6 +157,38 @@ interface ChatValue {
 }
 
 const ChatContext = createContext<ChatValue | null>(null);
+
+/** How long a socket send waits for its ack before trying REST (G-05). */
+const ACK_TIMEOUT_MS = 8_000;
+/** How long a delete can be taken back before it is sent (G-12). */
+const UNDO_DELETE_MS = 5_000;
+
+interface SendPayload {
+  conversationId: string; body: string; nonce: string; type?: MessageType;
+  threadRootId: string | null; replyToId: string | null;
+  attachments?: string[]; metadata?: Record<string, unknown>;
+  alsoSendToChannel?: boolean;
+}
+
+/**
+ * One delivery over REST. Idempotent by nonce: a message that in fact landed
+ * resolves to itself. Thread replies use the replies route, which also makes
+ * the channel copy and returns the updated root.
+ */
+async function deliverRest(p: SendPayload): Promise<{ message: WireMessage; root?: WireMessage | null }> {
+  if (p.threadRootId) {
+    const r = await chatApi.replyInThread(p.conversationId, p.threadRootId, {
+      body: p.body, nonce: p.nonce, attachments: p.attachments ?? [],
+      ...(p.alsoSendToChannel ? { alsoSendToChannel: true } : {}),
+    });
+    return { message: r.message, root: r.root };
+  }
+  const r = await chatApi.sendMessage(p.conversationId, {
+    body: p.body, nonce: p.nonce, type: p.type, threadRootId: null, replyToId: p.replyToId,
+    attachments: p.attachments ?? [], metadata: p.metadata,
+  });
+  return { message: r.message };
+}
 
 /**
  * The actions only, with identities that never change (G-02).
@@ -257,6 +291,7 @@ const newNonce = () =>
 
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user } = useAuth();
+  const { notify } = useNotify();
 
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(true);
@@ -309,6 +344,40 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [threadUnread, setThreadUnread] = useState<Record<string, number>>({});
   const threadRootRef = useRef<string | null>(null);
   threadRootRef.current = threadRootId;
+  const threadMessagesRef = useRef<WireMessage[]>([]);
+  threadMessagesRef.current = threadMessages;
+
+  /*
+   * Where a message being sent lives: the main log, or the open thread.
+   * Acks can arrive after the person moved on; they only touch the lists of
+   * the conversation (and thread) they were sent in.
+   */
+  const applyToLists = useCallback((
+    conversationId: string, rootId: string | null, fn: (prev: WireMessage[]) => WireMessage[],
+  ) => {
+    if (activeIdRef.current !== conversationId) return;
+    if (!rootId) { setMessages(fn); return; }
+    if (threadRootRef.current === rootId) setThreadMessages(fn);
+    threadListeners.current.get(rootId)?.forEach((l) => l(fn));
+  }, []);
+  const settleInLists = useCallback((
+    conversationId: string, rootId: string | null, nonce: string,
+    r: { message: WireMessage; root?: WireMessage | null },
+  ) => {
+    applyToLists(conversationId, rootId, (prev) => reconcile(prev, r.message, nonce));
+    // The parent's reply count moved; the main flow has to show it.
+    const root = r.root;
+    if (root && activeIdRef.current === conversationId) {
+      setMessages((prev) => prev.map((m) => (m.id === root.id ? root : m)));
+    }
+  }, [applyToLists]);
+  const markInLists = useCallback((
+    conversationId: string, rootId: string | null, nonce: string, delivery: 'pending' | 'failed',
+  ) => {
+    applyToLists(conversationId, rootId, (prev) => prev.map((m) => (m.nonce === nonce ? { ...m, delivery } : m)));
+  }, [applyToLists]);
+  /** Inline threads (P4) listen for sends to their root here. */
+  const threadListeners = useRef(new Map<string, Set<(fn: (prev: WireMessage[]) => WireMessage[]) => void>>());
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [enterToSend, setEnterToSend] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -321,7 +390,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const lastTypingSentAt = useRef(0);
   /** What each unsent message was, for an exact retry. */
-  const pendingPayloads = useRef(new Map<string, Parameters<typeof chatApi.sendMessage>[1]>());
+  const pendingPayloads = useRef(new Map<string, SendPayload>());
 
   const active = useMemo(
     () => conversations.find((c) => c.id === activeId) ?? null,
@@ -962,16 +1031,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const result = await outbox.flush(
       async (entry) => {
         try {
-          const r = await chatApi.sendMessage(entry.conversationId, {
-            body: entry.body, nonce: entry.nonce,
+          const r = await deliverRest({
+            conversationId: entry.conversationId, body: entry.body, nonce: entry.nonce,
             threadRootId: entry.threadRootId, replyToId: entry.replyToId,
             attachments: entry.attachments,
-            ...(entry.type ? { type: entry.type as MessageType } : {}),
-            ...(entry.metadata ? { metadata: entry.metadata } : {}),
+            type: entry.type as MessageType | undefined, metadata: entry.metadata,
+            alsoSendToChannel: entry.alsoSendToChannel,
           });
-          if (entry.conversationId === activeIdRef.current) {
-            setMessages((prev) => reconcile(prev, r.message, entry.nonce));
-          }
+          settleInLists(entry.conversationId, entry.threadRootId, entry.nonce, r);
           return true;
         } catch {
           return false;
@@ -980,9 +1047,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       (entry) => {
         // Out of retries. Show it as failed on the message itself, where the
         // retry button is, rather than dropping it silently.
-        setMessages((prev) => prev.map((m) => (m.nonce === entry.nonce
-          ? { ...m, delivery: 'failed' as const } : m)));
+        markInLists(entry.conversationId, entry.threadRootId, entry.nonce, 'failed');
       },
+      () => count('chat.outbox.flush_joined'),
     );
     setQueued(result.remaining);
   }, []);
@@ -1057,6 +1124,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     body: string; replyToId?: string | null; threadRootId?: string | null;
     attachments?: string[]; type?: MessageType;
     metadata?: Record<string, unknown>;
+    /** A thread reply that also goes to the channel (FR-MSG-6). */
+    alsoSendToChannel?: boolean;
   }) => {
     const conversationId = activeIdRef.current;
     if (!conversationId || !user) return;
@@ -1068,7 +1137,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!body && !(input.attachments?.length)) return;
 
     const nonce = newNonce();
-    const replyToId = input.replyToId ?? replyTarget?.id ?? null;
+    const threadRootId = input.threadRootId ?? null;
+    // A quote belongs to the main flow; a thread reply answers its root.
+    const quote = threadRootId ? null : replyTarget;
+    const replyToId = threadRootId ? null : (input.replyToId ?? quote?.id ?? null);
     const optimistic: WireMessage = {
       id: `pending:${nonce}`,
       conversationId,
@@ -1083,12 +1155,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       createdAt: new Date().toISOString(),
       editedAt: null, deletedAt: null, deletedBy: null, nonce,
       reactions: [], attachments: [],
-      threadRootId: input.threadRootId ?? null,
+      threadRootId,
       replyCount: 0, threadLastAt: null,
-      replyTo: replyTarget && !input.replyToId
+      replyTo: quote && !input.replyToId
         ? {
-            id: replyTarget.id, senderId: replyTarget.senderId,
-            senderName: replyTarget.senderName, body: replyTarget.body, deleted: false,
+            id: quote.id, senderId: quote.senderId,
+            senderName: quote.senderName, body: quote.body, deleted: false,
           }
         : null,
       pinnedAt: null, pinnedBy: null, saved: false, editedCount: 0,
@@ -1096,16 +1168,20 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       delivery: 'pending', readCount: 0, metadata: input.metadata ?? {},
     };
 
-    setMessages((prev) => [...prev, optimistic]);
-    // Sending ends the draft: nothing pending, nothing in flight, no echo put back.
-    if (!input.threadRootId) drafts.end(conversationId, body);
-    setReplyTarget(null);
+    // Thread replies are optimistic too (G-07): the bubble shows in the thread at once.
+    applyToLists(conversationId, threadRootId, (prev) => [...prev, optimistic]);
+    if (!threadRootId) {
+      // Sending ends the draft: nothing pending, nothing in flight, no echo put back.
+      drafts.end(conversationId, body);
+      setReplyTarget(null);
+    }
 
-    const payload = {
+    const payload: SendPayload = {
       conversationId, body, nonce,
-      type: input.type, threadRootId: input.threadRootId ?? null,
+      type: input.type, threadRootId,
       replyToId, attachments: input.attachments ?? [],
       metadata: input.metadata ?? {},
+      ...(threadRootId && input.alsoSendToChannel ? { alsoSendToChannel: true } : {}),
     };
 
     /*
@@ -1119,88 +1195,107 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
      */
     await outbox.enqueue({
       nonce, conversationId, body,
-      replyToId,
-      threadRootId: input.threadRootId ?? null,
+      replyToId, threadRootId,
       attachments: input.attachments ?? [],
       type: input.type, metadata: input.metadata,
+      alsoSendToChannel: payload.alsoSendToChannel,
     });
     void outbox.pending().then((q) => setQueued(q.length));
-
     pendingPayloads.current.set(nonce, payload);
+
     // Acks can arrive after the person has switched conversation: they belong
     // to the conversation they were sent in, never to whichever one is open.
-    const stillHere = () => activeIdRef.current === conversationId;
-    const settle = async (message: WireMessage) => {
+    const settle = async (r: { message: WireMessage; root?: WireMessage | null }) => {
       await outbox.dequeue(nonce);
       pendingPayloads.current.delete(nonce);
       void outbox.pending().then((q) => setQueued(q.length));
-      if (stillHere()) setMessages((prev) => reconcile(prev, message, nonce));
+      settleInLists(conversationId, threadRootId, nonce, r);
     };
-    const failed = () => {
-      if (!stillHere()) return;
-      setMessages((prev) => prev.map((m) => (m.nonce === nonce
-        ? { ...m, delivery: 'failed' as const } : m)));
+    const viaRest = async () => {
+      try {
+        await settle(await deliverRest(payload));
+      } catch {
+        // Offline: it stays pending and the outbox sends it on reconnect.
+        // Online and refused or broken: it says so, with a retry.
+        if (typeof navigator === 'undefined' || navigator.onLine) markInLists(conversationId, threadRootId, nonce, 'failed');
+      }
     };
+
+    // No network at all: queued, not attempted. The outbox goes on reconnect,
+    // once — trying now only burns a request per message (G-10).
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
     const socket = getSocket();
     if (socket?.connected) {
-      socket.emit('message:send', payload, (r) => {
-        if (r?.ok && r.message) void settle(r.message);
-        else failed();
+      /*
+       * The ack is awaited for 8 s (G-05). A socket can look connected while
+       * its transport is dead (a half-open connection on a weak signal); the
+       * ack then never comes, and the bubble used to sit on its clock until
+       * the ping timeout. After 8 s it goes over REST with the same nonce:
+       * if the socket copy did land, the server answers with that message.
+       */
+      // The typed event declares its ack optional, which Socket.IO's types do not
+      // map to the (err, reply) form a timeout uses; the shape is the same.
+      const timed = socket.timeout(ACK_TIMEOUT_MS) as unknown as {
+        emit: (ev: 'message:send', p: SendPayload, cb: (err: Error | null, r?: { ok: boolean; message?: WireMessage }) => void) => void;
+      };
+      timed.emit('message:send', payload, (err, r) => {
+        if (err) {
+          count('chat.send.ack_timeout');
+          count('chat.send.rest_fallback');
+          void viaRest();
+          return;
+        }
+        if (r?.ok && r.message) void settle({ message: r.message });
+        else markInLists(conversationId, threadRootId, nonce, 'failed');
       });
       return;
     }
 
-    // No socket — fall back to REST with the same nonce, so whichever arrives
-    // first wins and the other resolves to the same message.
-    try {
-      const r = await chatApi.sendMessage(conversationId, payload);
-      await settle(r.message);
-    } catch {
-      failed();
-    }
-  }, [user, replyTarget]);
+    // No socket: REST with the same nonce, so whichever arrives first wins.
+    await viaRest();
+  }, [user, replyTarget, applyToLists, settleInLists, markInLists]);
 
   const retry = useCallback(async (nonce: string) => {
-    const failedMsg = messages.find((m) => m.nonce === nonce);
+    const failedMsg = messagesRef.current.find((m) => m.nonce === nonce)
+      ?? threadMessagesRef.current.find((m) => m.nonce === nonce);
     if (!failedMsg) return;
-    setMessages((prev) => prev.map((m) => (m.nonce === nonce
-      ? { ...m, delivery: 'pending' as const } : m)));
-
     const conversationId = failedMsg.conversationId;
+    const threadRootId = failedMsg.threadRootId ?? null;
+    markInLists(conversationId, threadRootId, nonce, 'pending');
+
     // The original payload — attachments, type and metadata included — not a
     // text-only rebuild that would post a voice note as an empty message.
     // After a reload the payload lives only in the outbox: take it from there.
     const queued = pendingPayloads.current.has(nonce)
       ? null : (await outbox.pending().catch(() => [])).find((e) => e.nonce === nonce) ?? null;
-    const original = pendingPayloads.current.get(nonce) ?? (queued ? {
-      body: queued.body, nonce, threadRootId: queued.threadRootId, replyToId: queued.replyToId,
+    const original: SendPayload = pendingPayloads.current.get(nonce) ?? (queued ? {
+      conversationId, body: queued.body, nonce, threadRootId: queued.threadRootId, replyToId: queued.replyToId,
       attachments: queued.attachments,
-      ...(queued.type ? { type: queued.type as MessageType } : {}),
-      ...(queued.metadata ? { metadata: queued.metadata } : {}),
-    } : undefined);
+      type: queued.type as MessageType | undefined, metadata: queued.metadata,
+      alsoSendToChannel: queued.alsoSendToChannel,
+    } : {
+      conversationId, body: failedMsg.body ?? '', nonce,
+      threadRootId, replyToId: failedMsg.replyTo?.id ?? null,
+    });
     try {
       // Same nonce: if the original in fact landed, this resolves to it rather
       // than posting a second copy.
-      const r = await chatApi.sendMessage(conversationId, original ?? {
-        body: failedMsg.body ?? '', nonce,
-        threadRootId: failedMsg.threadRootId, replyToId: failedMsg.replyTo?.id ?? null,
-      });
+      const r = await deliverRest(original);
       await outbox.dequeue(nonce);
       pendingPayloads.current.delete(nonce);
       void outbox.pending().then((q) => setQueued(q.length));
-      if (activeIdRef.current === conversationId) setMessages((prev) => reconcile(prev, r.message, nonce));
+      settleInLists(conversationId, threadRootId, nonce, r);
     } catch {
-      if (activeIdRef.current === conversationId) {
-        setMessages((prev) => prev.map((m) => (m.nonce === nonce
-          ? { ...m, delivery: 'failed' as const } : m)));
-      }
+      markInLists(conversationId, threadRootId, nonce, 'failed');
     }
-  }, [messages]);
+  }, [markInLists, settleInLists]);
 
   /** Give up on a message that did not send: off the screen and out of the queue. */
   const discard = useCallback(async (nonce: string) => {
-    setMessages((prev) => prev.filter((m) => m.nonce !== nonce || m.delivery !== 'failed'));
+    const drop = (prev: WireMessage[]) => prev.filter((m) => m.nonce !== nonce || m.delivery !== 'failed');
+    setMessages(drop);
+    setThreadMessages(drop);
     pendingPayloads.current.delete(nonce);
     await outbox.dequeue(nonce).catch(() => {});
     void outbox.pending().then((q) => setQueued(q.length));
@@ -1269,22 +1364,83 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
+  /**
+   * Edit, optimistically (G-04). The new text shows at once; a refusal puts
+   * the old text back and is rethrown, so the row can reopen its editor with
+   * what was typed and say so — the correction is never silently lost.
+   */
   const edit = useCallback(async (messageId: string, body: string) => {
     const conversationId = activeIdRef.current;
     if (!conversationId) return;
-    const message = await chatApi.editMessage(conversationId, messageId, body);
-    setMessages((prev) => prev.map((m) => (m.id === messageId ? message : m)));
+    const before = messagesRef.current.find((m) => m.id === messageId)
+      ?? threadMessagesRef.current.find((m) => m.id === messageId);
+    const both = (fn: (prev: WireMessage[]) => WireMessage[]) => { setMessages(fn); setThreadMessages(fn); };
+    both((prev) => prev.map((m) => (m.id === messageId ? { ...m, body, editedAt: new Date().toISOString() } : m)));
+    try {
+      const message = await chatApi.editMessage(conversationId, messageId, body);
+      both((prev) => prev.map((m) => (m.id === messageId ? message : m)));
+    } catch (err) {
+      if (before) both((prev) => prev.map((m) => (m.id === messageId ? before : m)));
+      count('chat.edit.rollback');
+      throw err;
+    }
   }, []);
 
+  /**
+   * Delete, at once, with a few seconds to take it back (G-12). The row turns
+   * into its tombstone on the click; the request goes when the Undo window
+   * closes (or the page is left). A refusal brings the message back and says so.
+   */
+  const pendingDeletes = useRef(new Map<string, { timer: ReturnType<typeof setTimeout>; commit: () => Promise<void> }>());
   const remove = useCallback(async (messageId: string) => {
     const conversationId = activeIdRef.current;
     if (!conversationId) return;
-    await chatApi.deleteMessage(conversationId, messageId);
-    // The socket broadcast tombstones it for everyone including us, but doing
-    // it here too means the row changes on the click rather than on the echo.
-    setMessages((prev) => prev.map((m) => (m.id === messageId
+    const before = messagesRef.current.find((m) => m.id === messageId)
+      ?? threadMessagesRef.current.find((m) => m.id === messageId);
+    if (!before || pendingDeletes.current.has(messageId)) return;
+    const both = (fn: (prev: WireMessage[]) => WireMessage[]) => { setMessages(fn); setThreadMessages(fn); };
+    const restore = () => both((prev) => prev.map((m) => (m.id === messageId ? before : m)));
+    both((prev) => prev.map((m) => (m.id === messageId
       ? { ...m, deletedAt: new Date().toISOString(), body: null, attachments: [], reactions: [] }
       : m)));
+    const commit = async () => {
+      const pending = pendingDeletes.current.get(messageId);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      pendingDeletes.current.delete(messageId);
+      try {
+        await chatApi.deleteMessage(conversationId, messageId);
+      } catch (err) {
+        restore();
+        count('chat.delete.rollback');
+        notify({ title: 'The message could not be deleted', body: err instanceof Error ? err.message : undefined, tone: 'error' });
+      }
+    };
+    pendingDeletes.current.set(messageId, { timer: setTimeout(() => void commit(), UNDO_DELETE_MS), commit });
+    notify({
+      title: 'Message deleted',
+      tone: 'info',
+      confirmation: true,
+      durationMs: UNDO_DELETE_MS,
+      key: `delete-${messageId}`,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          const pending = pendingDeletes.current.get(messageId);
+          if (!pending) return;
+          clearTimeout(pending.timer);
+          pendingDeletes.current.delete(messageId);
+          restore();
+        },
+      },
+    });
+  }, [notify]);
+
+  // Leaving the page closes every Undo window: the deletes go now.
+  useEffect(() => {
+    const flushDeletes = () => { for (const p of [...pendingDeletes.current.values()]) void p.commit(); };
+    window.addEventListener('pagehide', flushDeletes);
+    return () => window.removeEventListener('pagehide', flushDeletes);
   }, []);
 
   /* ────────────────────────────────────────────────────────────────────── *
@@ -1307,19 +1463,18 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       .finally(() => setThreadLoading(false));
   }, []);
 
-  const sendThreadReply = useCallback(async (body: string, alsoSendToChannel: boolean, attachments: string[] = []) => {
-    const conversationId = activeIdRef.current;
-    const rootId = threadRootId;
-    if (!conversationId || !rootId || (!body.trim() && attachments.length === 0)) return;
-
-    const nonce = newNonce();
-    const r = await chatApi.replyInThread(conversationId, rootId, {
-      body: body.trim(), nonce, alsoSendToChannel, ...(attachments.length ? { attachments } : {}),
-    });
-    setThreadMessages((prev) => reconcile(prev, r.message, nonce));
-    // The parent's reply count moved; the main flow has to show it.
-    if (r.root) setMessages((prev) => prev.map((m) => (m.id === r.root!.id ? r.root! : m)));
-  }, [threadRootId]);
+  /*
+   * A thread reply goes through `send` (G-07): an optimistic bubble in the
+   * thread, the durable outbox, the nonce, the ack timeout. `rootId` lets an
+   * inline thread reply to a thread that is not the one open in the panel.
+   */
+  const sendThreadReply = useCallback(async (
+    body: string, alsoSendToChannel: boolean, attachments: string[] = [], rootId?: string,
+  ) => {
+    const root = rootId ?? threadRootRef.current;
+    if (!root || (!body.trim() && attachments.length === 0)) return;
+    await send({ body, threadRootId: root, attachments, alsoSendToChannel });
+  }, [send]);
 
   const pin = useCallback(async (messageId: string, pinned: boolean) => {
     const conversationId = activeIdRef.current;

@@ -1,4 +1,4 @@
-import { SESSION_KEY } from './api';
+import { SESSION_KEY, setRequestTimeoutListener } from './api';
 
 /**
  * Client counters (chat experience plan, 0.7).
@@ -47,6 +47,8 @@ function flush(): void {
     body: JSON.stringify({ counters }),
   }).catch(() => {});
 }
+
+setRequestTimeoutListener(() => count('chat.request.timeout'));
 
 if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', flush);

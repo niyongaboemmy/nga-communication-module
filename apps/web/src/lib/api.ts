@@ -37,23 +37,56 @@ export const TAB_ID: string = typeof crypto !== 'undefined' && 'randomUUID' in c
   // Not in sessionStorage: a duplicated tab copies it, and two writers would share an id.
   : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<Envelope<T>> {
+/** A request that hangs is worse than one that fails: it fails at 20 s (G-05). */
+export const REQUEST_TIMEOUT_MS = 20_000;
+
+let onRequestTimeout: (() => void) | null = null;
+/** Lets the counters module hear about timeouts without an import cycle. */
+export function setRequestTimeoutListener(fn: (() => void) | null): void { onRequestTimeout = fn; }
+
+/** The caller's signal and the timeout, whichever fires first. */
+function withTimeout(signal: AbortSignal | null | undefined, ms: number): { signal: AbortSignal; timedOut: () => boolean } {
+  const ctl = new AbortController();
+  let fired = false;
+  const timer = setTimeout(() => { fired = true; ctl.abort(new DOMException('Request timed out', 'TimeoutError')); }, ms);
+  if (signal) {
+    if (signal.aborted) ctl.abort(signal.reason);
+    else signal.addEventListener('abort', () => ctl.abort(signal.reason), { once: true });
+  }
+  ctl.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
+  return { signal: ctl.signal, timedOut: () => fired };
+}
+
+async function request<T>(path: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<Envelope<T>> {
   // A signed-in session always wins; the guest ticket is only used by someone
   // who has no session at all, and only reaches Meet routes.
   const token = localStorage.getItem(SESSION_KEY) ?? localStorage.getItem(MEET_GUEST_KEY);
   // The shared NGA device id, so key events the server records (a message sent,
   // a meeting joined) land on the same device as this browser's page views.
   const deviceId = getDeviceId();
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(deviceId ? { 'X-NGA-Device': deviceId } : {}),
-      'X-Tupo-Tab': TAB_ID,
-      ...(init.headers ?? {}),
-    },
-  });
+  const { timeoutMs = REQUEST_TIMEOUT_MS, ...rest } = init;
+  // `keepalive` requests outlive the page; a timer would only cut them short.
+  const t = rest.keepalive ? null : withTimeout(rest.signal, timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      ...rest,
+      ...(t ? { signal: t.signal } : {}),
+      headers: {
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(deviceId ? { 'X-NGA-Device': deviceId } : {}),
+        'X-Tupo-Tab': TAB_ID,
+        ...(rest.headers ?? {}),
+      },
+    });
+  } catch (err) {
+    if (t?.timedOut()) {
+      onRequestTimeout?.();
+      throw new ApiError('The connection is too slow right now. Please try again.', 0, { code: 'TIMEOUT' });
+    }
+    throw err;
+  }
 
   // A 401 means the stored session is dead and cannot recover on its own.
   // Clear it and send the user back through the MIS rather than letting every
