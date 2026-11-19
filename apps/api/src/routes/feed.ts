@@ -2,7 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { ok, fail } from '@tupo/shared';
 import { feedAudienceRoom, feedPostRoom, feedReelRoom } from '@tupo/shared';
 import type { FeedActor } from '@tupo/feed';
-import type { FeedPostView } from '@tupo/shared';
+import type { FeedLinkPreview, FeedPostView } from '@tupo/shared';
+import { fetchPreview } from '@tupo/chat';
 import * as feed from '@tupo/feed';
 import { FeedError } from '@tupo/feed';
 import { notifyAndPush } from '@tupo/notify';
@@ -186,6 +187,28 @@ router.get('/pages/:id/posts', authorizePermission('FEED_VIEW'), wrap(async (req
  * here.
  */
 /** Drafts and scheduled posts of a page, for its editors (D-05). */
+/*
+ * Link preview for the composer (F-05). The same fetcher chat uses — every
+ * hop re-validated against private addresses, a 5 s timeout and a 512 KB
+ * cap — so a post can carry a title, description and picture for the first
+ * link in it. Cached for ten minutes per URL; only people who can post ask.
+ */
+const PREVIEW_TTL_MS = 10 * 60_000;
+const previewCache = new Map<string, { at: number; value: FeedLinkPreview | null }>();
+router.post('/link-preview', authorizePermission('FEED_POST'), wrap(async (req, res) => {
+  const raw = typeof req.body?.url === 'string' ? req.body.url.trim().slice(0, 2048) : '';
+  if (!/^https?:\/\//i.test(raw)) return res.status(400).json(fail('A http(s) link is required.'));
+  const hit = previewCache.get(raw);
+  if (hit && Date.now() - hit.at < PREVIEW_TTL_MS) return res.json(ok({ preview: hit.value }));
+  const p = await fetchPreview(raw).catch(() => null);
+  const value: FeedLinkPreview | null = p && p.status === 'ok' && (p.title || p.description || p.imageUrl)
+    ? { url: p.url, title: p.title, description: p.description, image: p.imageUrl, siteName: p.siteName }
+    : null;
+  if (previewCache.size > 500) previewCache.delete(previewCache.keys().next().value!);
+  previewCache.set(raw, { at: Date.now(), value });
+  return res.json(ok({ preview: value }));
+}));
+
 router.get('/pages/:id/drafts', authorizePermission('FEED_POST'), wrap(async (req, res) => {
   res.json(ok({ posts: await feed.posts.listUnpublished(actorOf(req), req.params.id!) }));
 }));

@@ -5,7 +5,7 @@ import type {
   FeedCommentView, FeedFilter, FeedPageAnalytics, FeedPageDetail, FeedPageSummary, FeedPollView,
   FeedPostView, FeedReaction, FeedReactionSummary, FeedReelCommentView, FeedReelsPage, FeedReelView,
   FeedReportReason, FeedSort, FeedStoryGroup, FeedStoryView, FeedStoryViewer, FeedTimelinePage,
-  UpdatePageEditorPayload, UpdatePagePayload,
+  UpdatePageEditorPayload, UpdatePagePayload, FeedLinkPreview,
 } from '@tupo/shared';
 
 /** REST client for Tupo Feed — one thin function per endpoint. */
@@ -138,6 +138,10 @@ export const rsvpEvent = (postId: string, going: boolean) =>
   apiPost<{ going: boolean; goingCount: number }>(`/api/feed/posts/${postId}/rsvp`, { going }).then((r) => r.data!);
 
 export const recordView = (id: string) => apiPost(`/api/feed/posts/${id}/view`).catch(() => {});
+/** Title, description and picture for a link, fetched safely by the server (F-05). */
+export const getLinkPreview = (url: string) =>
+  apiPost<{ preview: FeedLinkPreview | null }>('/api/feed/link-preview', { url }).then((r) => r.data!.preview);
+
 export const sharePost = (id: string) =>
   apiPost<{ shareCount: number }>(`/api/feed/posts/${id}/share`).then((r) => r.data!.shareCount);
 export const bookmarkPost = (id: string) => apiPost(`/api/feed/posts/${id}/bookmark`);

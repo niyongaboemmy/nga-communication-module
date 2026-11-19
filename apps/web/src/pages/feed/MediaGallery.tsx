@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { X, ChevronLeft, ChevronRight, FileText, Download, Play, ImageOff, Volume2, VolumeX } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, FileText, Download, Play, ImageOff, Volume2, VolumeX, Loader2 } from 'lucide-react';
 import type { FeedMediaItem } from '@tupo/shared';
 import { FeedImage, useInViewport, useResilientMediaUrl } from './lib';
 import { downloadFile } from '../chat/uploads';
+import { useNotify } from '../../context/NotificationContext';
 
 /* ── Aspect ratios ─────────────────────────────────────────────────────────
    Social feeds show a photo in its own shape, within limits: nothing wider
@@ -39,23 +40,109 @@ function useRatios(items: FeedMediaItem[]): [Ratios, (fileId: string, w: number,
 
 /* ── Tiles ─────────────────────────────────────────────────────────────── */
 
-const DocumentRow: React.FC<{ item: FeedMediaItem }> = ({ item }) => (
-  <button
-    onClick={(e) => { e.stopPropagation(); void downloadFile(item.fileId, item.name ?? 'file'); }}
-    className="flex w-full items-center gap-3 rounded-xl border border-border-light bg-surface-light p-3 text-left transition-colors hover:bg-blue-50 dark:border-border-dark/50 dark:bg-card-dark/40 dark:hover:bg-blue-900/20"
-  >
-    <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300">
-      <FileText size={18} />
-    </span>
-    <span className="min-w-0 flex-1">
-      <span className="block truncate text-sm font-medium text-text-primary-light dark:text-text-primary-dark">{item.name ?? 'Document'}</span>
-      <span className="text-xs text-text-secondary-light dark:text-text-secondary-dark">
-        {item.size ? `${(item.size / 1024 / 1024).toFixed(1)} MB` : 'Download'}
-      </span>
-    </span>
-    <Download size={16} className="text-text-secondary-light dark:text-text-secondary-dark" />
-  </button>
-);
+/** "12 KB", "3.4 MB" — a small file no longer reads "0.0 MB" (F-06). */
+export function readableSize(bytes: number | null | undefined): string {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const isPdf = (item: FeedMediaItem) => /\.pdf$/i.test(item.name ?? '');
+
+/**
+ * A document in a post (F-06). Tapping it opens a preview in the app when the
+ * browser can show the file (PDF); the download button says what it is doing
+ * and says so if it fails, instead of the old silent button.
+ */
+const DocumentRow: React.FC<{ item: FeedMediaItem }> = ({ item }) => {
+  const { notify } = useNotify();
+  const [downloading, setDownloading] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const canPreview = isPdf(item);
+  const download = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    try { await downloadFile(item.fileId, item.name ?? 'file'); }
+    catch { notify({ title: 'The download did not work', body: 'Check your connection and try again.', tone: 'error' }); }
+    finally { setDownloading(false); }
+  };
+  return (
+    <>
+      <div className="flex w-full items-center gap-3 rounded-xl border border-border-light bg-surface-light p-2 dark:border-border-dark/50 dark:bg-card-dark/40">
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); if (canPreview) setPreviewing(true); else void download(); }}
+          aria-label={canPreview ? `Preview ${item.name ?? 'document'}` : `Download ${item.name ?? 'document'}`}
+          className="flex min-w-0 flex-1 items-center gap-3 rounded-lg p-1 text-left transition-colors hover:bg-blue-50 dark:hover:bg-blue-900/20"
+        >
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300">
+            <FileText size={18} />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium text-text-primary-light dark:text-text-primary-dark">{item.name ?? 'Document'}</span>
+            <span className="text-xs text-text-secondary-light dark:text-text-secondary-dark">
+              {[canPreview ? 'PDF · tap to preview' : 'Document', readableSize(item.size)].filter(Boolean).join(' · ')}
+            </span>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); void download(); }}
+          disabled={downloading}
+          aria-label={downloading ? 'Downloading…' : `Download ${item.name ?? 'document'}`}
+          aria-busy={downloading}
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-lg text-text-secondary-light hover:bg-blue-50 hover:text-blue-600 disabled:opacity-70 dark:text-text-secondary-dark dark:hover:bg-blue-900/20"
+        >
+          {downloading ? <Loader2 size={17} className="animate-spin" /> : <Download size={17} />}
+        </button>
+      </div>
+      {previewing && <DocumentPreview item={item} onClose={() => setPreviewing(false)} onDownload={() => void download()} downloading={downloading} />}
+    </>
+  );
+};
+
+/** The browser's own PDF viewer, in a full-screen sheet with Download and Close. */
+const DocumentPreview: React.FC<{ item: FeedMediaItem; onClose: () => void; onDownload: () => void; downloading: boolean }> = ({
+  item, onClose, onDownload, downloading,
+}) => {
+  const { url, broken, retry } = useResilientMediaUrl(item.fileId, true);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return createPortal(
+    <div role="dialog" aria-modal="true" aria-label={`Preview of ${item.name ?? 'document'}`} className="fixed inset-0 z-[120] flex flex-col bg-black/85">
+      <div className="flex items-center gap-2 px-3 py-2 text-white sm:px-5" style={{ paddingTop: 'max(0.5rem, env(safe-area-inset-top))' }}>
+        <FileText size={18} className="shrink-0 opacity-80" />
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{item.name ?? 'Document'}</span>
+        <button type="button" onClick={onDownload} disabled={downloading} aria-label="Download"
+          className="grid h-10 w-10 place-items-center rounded-full bg-white/10 hover:bg-white/20 disabled:opacity-60">
+          {downloading ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+        </button>
+        <button type="button" onClick={onClose} aria-label="Close" className="grid h-10 w-10 place-items-center rounded-full bg-white/10 hover:bg-white/20">
+          <X size={20} />
+        </button>
+      </div>
+      <div className="relative min-h-0 flex-1 px-0 pb-0 sm:px-6 sm:pb-6">
+        {url && <iframe title={item.name ?? 'Document'} src={url} onLoad={() => setLoaded(true)} className="h-full w-full rounded-none bg-white sm:rounded-lg" />}
+        {(!url || !loaded) && !broken && (
+          <div className="absolute inset-0 grid place-items-center" role="status" aria-label="Loading the document">
+            <Loader2 size={28} className="animate-spin text-white/80" />
+          </div>
+        )}
+        {broken && (
+          <button type="button" onClick={retry} className="absolute inset-0 grid place-items-center text-sm font-medium text-white/80">
+            Couldn't load the document. Tap to retry.
+          </button>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+};
 
 interface TileProps {
   item: FeedMediaItem;
