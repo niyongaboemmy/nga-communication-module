@@ -112,7 +112,8 @@ interface ChatValue {
   /** Messages still waiting for a connection (FR-MSG-24). */
   queued: number;
   /** `kind` widens the indicator past typing — see ActivityKind. */
-  notifyTyping: (kind?: ActivityKind) => void;
+  /** `threadRootId`: typing a reply in that thread (shown there, not in the room). */
+  notifyTyping: (kind?: ActivityKind, threadRootId?: string | null) => void;
   /** Withdraw "typing…" now: the box emptied, lost focus, or was left (G-11). */
   stopTyping: () => void;
   markReadTo: (seq: number) => void;
@@ -1582,7 +1583,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * Typing, reading, drafts
    * ────────────────────────────────────────────────────────────────────── */
 
-  const notifyTyping = useCallback((kind: ActivityKind = 'typing') => {
+  const notifyTyping = useCallback((kind: ActivityKind = 'typing', threadRootId: string | null = null) => {
     const id = activeIdRef.current;
     const socket = getSocket();
     if (!id || !socket?.connected) return;
@@ -1591,7 +1592,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const now = Date.now();
     if (now - lastTypingSentAt.current < TYPING_THROTTLE_MS) return;
     lastTypingSentAt.current = now;
-    socket.emit('typing:start', { conversationId: id, kind });
+    socket.emit('typing:start', { conversationId: id, kind, ...(threadRootId ? { threadRootId } : {}) });
   }, []);
 
   const stopTyping = useCallback(() => {
@@ -1746,7 +1747,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const value: ChatValue = {
     conversations, conversationsLoading, conversationsError, activeId, setActiveId, active,
     messages, messagesLoading, messagesConversationId, hasMore, loadingMore, loadOlder,
-    typing: (activeId && typingByConv[activeId]) || [],
+    // The room's own typing line leaves out people replying in a thread.
+    typing: ((activeId && typingByConv[activeId]) || []).filter((u) => !u.threadRootId),
     typingByConversation: typingByConv,
     conversationPresence: convPresence,
     connected,

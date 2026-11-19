@@ -340,12 +340,13 @@ export function registerChatHandlers(
         // blanking the indicator for everyone in the room.
         try {
           const parsed = JSON.parse(value) as
-            { name?: string; avatarUrl?: string | null; kind?: ActivityKind };
+            { name?: string; avatarUrl?: string | null; kind?: ActivityKind; threadRootId?: string | null };
           return {
             userId,
             name: parsed.name ?? 'Someone',
             avatarUrl: parsed.avatarUrl ?? null,
             kind: parsed.kind ?? 'typing',
+            threadRootId: parsed.threadRootId ?? null,
           };
         } catch {
           return { userId, name: value, avatarUrl: null, kind: 'typing' as ActivityKind };
@@ -357,7 +358,7 @@ export function registerChatHandlers(
 
   const ACTIVITY_KINDS = new Set<ActivityKind>(['typing', 'recording', 'uploading']);
 
-  socket.on('typing:start', async ({ conversationId, kind }) => {
+  socket.on('typing:start', async ({ conversationId, kind, threadRootId }) => {
     if (!inRoom(conversationId) || !redis) return;
     try {
       const key = typingKey(conversationId);
@@ -368,6 +369,8 @@ export function registerChatHandlers(
         // socket supply it would let anyone wear anyone else's.
         avatarUrl: user.avatarUrl ?? null,
         kind: ACTIVITY_KINDS.has(kind as ActivityKind) ? kind : 'typing',
+        // Where: a thread's root id (a short opaque id, nothing else is kept).
+        threadRootId: typeof threadRootId === 'string' && /^[\w:-]{1,64}$/.test(threadRootId) ? threadRootId : null,
         at: Date.now(),
       }));
       // Refreshed on every keystroke burst, so the key outlives a pause in

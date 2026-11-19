@@ -112,6 +112,8 @@ export interface MessageRowProps {
   variant?: 'default' | 'compact';
   /** Overrides Reply (a reply inside a thread answers with "@Name"). */
   onReply?: (m: Message) => void;
+  /** "Didier is replying…" for this message's thread. */
+  replying?: string;
 }
 
 /**
@@ -122,7 +124,7 @@ export interface MessageRowProps {
 const MessageRowInner: React.FC<MessageRowProps> = ({
   message: m, newGroup, names, isHighlighted = false, editRequested = false,
   newReplies = 0, senderBlocked = false, runsThisRoom = false,
-  isDm = false, canReply = true, inlineReplies = false, variant = 'default', onReply,
+  isDm = false, canReply = true, inlineReplies = false, variant = 'default', onReply, replying,
 }) => {
   noteRowRender();
   const { can } = usePermissions();
@@ -540,6 +542,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
             newReplies={newReplies}
             open={threadOpen}
             meId={user?.id}
+            replying={replying}
             onToggle={() => setThreadOpen(!threadOpen)}
           />
         )}
@@ -781,7 +784,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
         light up the root's toolbar (R-03). Indented to the bubble column. */}
     {threadable && threadOpen && (
       <li data-inline-thread-for={m.id} className="pb-1 pl-[3.375rem] pr-2 sm:pl-[3.875rem] sm:pr-4">
-        <InlineThread root={m} canReply={canReply} names={names} focusRequest={focusReply} />
+        <InlineThread root={m} canReply={canReply} names={names} focusRequest={focusReply} replying={replying} />
       </li>
     )}
     </>

@@ -32,7 +32,7 @@ export function useChatUrl(opts: {
   const pushedOverList = useRef(false);
   const {
     activeId, setActiveId, conversationsLoading, openThread, jumpTo, messagesLoading, refresh,
-    messagesConversationId,
+    messagesConversationId, threadRootId,
   } = useChat();
   const [params, setParams] = useSearchParams();
   const urlC = params.get('c');
@@ -84,10 +84,48 @@ export function useChatUrl(opts: {
     const { m, thread } = pending.current;
     if (!m && !thread) return;
     pending.current = { m: null, thread: null };
-    if (thread) openThread(thread);
+    // The thread stays in the URL (R-05): Back closes it, a reload reopens it.
+    if (thread) { syncedThread.current = thread; openThread(thread); }
     if (m) void jumpTo(m);
-    setParams((prev) => { const next = new URLSearchParams(prev); next.delete('m'); next.delete('thread'); return next; }, { replace: true });
+    if (m) setParams((prev) => { const next = new URLSearchParams(prev); next.delete('m'); return next; }, { replace: true });
   }, [activeId, urlC, messagesLoading, messagesConversationId, openThread, jumpTo, params, setParams]);
+
+  /*
+   * The open thread ↔ `?thread=` (R-05). Whichever side moved since they last
+   * agreed wins: the URL moving (Back, Forward, a link) opens or closes the
+   * thread; the thread opening in the app pushes a history entry, so the
+   * browser's and the phone's Back close it; closing it in the app steps back
+   * over that entry rather than leaving it behind to reopen.
+   */
+  const urlThread = params.get('thread');
+  const syncedThread = useRef<string | null>(null);
+  const pushedThread = useRef(false);
+  useEffect(() => {
+    if (!activeId || activeId !== urlC || pending.current.thread) return;
+    const cur = threadRootId ?? null;
+    const url = urlThread ?? null;
+    if (cur === url) { syncedThread.current = cur; return; }
+    if (url !== syncedThread.current && cur === syncedThread.current) {
+      // The URL moved: the thread follows it.
+      syncedThread.current = url;
+      pushedThread.current = false;
+      openThread(url);
+      return;
+    }
+    // The thread moved: the URL follows it.
+    const was = syncedThread.current;
+    syncedThread.current = cur;
+    if (cur) {
+      pushedThread.current = !was;
+      setParams((prev) => { const next = new URLSearchParams(prev); next.set('thread', cur); return next; }, { replace: Boolean(was) });
+    } else if (pushedThread.current) {
+      pushedThread.current = false;
+      navigate(-1);
+    } else {
+      setParams((prev) => { const next = new URLSearchParams(prev); next.delete('thread'); return next; }, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- driven by the two values being synced
+  }, [activeId, urlC, urlThread, threadRootId]);
 
   // state → URL
   useEffect(() => {
@@ -108,6 +146,8 @@ export function useChatUrl(opts: {
       const next = new URLSearchParams(prev);
       if (activeId) next.set('c', activeId); else next.delete('c');
       next.delete('m'); next.delete('thread');
+      syncedThread.current = null;
+      pushedThread.current = false;
       return next;
     }, { replace });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- state-driven only

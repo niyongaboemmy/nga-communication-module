@@ -2238,19 +2238,81 @@ export async function threadParticipants(
  */
 
 /**
- * Who follows a thread: the root's author, everyone who has replied, and
- * everyone who has opened it (a thread_reads row).
+ * Who follows a thread (R-11): the root's author, everyone who has replied,
+ * everyone who has opened it (a thread_reads row), everyone @mentioned in it,
+ * the owners and moderators of a room of 50 or fewer (a teacher hears about
+ * the homework thread in their own class channel), and anyone who chose
+ * Follow — minus anyone who chose Mute. The explicit choice always wins.
  */
+const SMALL_ROOM = 50;
 export async function threadFollowers(conversationId: string, rootId: string): Promise<string[]> {
   const { rows } = await getPool().query<{ user_id: string }>(
-    `SELECT sender_id AS user_id FROM messages
-      WHERE conversation_id = $1 AND (id = $2 OR thread_root_id = $2)
-        AND deleted_at IS NULL AND type <> 'system'
-     UNION
-     SELECT user_id FROM thread_reads WHERE conversation_id = $1 AND root_id = $2`,
-    [conversationId, rootId],
+    `WITH base AS (
+       SELECT sender_id AS user_id FROM messages
+        WHERE conversation_id = $1 AND (id = $2 OR thread_root_id = $2)
+          AND deleted_at IS NULL AND type <> 'system'
+       UNION
+       SELECT user_id FROM thread_reads WHERE conversation_id = $1 AND root_id = $2
+       UNION
+       SELECT mm.user_id FROM message_mentions mm
+         JOIN messages x ON x.id = mm.message_id AND x.conversation_id = mm.conversation_id
+        WHERE mm.conversation_id = $1 AND x.thread_root_id = $2 AND mm.kind = 'user'
+       UNION
+       SELECT cm.user_id FROM conversation_members cm
+        WHERE cm.conversation_id = $1 AND cm.left_at IS NULL
+          AND cm.role IN ('owner', 'admin', 'moderator')
+          AND (SELECT count(*) FROM conversation_members c2
+                WHERE c2.conversation_id = $1 AND c2.left_at IS NULL) <= $3
+       UNION
+       SELECT user_id FROM thread_follows WHERE root_id = $2 AND state = 'following'
+     )
+     SELECT b.user_id FROM base b
+      WHERE NOT EXISTS (SELECT 1 FROM thread_follows tf
+                         WHERE tf.root_id = $2 AND tf.user_id = b.user_id AND tf.state = 'muted')`,
+    [conversationId, rootId, SMALL_ROOM],
   );
   return rows.map((r) => r.user_id);
+}
+
+export type ThreadFollowChoice = 'following' | 'muted' | null;
+
+/** One person's standing in a thread: their explicit choice, whether they follow, their place. */
+export async function threadFollowState(
+  userId: string, conversationId: string, rootId: string,
+): Promise<{ choice: ThreadFollowChoice; following: boolean; lastReadSeq: number }> {
+  const [choiceRow, followers, read] = await Promise.all([
+    getPool().query<{ state: 'following' | 'muted' }>(
+      'SELECT state FROM thread_follows WHERE root_id = $1 AND user_id = $2', [rootId, userId]),
+    threadFollowers(conversationId, rootId),
+    getPool().query<{ last_read_seq: string }>(
+      'SELECT last_read_seq FROM thread_reads WHERE root_id = $1 AND user_id = $2', [rootId, userId]),
+  ]);
+  return {
+    choice: choiceRow.rows[0]?.state ?? null,
+    following: followers.includes(userId),
+    lastReadSeq: Number(read.rows[0]?.last_read_seq ?? 0),
+  };
+}
+
+/** Follow, mute, or go back to the implicit rule (null). */
+export async function setThreadFollow(
+  userId: string, conversationId: string, rootId: string, choice: ThreadFollowChoice,
+): Promise<void> {
+  const { rows } = await getPool().query<{ id: string }>(
+    'SELECT id FROM messages WHERE conversation_id = $1 AND id = $2 AND thread_root_id IS NULL',
+    [conversationId, rootId],
+  );
+  if (!rows[0]) throw new ChatError('That thread is not in this conversation.', 404);
+  if (choice === null) {
+    await getPool().query('DELETE FROM thread_follows WHERE root_id = $1 AND user_id = $2', [rootId, userId]);
+    return;
+  }
+  await getPool().query(
+    `INSERT INTO thread_follows (conversation_id, root_id, user_id, state)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (root_id, user_id) DO UPDATE SET state = EXCLUDED.state, updated_at = now()`,
+    [conversationId, rootId, userId, choice],
+  );
 }
 
 /** The reader's place in one thread. Never moves backwards. */
@@ -2282,8 +2344,10 @@ const THREAD_UNREAD_SQL = `
     FROM messages r
     JOIN followers f ON TRUE
     LEFT JOIN thread_reads tr ON tr.user_id = f.user_id AND tr.root_id = r.id
+    LEFT JOIN thread_follows tf ON tf.user_id = f.user_id AND tf.root_id = r.id
    WHERE r.conversation_id = $1 AND r.deleted_at IS NULL AND r.reply_count > 0
-     AND (r.sender_id = f.user_id OR tr.user_id IS NOT NULL)`;
+     AND (r.sender_id = f.user_id OR tr.user_id IS NOT NULL OR tf.state = 'following')
+     AND tf.state IS DISTINCT FROM 'muted'`;
 
 /**
  * New-reply counts per follower of one thread — pushed to each of them after
@@ -2296,6 +2360,7 @@ export async function threadUnreadFor(
     `WITH followers AS (
        SELECT sender_id AS user_id FROM messages WHERE conversation_id = $1 AND id = $2
        UNION SELECT user_id FROM thread_reads WHERE root_id = $2
+       UNION SELECT user_id FROM thread_follows WHERE root_id = $2 AND state = 'following'
      )
      ${THREAD_UNREAD_SQL} AND r.id = $2`,
     [conversationId, rootId],
@@ -2325,6 +2390,9 @@ export interface FollowedThread {
   replyCount: number;
   lastReplyAt: string | null;
   unread: number;
+  /** The newest reply — what the inbox row leads with (R-13). */
+  latest: { senderId: string; senderName: string; body: string; hasAttachment: boolean; at: string } | null;
+  participants: WireThreadParticipant[];
 }
 
 /**
@@ -2336,18 +2404,23 @@ export async function followedThreads(userId: string, limit = 50): Promise<Follo
     conversation_id: string; conversation_name: string | null; conversation_type: string;
     root_id: string; body: string | null; sender_name: string | null; reply_count: number;
     last_reply_at: Date | null; unread: number;
+    thread_latest: FollowedThread['latest']; thread_participants: FollowedThread['participants'] | null;
   }>(
     `WITH mine AS (
        SELECT r.id, r.conversation_id, r.seq, r.sender_id, r.body, r.reply_count,
+              r.thread_latest, r.thread_participants,
               COALESCE(tr.last_read_seq, 0) AS read_seq
          FROM messages r
          JOIN conversation_members cm ON cm.conversation_id = r.conversation_id
                                      AND cm.user_id = $1 AND cm.left_at IS NULL
          LEFT JOIN thread_reads tr ON tr.root_id = r.id AND tr.user_id = $1
+         LEFT JOIN thread_follows tf ON tf.root_id = r.id AND tf.user_id = $1
         WHERE r.deleted_at IS NULL AND r.reply_count > 0 AND r.thread_root_id IS NULL
-          AND (r.sender_id = $1 OR tr.user_id IS NOT NULL)
+          AND (r.sender_id = $1 OR tr.user_id IS NOT NULL OR tf.state = 'following')
+          AND tf.state IS DISTINCT FROM 'muted'
      )
      SELECT m.conversation_id, c.name AS conversation_name, c.type AS conversation_type,
+            m.thread_latest, m.thread_participants,
             m.id AS root_id, m.body, u.name AS sender_name, m.reply_count,
             last.created_at AS last_reply_at,
             (SELECT count(*) FROM messages x
@@ -2378,6 +2451,8 @@ export async function followedThreads(userId: string, limit = 50): Promise<Follo
     replyCount: r.reply_count,
     lastReplyAt: r.last_reply_at ? r.last_reply_at.toISOString() : null,
     unread: r.unread,
+    latest: r.thread_latest ?? null,
+    participants: r.thread_participants ?? [],
   }));
 }
 

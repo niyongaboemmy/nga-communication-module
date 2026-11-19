@@ -182,6 +182,8 @@ try {
     const box = await pAside.boundingBox();
     S.check('phone thread is full width', Math.round(box?.width ?? 0) >= 389, `${box?.width}px`);
     S.check('URL names the thread', Q.url().includes(`thread=${root.id}`), Q.url());
+    await Q.locator('aside[aria-label="Thread"] li[data-message-row]').first().waitFor({ timeout: 8000 }).catch(() => {});
+    await sleep(600); // the slide-in finishes
     await Q.screenshot({ path: `${SHOTS}/thread-390.png` });
     await Q.goBack();
     S.check('Back closes the thread', await pAside.waitFor({ state: 'hidden', timeout: 5000 }).then(() => true).catch(() => false));

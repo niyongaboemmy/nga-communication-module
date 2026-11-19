@@ -1,3 +1,4 @@
+import { useFlag } from '../../lib/flags';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PinnedPanel } from './PinnedPanel';
 import { MessagesSquare } from 'lucide-react';
@@ -50,8 +51,10 @@ const PANELS_IN_URL = new Set<Panel>(['details', 'saved', 'settings', 'search', 
 const SidePanel: React.FC<{
   width: 'wide' | 'narrow';
   onDismiss: () => void;
+  /** Below 768 px this panel is a full-screen page, not an overlay (R-05). */
+  pageOnPhone?: boolean;
   children: React.ReactNode;
-}> = ({ width, onDismiss, children }) => (
+}> = ({ width, onDismiss, pageOnPhone = false, children }) => (
   <>
     {/* The scrim exists below xl, where the panel is an overlay. Inline at xl
         there is nothing to dismiss by clicking past. */}
@@ -62,9 +65,9 @@ const SidePanel: React.FC<{
     />
     <div
       data-side-panel
-      className={`animate-panel-in-right fixed inset-y-0 right-0 z-80 max-w-[90vw] xl:static xl:z-auto ${
-        width === 'wide' ? 'w-96 xl:w-96' : 'w-80 xl:w-80'
-      }`}
+      className={`animate-panel-in-right fixed inset-y-0 right-0 z-80 xl:static xl:z-auto ${
+        pageOnPhone ? 'max-md:inset-x-0 max-md:w-full max-md:max-w-none md:max-w-[90vw]' : 'max-w-[90vw]'
+      } ${width === 'wide' ? 'md:w-96 xl:w-96' : 'w-80 xl:w-80'} ${pageOnPhone ? '' : width === 'wide' ? 'w-96' : ''}`}
     >
       {children}
     </div>
@@ -90,6 +93,8 @@ const ChatWorkspace: React.FC = () => {
    * cannot get out of step with itself.
    */
   const [panel, setPanel] = useState<Panel>('none');
+  // A thread is a full-screen page on a phone (R-05), behind its flag.
+  const threadPage = useFlag('chat.threadPage');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [members, setMembers] = useState<Member[]>([]);
@@ -307,7 +312,7 @@ const ChatWorkspace: React.FC = () => {
 
       {/* Pane 3 — whichever side panel is open. */}
       {panel === 'thread' && active && (
-        <SidePanel width="wide" onDismiss={closePanel}>
+        <SidePanel width="wide" onDismiss={closePanel} pageOnPhone={threadPage}>
           <ThreadPanel conversation={active} />
         </SidePanel>
       )}

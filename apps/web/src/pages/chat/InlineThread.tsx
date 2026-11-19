@@ -35,13 +35,15 @@ const firstName = (n: string) => n.split(' ')[0] || n;
 export const InlineThread: React.FC<{
   root: WireMessage;
   canReply: boolean;
+  /** "Didier is replying…" — people typing in this thread right now. */
+  replying?: string;
   names: Record<string, string>;
   /** Increments when the person pressed Reply on the root: focus the box. */
   focusRequest: number;
-}> = ({ root, canReply, names, focusRequest }) => {
+}> = ({ root, canReply, names, focusRequest, replying }) => {
   const { user } = useAuth();
   const { notify } = useNotify();
-  const { subscribeThread, sendThreadReply, openThread, markThreadRead } = useChatActions();
+  const { subscribeThread, sendThreadReply, openThread, markThreadRead, notifyTyping, stopTyping } = useChatActions();
   const [replies, setReplies] = useState<WireMessage[]>([]);
   const [hasEarlier, setHasEarlier] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -97,6 +99,8 @@ export const InlineThread: React.FC<{
     draftKey: threadKey(root.id),
     maxHeightPx: 120,
     onSubmit: () => submitRef.current(),
+    onTyping: () => notifyTyping('typing', root.id),
+    onTypingStop: stopTyping,
   });
   submitRef.current = () => {
     const raw = box.value.trim();
@@ -181,6 +185,9 @@ export const InlineThread: React.FC<{
         </>
       )}
 
+      {replying && (
+        <p role="status" className="px-2 pt-1 text-[11px] italic text-text-secondary-light dark:text-text-secondary-dark">{replying}</p>
+      )}
       <div className="mt-1.5 flex items-end gap-1.5">
         {canReply ? (
           <div className="flex min-w-0 flex-1 items-end gap-1 rounded-xl border border-border-light bg-white px-2 py-1 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20 dark:border-border-dark/50 dark:bg-elevated-dark">

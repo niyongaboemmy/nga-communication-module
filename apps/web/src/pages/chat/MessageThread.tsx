@@ -243,8 +243,20 @@ export const MessageThread: React.FC<{
   const {
     messages, messagesLoading: loading, hasMore, loadingMore, loadOlder,
     markReadTo, hasNewer, loadNewer, showLatest,
-    highlightedId, editingId, threadUnread, blockedIds,
+    highlightedId, editingId, threadUnread, blockedIds, typingByConversation,
   } = useChat();
+  // Who is typing in which thread, as one sentence per root.
+  const replyingByRoot = useMemo(() => {
+    const byRoot: Record<string, string[]> = {};
+    for (const u of typingByConversation[conversation.id] ?? []) {
+      if (u.threadRootId && u.userId !== user?.id) (byRoot[u.threadRootId] ??= []).push(u.name.split(' ')[0] ?? u.name);
+    }
+    const out: Record<string, string> = {};
+    for (const [root, names] of Object.entries(byRoot)) {
+      out[root] = names.length === 1 ? `${names[0]} is replying…` : `${names.slice(0, 2).join(' and ')} are replying…`;
+    }
+    return out;
+  }, [typingByConversation, conversation.id, user?.id]);
   // A channel's own owner, admins and moderators may remove what is posted
   // there (B-13) — the server always allowed it; the menu never offered it.
   const { can } = usePermissions();
@@ -304,6 +316,44 @@ export const MessageThread: React.FC<{
     if (atBottom && !hasNewer) bottomRef.current?.scrollIntoView({ block: 'end' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length, conversation.id]);
+
+  /*
+   * C-07: opening a side panel narrows the log, rows re-wrap, and the reader's
+   * place used to slide away under them. The message at the top of the view
+   * is tracked as they scroll (once a frame), and after a width change it is
+   * put back at the same offset — unless they are following the newest
+   * message, which the tail rule already keeps in view.
+   */
+  const atBottomRef = useRef(true);
+  atBottomRef.current = atBottom;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let anchor: { id: string; offset: number } | null = null;
+    let width = el.clientWidth;
+    let frame = 0;
+    const record = () => {
+      frame = 0;
+      const top = el.getBoundingClientRect().top;
+      for (const row of el.querySelectorAll<HTMLElement>('li[data-message-row]')) {
+        const box = row.getBoundingClientRect();
+        if (box.bottom > top + 4) { anchor = { id: row.id, offset: box.top - top }; return; }
+      }
+    };
+    const onScroll = () => { if (!frame) frame = requestAnimationFrame(record); };
+    record();
+    el.addEventListener('scroll', onScroll, { passive: true });
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      if (atBottomRef.current || !anchor) return;
+      const target = anchor.id ? document.getElementById(anchor.id) : null;
+      if (!target) return;
+      el.scrollTop += (target.getBoundingClientRect().top - el.getBoundingClientRect().top) - anchor.offset;
+    });
+    ro.observe(el);
+    return () => { el.removeEventListener('scroll', onScroll); ro.disconnect(); if (frame) cancelAnimationFrame(frame); };
+  }, [conversation.id]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -489,6 +539,7 @@ export const MessageThread: React.FC<{
                       isDm={conversation.type === 'dm'}
                       canReply={canReply}
                       inlineReplies={inlineReplies}
+                      replying={replyingByRoot[m.id]}
                     />
                   </React.Fragment>
                 );

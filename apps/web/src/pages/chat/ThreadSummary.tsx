@@ -40,8 +40,10 @@ export const ThreadSummary: React.FC<{
   newReplies: number;
   open: boolean;
   meId?: string;
+  /** "Didier is replying…" when someone is typing in the thread. */
+  replying?: string;
   onToggle: () => void;
-}> = ({ message: m, newReplies, open, meId, onToggle }) => {
+}> = ({ message: m, newReplies, open, meId, replying, onToggle }) => {
   const people = m.threadParticipants ?? [];
   const count = m.replyCount;
   const who = whoReplied(people, meId);
@@ -61,10 +63,10 @@ export const ThreadSummary: React.FC<{
       }`}
     >
       {people.length > 0 && (
-        <span className="flex shrink-0 -space-x-1.5" aria-hidden="true">
+        <span className="flex shrink-0 -space-x-1" aria-hidden="true">
           {people.slice(0, 3).map((p) => (
             <span key={p.id} data-avatar="" className="rounded-full ring-2 ring-surface-light dark:ring-background-dark">
-              <Avatar name={p.name} src={p.avatarUrl ?? undefined} size={20} />
+              <Avatar name={p.name} src={p.avatarUrl ?? undefined} size={22} />
             </span>
           ))}
         </span>
@@ -75,7 +77,9 @@ export const ThreadSummary: React.FC<{
           {newReplies} new
         </span>
       )}
-      {when && <span className="shrink-0 text-text-secondary-light dark:text-text-secondary-dark">· {when}</span>}
+      {replying
+        ? <span className="shrink-0 italic text-text-secondary-light dark:text-text-secondary-dark">· {replying}</span>
+        : when && <span className="shrink-0 text-text-secondary-light dark:text-text-secondary-dark">· {when}</span>}
       <ChevronDown size={14} className={`shrink-0 transition-transform duration-150 motion-reduce:transition-none ${open ? 'rotate-180' : ''}`} aria-hidden="true" />
     </button>
   );

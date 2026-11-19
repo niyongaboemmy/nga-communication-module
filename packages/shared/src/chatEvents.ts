@@ -82,7 +82,8 @@ export interface ChatClientToServerEvents {
    * because they share every property that matters: short-lived, per
    * conversation, and worthless if stale.
    */
-  'typing:start': (p: { conversationId: string; kind?: ActivityKind }) => void;
+  /** `threadRootId`: the typing is a reply in that thread, not in the room. */
+  'typing:start': (p: { conversationId: string; kind?: ActivityKind; threadRootId?: string | null }) => void;
   'typing:stop': (p: { conversationId: string }) => void;
 
   /**

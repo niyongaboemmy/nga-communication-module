@@ -238,6 +238,8 @@ export interface TypingUser {
    */
   avatarUrl?: string | null;
   kind?: ActivityKind;
+  /** Replying in this thread rather than in the room ("Didier is replying…"). */
+  threadRootId?: string | null;
 }
 
 /* ────────────────────────────────────────────────────────────────────────── *

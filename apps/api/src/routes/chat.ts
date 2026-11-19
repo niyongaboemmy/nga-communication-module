@@ -439,6 +439,27 @@ router.put('/conversations/:id/draft', wrap(async (req, res) => {
   res.json(ok({ saved: result.saved, at: result.at }));
 }));
 
+/** This person's standing in a thread: follow choice, whether they follow, their place (R-11, R-12). */
+router.get('/conversations/:id/threads/:rootId/follow', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, rootId } = req.params as { id: string; rootId: string };
+  await chat.requireMembership(me.id, id);
+  res.json(ok(await chat.threadFollowState(me.id, id, rootId)));
+}));
+
+/** Follow, mute, or back to automatic (`state: null`) (R-11). */
+router.put('/conversations/:id/threads/:rootId/follow', wrap(async (req, res) => {
+  const me = actor(req);
+  const { id, rootId } = req.params as { id: string; rootId: string };
+  await chat.requireMembership(me.id, id);
+  const raw = req.body?.state;
+  if (raw !== null && raw !== 'following' && raw !== 'muted') {
+    return res.status(400).json(fail('state must be "following", "muted" or null.'));
+  }
+  await chat.setThreadFollow(me.id, id, rootId, raw);
+  res.json(ok(await chat.threadFollowState(me.id, id, rootId)));
+}));
+
 /** Links shared here, newest first (B-12). */
 router.get('/conversations/:id/links', wrap(async (req, res) => {
   const me = actor(req);
