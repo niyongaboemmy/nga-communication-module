@@ -4,6 +4,7 @@ import { jumpHistory } from './jumpHistory';
 import { ThreadSummary } from './ThreadSummary';
 import { isInlineOpen, setInlineOpen } from './inlineThreadState';
 import { QuotePreview } from './QuotePreview';
+import { PostShareCard } from './PostShareCard';
 import { isComposing, isSubmitEnter } from './composerKeys';
 import { noteRowRender } from '../../lib/perf';
 import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
@@ -196,6 +197,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
   const right = mine && !compact;
   const onDark = mine && !compact;
   const fromThread = typeof m.metadata?.fromThread === 'string' ? m.metadata.fromThread as string : null;
+  const sharedPostId = m.type === 'post_share' && typeof m.metadata?.postId === 'string' ? m.metadata.postId as string : null;
 
   // ↑ in the composer names a message; this is the row that answers.
   useEffect(() => {
@@ -432,7 +434,9 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
                 it is not drawn when the card is. It still exists on the row —
                 notifications, sidebar previews and search all need a sentence,
                 and it is the fallback if the card ever fails to load. */}
-            {m.body && !meetMeta && (
+            {/* A feed post shared here (F-07): drawn as the post, with the reader's own rights. */}
+            {sharedPostId && <PostShareCard postId={sharedPostId} onDark={onDark} />}
+            {m.body && !meetMeta && !sharedPostId && (
               /* `mentionNames` comes from the server and covers everyone this
                  message mentions; `names` is the fallback built from senders
                  in the loaded window. The server's map wins — the fallback is

@@ -14,6 +14,7 @@ import { useFeed } from './FeedProvider';
 import { MediaGallery } from './MediaGallery';
 import { PollBlock, EventBlock } from './PollEventBlocks';
 import { Comments } from './Comments';
+import { ShareSheet } from './ShareSheet';
 import {
   ReactionBurst, ReactionBubbles, ReactionDisc, ReactionIcon, ReactionPicker, fullTime, relativeTime,
   renderRichText, useDismiss, useMediaUrl, usePressToOpen,
@@ -77,20 +78,9 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
   const primaryReaction: FeedReaction = post.reactions.mine ?? 'like';
   const press = usePressToOpen(() => setPickerOpen(true), () => setPickerOpen(false));
 
-  const share = async () => {
-    const url = `${location.origin}/app/feed/post/${post.id}`;
-    if (navigator.share) {
-      // The OS share sheet is its own feedback — cancelling it (the common
-      // case for the rejection here) needs no toast on top of it.
-      try { await navigator.share({ url, title: `${post.page.name} on Tupo` }); } catch { return; }
-    } else {
-      // Unlike the share sheet, a clipboard write is invisible — with no
-      // confirmation this looked exactly like the button doing nothing.
-      try { await navigator.clipboard.writeText(url); } catch { notify({ title: 'Could not copy the link', tone: 'error' }); return; }
-      toastConfirm('Link copied');
-    }
-    void api.sharePost(post.id).catch(() => {});
-  };
+  // Share opens the share sheet (F-07): send in chat, copy link, device share.
+  const [shareOpen, setShareOpen] = useState(false);
+  const share = () => setShareOpen(true);
 
   const clamp = !expanded && post.body.length > 360;
   const bodyText = clamp ? `${post.body.slice(0, 340).trimEnd()}…` : post.body;
@@ -251,13 +241,14 @@ export const PostCard: React.FC<{ post: FeedPostView; openComments?: boolean; pe
         >
           <MessageCircle size={18} /> Comment
         </button>
-        <button onClick={() => void share()} className={actionButton}>
+        <button onClick={share} aria-haspopup="dialog" className={actionButton}>
           <Share2 size={17} /> Share
         </button>
       </div>
 
       {(showComments || permalink) && <Comments post={post} autoFocus={showComments && !permalink} />}
       {confirmDialog}
+      {shareOpen && <ShareSheet post={post} onClose={() => setShareOpen(false)} />}
       {/* Portalled to <body>: the card's entrance animation makes it the box
           that `fixed` is measured against, which trapped the dialog inside the post. */}
       {reactorsOpen && createPortal(
