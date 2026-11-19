@@ -27,12 +27,12 @@ try {
     const box = page.locator('#composer');
     await box.click();
     await box.pressSequentially('I will come tomorow', { delay: 25 });
-    await sleep(1100);                       // the 800 ms debounce fires; the PUT is now in flight
+    await sleep(2800);                       // the 2.5 s server debounce fires; the PUT is now in flight
     for (let i = 0; i < 3; i++) await box.press('Backspace');
     await box.pressSequentially('rrow at 9', { delay: 25 });
-    await sleep(1200);                       // a second save goes out
+    await sleep(2800);                       // a second save goes out
     await box.pressSequentially(' sharp', { delay: 25 });
-    await sleep(4500);                       // both echoes have arrived by now
+    await sleep(5500);                       // both echoes have arrived by now
     const v = await composerValue(page);
     S.check('typed text survives every draft echo', v === 'I will come tomorrow at 9 sharp', JSON.stringify(v));
     await box.fill('');
@@ -49,7 +49,7 @@ try {
     const text = `ping ${Date.now()}`;
     await box.click();
     await box.pressSequentially(text, { delay: 20 });
-    await sleep(1000);                       // save in flight
+    await sleep(2800);                       // save in flight
     await box.press('Enter');
     await sleep(4500);
     const v = await composerValue(page);
@@ -69,9 +69,9 @@ try {
     const box = a.page.locator('#composer');
     await box.click();
     await box.pressSequentially('first part', { delay: 20 });
-    await sleep(1100);
+    await sleep(2800);
     await box.pressSequentially(' and more', { delay: 20 });
-    await sleep(5000);
+    await sleep(6000);
     const va = await composerValue(a.page);
     S.check('typing tab keeps its text', va === 'first part and more', JSON.stringify(va));
     const synced = await waitTrue(b.page, () => document.querySelector('#composer')?.value === 'first part and more', null, 8000);
@@ -196,6 +196,47 @@ try {
       return Boolean(row && !row.querySelector('[aria-label="Sending"]') && !row.textContent?.includes('Sending…'));
     }, text, 15000);
     S.check('message settles within 15 s without a socket ack', delivered);
+  }
+  /* ── 9. G-09: drafts live on the device, not only on the server ── */
+  S.step('G-09 draft survives a reload the server never heard about');
+  {
+    const conv = await S.channel(ada, [bosco], 'slow');
+    const root = await S.post(bosco, conv, `Root for drafts ${Date.now()}`);
+    const { page } = await S.openAs(ada, conv);
+    await page.route((u) => /\/draft$/.test(u.pathname), (route) => route.abort());
+    await page.locator('#composer').fill('kept on this device');
+    await sleep(900);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    const kept = await waitTrue(page, () => document.querySelector('#composer')?.value === 'kept on this device', null, 10000);
+    S.check('main draft restored after reload', kept, JSON.stringify(await composerValue(page)));
+    await page.goto(page.url().replace(/&thread=[^&]*/, '') + `&thread=${root.id}`, { waitUntil: 'domcontentloaded' });
+    const tbox = page.locator('#thread-composer');
+    if (await tbox.waitFor({ timeout: 6000 }).then(() => true).catch(() => false)) {
+      await tbox.fill('thread draft kept');
+      await sleep(900);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      const tkept = await waitTrue(page, () => document.querySelector('#thread-composer')?.value === 'thread draft kept', null, 10000);
+      S.check('thread draft restored after reload', tkept);
+    } else {
+      S.check('thread draft restored after reload', false, 'thread did not open from ?thread=');
+    }
+  }
+
+  /* ── 10. G-11: typing ends when the box empties ── */
+  S.step('G-11 typing indicator withdrawn when the box is cleared');
+  {
+    const conv = await S.channel(ada, [bosco], 'slow');
+    const watcher = await S.openAs(ada, conv);
+    const typer = await S.openAs(bosco, conv);
+    await sleep(1500);
+    const box = typer.page.locator('#composer');
+    await box.click();
+    await box.pressSequentially('hello', { delay: 30 });
+    const shows = await waitTrue(watcher.page, () => /typing/i.test(document.body.innerText), null, 6000);
+    S.check('watcher sees "typing"', shows);
+    await box.fill('');
+    const gone = await waitTrue(watcher.page, () => !/is typing|are typing/i.test(document.body.innerText), null, 2500);
+    S.check('"typing" goes within 2.5 s of clearing', gone);
   }
 } catch (e) {
   S.check('suite ran to the end', false, String(e?.stack ?? e).split('\n').slice(0, 3).join(' | '));

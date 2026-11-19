@@ -12,6 +12,7 @@ import { apiGet, TAB_ID } from '../../lib/api';
 import { count } from '../../lib/clientCounters';
 import * as chatApi from './api';
 import * as outbox from './outbox';
+import { drafts } from './drafts';
 import { cacheGet, cacheSet, debouncedWriter } from '../../lib/localStore';
 import { closeConversationNotifications } from '../../lib/swSession';
 
@@ -36,7 +37,6 @@ const CACHED_MESSAGES = 100;
  * duplicate. That nonce match is the whole reason a retry is safe.
  */
 
-interface Draft { text: string; savedAt: number }
 
 interface ChatValue {
   conversations: ConversationSummary[];
@@ -109,6 +109,8 @@ interface ChatValue {
   queued: number;
   /** `kind` widens the indicator past typing — see ActivityKind. */
   notifyTyping: (kind?: ActivityKind) => void;
+  /** Withdraw "typing…" now: the box emptied, lost focus, or was left (G-11). */
+  stopTyping: () => void;
   markReadTo: (seq: number) => void;
   markEverythingRead: () => Promise<void>;
   /** The newest message of mine that can still be edited — what ↑ targets. */
@@ -119,12 +121,6 @@ interface ChatValue {
 
   draftFor: (conversationId: string) => string;
   setDraft: (conversationId: string, text: string) => void;
-  /**
-   * A draft saved on another device while this box was being typed in (G-01):
-   * offered, never applied over live typing. `take` puts it in the box.
-   */
-  remoteDraftFor: (conversationId: string) => string | null;
-  resolveRemoteDraft: (conversationId: string, take: boolean) => void;
 
   toggleStar: (id: string) => Promise<void>;
   setNotificationLevel: (id: string, level: NotificationLevel) => Promise<void>;
@@ -159,6 +155,34 @@ interface ChatValue {
 }
 
 const ChatContext = createContext<ChatValue | null>(null);
+
+/**
+ * The actions only, with identities that never change (G-02).
+ *
+ * A message row needs to *do* things (react, reply, edit) but must not
+ * re-render because some unrelated state moved. Reading these from the full
+ * context subscribed every row to every change; this context's value is
+ * created once, and each function forwards to the provider's latest version.
+ */
+export type ChatActions = Pick<ChatValue,
+  'send' | 'retry' | 'discard' | 'react' | 'edit' | 'remove' | 'pin' | 'save' | 'forward'
+  | 'openThread' | 'setReplyTarget' | 'jumpTo' | 'setEditingId' | 'markUnread' | 'sendThreadReply'
+  | 'markThreadRead' | 'notifyTyping' | 'stopTyping'>;
+const ChatActionsContext = createContext<ChatActions | null>(null);
+
+/** Stable wrappers around changing callbacks: same object for the provider's whole life. */
+function useStableActions<T extends Record<string, (...args: never[]) => unknown>>(fns: T): T {
+  const ref = useRef(fns);
+  ref.current = fns;
+  const [stable] = useState(() => {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(fns)) {
+      out[k] = (...args: unknown[]) => (ref.current[k] as (...a: unknown[]) => unknown)(...args);
+    }
+    return out as T;
+  });
+  return stable;
+}
 
 /**
  * Make a broadcast message this reader's own (X-01).
@@ -277,7 +301,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     Record<string, { online: string[]; viewing: string[] }>
   >({});
   const [connected, setConnected] = useState(false);
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [queued, setQueued] = useState(0);
   const [replyTarget, setReplyTarget] = useState<WireMessage | null>(null);
   const [threadRootId, setThreadRootId] = useState<string | null>(null);
@@ -299,14 +322,6 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const lastTypingSentAt = useRef(0);
   /** What each unsent message was, for an exact retry. */
   const pendingPayloads = useRef(new Map<string, Parameters<typeof chatApi.sendMessage>[1]>());
-  const draftTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  /** One live draft save per conversation; a newer save aborts the older (G-01). */
-  const draftAborts = useRef<Record<string, AbortController>>({});
-  /** When this tab last changed each draft by hand. */
-  const draftEditedAt = useRef<Record<string, number>>({});
-  /** What was just sent from each box, so a late echo of it is not put back (G-01). */
-  const lastSent = useRef<Record<string, { text: string; at: number }>>({});
-  const [remoteDrafts, setRemoteDrafts] = useState<Record<string, string>>({});
 
   const active = useMemo(
     () => conversations.find((c) => c.id === activeId) ?? null,
@@ -363,15 +378,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setConversations(list);
       prefetchUnread(list);
       setConversationsError(false);
-      // Server-side drafts follow the user between devices; seed the local
-      // cache from them, without clobbering something being typed right now.
-      setDrafts((prev) => {
-        const next = { ...prev };
-        for (const c of list) {
-          if (c.draft && !next[c.id]) next[c.id] = { text: c.draft, savedAt: Date.now() };
-        }
-        return next;
-      });
+      // Server-side drafts follow the user between devices; they fill only
+      // boxes this device knows nothing about (the device copy is newer).
+      for (const c of list) drafts.seedFromServer(c.id, c.draft);
     } catch {
       setConversationsError(true);
     } finally {
@@ -403,6 +412,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (listFromNetwork.current) saveConversations(conversations);
   }, [conversations, saveConversations]);
   // The offline queue belongs to whoever is signed in.
+  // The device copy of this person's drafts; nothing of theirs survives sign-out.
+  // Keyed on the id, not the object: a profile refresh must not wipe a draft.
+  const userId = user?.id ?? null;
+  useEffect(() => {
+    if (userId) void drafts.hydrate();
+    return () => drafts.reset();
+  }, [userId]);
   useEffect(() => { outbox.setOutboxOwner(user?.id ?? null, currentSessionTid()); }, [user]);
 
   /** Seed the per-thread counters from the Threads inbox. */
@@ -866,42 +882,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         : c)));
     };
 
-    /*
-     * A draft saved somewhere (G-01). Applied only when it is genuinely news:
-     *  - this tab's own save coming back is ignored outright;
-     *  - anything older than what this tab holds is dropped;
-     *  - a late echo of a message just sent is not put back in the box;
-     *  - while the box is being typed in, it is offered, never applied.
-     */
-    const onDraft = ({ conversationId, draft, at, origin }: {
-      conversationId: string; draft: string | null; at: string; origin?: string | null;
-    }) => {
-      if (origin && origin === TAB_ID) return;
-      const text = draft ?? '';
-      const remoteAt = Date.parse(at) || Date.now();
-      const sent = lastSent.current[conversationId];
-      if (sent && sent.text.trim() === text.trim() && Date.now() - sent.at < 30_000) {
-        count('chat.draft.conflict_dropped');
-        return;
-      }
-      const editingHere = Date.now() - (draftEditedAt.current[conversationId] ?? 0) < 5_000
-        || (activeIdRef.current === conversationId
-            && typeof document !== 'undefined'
-            && (document.activeElement as HTMLElement | null)?.id === 'composer');
-      let dropped = false;
-      let offered = false;
-      setDrafts((prev) => {
-        const local = prev[conversationId];
-        if (local && local.savedAt >= remoteAt) { dropped = true; return prev; }
-        if (local && local.text === text) return prev;
-        if (editingHere && local && local.text.trim()) { offered = true; return prev; }
-        return { ...prev, [conversationId]: { text, savedAt: remoteAt } };
-      });
-      if (dropped) count('chat.draft.conflict_dropped');
-      if (offered) {
-        count('chat.draft.remote_offered');
-        setRemoteDrafts((prev) => ({ ...prev, [conversationId]: text }));
-      }
+    // Drafts saved elsewhere: the store decides whether they are news (G-01).
+    const onDraft = (p: { conversationId: string; draft: string | null; at: string; origin?: string | null }) => {
+      drafts.applyRemote(p);
     };
 
     // Presence arrives per person, and the sidebar shows it per DM row, so it
@@ -1063,48 +1046,12 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return null;
   }, [messages, user]);
 
-  const draftFor = useCallback((id: string) => drafts[id]?.text ?? '', [drafts]);
-
-  const setDraft = useCallback((id: string, text: string) => {
-    const savedAt = Date.now();
-    draftEditedAt.current[id] = savedAt;
-    setDrafts((prev) => ({ ...prev, [id]: { text, savedAt } }));
-    // Debounced to the server. A draft is worth persisting so it survives a
-    // reload and follows you to another device — but not on every keystroke.
-    // `savedAt` travels with it, so the server keeps the newest (G-01), and a
-    // newer save aborts the one still in flight.
-    clearTimeout(draftTimers.current[id]);
-    draftTimers.current[id] = setTimeout(() => {
-      draftAborts.current[id]?.abort();
-      const ctl = new AbortController();
-      draftAborts.current[id] = ctl;
-      void chatApi.saveDraft(id, text || null, savedAt, { signal: ctl.signal })
-        .catch(() => {})
-        .finally(() => { if (draftAborts.current[id] === ctl) delete draftAborts.current[id]; });
-    }, 800);
-  }, []);
-
-  /** Sending ends the draft: no pending save, no save in flight, no echo put back (G-01). */
-  const endDraft = useCallback((id: string, sentText: string) => {
-    clearTimeout(draftTimers.current[id]);
-    draftAborts.current[id]?.abort();
-    delete draftAborts.current[id];
-    lastSent.current[id] = { text: sentText, at: Date.now() };
-    setRemoteDrafts((prev) => {
-      if (!(id in prev)) return prev;
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-  }, []);
-
-  const remoteDraftFor = useCallback((id: string) => remoteDrafts[id] ?? null, [remoteDrafts]);
-  const resolveRemoteDraft = useCallback((id: string, take: boolean) => {
-    const text = remoteDrafts[id];
-    setRemoteDrafts((prev) => { const next = { ...prev }; delete next[id]; return next; });
-    if (take && text !== undefined) setDraft(id, text);
-  }, [remoteDrafts, setDraft]);
-
+  /*
+   * Drafts live in their own store (drafts.ts) so typing re-renders only the
+   * box being typed in (G-02). These two stay for callers that read once.
+   */
+  const draftFor = useCallback((id: string) => drafts.get(id), []);
+  const setDraft = useCallback((id: string, text: string) => drafts.set(id, text), []);
 
   const send = useCallback(async (input: {
     body: string; replyToId?: string | null; threadRootId?: string | null;
@@ -1150,11 +1097,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
 
     setMessages((prev) => [...prev, optimistic]);
-    if (!input.threadRootId) {
-      endDraft(conversationId, body);
-      // The cleared box is saved as cleared, stamped after the text it replaces.
-      setDraft(conversationId, '');
-    }
+    // Sending ends the draft: nothing pending, nothing in flight, no echo put back.
+    if (!input.threadRootId) drafts.end(conversationId, body);
     setReplyTarget(null);
 
     const payload = {
@@ -1215,7 +1159,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       failed();
     }
-  }, [user, setDraft, endDraft, replyTarget]);
+  }, [user, replyTarget]);
 
   const retry = useCallback(async (nonce: string) => {
     const failedMsg = messages.find((m) => m.nonce === nonce);
@@ -1475,6 +1419,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     socket.emit('typing:start', { conversationId: id, kind });
   }, []);
 
+  const stopTyping = useCallback(() => {
+    const id = activeIdRef.current;
+    if (!id || lastTypingSentAt.current === 0) return;
+    lastTypingSentAt.current = 0;
+    const socket = getSocket();
+    if (socket?.connected) socket.emit('typing:stop', { conversationId: id });
+  }, []);
+
   const markReadTo = useCallback((seq: number) => {
     const id = activeIdRef.current;
     if (!id || !Number.isFinite(seq) || seq <= 0) return;
@@ -1623,18 +1575,27 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     typingByConversation: typingByConv,
     conversationPresence: convPresence,
     connected,
-    send, retry, discard, react, edit, remove, notifyTyping, markReadTo, queued,
+    send, retry, discard, react, edit, remove, notifyTyping, stopTyping, markReadTo, queued,
     markEverythingRead, lastEditableOwnMessage, editingId, setEditingId,
     replyTarget, setReplyTarget,
     threadRootId, threadMessages, threadLoading, openThread, sendThreadReply,
     pin, save, forward, jumpTo, highlightedId, hasNewer, loadNewer, showLatest,
-    draftFor, setDraft, remoteDraftFor, resolveRemoteDraft, toggleStar, setNotificationLevel, muteUntil, hideConversation,
+    draftFor, setDraft, toggleStar, setNotificationLevel, muteUntil, hideConversation,
     totalUnread, totalMentions, threadUnread, threadsUnreadTotal,
     markThreadRead, markUnread, markConversationRead,
     refresh, enterToSend, blockedIds, setBlocked,
   };
 
-  return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;
+  const actions = useStableActions<ChatActions>({
+    send, retry, discard, react, edit, remove, pin, save, forward, openThread, setReplyTarget,
+    jumpTo, setEditingId, markUnread, sendThreadReply, markThreadRead, notifyTyping, stopTyping,
+  });
+
+  return (
+    <ChatActionsContext.Provider value={actions}>
+      <ChatContext.Provider value={value}>{children}</ChatContext.Provider>
+    </ChatActionsContext.Provider>
+  );
 };
 
 /**
@@ -1659,6 +1620,12 @@ function reconcile(list: WireMessage[], incoming: WireMessage, nonce?: string): 
   const out = [...list, incoming];
   out.sort((a, b) => a.seq - b.seq);
   return out;
+}
+
+export function useChatActions(): ChatActions {
+  const ctx = useContext(ChatActionsContext);
+  if (!ctx) throw new Error('useChatActions must be used inside <ChatProvider>');
+  return ctx;
 }
 
 export function useChat(): ChatValue {

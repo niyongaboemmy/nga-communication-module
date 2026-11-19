@@ -22,8 +22,9 @@ import { toDisplay, toWire, type MentionTarget } from './mentionText';
 import { SchedulePopover } from './SchedulePopover';
 import { MeetSchedulePopover } from './MeetSchedulePopover';
 import type { Conversation } from './types';
-import { noteKeystroke, noteCommit } from '../../lib/perf';
-import { isComposing, isSubmitEnter } from './composerKeys';
+import { isComposing } from './composerKeys';
+import { drafts, useDraftOffer } from './drafts';
+import { useComposerBox } from './useComposerBox';
 
 /**
  * The composer.
@@ -50,14 +51,23 @@ export const Composer: React.FC<{
   const { notify } = useNotify();
   const navigate = useNavigate();
   const {
-    send, notifyTyping, draftFor, setDraft, remoteDraftFor, resolveRemoteDraft,
+    send, notifyTyping, stopTyping, setDraft,
     connected, queued, replyTarget, setReplyTarget,
     enterToSend, lastEditableOwnMessage, setEditingId, blockedIds, setBlocked,
   } = useChat();
-  const ref = useRef<HTMLTextAreaElement>(null);
-
-  const value = draftFor(conversation.id);
-  const remoteDraft = remoteDraftFor(conversation.id);
+  // Text, Enter rules, auto-grow and typing come from the shared core: a
+  // keystroke re-renders this box and nothing else (G-02).
+  const submitRef = useRef<() => void>(() => {});
+  const box = useComposerBox({
+    draftKey: conversation.id,
+    maxHeightPx: MAX_ROWS_PX,
+    enterToSend,
+    onSubmit: () => submitRef.current(),
+    onTyping: () => notifyTyping(),
+    onTypingStop: stopTyping,
+  });
+  const { ref, value } = box;
+  const remoteDraft = useDraftOffer(conversation.id);
   const [touch, setTouch] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -135,13 +145,6 @@ export const Composer: React.FC<{
     setTouch(window.matchMedia('(pointer: coarse)').matches);
   }, []);
 
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, MAX_ROWS_PX)}px`;
-    noteCommit();
-  }, [value]);
 
   // Focus follows the open conversation on a pointer device, so switching
   // channels and typing works without a click. Not on touch: focusing there
@@ -289,6 +292,8 @@ export const Composer: React.FC<{
     }
   }, [value, send, tray, conversation.id, setDraft, onOpenPanel, notify, navigate, members]);
 
+  submitRef.current = () => submit();
+
   // The held voice note goes as soon as its upload is done (U-02).
   useEffect(() => {
     if (!sendWhenReady || tray.busy) return;
@@ -364,10 +369,7 @@ export const Composer: React.FC<{
     }
 
     // Enter on a pointer device (unless turned off), ⌘/Ctrl+Enter anywhere.
-    if (isSubmitEnter(e, enterToSend)) {
-      e.preventDefault();
-      submit();
-    }
+    box.handleSubmitKey(e);
   };
 
   // Choosing a message to answer is choosing to write; put the caret there.
@@ -559,8 +561,8 @@ export const Composer: React.FC<{
           <span className="min-w-0 flex-1 truncate">
             Draft from another device: <span className="opacity-80">{remoteDraft || '(empty)'}</span>
           </span>
-          <button className="font-semibold hover:underline" onClick={() => resolveRemoteDraft(conversation.id, true)}>Use it</button>
-          <button className="opacity-80 hover:underline" onClick={() => resolveRemoteDraft(conversation.id, false)}>Keep mine</button>
+          <button className="font-semibold hover:underline" onClick={() => drafts.resolveOffer(conversation.id, true)}>Use it</button>
+          <button className="opacity-80 hover:underline" onClick={() => drafts.resolveOffer(conversation.id, false)}>Keep mine</button>
         </div>
       )}
 
@@ -613,16 +615,13 @@ export const Composer: React.FC<{
         </label>
         <textarea
           id="composer"
-          ref={ref}
+          {...box.textareaProps}
           rows={1}
-          value={value}
           onChange={(e) => {
-            noteKeystroke();
-            setDraft(conversation.id, e.target.value);
+            // Typing is announced (throttled in the provider) and withdrawn
+            // when the box empties, by the core.
+            box.onChange(e);
             syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
-            // Throttled inside the provider — one event per keystroke would be
-            // thousands of packets for a fact that is true for six seconds.
-            if (e.target.value) notifyTyping();
           }}
           onKeyUp={(e) => {
             // Arrow keys and clicks move the caret without changing the text,
@@ -634,7 +633,7 @@ export const Composer: React.FC<{
             const el = e.currentTarget;
             syncMention(el.value, el.selectionStart ?? el.value.length);
           }}
-          onBlur={() => setMention(null)}
+          onBlur={() => { box.onBlur(); setMention(null); }}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           placeholder={

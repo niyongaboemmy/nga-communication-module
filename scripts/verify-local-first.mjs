@@ -136,7 +136,8 @@ try {
 
   console.log('\nSign-out');
   const before = await page.evaluate(async () => (await indexedDB.databases?.() ?? []).map((d) => d.name).filter((n) => n?.startsWith('tupo-cache-')));
-  check('the device copy is per account', before.includes(`tupo-cache-${me.id}`), before.join(', '));
+  // Multi-tenancy (0046) names the copy per school and account: tupo-cache-<tid>-<user>.
+  check('the device copy is per account', before.some((n) => n === `tupo-cache-${me.id}` || n.endsWith(`-${me.id}`)), before.join(', '));
   await page.evaluate(async () => {
     // What every sign-out path calls (lib/api clearSession), without leaving the page.
     const mod = await import('/src/lib/api.ts');

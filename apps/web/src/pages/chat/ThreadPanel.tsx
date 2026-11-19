@@ -1,4 +1,5 @@
-import { isSubmitEnter } from './composerKeys';
+import { useComposerBox } from './useComposerBox';
+import { threadKey } from './drafts';
 import { MAX_MESSAGE_LENGTH } from '@tupo/shared';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X, Send, CornerDownRight, Paperclip, FileText } from 'lucide-react';
@@ -78,11 +79,6 @@ const ThreadMessage: React.FC<{
   );
 };
 
-/**
- * Half-written replies, per thread, for as long as the tab is open (B-08):
- * closing the panel, or switching to another thread and back, keeps them.
- */
-const threadDrafts = new Map<string, string>();
 
 export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversation }) => {
   const { can } = usePermissions();
@@ -92,19 +88,22 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
   } = useChat();
 
   const { notify } = useNotify();
-  const [value, setValueState] = useState(() => (threadRootId ? threadDrafts.get(threadRootId) ?? '' : ''));
-  const setValue = (next: string) => {
-    setValueState(next);
-    if (!threadRootId) return;
-    if (next) threadDrafts.set(threadRootId, next); else threadDrafts.delete(threadRootId);
-  };
-  // Another thread opened in the same panel: show that thread's draft.
-  useEffect(() => { setValueState(threadRootId ? threadDrafts.get(threadRootId) ?? '' : ''); }, [threadRootId]);
+  /*
+   * Half-written replies, per thread (B-08), in the draft store: closing the
+   * panel, switching threads, and now a reload or a crash all keep them (G-09).
+   */
+  const submitRef = useRef<() => void>(() => {});
+  const box = useComposerBox({
+    draftKey: threadKey(threadRootId ?? 'none'),
+    maxHeightPx: 128,
+    onSubmit: () => submitRef.current(),
+  });
+  const { value } = box;
+  const inputRef = box.ref;
   const [alsoSend, setAlsoSend] = useState(false);
   const tray = useUploads();
   const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useLayoutEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
@@ -172,16 +171,18 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
     }
     const attachments = tray.readyIds;
     const wasAlsoSend = alsoSend;
-    setValue('');
+    box.takeForSend();
     setAlsoSend(false);
     tray.clear();
     try {
       await sendThreadReply(text, wasAlsoSend, attachments);
     } catch (err) {
-      if (!inputRef.current?.value.trim()) setValue(text);
+      box.restore(text);
       notify({ title: 'Your reply was not sent', body: err instanceof Error ? err.message : undefined, tone: 'error' });
     }
   };
+
+  submitRef.current = () => { void submit(); };
 
   // The same rule as the server's assertCanPost: an announcement channel's
   // threads are for announcers too.
@@ -277,20 +278,13 @@ export const ThreadPanel: React.FC<{ conversation: Conversation }> = ({ conversa
             <label className="sr-only" htmlFor="thread-composer">Reply in thread</label>
             <textarea
               id="thread-composer"
-              ref={inputRef}
+              {...box.textareaProps}
               rows={1}
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
               onPaste={(e) => {
                 const files = [...e.clipboardData.files];
                 if (files.length) { e.preventDefault(); tray.add(files); }
               }}
-              onKeyDown={(e) => {
-                if (isSubmitEnter(e)) {
-                  e.preventDefault();
-                  void submit();
-                }
-              }}
+              onKeyDown={(e) => { box.handleSubmitKey(e); }}
               placeholder="Reply…"
               className="max-h-32 min-h-8 flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-text-primary-light outline-none placeholder:text-text-secondary-light/80 dark:text-text-primary-dark"
             />
