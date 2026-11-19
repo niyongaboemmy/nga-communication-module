@@ -46,7 +46,15 @@ export default defineConfig({
             { name: 'react', test: /node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler)[\\/]/, priority: 30 },
             { name: 'icons', test: /node_modules[\\/]lucide-react[\\/]/, priority: 20 },
             { name: 'socket', test: /node_modules[\\/](socket\.io-client|engine\.io-client|socket\.io-parser|engine\.io-parser|@socket\.io)[\\/]/, priority: 20 },
-            { name: 'editor', test: /node_modules[\\/](@tiptap|prosemirror-[a-z-]+|linkifyjs)[\\/]/, priority: 20 },
+            /*
+             * The editor group must hold ProseMirror's own small dependencies
+             * too (rope-sequence, orderedmap, w3c-keyname, …). Left out, the
+             * bundler put them in the `mail` chunk, which imports `editor`:
+             * a chunk cycle, and in production `editor` evaluated first and
+             * crashed Mail on open ("reading 'empty'" in prosemirror-history).
+             * `verify:bundle` now fails the build on any chunk cycle.
+             */
+            { name: 'editor', test: /node_modules[\\/](@tiptap|prosemirror-[a-z-]+|linkifyjs|linkify-it|rope-sequence|orderedmap|w3c-keyname|markdown-it|mdurl|uc\.micro|entities|punycode)[\\/]/, priority: 20 },
             /*
              * The conversation view (message log, rows, composer, thread pane)
              * as one lazy chunk. Left to itself the bundler merged it into the
@@ -55,7 +63,7 @@ export default defineConfig({
              * lazy pages import belong here — anything the shell imports
              * statically would drag the group back into the first download.
              */
-            { name: 'chat-view', test: /src[\\/]pages[\\/]chat[\\/](MessageThread|MessageRow|Composer|ThreadPanel|InlineThread|ThreadSummary|QuotePreview|MessageActionSheet|useComposerBox|jumpHistory|inlineThreadState|MentionAutocomplete|VoiceRecorder|SchedulePopover|MeetSchedulePopover|PinnedBar)\.tsx?$/, priority: 10 },
+            { name: 'chat-view', test: /src[\\/]pages[\\/]chat[\\/](MessageThread|MessageRow|Composer|ThreadPanel|InlineThread|ThreadSummary|QuotePreview|MessageActionSheet|useComposerBox|jumpHistory|inlineThreadState|MentionAutocomplete|VoiceRecorder|SchedulePopover|MeetSchedulePopover|PinnedBar|slashCommands|useStartCall|useVirtualWindow)\.tsx?$|src[\\/]lib[\\/]voiceFormat\.ts$/, priority: 10 },
           ],
         },
       },

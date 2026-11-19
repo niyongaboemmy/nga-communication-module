@@ -28,7 +28,7 @@ const env = Object.fromEntries(readFileSync('apps/api/.env', 'utf8').split('\n')
 
 const API = 'http://localhost:5190';
 const FILES = 'http://localhost:5192';
-const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
+const pool = new pg.Pool({ connectionString: env.DATABASE_URL, options: '-c app.tenant_id=1' }); // multi-tenancy: suites run as tenant 1
 
 const pass = [], fails = [];
 const check = (name, ok, detail = '') => {
