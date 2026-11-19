@@ -123,6 +123,38 @@ export const FeedProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   }, []);
 
+  /*
+   * A page changed its name or pictures (F-01): every loaded post of that page
+   * shows the new one at once. The page announces itself on the `feed:page`
+   * window event (see announcePage in Frame); the reader's own relationship
+   * with the page on each post is left alone.
+   */
+  useEffect(() => {
+    const on = (e: Event) => {
+      const u = (e as CustomEvent<{ id: string; name?: string; slug?: string; avatarFileId?: string | null; verified?: boolean }>).detail;
+      if (!u?.id) return;
+      setPosts((prev) => {
+        let changed = false;
+        const next: PostMap = {};
+        for (const [id, post] of Object.entries(prev)) {
+          if (post.page.id !== u.id) { next[id] = post; continue; }
+          const page = {
+            ...post.page,
+            ...(u.name !== undefined ? { name: u.name } : {}),
+            ...(u.slug !== undefined ? { slug: u.slug } : {}),
+            ...(u.avatarFileId !== undefined ? { avatarFileId: u.avatarFileId } : {}),
+            ...(u.verified !== undefined ? { verified: u.verified } : {}),
+          };
+          changed = true;
+          next[id] = { ...post, page };
+        }
+        return changed ? next : prev;
+      });
+    };
+    window.addEventListener('feed:page', on);
+    return () => window.removeEventListener('feed:page', on);
+  }, []);
+
   const remove = useCallback((id: string) => {
     setPosts((prev) => {
       if (!prev[id]) return prev;

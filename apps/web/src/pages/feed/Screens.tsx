@@ -3,7 +3,7 @@ import { useNotify } from '../../context/NotificationContext';
 import { useConfirmDialog } from '../../components/ConfirmDialog';
 import { LoadError } from '../../components/LoadError';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, Bookmark, ShieldAlert, Check, Trash2, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Bookmark, ShieldAlert, Check, Trash2, AlertTriangle, Loader2 } from 'lucide-react';
 import type { FeedPostView, FeedReportView } from '@tupo/shared';
 import { Avatar, EmptyState, Spinner } from '../../components/ui';
 import { useFeed, useFeedList } from './FeedProvider';
@@ -29,9 +29,16 @@ export const SavedPosts: React.FC = () => {
           </Link>
           <h1 className="mb-4 flex items-center gap-2 text-lg font-bold text-text-primary-light dark:text-text-primary-dark"><Bookmark size={18} /> Saved posts</h1>
           {list.loading ? <><PostSkeleton /><PostSkeleton /></>
+            // A failed load is not an empty list (F-09).
+            : list.error && items.length === 0 ? <LoadError what="your saved posts" onRetry={list.reload} />
             : items.length === 0 ? <EmptyState title="Nothing saved yet" hint="Tap the bookmark on any post to keep it here." />
             : <div className="space-y-4">{items.map((p) => <PostCard key={p.id} post={p} />)}</div>}
-          {list.hasMore && <button onClick={list.loadMore} className="mx-auto mt-4 block rounded-full border border-border-light px-5 py-2 text-sm font-semibold dark:border-border-dark/50">Load more</button>}
+{list.hasMore && (
+            <button onClick={list.loadMore} disabled={list.more} aria-busy={list.more}
+              className="mx-auto mt-4 flex items-center gap-2 rounded-full border border-border-light px-5 py-2 text-sm font-semibold disabled:opacity-60 dark:border-border-dark/50">
+              {list.more && <Loader2 size={14} className="animate-spin" />} {list.moreError ? 'Try again' : 'Load more'}
+            </button>
+          )}
         </div>
       </FeedFrame>
       <ReportDialog />

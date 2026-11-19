@@ -91,7 +91,13 @@ export const FeedHome: React.FC = () => {
           {list.loading ? (
             <><PostSkeleton /><PostSkeleton /></>
           ) : list.error ? (
-            <div className="feed-card p-6"><EmptyState title="Could not load the feed" hint={list.error} /></div>
+            <div className="feed-card p-6">
+              <EmptyState
+                title="Could not load the feed"
+                hint={list.error}
+                action={<button onClick={list.reload} className="rounded-full bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700">Try again</button>}
+              />
+            </div>
           ) : items.length === 0 ? (
             <div className="feed-card p-6">
               <EmptyState

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   BadgeCheck, Bell, BellOff, Plus, BarChart3, ArrowLeft, Users, Search, X, Loader2, Settings2, Camera,
   Check, ChevronDown, MoreHorizontal, Mail, ExternalLink, Pencil, Link2, Trash2, UserPlus,
@@ -280,7 +280,12 @@ export const PageProfile: React.FC = () => {
   const { posts, ingest } = useFeed();
   const { notify, confirm } = useNotify();
   const [page, setPage] = useState<FeedPageDetail | null>(null);
-  const [tab, setTab] = useState<PageTab>('posts');
+  // A link can open a tab directly (e.g. "Open drafts" after moving a post there).
+  const [tabParams] = useSearchParams();
+  const [tab, setTab] = useState<PageTab>(() => {
+    const t = tabParams.get('tab');
+    return t === 'drafts' || t === 'about' || t === 'team' || t === 'posts' ? t as PageTab : 'posts';
+  });
   const [allPages, setAllPages] = useState<FeedPageSummary[]>([]);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [coverBusy, setCoverBusy] = useState(false);
@@ -371,6 +376,9 @@ export const PageProfile: React.FC = () => {
       const fileId = await uploadFile(file, () => {}).promise;
       const updated = await api.updatePage(page.id, { [kind]: fileId });
       setPage(updated);
+      // Every list showing this page — the rails, suggestions, its posts —
+      // takes the new picture now, not after a reload (F-01).
+      announcePage(updated);
       confirm(kind === 'avatarFileId' ? 'Page photo updated' : 'Cover photo updated');
     } catch (e) {
       notify({ title: e instanceof Error ? e.message : 'Could not update the photo', tone: 'error' });
@@ -488,9 +496,15 @@ export const PageProfile: React.FC = () => {
             <div className="mt-4 space-y-4">
               {page.canPost && <Composer pages={allPages} defaultPageId={page.id} onPublished={(p) => { if (p) { list.prepend(p.id); ingest([p]); } }} />}
               {list.loading ? <><PostSkeleton /><PostSkeleton /></>
+                : list.error && items.length === 0 ? <LoadError what="this page's posts" onRetry={list.reload} />
                 : items.length === 0 ? <EmptyState title="No posts yet" hint={page.canPost ? 'Share the first update.' : 'Check back soon.'} />
                 : items.map((post) => <PostCard key={post.id} post={post} />)}
-              {list.hasMore && <button onClick={list.loadMore} className="mx-auto block rounded-full border border-border-light px-5 py-2 text-sm font-semibold dark:border-border-dark/50">Load more</button>}
+{list.hasMore && (
+                <button onClick={list.loadMore} disabled={list.more} aria-busy={list.more}
+                  className="mx-auto mt-4 flex items-center gap-2 rounded-full border border-border-light px-5 py-2 text-sm font-semibold disabled:opacity-60 dark:border-border-dark/50">
+                  {list.more && <Loader2 size={14} className="animate-spin" />} {list.moreError ? 'Try again' : 'Load more'}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -498,7 +512,7 @@ export const PageProfile: React.FC = () => {
       <ReportDialog />
       <EditPostMount pages={allPages} />
       {followersOpen && canManage && <FollowersDialog page={page} onClose={() => setFollowersOpen(false)} />}
-      {editing && <EditPageDialog page={page} onClose={() => setEditing(false)} onSaved={(p) => { setPage(p); setEditing(false); }} />}
+      {editing && <EditPageDialog page={page} onClose={() => setEditing(false)} onSaved={(p) => { setPage(p); announcePage(p); setEditing(false); }} />}
     </>
   );
 };

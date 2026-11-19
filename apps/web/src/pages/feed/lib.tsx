@@ -106,6 +106,9 @@ export function useMediaUrl(
   const failRef = useRef(onFail);
   failRef.current = onFail;
   useEffect(() => {
+    // A different file (a new page photo, say) never shows the previous one
+    // while it resolves, and a cleared one never keeps a stale picture (F-02).
+    setUrl(key ? urlCache.get(key) : undefined);
     if (!fileId || !key || !enabled) return;
     const cached = urlCache.get(key);
     if (cached) { setUrl(cached); return; }
