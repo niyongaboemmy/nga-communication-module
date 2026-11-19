@@ -9,6 +9,8 @@
 - A **live run**: a seeded `#s4-mathematics` channel with 4 people, 2 threads (5 and 3 replies), 3 quote replies and one thread reply also sent to the channel.
 - Screenshots from desktop (1440×900) and phone (390×844, touch), driven by Playwright, saved in [chat-replies-audit-2026-11-19/](chat-replies-audit-2026-11-19/).
 
+**Status (19 Nov 2026):** R-01 to R-13 and C-01 to C-07 are implemented on branch `feat/chat-experience` (not yet deployed). Results and deviations are in §11 of [CHAT_EXPERIENCE_IMPLEMENTATION_PLAN_2026-11.md](CHAT_EXPERIENCE_IMPLEMENTATION_PLAN_2026-11.md).
+
 ---
 
 ## 1. Summary

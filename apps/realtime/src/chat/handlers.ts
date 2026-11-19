@@ -464,6 +464,11 @@ export async function fanOutMessage(
     io.to(conversationRoom(conversationId)).emit('thread:reply', {
       conversationId, rootId, message: result.message,
     });
+    // The parent's reply count and summary line (who replied, the latest
+    // reply) changed for everyone looking at the main flow, as on the REST
+    // route — thread replies now arrive over the socket too (G-07, R-02).
+    const root = await chat.getMessage(result.message.senderId, conversationId, rootId).catch(() => null);
+    if (root) io.to(conversationRoom(conversationId)).emit('message:updated', { conversationId, message: root });
     const counts = await chat.threadUnreadFor(conversationId, rootId).catch(() => []);
     for (const c of counts) {
       io.to(userRoom(c.userId)).emit('thread:unread', { conversationId, rootId, unread: c.unread });

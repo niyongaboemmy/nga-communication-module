@@ -72,11 +72,28 @@ export const InlineThread: React.FC<{
   useEffect(() => subscribeThread(root.id, (fn) => setReplies((prev) => withoutRoot(fn(prev)))),
     [root.id, subscribeThread, withoutRoot]);
 
-  // On screen and expanded is read (the same honest proxy the main log uses).
+  /*
+   * Read means seen: the replies count as read only while this block is on
+   * screen with the tab visible — the same honest proxy the main log uses —
+   * not merely because it is expanded somewhere up the log.
+   */
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [onScreen, setOnScreen] = useState(false);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') { setOnScreen(true); return; }
+    const io = new IntersectionObserver(([e]) => setOnScreen(Boolean(e?.isIntersecting)), { threshold: 0.5 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
   const newest = replies.reduce((max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
   useEffect(() => {
-    if (newest > 0 && !document.hidden) markThreadRead(root.id, newest);
-  }, [newest, root.id, markThreadRead]);
+    if (!onScreen || newest <= 0) return;
+    const mark = () => { if (!document.hidden) markThreadRead(root.id, newest); };
+    mark();
+    document.addEventListener('visibilitychange', mark);
+    return () => document.removeEventListener('visibilitychange', mark);
+  }, [onScreen, newest, root.id, markThreadRead]);
 
   const loadEarlier = async () => {
     const oldest = replies.find((m) => m.seq > 0 && m.seq !== Number.MAX_SAFE_INTEGER);
@@ -140,7 +157,7 @@ export const InlineThread: React.FC<{
   const capped = replies.length >= INLINE_MAX;
 
   return (
-    <div data-inline-thread="" className="mt-1.5 w-full min-w-0 rounded-2xl bg-white/70 p-1.5 sm:p-2 dark:bg-elevated-dark/40">
+    <div ref={boxRef} data-inline-thread="" className="mt-1.5 w-full min-w-0 rounded-2xl bg-white/70 p-1.5 sm:p-2 dark:bg-elevated-dark/40">
       {loading ? (
         <div className="space-y-2 p-1" aria-busy="true" aria-label="Loading replies">
           <Skeleton className="h-8 w-4/5 rounded-xl" />

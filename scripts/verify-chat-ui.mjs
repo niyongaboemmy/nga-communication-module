@@ -144,7 +144,7 @@ try {
   const B = await openAs(bob);
 
   check('the chat screen renders for a signed-in user',
-    await A.page.getByRole('heading', { name: 'Chat', exact: true }).isVisible());
+    await visible(A.page.getByRole('heading', { name: 'Chat', exact: true }), 10000));
 
   /* ── Start a DM ───────────────────────────────────────────────────────── */
 
@@ -169,7 +169,8 @@ try {
   await A.page.locator('#composer').fill(text);
   await A.page.locator('#composer').press('Enter');
 
-  const aliceThread = A.page.getByRole('log', { name: 'Messages' });
+  // exact: a string name otherwise also matches the thread pane's "Thread messages".
+  const aliceThread = A.page.getByRole('log', { name: 'Messages', exact: true });
   await aliceThread.getByText(text).waitFor({ timeout: 5000 });
   check('the sender sees their own message immediately', true);
 
@@ -187,7 +188,7 @@ try {
   await B.page.screenshot({ path: `${SHOTS}/02-bob-badge.png` });
 
   await bobRow.click();
-  const bobThread = B.page.getByRole('log', { name: 'Messages' });
+  const bobThread = B.page.getByRole('log', { name: 'Messages', exact: true });
   await bobThread.getByText(text).waitFor({ timeout: 8000 });
   check('the recipient can open it and read the message', true);
 
@@ -323,14 +324,13 @@ try {
   const editedRow = aliceThread.locator('li', { hasText: `${editable} (fixed)` }).first();
   await editedRow.hover();
   await editedRow.getByRole('button', { name: 'Delete message' }).click();
-  const confirmBox = A.page.getByRole('dialog', { name: 'Confirm deletion' });
-  check('deletion asks first', await visible(confirmBox, 3000));
-
-  await confirmBox.getByRole('button', { name: 'Delete' }).click();
+  // G-12: your own message goes at once, with a few seconds to take it back,
+  // instead of a confirmation (someone else's still asks first).
+  check('deleting my own message offers Undo', await visible(A.page.getByRole('button', { name: 'Undo' }).first(), 3000));
   check('a deleted message becomes a tombstone rather than vanishing',
     await visible(aliceThread.getByText('This message was deleted').first()));
-  check('and the tombstone reaches the other person live',
-    await visible(bobThread.getByText('This message was deleted').first()));
+  check('and the tombstone reaches the other person live (after the Undo window)',
+    await visible(bobThread.getByText('This message was deleted').first(), 12000));
   await A.page.screenshot({ path: `${SHOTS}/06-alice-phase2.png` });
 
   /* ── Quote reply ──────────────────────────────────────────────────────── */
@@ -342,7 +342,8 @@ try {
   await quotableRow.waitFor({ timeout: 8000 });
 
   await quotableRow.hover();
-  await quotableRow.getByRole('button', { name: 'Quote reply' }).click();
+  // In a DM the one Reply is the quote (R-06); with inline replies off it is "Quote reply".
+  await quotableRow.getByRole('button', { name: /^(Quote reply|Reply)$/ }).first().click();
   check('choosing to quote shows what is being answered above the composer',
     await visible(A.page.getByText(/Replying to Bosco Rugema/)));
 
@@ -365,7 +366,13 @@ try {
   await rootRow.waitFor({ timeout: 8000 });
 
   await rootRow.hover();
-  await rootRow.getByRole('button', { name: 'Reply in thread' }).click();
+  // In a DM, "Reply in thread" lives in the ⋯ menu once Reply means the quote (R-06).
+  const threadButton = rootRow.getByRole('button', { name: 'Reply in thread' });
+  if (await threadButton.count()) await threadButton.click();
+  else {
+    await rootRow.getByRole('button', { name: 'More actions' }).click();
+    await A.page.getByRole('menuitem', { name: 'Reply in thread' }).click();
+  }
   const threadPane = A.page.getByRole('complementary', { name: 'Thread' });
   check('a thread opens in its own pane', await visible(threadPane, 4000));
   check('and repeats the message it is about, so the subject is never off-screen',

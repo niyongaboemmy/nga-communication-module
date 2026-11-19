@@ -5,6 +5,8 @@
 **Branch reviewed:** `feat/responsiveness-m5b` (head `12ceb94`)
 **Method:** code review of `apps/web`, `apps/api` and `packages/shared`. Nothing here was reproduced in a browser yet. §7 lists the tests that would confirm each finding.
 
+**Status (19 Nov 2026):** G-01 to G-16 are implemented on branch `feat/chat-experience` (not yet deployed). Results and deviations are in §11 of [CHAT_EXPERIENCE_IMPLEMENTATION_PLAN_2026-11.md](CHAT_EXPERIENCE_IMPLEMENTATION_PLAN_2026-11.md).
+
 ---
 
 ## 1. Summary

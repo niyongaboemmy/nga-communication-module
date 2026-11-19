@@ -143,8 +143,9 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
   const [threadOpen, setThreadOpenState] = useState(() => threadable && isInlineOpen(m.id));
   const [focusReply, setFocusReply] = useState(0);
   const setThreadOpen = (open: boolean) => { setThreadOpenState(open); setInlineOpen(m.id, open); };
-  // Unread replies open the thread in place (R-03): what is new is shown, not hinted at.
-  useEffect(() => { if (threadable && newReplies > 0) setThreadOpenState(true); }, [threadable, newReplies]);
+  // Unread replies are announced on the summary line ("N new", blue) rather than
+  // opened by themselves: an opened thread is read, and reading must be something
+  // the person did, not something a scroll past an expanded block did for them.
   /*
    * One Reply (R-06). Inside a thread: "@Name" in the same thread. In a direct
    * message: a quote. In a room: the replies open under the message, caret

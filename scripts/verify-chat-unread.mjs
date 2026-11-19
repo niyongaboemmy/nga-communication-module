@@ -137,8 +137,11 @@ try {
   await p.screenshot({ path: `${OUT}/3-all-read.png` });
 
   console.log('\n── Threads inbox');
-  await call(C, 'POST', `/api/chat/conversations/${grp}/messages/${seedB.id}/replies`, { body: 'cy chimes in', nonce: nonce() });
+  // Away from the room first: a reply that lands in a thread open on screen is
+  // read (R-03, "seen means read"); this checks one that arrives elsewhere.
   await p.getByText('Ada Unread').first().click(); await sleep(1500);
+  await call(C, 'POST', `/api/chat/conversations/${grp}/messages/${seedB.id}/replies`, { body: 'cy chimes in', nonce: nonce() });
+  await sleep(1000);
   await p.getByRole('button', { name: /^Threads/ }).first().click(); await sleep(1500);
   check('the Threads inbox lists the thread with "1 new"', await p.getByText('1 new').first().isVisible().catch(() => false));
   await p.screenshot({ path: `${OUT}/4-threads-inbox.png` });

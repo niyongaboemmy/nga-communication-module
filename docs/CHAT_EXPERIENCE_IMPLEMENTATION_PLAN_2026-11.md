@@ -353,15 +353,23 @@ Migration **0048_reply_notify_pref.sql**: add a `notify_replies BOOLEAN NOT NULL
 
 ---
 
-## 11. Status log (fill in as phases land)
+## 11. Status log
 
-| Phase | PR | Merged / deployed | Baseline → result | Notes |
-|---|---|---|---|---|
-| 0 | | | keystroke p50/p95: __ / __ ms; row commits per key: __ | |
-| 1 | | | slow suite: _/7 | |
-| 2 | | | p50/p95: __ / __ ms; row commits: 0 | |
-| 3 | | | slow suite: 7/7 | |
-| 4 | | | replies suite: _/8 | flag `chat.inlineReplies` |
-| 5 | | | | flag `chat.threadPage`, mig 0047 |
-| 6 | | | | flag `chat.actionSheet`, mig 0048; device check: Android __, iPhone __ |
-| 7 | | | | flags removed |
+All phases are implemented on branch `feat/chat-experience` (from `main` b2dc20e), one commit per phase. Not pushed, merged or deployed yet: pushing to `main` deploys.
+
+| Phase | Commit | Baseline → result | Notes |
+|---|---|---|---|
+| 0 | f21f6fc (with P1) | At 6× CPU (dev build): keystroke cost p50 **155 ms**, p95 **689 ms**; **95** message-row renders per key. Slow suite reproduced the bug ("I will come tomorowrp"). | Harness `scripts/lib/chatSuite.mjs` (tenant-aware). Flags at `GET /api/system/client-config`; counters at `POST /api/system/client-counters` (summed as `client.*` metrics). |
+| 1 | f21f6fc | Slow suite: G-01 ×3, G-03 and G-06 pass. Quotes inside bubbles at 360/390/1440 px. | Newest-wins draft save reuses `conversation_members.draft_updated_at` (client time, clamped). No Redis key and no migration, unlike the plan. |
+| 2 | 827ac7c | p50 **155 → 15–16 ms**, p95 **689 → 19–22 ms** (dev, 6×); row renders **95 → 0** per key. | `drafts.ts` store + `useComposerBox` core + memoised `MessageRow`. `content-visibility` was tried and **dropped**: skipped rows report the placeholder height to the windowing maths. |
+| 3 | 2be244e | Offline queue: **8–9 → 3** requests for 3 messages. A dropped socket ack settles via REST. Failed edit rolls back and reopens. Delete with Undo. | Thread replies go through `send()`. The realtime handler makes the also-send-to-channel copy. |
+| 4 | 35ff8b6 | Replies suite criteria 1, 2, 6 and R-07 pass. | Migration **0048** `thread_preview` (backfilled as `tupo_platform`). Flag `chat.inlineReplies`. |
+| 5 | dc67991 | Criteria 3 and 4 pass. Phone thread full width; `?thread=` with Back. | Migration **0049** `thread_follows` (tenant RLS). Flag `chat.threadPage`. "X is replying…" carries `threadRootId`. |
+| 6 | 4e0f241 | Criteria 5, 7 and 8 pass. `verify:chat:touch` 18/18 (updated for the new swipe and modal sheet). | Migration **0050** `notify_replies`, `double_tap_like`. Flag `chat.actionSheet`. Device check: emulated only (Playwright, 390×844 touch); **no real Android/iPhone check yet**. |
+| 7 | 5645a72 | Initial JS **249.6 → 202.6 KB** gzip (main 239.1). Production build: keystroke p50 **2.0 ms**, p95 **6.3 ms** at 6×. Replies suite 36/37 → 37/37 on the production build after a timing fix in the test. | The conversation view leaves the first download: lazy dock view, lazy inline thread and sheet, `chat-view` split group. Flags **not removed**: that waits for the rollout (§8). axe-core is not installed, so no automated a11y scan was run. |
+
+**Deviations from the plan, on purpose:**
+- **Migration numbers.** They are 0048–0050, because `main` already used 0046/0047 for multi-tenancy.
+- **Flag defaults.** Unset `TUPO_FLAGS` means every flag is on. To stage the rollout (§8), set e.g. `TUPO_FLAGS="chat.inlineReplies=staff|admin,chat.threadPage=staff|admin,chat.actionSheet=staff|admin"` **before** the deploy.
+- **Auto-follow.** Auto-follow covers @mentioned people and owners/admins/moderators of rooms with ≤ 50 members, as planned.
+- **Legacy suites.** The old `verify:*` suites predate tenancy. Run them with `PGOPTIONS="-c app.tenant_id=1"`. `verify:local-first` was updated for the tenant-scoped cache name.
