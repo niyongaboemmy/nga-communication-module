@@ -106,11 +106,14 @@ table td, table th, .tabular-nums { font-variant-numeric: tabular-nums; }
 @keyframes tupo-fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @keyframes tupo-slide-in-right { from { transform: translateX(100%); } to { transform: none; } }
 @keyframes tupo-slide-in-left { from { transform: translateX(-100%); } to { transform: none; } }
+@keyframes tupo-slide-in-up { from { transform: translateY(100%); } to { transform: none; } }
 @keyframes tupo-pop { from { opacity: 0; transform: scale(0.96) translateY(-4px); } to { opacity: 1; transform: none; } }
 
 .animate-fade-in { animation: tupo-fade-in var(--duration-micro) ease-out both; }
 .animate-panel-in-right { animation: tupo-slide-in-right var(--duration-panel) cubic-bezier(0.32, 0.72, 0, 1) both; }
 .animate-panel-in-left { animation: tupo-slide-in-left var(--duration-panel) cubic-bezier(0.32, 0.72, 0, 1) both; }
+/* The phone action sheet (C-02) rising from the bottom edge. */
+.animate-panel-in-up { animation: tupo-slide-in-up var(--duration-panel) cubic-bezier(0.32, 0.72, 0, 1) both; }
 .animate-pop { animation: tupo-pop var(--duration-micro) ease-out both; }
 
 /*

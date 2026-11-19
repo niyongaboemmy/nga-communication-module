@@ -206,6 +206,7 @@ export function registerChatHandlers(
             mentionedUserIds: result.mentionedUserIds,
             broadcast: result.broadcast,
             senderMayBroadcast: chat.canManage(membership.role),
+            repliedToUserId: result.repliedToUserId,
           }).catch(() => {});
         }
       }

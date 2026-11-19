@@ -1,3 +1,6 @@
+import { MessageActionSheet } from './MessageActionSheet';
+import { useFlag } from '../../lib/flags';
+import { useConfirmDialog } from '../../components/ConfirmDialog';
 import { jumpHistory } from './jumpHistory';
 import { ThreadSummary } from './ThreadSummary';
 import { InlineThread } from './InlineThread';
@@ -114,6 +117,8 @@ export interface MessageRowProps {
   onReply?: (m: Message) => void;
   /** "Didier is replying…" for this message's thread. */
   replying?: string;
+  /** Double-tap adds 👍 on a phone (a chat preference). */
+  doubleTapLike?: boolean;
 }
 
 /**
@@ -125,6 +130,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
   message: m, newGroup, names, isHighlighted = false, editRequested = false,
   newReplies = 0, senderBlocked = false, runsThisRoom = false,
   isDm = false, canReply = true, inlineReplies = false, variant = 'default', onReply, replying,
+  doubleTapLike = false,
 }) => {
   noteRowRender();
   const { can } = usePermissions();
@@ -134,6 +140,9 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
     setEditingId, discard, markUnread, retry: onRetry,
   } = useChatActions();
   const compact = variant === 'compact';
+  const sheetOn = useFlag('chat.actionSheet');
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [confirmOther, confirmDialog] = useConfirmDialog();
   // The thread line and inline replies belong to a top-level message in a room.
   const threadable = !compact && !isDm && inlineReplies && !m.threadRootId;
   const [threadOpen, setThreadOpenState] = useState(() => threadable && isInlineOpen(m.id));
@@ -153,6 +162,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
     setThreadOpen(true);
     setFocusReply((n) => n + 1);
   };
+  const closeSheet = useCallback(() => setSheetOpen(false), []);
   const { notify, confirm: confirmed } = useNotify();
   /** Every action says so when it fails (B-10) — they used to fail silently. */
   const attempt = (what: () => Promise<unknown>, failed: string, done?: string) => {
@@ -178,7 +188,8 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
   // Phones (U-01): swipe right to reply, long-press for the actions menu.
   const gestures = useTouchGestures({
     onSwipe: () => reply(),
-    onLongPress: () => setMenuOpen(true),
+    // C-02: on a phone, a labelled bottom sheet rather than the desktop menu.
+    onLongPress: () => (sheetOn ? setSheetOpen(true) : setMenuOpen(true)),
     disabled: m.type === 'system' || Boolean(m.deletedAt),
   });
   const editRef = useRef<HTMLTextAreaElement>(null);
@@ -288,6 +299,11 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
       id={`msg-${m.id}`}
       data-message-row=""
       {...gestures.handlers}
+      // C-02: on a phone, a double tap is a 👍 — the commonest reaction, in one gesture.
+      onDoubleClick={sheetOn && doubleTapLike && !m.deletedAt && !pending && !failed
+        && typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches
+        ? () => { navigator.vibrate?.(8); void react(m.id, '👍'); }
+        : undefined}
       style={gestures.dx ? { transform: `translateX(${gestures.dx}px)`, transition: 'none' } : { transition: 'transform 150ms ease-out' }}
       className={`group relative flex ${compact ? 'gap-2 px-1' : 'gap-2.5 px-2 sm:px-4'} [touch-action:pan-y] ${newGroup ? (compact ? 'mt-1.5' : 'mt-3') : 'mt-0.5'} ${
         right ? 'flex-row-reverse' : ''
@@ -553,7 +569,7 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
           without a mouse, and everything here is keyboard-focusable. */}
       {!editing && !pending && !failed && (
         <div
-          className={`absolute -top-3 z-10 flex items-center gap-0.5 rounded-xl border border-border-light bg-white p-0.5 opacity-0 pointer-events-none transition-opacity duration-150 focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
+          className={`${sheetOn ? '[@media(pointer:coarse)]:hidden ' : ''}absolute -top-3 z-10 flex items-center gap-0.5 rounded-xl border border-border-light bg-white p-0.5 opacity-0 pointer-events-none transition-opacity duration-150 focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 dark:border-border-dark dark:bg-elevated-dark ${
             /* Anchored to the side the bubble is actually on. `left-12` for an
                own message put the toolbar at the far left of a full-width row,
                half a screen away from the message it acted on — easy to miss,
@@ -768,6 +784,47 @@ const MessageRowInner: React.FC<MessageRowProps> = ({
           </div>
         </div>
       )}
+
+      {sheetOpen && (
+        <MessageActionSheet
+          message={m}
+          mine={right}
+          canReact={!pending && !failed}
+          onReact={(e) => void react(m.id, e)}
+          onClose={closeSheet}
+          actions={[
+            { key: 'reply', label: 'Reply', icon: Reply, onSelect: reply },
+            ...(can('MESSAGE_FORWARD') ? [{ key: 'forward', label: 'Forward', icon: Forward, onSelect: () => setForwarding(true) }] : []),
+            ...(m.body ? [{ key: 'copy', label: 'Copy text', icon: Copy, onSelect: () => copy(m.body ?? '', 'Text copied') }] : []),
+            { key: 'save', label: m.saved ? 'Remove from saved' : 'Save', icon: Bookmark, onSelect: () => void save(m.id, !m.saved) },
+            ...(inlineReplies && !compact && !isDm && !m.threadRootId
+              ? [{ key: 'quote', label: 'Quote in channel', icon: Quote, onSelect: () => setReplyTarget(m) }] : []),
+            ...(can('MESSAGE_PIN') ? [{
+              key: 'pin', label: m.pinnedAt ? 'Unpin' : 'Pin', icon: m.pinnedAt ? PinOff : Pin,
+              onSelect: () => attempt(() => pin(m.id, !m.pinnedAt), m.pinnedAt ? 'Could not unpin that message' : 'Could not pin that message'),
+            }] : []),
+            ...(canEdit ? [{ key: 'edit', label: 'Edit', icon: Pencil, onSelect: () => { setDraft(m.body ?? ''); setEditing(true); } }] : []),
+            { key: 'link', label: 'Copy link', icon: Link2, onSelect: () => copy(`${window.location.origin}/app/chat/${m.conversationId}/${m.id}`, 'Link copied') },
+            ...(!mine && !pending && !failed ? [{
+              key: 'unread', label: 'Mark unread from here', icon: Mail,
+              onSelect: () => attempt(() => markUnread(m.conversationId, m.seq), 'Could not mark that unread'),
+            }] : []),
+            ...(mine && m.seq > 0 ? [{ key: 'info', label: 'Message info', icon: Info, onSelect: () => setInfoOpen(true) }] : []),
+            ...(canDelete ? [{
+              key: 'delete', label: 'Delete', icon: Trash2, tone: 'danger' as const,
+              onSelect: () => {
+                if (mine) { void remove(m.id); return; }
+                void confirmOther({
+                  title: "Delete someone else's message?", body: 'This is recorded.',
+                  confirmLabel: 'Delete', tone: 'danger',
+                }).then((ok) => { if (ok) void remove(m.id); });
+              },
+            }] : []),
+            ...(!mine ? [{ key: 'report', label: 'Report', icon: Flag, tone: 'danger' as const, onSelect: () => setReporting(true) }] : []),
+          ]}
+        />
+      )}
+      {confirmDialog}
 
       {forwarding && <ForwardDialog message={m} onClose={() => setForwarding(false)} />}
       {infoOpen && <MessageInfoDialog conversationId={m.conversationId} messageId={m.id} onClose={() => setInfoOpen(false)} />}

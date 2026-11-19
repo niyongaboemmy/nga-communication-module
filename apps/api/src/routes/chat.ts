@@ -613,6 +613,7 @@ async function fanOutNewMessage(
     mentionedUserIds: result.mentionedUserIds.filter((u) => !deniedMentions.has(u)),
     broadcast: result.broadcast,
     senderMayBroadcast: context.senderMayBroadcast,
+    repliedToUserId: result.repliedToUserId,
   }).catch(() => { /* a missed notification must not fail the send */ });
 
   const members = await chat.memberIdsOf(conversationId);
@@ -1078,6 +1079,8 @@ router.patch('/prefs', authorizePermission('SETTINGS_MANAGE'), wrap(async (req, 
   if (bool('sound') !== undefined) patch.sound = bool('sound');
   if (bool('showPresence') !== undefined) patch.showPresence = bool('showPresence');
   if (bool('emailDigest') !== undefined) patch.emailDigest = bool('emailDigest');
+  if (bool('notifyReplies') !== undefined) patch.notifyReplies = bool('notifyReplies');
+  if (bool('doubleTapLike') !== undefined) patch.doubleTapLike = bool('doubleTapLike');
   if (num('quietFromMinute') !== undefined) patch.quietFromMinute = num('quietFromMinute');
   if (num('quietToMinute') !== undefined) patch.quietToMinute = num('quietToMinute');
   if (typeof body.timezone === 'string') patch.timezone = body.timezone.slice(0, 64);

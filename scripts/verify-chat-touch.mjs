@@ -124,11 +124,17 @@ try {
     }
   }, steps);
   await touch([['pointerdown', 0, 0, 16], ['pointermove', 20, 2, 16], ['pointermove', 50, 3, 16], ['pointermove', 80, 4, 16], ['pointerup', 80, 4, 0]]);
-  check('swiping a message right starts a reply to it', await phone.getByText(/Replying to Uma Other/).first().waitFor({ timeout: 3_000 }).then(() => true).catch(() => false));
+  // R-06: Reply in a room opens the replies under the message, caret in the
+  // inline box; in a DM (or with chat.inlineReplies off) it is the quote banner.
+  check('swiping a message right starts a reply to it',
+    await phone.locator('[data-inline-composer], :text("Replying to Uma Other")').first().waitFor({ timeout: 3_000 }).then(() => true).catch(() => false));
   await touch([['pointermove', 0, 30, 0], ['pointerdown', 0, 0, 0]]);
   await touch([['pointerdown', 0, 0, 600], ['pointerup', 0, 0, 0]]);
   check('long-pressing a message opens its actions', await phone.getByText('Copy text').first().waitFor({ timeout: 3_000 }).then(() => true).catch(() => false));
   check('with quick reactions, even on a phone', await phone.getByRole('button', { name: /^React with/ }).first().isVisible().catch(() => false));
+  // The phone sheet (C-02) is modal: put it away before touching the page again.
+  await phone.keyboard.press('Escape');
+  await sleep(400);
   const scrolled = await row.evaluate(async (el) => {
     const r = el.getBoundingClientRect();
     const ev = (type, dy) => el.dispatchEvent(new PointerEvent(type, { clientX: r.left + 40, clientY: r.top + 10 + dy, pointerId: 8, pointerType: 'touch', bubbles: true }));

@@ -153,6 +153,8 @@ interface ChatValue {
   markConversationRead: (conversationId: string) => void;
   /** Whether Enter sends, from the user's own preferences (FR-USR-8). */
   enterToSend: boolean;
+  /** Double-tap a message on a phone to add 👍 (C-02, a chat preference). */
+  doubleTapLike: boolean;
   refresh: () => Promise<void>;
   /** People this reader has blocked (B-05). */
   blockedIds: ReadonlySet<string>;
@@ -403,6 +405,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [enterToSend, setEnterToSend] = useState(true);
+  const [doubleTapLike, setDoubleTapLike] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
 
   /* `activeId` is read inside socket handlers that are registered once. A ref
@@ -526,8 +529,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // the notification bridge, which is where they are acted on.
   useEffect(() => {
     if (!user) return;
-    apiGet<{ prefs: { enterToSend: boolean } }>('/api/chat/prefs')
-      .then((r) => setEnterToSend(r.data!.prefs.enterToSend))
+    apiGet<{ prefs: { enterToSend: boolean; doubleTapLike?: boolean } }>('/api/chat/prefs')
+      .then((r) => { setEnterToSend(r.data!.prefs.enterToSend); setDoubleTapLike(r.data!.prefs.doubleTapLike !== false); })
       .catch(() => {});
   }, [user]);
 
@@ -1760,7 +1763,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     draftFor, setDraft, toggleStar, setNotificationLevel, muteUntil, hideConversation,
     totalUnread, totalMentions, threadUnread, threadsUnreadTotal,
     markThreadRead, markUnread, markConversationRead,
-    refresh, enterToSend, blockedIds, setBlocked, subscribeThread,
+    refresh, enterToSend, doubleTapLike, blockedIds, setBlocked, subscribeThread,
   };
 
   const actions = useStableActions<ChatActions>({

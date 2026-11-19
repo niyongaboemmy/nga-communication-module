@@ -112,6 +112,7 @@ export async function runScheduledMessages(redisUrl: string): Promise<ScheduledS
           conversationType: conversation?.type ?? 'channel',
           mentionedUserIds: result.mentionedUserIds,
           broadcast: result.broadcast,
+          repliedToUserId: result.repliedToUserId,
           // A scheduled send cannot check platform permissions from here, so it
           // takes the conservative branch: a broadcast reaches people on `all`
           // and nobody who has narrowed it.

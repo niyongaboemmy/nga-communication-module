@@ -454,6 +454,8 @@ export interface SendResult {
   created: boolean;
   mentionedUserIds: string[];
   broadcast: 'channel' | 'here' | null;
+  /** The author of the quoted message, told "X replied to you" (R-09). */
+  repliedToUserId: string | null;
 }
 
 export async function sendMessage(input: SendMessageInput): Promise<SendResult> {
@@ -478,6 +480,7 @@ export async function sendMessage(input: SendMessageInput): Promise<SendResult> 
     created: written.created,
     mentionedUserIds: written.mentionedUserIds,
     broadcast: written.broadcast,
+    repliedToUserId: written.repliedToUserId,
   };
 }
 
@@ -486,6 +489,7 @@ interface WriteResult {
   created: boolean;
   mentionedUserIds: string[];
   broadcast: 'channel' | 'here' | null;
+  repliedToUserId: string | null;
 }
 
 /** The message kinds a client may send itself. System notices and polls are server-written. */
@@ -649,7 +653,7 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
       await client.query('ROLLBACK');
       if (!rows[0]) throw new ChatError('Duplicate send could not be resolved.', 409);
       return {
-        messageId: rows[0].message_id, created: false, mentionedUserIds: [], broadcast: null,
+        messageId: rows[0].message_id, created: false, mentionedUserIds: [], broadcast: null, repliedToUserId: null,
       };
     }
 
@@ -760,6 +764,37 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
     }
 
     /*
+     * Being replied to (R-09). A quote of someone's message is addressed to
+     * them: it badges them like a mention (a `reply` mention row, so it shows
+     * in their mentions and lights the message up for them) — unless they are
+     * the sender, have left, are already @mentioned, or turned it off.
+     * Thread replies have their own audience (followers) and are left out.
+     */
+    let repliedToUserId: string | null = null;
+    if (input.replyToId && !input.threadRootId && messageType !== 'system') {
+      const { rows: target } = await client.query<{ user_id: string }>(
+        `SELECT rp.sender_id AS user_id
+           FROM messages rp
+           JOIN conversation_members cm ON cm.conversation_id = rp.conversation_id
+                                       AND cm.user_id = rp.sender_id AND cm.left_at IS NULL
+           LEFT JOIN user_chat_prefs p ON p.user_id = rp.sender_id
+          WHERE rp.conversation_id = $1 AND rp.id = $2 AND rp.deleted_at IS NULL
+            AND rp.sender_id <> $3 AND COALESCE(p.notify_replies, true)`,
+        [input.conversationId, input.replyToId, input.senderId],
+      );
+      const uid = target[0]?.user_id ?? null;
+      if (uid && !mentioned.includes(uid)) {
+        repliedToUserId = uid;
+        await client.query(
+          `INSERT INTO message_mentions (message_id, conversation_id, user_id, kind, seq)
+           VALUES ($1,$2,$3,'reply',$4) ON CONFLICT DO NOTHING`,
+          [messageId, input.conversationId, uid, seq],
+        );
+      }
+    }
+    const badged = repliedToUserId ? [...mentioned, repliedToUserId] : mentioned;
+
+    /*
      * Everyone except the sender gains an unread. The sender's own watermark is
      * advanced instead, because sending something is the strongest possible
      * signal that you have read it.
@@ -778,7 +813,7 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
               -- A hidden DM comes back the moment the other person writes.
               is_hidden = false
         WHERE conversation_id = $1 AND user_id <> $2 AND left_at IS NULL`,
-      [input.conversationId, input.senderId, mentioned,
+      [input.conversationId, input.senderId, badged,
         messageType === 'system' || input.threadRootId ? 0 : 1],
     );
 
@@ -817,7 +852,7 @@ async function writeMessage(input: SendMessageInput): Promise<WriteResult> {
 
     await client.query('COMMIT');
 
-    return { messageId, created: true, mentionedUserIds: mentioned, broadcast };
+    return { messageId, created: true, mentionedUserIds: mentioned, broadcast, repliedToUserId };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
@@ -2828,6 +2863,10 @@ export interface ChatPrefs {
   showPresence: boolean;
   /** Email a digest of unseen mentions and DMs (F-04). */
   emailDigest: boolean;
+  /** A quote reply to my message reaches me like a mention (R-09). */
+  notifyReplies: boolean;
+  /** Double-tap a message on a phone to add 👍 (C-02). */
+  doubleTapLike: boolean;
 }
 
 const DEFAULT_PREFS: ChatPrefs = {
@@ -2841,6 +2880,8 @@ const DEFAULT_PREFS: ChatPrefs = {
   timezone: null,
   showPresence: true,
   emailDigest: true,
+  notifyReplies: true,
+  doubleTapLike: true,
 };
 
 export async function getPrefs(userId: string): Promise<ChatPrefs> {
@@ -2849,6 +2890,7 @@ export async function getPrefs(userId: string): Promise<ChatPrefs> {
     sound: boolean; default_level: NotificationLevel;
     quiet_from_minute: number | null; quiet_to_minute: number | null;
     timezone: string | null; show_presence: boolean; email_digest: boolean;
+    notify_replies: boolean | null; double_tap_like: boolean | null;
   }>('SELECT * FROM user_chat_prefs WHERE user_id = $1', [userId]);
 
   const r = rows[0];
@@ -2867,6 +2909,8 @@ export async function getPrefs(userId: string): Promise<ChatPrefs> {
     timezone: r.timezone,
     showPresence: r.show_presence,
     emailDigest: r.email_digest ?? true,
+    notifyReplies: r.notify_replies ?? true,
+    doubleTapLike: r.double_tap_like ?? true,
   };
 }
 
@@ -2884,8 +2928,9 @@ export async function setPrefs(
   await getPool().query(
     `INSERT INTO user_chat_prefs
        (user_id, read_receipts, enter_to_send, desktop_notifications, sound,
-        default_level, quiet_from_minute, quiet_to_minute, timezone, show_presence, email_digest, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+        default_level, quiet_from_minute, quiet_to_minute, timezone, show_presence, email_digest,
+        notify_replies, double_tap_like, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
      ON CONFLICT (user_id) DO UPDATE SET
        read_receipts = EXCLUDED.read_receipts,
        enter_to_send = EXCLUDED.enter_to_send,
@@ -2897,11 +2942,14 @@ export async function setPrefs(
        timezone = EXCLUDED.timezone,
        show_presence = EXCLUDED.show_presence,
        email_digest = EXCLUDED.email_digest,
+       notify_replies = EXCLUDED.notify_replies,
+       double_tap_like = EXCLUDED.double_tap_like,
        updated_at = now()`,
     [userId, next.readReceipts, next.enterToSend, next.desktopNotifications, next.sound,
      NOTIFICATION_LEVELS_SET.has(next.defaultLevel) ? next.defaultLevel : 'all',
      minute(next.quietFromMinute), minute(next.quietToMinute),
-     next.timezone ?? null, next.showPresence, next.emailDigest !== false],
+     next.timezone ?? null, next.showPresence, next.emailDigest !== false,
+     next.notifyReplies !== false, next.doubleTapLike !== false],
   );
 
   /*

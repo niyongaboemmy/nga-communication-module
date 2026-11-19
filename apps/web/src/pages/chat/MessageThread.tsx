@@ -241,9 +241,9 @@ export const MessageThread: React.FC<{
 }) => {
   const { user } = useAuth();
   const {
-    messages, messagesLoading: loading, hasMore, loadingMore, loadOlder,
+    messages, messagesLoading: loading, hasMore, loadingMore, loadOlder, messagesConversationId,
     markReadTo, hasNewer, loadNewer, showLatest,
-    highlightedId, editingId, threadUnread, blockedIds, typingByConversation,
+    highlightedId, editingId, threadUnread, blockedIds, typingByConversation, doubleTapLike,
   } = useChat();
   // Who is typing in which thread, as one sentence per root.
   const replyingByRoot = useMemo(() => {
@@ -312,10 +312,46 @@ export const MessageThread: React.FC<{
   // the real tail. Reading an old window after a jump (U-04), the bottom is
   // just where "load newer" appends; following it would chain every page in
   // and lose the place the jump was for.
+  /*
+   * C-03: open where the reader left off. Returning to forty unread messages
+   * used to land on the last one, with the "New" line somewhere above. The
+   * first time this conversation's own messages are on screen, a "New" line
+   * more than a screen up is placed a third of the way down the view instead
+   * (the jump button carries the count to the end). Decided once per opening.
+   */
+  const positionedFor = useRef<string | null>(null);
+  const olderFor = useRef<string | null>(null);
   useLayoutEffect(() => {
+    const ready = !loading && messages.length > 0 && messagesConversationId === conversation.id;
+    if (ready && positionedFor.current !== conversation.id) {
+      // The first page holds the newest messages. If the first unread is older
+      // than that, the "New" line would sit on the oldest *loaded* message and
+      // jump once the real one arrives: load back to it first (up to a few
+      // pages' worth), then place the view.
+      const oldest = messages.find((m) => m.seq > 0 && m.seq !== Number.MAX_SAFE_INTEGER);
+      const startLoaded = !hasMore || (oldest !== undefined && oldest.seq <= conversation.lastReadSeq + 1);
+      if (!startLoaded && conversation.unread <= 150) {
+        if (!loadingMore && olderFor.current !== `${conversation.id}:${messages.length}`) {
+          olderFor.current = `${conversation.id}:${messages.length}`;
+          void loadOlder();
+        }
+        return;
+      }
+      positionedFor.current = conversation.id;
+      const el = scrollRef.current;
+      const line = dividerId ? el?.querySelector<HTMLElement>('[aria-label="New messages"]') : null;
+      if (el && line) {
+        const top = line.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
+        if (el.scrollHeight - top > el.clientHeight) {
+          el.scrollTop = Math.max(0, top - el.clientHeight * 0.3);
+          setAtBottom(false);
+          return;
+        }
+      }
+    }
     if (atBottom && !hasNewer) bottomRef.current?.scrollIntoView({ block: 'end' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages.length, conversation.id]);
+  }, [messages.length, conversation.id, loading, messagesConversationId, loadingMore]);
 
   /*
    * C-07: opening a side panel narrows the log, rows re-wrap, and the reader's
@@ -414,6 +450,10 @@ export const MessageThread: React.FC<{
   useEffect(() => {
     if (!atBottom || loading || messages.length === 0) return;
     if (typeof document !== 'undefined' && document.hidden) return;
+    // Measured, not remembered: the first render after opening still holds the
+    // initial "at bottom" while the log is being placed at the first unread (C-03).
+    const sc = scrollRef.current;
+    if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight >= 80) return;
     const newest = messages.reduce(
       (max, m) => (m.seq !== Number.MAX_SAFE_INTEGER && m.seq > max ? m.seq : max), 0);
     if (newest > 0) markReadTo(newest);
@@ -540,6 +580,7 @@ export const MessageThread: React.FC<{
                       canReply={canReply}
                       inlineReplies={inlineReplies}
                       replying={replyingByRoot[m.id]}
+                      doubleTapLike={doubleTapLike}
                     />
                   </React.Fragment>
                 );
