@@ -61,11 +61,12 @@ export interface MailServerConfig {
   smtpPort: number;
   smtpSecure: boolean;
   /**
-   * Hosts a person may connect to, in the order they are tried. A school's
-   * provider can run more than one: NGA's relay (mail.hackflix.net) is the
-   * incoming exchanger and refuses mailbox logins, while the mailboxes live on
-   * mail.supremecenter.com. Trying the list means one wrong guess in the
-   * settings does not lock everyone out.
+   * Hosts a person may connect to, in the order they are tried, for a
+   * provider that runs more than one (MAIL_IMAP_HOSTS). NGA's mailboxes are on
+   * mail.hackflix.net (IMAP 993 / SMTP 465, the provider's own settings), the
+   * same name as the relay; mail.supremecenter.com refuses NGA logins even
+   * with the right password. Keep this list short: each refused attempt
+   * counts toward the provider's failed-login lockout.
    */
   allowedHosts: string[];
   domain: string | null;
