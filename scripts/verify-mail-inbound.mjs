@@ -8,7 +8,8 @@
  *   connect     a wrong password is refused; the right one is kept, encrypted,
  *               and never returned
  *   import      outside mail → Inbox (with its attachment), spam → Spam,
- *               older than two weeks → left out, Tupo's own copy → not doubled
+ *               the whole history (newest first, read state kept), Tupo's own
+ *               copy → not doubled
  *   sync        idempotent; new mail arrives; a reply threads by its headers
  *   reply       from Tupo to an outsider: as the person's own address, threaded
  *               on the outsider's Message-ID; their answer comes back in
@@ -62,11 +63,11 @@ let imap; let relay; let sink;
 const RELAY_PORT = Number(env.MAIL_REPLY_IMAP_PORT || 14144);
 // `date`: when the server received it (IMAP INTERNALDATE), which is what a
 // "since" search reads, not the Date header.
-const append = async (user, pass, raw, date) => {
+const append = async (user, pass, raw, date, flags = []) => {
   const port = user === 'tupo-relay' ? RELAY_PORT : IMAP_PORT;
   const c = new ImapFlow({ host: '127.0.0.1', port, secure: false, auth: { user, pass }, logger: false });
   await c.connect();
-  await c.append('INBOX', raw, [], date);
+  await c.append('INBOX', raw, flags, date);
   await c.logout();
 };
 const threads = (u, folder = 'inbox') => S.api(`/api/mail/threads?folder=${folder}`, u).then((d) => d.threads);
@@ -106,7 +107,11 @@ try {
     mail({ from: 'Old Friend <old@outside.org>', to: ada.user.email, subject: 'Ancient history', id: '<o1@outside.org>', date: new Date(now - 30 * 86_400_000) }),
     mail({ from: `NGA Tupo <no-reply@${DOMAIN}>`, to: ada.user.email, subject: internalSubject, id: `<${internal.messageId}@${DOMAIN}>`, date: new Date(now - 600_000) }),
   ];
-  for (const raw of seed) await append(ada.user.email, PW, raw, raw.includes('Ancient history') ? new Date(now - 30 * 86_400_000) : undefined);
+  // The old one was read in her real mailbox: it must arrive read.
+  for (const raw of seed) {
+    const old = raw.includes('Ancient history');
+    await append(ada.user.email, PW, raw, old ? new Date(now - 30 * 86_400_000) : undefined, old ? ['\\Seen'] : []);
+  }
 
   await part('connect: wrong password refused, right one kept encrypted', async () => {
     const s0 = await S.api('/api/mail/account', ada);
@@ -125,7 +130,7 @@ try {
     S.check('sending as her address is on (SMTP login checked)', row?.send_as === true && Boolean(row?.smtp_host));
   });
 
-  await part('import: inbox, attachment, spam, window, no doubles', async () => {
+  await part('import: inbox, attachment, spam, whole history, no doubles', async () => {
     const t = await until(() => findThread(ada, 'Outside hello'));
     S.check('outside mail arrives in the Inbox', Boolean(t));
     // The first sync works through the whole mailbox: wait for it to finish.
@@ -144,7 +149,15 @@ try {
     }
     const spamRows = (await S.pool.query(`SELECT r.folder, r.channel FROM mail_recipients r JOIN mail_messages m ON m.id = r.message_id WHERE m.subject = 'You won' AND r.user_id = $1`, [ada.id])).rows;
     S.check('spam goes to Spam', Boolean(await findThread(ada, 'You won', 'spam')) && !(await findThread(ada, 'You won')), JSON.stringify(spamRows));
-    S.check('mail older than two weeks is left out', !(await findThread(ada, 'Ancient history')));
+    const ancient = await until(() => findThread(ada, 'Ancient history'), 30_000);
+    S.check('older mail is brought in too (the whole history)', Boolean(ancient));
+    S.check('mail already read in the mailbox arrives read; new mail unread',
+      ancient?.unread === false && t.unread === true, `ancient.unread=${ancient?.unread} new.unread=${t.unread}`);
+    const acct = (await until(async () => { const r = (await S.pool.query('SELECT history_done, history_seen, mailbox_total FROM mail_accounts WHERE user_id = $1', [ada.id])).rows[0]; return r?.history_done ? r : null; }, 30_000));
+    S.check('the history import finishes and counts the mailbox', acct?.history_done === true && acct.mailbox_total === 4 && acct.history_seen === 4, JSON.stringify(acct));
+    // Everything seeded before connecting is history.
+    const notes = (await S.pool.query(`SELECT count(*)::int AS n FROM notifications WHERE user_id = $1 AND kind = 'mail.received' AND (title LIKE '%Ancient history%' OR title LIKE '%Outside hello%')`, [ada.id])).rows[0].n;
+    S.check('history arrives quietly (no notifications)', notes === 0, `notifications=${notes}`);
     const internalThreads = (await threads(ada)).filter((x) => x.subject === internalSubject);
     S.check("Tupo's own email copy is not imported twice", internalThreads.length === 1 && internalThreads[0].messageCount === 1, JSON.stringify(internalThreads.map((x) => x.messageCount)));
   });

@@ -391,6 +391,12 @@ export interface MailAccountView {
   lastSyncAt: string | null;
   importedCount: number;
   createdAt: string;
+  /** The mailbox's older mail has all been read (or MAIL_HISTORY_MAX reached). */
+  historyDone: boolean;
+  /** Older messages gone through so far (imported or already here). */
+  historySeen: number;
+  /** Messages in the mailbox when the import began, when known. */
+  mailboxTotal: number | null;
 }
 
 export interface MailAccountSettings {

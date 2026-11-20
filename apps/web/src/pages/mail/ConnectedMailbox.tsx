@@ -41,12 +41,16 @@ export const ConnectedMailbox: React.FC = () => {
     catch { setLoadFailed(true); }
   }, []);
   useEffect(() => { void load(); }, [load]);
-  // While the first sync runs, the counts move: check back a few times.
+  // While the first sync, or the import of older mail, runs the counts move:
+  // check back (often at first, then every 20 s while history comes in).
+  const importing = Boolean(settings?.account && settings.account.status === 'active'
+    && (!settings.account.lastSyncAt || !settings.account.historyDone));
+  const firstSync = Boolean(settings?.account && !settings.account.lastSyncAt);
   useEffect(() => {
-    if (!settings?.account || settings.account.lastSyncAt) return;
-    const t = setInterval(() => { void load(); }, 3000);
+    if (!importing) return;
+    const t = setInterval(() => { void load(); }, firstSync ? 3000 : 20_000);
     return () => clearInterval(t);
-  }, [settings?.account, load]);
+  }, [importing, firstSync, load]);
 
   if (loadFailed) {
     return (
@@ -158,9 +162,15 @@ export const ConnectedMailbox: React.FC = () => {
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium" data-testid="mailbox-address">{acct.address}</p>
               <p className="text-xs text-text-secondary-light dark:text-text-secondary-dark" data-testid="mailbox-status">
-                {acct.status === 'paused' ? 'Paused' : acct.lastSyncAt ? `Checked ${ago(acct.lastSyncAt)}` : 'Bringing in your recent email…'}
+                {acct.status === 'paused' ? 'Paused' : acct.lastSyncAt ? `Checked ${ago(acct.lastSyncAt)}` : 'Bringing in your email…'}
                 {' · '}{acct.importedCount} imported
               </p>
+              {acct.lastSyncAt && !acct.historyDone && acct.status !== 'error' && (
+                <p className="text-xs text-text-secondary-light dark:text-text-secondary-dark" data-testid="mailbox-history">
+                  {acct.status === 'paused' ? 'Older email: paused at ' : 'Bringing in older email: '}
+                  {acct.mailboxTotal ? `${Math.min(acct.historySeen, acct.mailboxTotal)} of ${acct.mailboxTotal}` : `${acct.historySeen} so far`}
+                </p>
+              )}
             </div>
             <Button size="sm" variant="secondary" onClick={() => void syncNow()} disabled={busy !== null || acct.status === 'paused'}>
               {busy === 'sync' ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} Sync now
