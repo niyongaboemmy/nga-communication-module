@@ -82,7 +82,8 @@ MAILBOX_HOST="${TUPO_MAILBOX_HOST:-mail.hackflix.net}"
 WRONG_HOST="mail.supremecenter.com"
 if has SMTP_HOST "$WORKER_ENV"; then
   for f in "$API_ENV" "$WORKER_ENV"; do
-    CUR="$(grep '^MAIL_IMAP_HOST=' "$f" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
+    # `|| true`: under `set -o pipefail` a grep that finds nothing would end the script.
+    CUR="$( (grep '^MAIL_IMAP_HOST=' "$f" 2>/dev/null || true) | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
     if [ -z "$CUR" ]; then
       printf '\n# Added by scripts/deploy-setup.sh (connected mailboxes)\nMAIL_IMAP_HOST=%s\n' "$MAILBOX_HOST" >> "$f"
       echo "setup: MAIL_IMAP_HOST added to $f"
@@ -90,7 +91,7 @@ if has SMTP_HOST "$WORKER_ENV"; then
       sed -i "s|^MAIL_IMAP_HOST=.*|MAIL_IMAP_HOST=$MAILBOX_HOST|" "$f"
       echo "setup: MAIL_IMAP_HOST corrected to $MAILBOX_HOST in $f"
     fi
-    FALLBACK="$(grep '^MAIL_IMAP_HOSTS=' "$f" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
+    FALLBACK="$( (grep '^MAIL_IMAP_HOSTS=' "$f" 2>/dev/null || true) | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
     if [ -n "$FALLBACK" ] && [ "$FALLBACK" = "$MAILBOX_HOST" ]; then
       sed -i '/^# Added by scripts\/deploy-setup.sh (fallback mailbox host)$/d; /^MAIL_IMAP_HOSTS=/d' "$f"
       echo "setup: redundant MAIL_IMAP_HOSTS removed from $f"
