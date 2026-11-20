@@ -54,7 +54,7 @@ const ToolButton: React.FC<{
     className={`grid h-8 w-8 place-items-center rounded-lg transition-colors disabled:opacity-30 ${
       active
         ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-        : 'text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light dark:text-text-secondary-dark dark:hover:bg-surface-dark'
+        : 'text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light dark:hover:text-text-primary-dark dark:text-text-secondary-dark dark:hover:bg-surface-dark'
     }`}
   >
     <Icon size={16} />

@@ -58,7 +58,7 @@ export const Sidebar: React.FC<Props> = ({
 
   const row = 'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors';
   const activeRow = 'bg-blue-50 font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300';
-  const idleRow = 'text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light dark:text-text-secondary-dark dark:hover:bg-surface-dark';
+  const idleRow = 'text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light dark:hover:text-text-primary-dark dark:text-text-secondary-dark dark:hover:bg-surface-dark';
 
   return (
     <div className="flex h-full flex-col gap-1 overflow-y-auto p-3">

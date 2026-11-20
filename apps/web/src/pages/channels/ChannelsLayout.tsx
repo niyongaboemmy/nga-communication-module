@@ -260,7 +260,7 @@ const ChannelSidebar: React.FC<{
                   {list.length === 0 && <li className="px-2 py-1.5 text-xs text-text-secondary-light dark:text-text-secondary-dark">No channels yet.</li>}
                   {subject.canCreateChannels && (
                     <li>
-                      <button onClick={() => onCreate(subject)} className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light dark:text-text-secondary-dark dark:hover:bg-card-dark/50">
+                      <button onClick={() => onCreate(subject)} className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light dark:hover:text-text-primary-dark dark:text-text-secondary-dark dark:hover:bg-card-dark/50">
                         <Plus size={15} className="opacity-70" /> Add channel
                       </button>
                     </li>

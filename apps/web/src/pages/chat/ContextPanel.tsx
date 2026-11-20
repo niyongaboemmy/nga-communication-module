@@ -251,14 +251,14 @@ export const ContextPanel: React.FC<{
               <button
                 onClick={() => setNotificationLevel(c.id, muted ? 'all' : 'none')}
                 aria-pressed={muted}
-                className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-secondary-dark dark:hover:bg-card-dark/50"
+                className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:hover:text-text-primary-dark dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-secondary-dark dark:hover:bg-card-dark/50"
               >
                 {muted ? <BellOff size={16} /> : <Bell size={16} />} {muted ? 'Unmute' : 'Mute'}
               </button>
               <button
                 onClick={() => toggleStar(c.id)}
                 aria-pressed={c.isStarred}
-                className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-secondary-dark dark:hover:bg-card-dark/50"
+                className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:hover:text-text-primary-dark dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-secondary-dark dark:hover:bg-card-dark/50"
               >
                 <Star size={16} className={c.isStarred ? 'fill-amber-400 text-amber-400' : ''} />
                 {c.isStarred ? 'Unstar' : 'Star'}
@@ -266,7 +266,7 @@ export const ContextPanel: React.FC<{
               {c.type !== 'dm' && (
                 <button
                   onClick={() => setLeaving(true)}
-                  className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-secondary-dark dark:hover:bg-card-dark/50"
+                  className="flex flex-col items-center gap-1.5 rounded-xl border border-border-light bg-white px-2 py-3 text-[11px] font-medium text-text-secondary-light transition-colors duration-150 hover:bg-surface-light hover:text-text-primary-light dark:hover:text-text-primary-dark dark:border-border-dark/50 dark:bg-elevated-dark/50 dark:text-text-secondary-dark dark:hover:bg-card-dark/50"
                 >
                   <LogOut size={16} /> Leave
                 </button>
