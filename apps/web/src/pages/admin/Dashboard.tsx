@@ -304,7 +304,7 @@ const ScopeBar: React.FC<{
               className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
                 win === w.key
                   ? 'bg-blue-600 text-white'
-                  : 'text-text-secondary-light hover:text-text-primary-light dark:text-text-secondary-dark'
+                  : 'text-text-secondary-light hover:text-text-primary-light dark:hover:text-text-primary-dark dark:text-text-secondary-dark'
               }`}
             >
               {w.label}

@@ -741,7 +741,7 @@ const ConversationViewer: React.FC<{
                   <button
                     onClick={loadOlder}
                     disabled={loadingOlder}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-border-light bg-white px-3 py-1 text-xs font-medium text-text-secondary-light transition-colors hover:text-text-primary-light disabled:opacity-50 dark:border-border-dark/50 dark:bg-elevated-dark dark:text-text-secondary-dark"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-border-light bg-white px-3 py-1 text-xs font-medium text-text-secondary-light transition-colors hover:text-text-primary-light dark:hover:text-text-primary-dark disabled:opacity-50 dark:border-border-dark/50 dark:bg-elevated-dark dark:text-text-secondary-dark"
                   >
                     {loadingOlder ? <Spinner className="h-3.5 w-3.5" /> : <><ChevronUp size={13} /> Load earlier messages</>}
                   </button>

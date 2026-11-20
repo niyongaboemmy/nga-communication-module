@@ -398,7 +398,7 @@ export const PageProfile: React.FC = () => {
     <>
       <FeedFrame left={left} right={right}>
         <div className="mx-auto max-w-2xl px-3 pt-3 sm:px-0 sm:pt-0">
-          <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light dark:text-text-secondary-dark">
+          <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light dark:hover:text-text-primary-dark dark:text-text-secondary-dark">
             <ArrowLeft size={15} /> Back to feed
           </Link>
 
@@ -674,7 +674,7 @@ const TeamTab: React.FC<{ page: FeedPageDetail; canManage: boolean; onChanged: (
                 </div>
                 {canManage && (
                   <div className="flex shrink-0 items-center gap-1">
-                    <button onClick={() => setEditingId(m.id)} aria-label={`Edit ${m.name}`} title="Edit title or role" className="grid h-8 w-8 place-items-center rounded-full text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light dark:hover:bg-card-dark"><Pencil size={15} /></button>
+                    <button onClick={() => setEditingId(m.id)} aria-label={`Edit ${m.name}`} title="Edit title or role" className="grid h-8 w-8 place-items-center rounded-full text-text-secondary-light hover:bg-surface-light hover:text-text-primary-light dark:hover:text-text-primary-dark dark:hover:bg-card-dark"><Pencil size={15} /></button>
                     <button onClick={() => remove(m)} aria-label={`Remove ${m.name}`} title="Remove from team" className="grid h-8 w-8 place-items-center rounded-full text-text-secondary-light hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20"><Trash2 size={15} /></button>
                   </div>
                 )}
@@ -958,7 +958,7 @@ export const PageDirectory: React.FC = () => {
   return (
     <FeedFrame left={left} right={right}>
       <div className="mx-auto max-w-3xl px-3 pt-3 sm:px-0 sm:pt-0">
-        <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light lg:hidden dark:text-text-secondary-dark">
+        <Link to="/app/feed" className="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary-light hover:text-text-primary-light dark:hover:text-text-primary-dark lg:hidden dark:text-text-secondary-dark">
           <ArrowLeft size={15} /> Back to feed
         </Link>
         <div className="mb-4 flex items-center justify-between">
