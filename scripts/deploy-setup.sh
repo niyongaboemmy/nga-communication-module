@@ -69,27 +69,31 @@ share_secret MAIL_LINK_SECRET "$API_ENV" "$WORKER_ENV"
 # The key that encrypts connected mailboxes' passwords: the api stores them,
 # the worker reads mailboxes with them, so both hold the same key.
 share_secret MAIL_ACCOUNT_KEY "$API_ENV" "$WORKER_ENV"
-# The mailbox server. NOT the relay: NGA's relay (mail.hackflix.net) is the
-# incoming exchanger and refuses mailbox logins; the mailboxes (and webmail)
-# live on the provider's server, mail.supremecenter.com (= imap/smtp.hackflix.net).
-# Another school sets TUPO_MAILBOX_HOST. The relay stays as a fallback host,
-# tried second (MAIL_IMAP_HOSTS). The first release copied the relay's host
-# into MAIL_IMAP_HOST; that copy is corrected here, a hand-set value is not.
-MAILBOX_HOST="${TUPO_MAILBOX_HOST:-mail.supremecenter.com}"
+# The mailbox server: mail.hackflix.net, as the provider's own settings page
+# says (IMAP 993, SMTP 465). It is the same name as the relay (SMTP_HOST).
+# Tested 2026-11-20 with a real NGA mailbox: mail.hackflix.net accepts the
+# login and SMTP; mail.supremecenter.com refuses even the correct password.
+# The release of 2026-11-19 wrongly set mail.supremecenter.com (and kept
+# mail.hackflix.net only as a fallback, so every connect first made a failed
+# login there, which counts toward the provider's lockout). That value is
+# corrected here, and the now-redundant fallback removed; a value set by
+# hand to anything else is left alone. Another school sets TUPO_MAILBOX_HOST.
+MAILBOX_HOST="${TUPO_MAILBOX_HOST:-mail.hackflix.net}"
+WRONG_HOST="mail.supremecenter.com"
 if has SMTP_HOST "$WORKER_ENV"; then
-  RELAYHOST="$(grep '^SMTP_HOST=' "$WORKER_ENV" | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
   for f in "$API_ENV" "$WORKER_ENV"; do
     CUR="$(grep '^MAIL_IMAP_HOST=' "$f" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
     if [ -z "$CUR" ]; then
       printf '\n# Added by scripts/deploy-setup.sh (connected mailboxes)\nMAIL_IMAP_HOST=%s\n' "$MAILBOX_HOST" >> "$f"
       echo "setup: MAIL_IMAP_HOST added to $f"
-    elif [ "$CUR" = "$RELAYHOST" ] && [ "$CUR" != "$MAILBOX_HOST" ]; then
+    elif [ "$CUR" = "$WRONG_HOST" ] && [ "$MAILBOX_HOST" != "$WRONG_HOST" ]; then
       sed -i "s|^MAIL_IMAP_HOST=.*|MAIL_IMAP_HOST=$MAILBOX_HOST|" "$f"
-      echo "setup: MAIL_IMAP_HOST corrected to the mailbox server in $f"
+      echo "setup: MAIL_IMAP_HOST corrected to $MAILBOX_HOST in $f"
     fi
-    if [ -n "$RELAYHOST" ] && [ "$RELAYHOST" != "$MAILBOX_HOST" ] && ! has MAIL_IMAP_HOSTS "$f"; then
-      printf '\n# Added by scripts/deploy-setup.sh (fallback mailbox host)\nMAIL_IMAP_HOSTS=%s\n' "$RELAYHOST" >> "$f"
-      echo "setup: MAIL_IMAP_HOSTS added to $f"
+    FALLBACK="$(grep '^MAIL_IMAP_HOSTS=' "$f" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
+    if [ -n "$FALLBACK" ] && [ "$FALLBACK" = "$MAILBOX_HOST" ]; then
+      sed -i '/^# Added by scripts\/deploy-setup.sh (fallback mailbox host)$/d; /^MAIL_IMAP_HOSTS=/d' "$f"
+      echo "setup: redundant MAIL_IMAP_HOSTS removed from $f"
     fi
   done
   if ! has MAIL_ACCOUNT_DOMAIN "$API_ENV" && has MAIL_FROM "$WORKER_ENV"; then
