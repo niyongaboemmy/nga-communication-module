@@ -285,6 +285,27 @@ describe('central NGA profile picture', () => {
     expect(await storedAvatar()).toBe(PIC);
   });
 
+  it('an MIS outage (5xx, 429) is not a sign-out; only the MIS refusing the token is', async () => {
+    mockMis({ meBody: meWith(avatarSet(PIC)) });
+    const login = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });
+    const auth = `Bearer ${login.body.data.token}`;
+    const base = globalThis.fetch as any;
+    const verifyAnswers = (status: number) => vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) =>
+      String(input).endsWith('/auth/verify')
+        ? new Response(status === 502 ? '<html>Bad Gateway</html>' : JSON.stringify({ success: false }), { status })
+        : base(input, init)));
+
+    for (const status of [500, 502, 503, 429]) {
+      verifyAnswers(status);
+      const poll = await request(app).get('/api/sso/verify-mis').set('Authorization', auth);
+      expect(poll.status, String(status)).toBe(200);
+      expect(poll.body.data).toMatchObject({ valid: true, degraded: true });
+    }
+    verifyAnswers(401);
+    const ended = await request(app).get('/api/sso/verify-mis').set('Authorization', auth);
+    expect(ended.status).toBe(401);
+  });
+
   it('ignores a picture link that is not http(s)', async () => {
     mockMis({ meBody: meWith({ version: 1, sm: 'x', md: 'javascript:alert(1)', lg: 'x' }) });
     const res = await request(app).post('/api/sso/exchange').send({ code: 'valid-code' });

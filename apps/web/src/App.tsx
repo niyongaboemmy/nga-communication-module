@@ -1,5 +1,6 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom';
+import { rememberReturn } from './lib/autoSignIn';
 import { ActivityRouterTracker } from './vendor/nga-activity/react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { MeetCallProvider } from './context/MeetCallContext';
@@ -82,8 +83,14 @@ const OutsideNotFound: React.FC = () => {
 const Protected: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated, loading } = useAuth();
   const { hasRole } = usePermissions();
+  const location = useLocation();
   if (loading) return null;
-  if (!isAuthenticated) return <Navigate to="/" replace />;
+  if (!isAuthenticated) {
+    // Kept across the MIS round trip, so the link they followed (a chat, a
+    // mail thread from MIS Home) is where they land after signing in.
+    rememberReturn(`${location.pathname}${location.search}${location.hash}`);
+    return <Navigate to="/" replace />;
+  }
   // Authenticated but no role assigned — no permissions, so no app.
   if (!hasRole) return <PendingAccess />;
   return <>{children}</>;

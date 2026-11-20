@@ -6,6 +6,7 @@ import { useAuth } from '../context/AuthContext';
 import type { SsoExchangeResult } from '@tupo/shared';
 import { consumeSsoState } from '../lib/ssoState';
 import { SESSION_KEY, USER_KEY } from '../lib/api';
+import { takeReturn } from '../lib/autoSignIn';
 
 /** Where the MIS sends the user back to. Exchanges the code for a Tupo session. */
 export const SsoCallback: React.FC = () => {
@@ -15,7 +16,8 @@ export const SsoCallback: React.FC = () => {
   const [pending, setPending] = useState<{ result: SsoExchangeResult; currentName: string } | null>(null);
   const accept = (r: SsoExchangeResult) => {
     setSession(r.token, r.user, r.permissions, r.rolePermissions ?? [], r.roleName ?? null);
-    navigate('/app', { replace: true });
+    // Back to the address they first asked for, when there was one.
+    navigate(takeReturn() ?? '/app', { replace: true });
   };
   // React Strict Mode runs effects twice in development; an authorization code
   // is single-use, so a second exchange would always fail. Guard it.
