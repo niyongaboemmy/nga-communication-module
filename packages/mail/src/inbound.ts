@@ -106,6 +106,8 @@ export interface StoreInboundInput {
   folder?: 'inbox' | 'spam';
   /** Bring it to people's attention (false while back-filling a mailbox). */
   notify?: boolean;
+  /** Already read in the person's real mailbox (\\Seen): imported as read. */
+  read?: boolean;
   /** A Tupo person who wrote it (reply by email); they get a Sent copy. */
   author?: InboundOwner | null;
   importedFor?: string;
@@ -250,9 +252,9 @@ export async function storeInbound(input: StoreInboundInput): Promise<StoreInbou
       const id = snowflake();
       await client.query(
         `INSERT INTO mail_recipients (id, message_id, thread_id, kind, user_id, address, name, channel,
-                                      delivery_status, delivered_at, folder, pending)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'inbound','delivered',now(),$8,false)`,
-        [id, messageId, threadId, kind, o.userId, o.address, o.name, folder]);
+                                      delivery_status, delivered_at, folder, pending, is_read, read_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'inbound','delivered',now(),$8,false,$9,CASE WHEN $9 THEN now() END)`,
+        [id, messageId, threadId, kind, o.userId, o.address, o.name, folder, input.read === true]);
       await recordEvent(client, id, messageId, 'delivered', { channel: 'inbound', source: input.source });
     }
     // The other addressees, for reading and for Reply all. Not mailboxes:
@@ -360,8 +362,17 @@ export async function applyBounce(raw: string, env: NodeJS.ProcessEnv = process.
 
 /* ── A connected mailbox ─────────────────────────────────────────────────── */
 
-const BACKFILL_DAYS = 14;
-const BACKFILL_MAX = 200;
+interface HistoryState { nextUid: number | null; done: boolean; seen: number; total: number | null }
+
+function historyMax(env: NodeJS.ProcessEnv): number {
+  const n = parseInt(env.MAIL_HISTORY_MAX ?? '', 10);
+  return Number.isFinite(n) && n >= 0 ? n : HISTORY_MAX_DEFAULT;
+}
+
+/** Older mail read per sync (newest first), on top of the new mail. */
+const HISTORY_PER_RUN = 100;
+/** The most of a mailbox's history brought in (MAIL_HISTORY_MAX; 0 = all). */
+const HISTORY_MAX_DEFAULT = 5000;
 const PER_RUN_MAX = 100;
 const MAX_EMAIL_BYTES = 30 * 1024 * 1024;
 
@@ -385,6 +396,11 @@ export async function syncMailAccount(accountId: string, env: NodeJS.ProcessEnv 
   const out: SyncResult = { imported: 0, skipped: 0, bounces: 0 };
   let lastUid = Number(acct.last_uid) || 0;
   let uidValidity = acct.uid_validity;
+  let history: HistoryState = {
+    nextUid: acct.history_next_uid == null ? null : Number(acct.history_next_uid),
+    done: acct.history_done === true, seen: Number(acct.history_seen) || 0,
+    total: acct.mailbox_total == null ? null : Number(acct.mailbox_total),
+  };
   let client: ReturnType<typeof imapClient> | null = null;
   try {
     client = imapClient({
@@ -398,43 +414,69 @@ export async function syncMailAccount(accountId: string, env: NodeJS.ProcessEnv 
     try {
       const mailbox = client.mailbox;
       const validity = mailbox && typeof mailbox === 'object' ? String(mailbox.uidValidity) : null;
-      let uids: number[];
-      const backfill = !uidValidity || validity !== uidValidity;
-      if (backfill) {
-        // First sync, or the server renumbered the mailbox: the last two weeks.
-        const since = new Date(Date.now() - BACKFILL_DAYS * 86_400_000);
-        const found = await client.search({ since }, { uid: true });
-        uids = (Array.isArray(found) ? found : []).sort((a, b) => a - b).slice(-BACKFILL_MAX);
+      const uidNext = mailbox && typeof mailbox === 'object' && mailbox.uidNext ? Number(mailbox.uidNext) : null;
+      const total = mailbox && typeof mailbox === 'object' && typeof mailbox.exists === 'number' ? mailbox.exists : null;
+      if (!uidValidity || validity !== uidValidity) {
+        // First sync, or the server renumbered the mailbox: everything now in
+        // it is history (read below, newest first, without notifications);
+        // only mail arriving from here on counts as new. Seen-once storage
+        // keeps a renumbered mailbox from importing anything twice.
         uidValidity = validity;
-        lastUid = 0;
-      } else {
-        const found = await client.search({ uid: `${lastUid + 1}:*` }, { uid: true });
-        // `n:*` always matches the newest message, even when it is older than n.
-        uids = (Array.isArray(found) ? found : []).filter((u) => u > lastUid).sort((a, b) => a - b);
+        lastUid = uidNext ? uidNext - 1 : 0;
+        history = { nextUid: uidNext ?? lastUid + 1, done: false, seen: 0, total };
       }
-      const batch = uids.slice(0, PER_RUN_MAX);
       const owner: InboundOwner = { userId: acct.user_id, address: acct.address, name: acct.user_name };
-      for (const uid of batch) {
-        const msg = await client.fetchOne(String(uid), { uid: true, source: true, flags: true, size: true }, { uid: true });
-        if (msg && msg.source && (msg.size ?? msg.source.length) <= MAX_EMAIL_BYTES) {
-          const raw = msg.source;
-          const rawText = raw.toString('utf8');
-          const bounced = await applyBounce(rawText, env);
-          if (bounced !== null && bounced > 0) { out.bounces += bounced; lastUid = uid; continue; }
-          const parsed = await simpleParser(raw);
-          const stored = await storeInbound({
-            parsed, raw, owners: [owner], source: 'imap', importedFor: acct.user_id,
-            folder: looksLikeSpam(parsed, msg.flags) ? 'spam' : 'inbox',
-            notify: !backfill, env,
-          });
-          if (stored) out.imported++; else out.skipped++;
-        } else {
-          out.skipped++;
+      const importOne = async (uid: number, isNew: boolean): Promise<void> => {
+        const msg = await client!.fetchOne(String(uid), { uid: true, source: true, flags: true, size: true }, { uid: true });
+        if (!msg || !msg.source || (msg.size ?? msg.source.length) > MAX_EMAIL_BYTES) { out.skipped++; return; }
+        const raw = msg.source;
+        // Delivery reports act on Tupo's own sent mail only while fresh.
+        if (isNew) {
+          const bounced = await applyBounce(raw.toString('utf8'), env);
+          if (bounced !== null && bounced > 0) { out.bounces += bounced; return; }
         }
+        const parsed = await simpleParser(raw);
+        const stored = await storeInbound({
+          parsed, raw, owners: [owner], source: 'imap', importedFor: acct.user_id,
+          folder: looksLikeSpam(parsed, msg.flags) ? 'spam' : 'inbox',
+          notify: isNew, read: msg.flags?.has('\\Seen') ?? false, env,
+        });
+        if (stored) out.imported++; else out.skipped++;
+      };
+
+      // New mail, oldest first, so a failure part-way resumes where it stopped.
+      const found = await client.search({ uid: `${lastUid + 1}:*` }, { uid: true });
+      // `n:*` always matches the newest message, even when it is older than n.
+      const fresh = (Array.isArray(found) ? found : []).filter((u) => u > lastUid).sort((a, b) => a - b).slice(0, PER_RUN_MAX);
+      for (const uid of fresh) {
+        await importOne(uid, true);
         lastUid = uid;
       }
-      if (backfill && !batch.length && mailbox && typeof mailbox === 'object' && mailbox.uidNext) {
-        lastUid = Number(mailbox.uidNext) - 1;
+
+      // Then a page of history, newest first, down to the start of the mailbox.
+      const cap = historyMax(env);
+      if (!history.done) {
+        const upper = history.nextUid ?? lastUid + 1;
+        const older = upper > 1 ? await client.search({ uid: `1:${upper - 1}` }, { uid: true }) : [];
+        const below = (Array.isArray(older) ? older : []).filter((u) => u < upper).sort((a, b) => b - a);
+        const room = cap > 0 ? Math.max(0, cap - history.seen) : Infinity;
+        const page = below.slice(0, Math.min(HISTORY_PER_RUN, room));
+        if (history.total === null) history.total = total;
+        for (const uid of page) {
+          try {
+            await importOne(uid, false);
+          } catch (e) {
+            // A dropped connection stops the run (the next one resumes here);
+            // one email that cannot be read or stored is skipped, so it does
+            // not hold back the rest of the history for ever.
+            if (!client.usable) throw e;
+            console.warn(`[mail] history import skipped uid ${uid} for ${acct.address}: ${(e as Error).message}`);
+            out.skipped++;
+          }
+          history.nextUid = uid;
+          history.seen++;
+        }
+        if (page.length === below.length || (cap > 0 && history.seen >= cap)) history.done = true;
       }
     } finally {
       lock.release();
@@ -442,8 +484,9 @@ export async function syncMailAccount(accountId: string, env: NodeJS.ProcessEnv 
     await client.logout().catch(() => {});
     await pool.query(
       `UPDATE mail_accounts SET last_sync_at = now(), last_error = NULL, status = 'active', sync_claimed_at = NULL,
-              uid_validity = $2, last_uid = $3, imported_count = imported_count + $4, updated_at = now()
-        WHERE id = $1`, [accountId, uidValidity, lastUid, out.imported]);
+              uid_validity = $2, last_uid = $3, imported_count = imported_count + $4, updated_at = now(),
+              history_next_uid = $5, history_done = $6, history_seen = $7, mailbox_total = $8
+        WHERE id = $1`, [accountId, uidValidity, lastUid, out.imported, history.nextUid, history.done, history.seen, history.total]);
   } catch (e) {
     client?.close();
     const err = e as { authenticationFailed?: boolean; message?: string };
@@ -453,8 +496,10 @@ export async function syncMailAccount(accountId: string, env: NodeJS.ProcessEnv 
     await pool.query(
       `UPDATE mail_accounts SET last_sync_at = now(), last_error = $2, sync_claimed_at = NULL,
               status = CASE WHEN $3 THEN 'error' ELSE status END,
-              uid_validity = $4, last_uid = $5, imported_count = imported_count + $6, updated_at = now()
-        WHERE id = $1`, [accountId, out.error, auth, uidValidity, lastUid, out.imported]);
+              uid_validity = $4, last_uid = $5, imported_count = imported_count + $6, updated_at = now(),
+              history_next_uid = $7, history_done = $8, history_seen = $9, mailbox_total = $10
+        WHERE id = $1`, [accountId, out.error, auth, uidValidity, lastUid, out.imported,
+                         history.nextUid, history.done, history.seen, history.total]);
   }
   return out;
 }

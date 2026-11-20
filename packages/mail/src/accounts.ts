@@ -153,6 +153,7 @@ export interface MailAccountRow {
   smtp_host: string | null; smtp_port: number | null; smtp_secure: boolean;
   send_as: boolean; status: 'active' | 'error' | 'paused'; last_error: string | null;
   last_sync_at: string | null; uid_validity: string | null; last_uid: string; imported_count: number;
+  history_next_uid: string | null; history_done: boolean; history_seen: number; mailbox_total: number | null;
   created_at: string;
 }
 
@@ -161,6 +162,9 @@ function toView(r: MailAccountRow): MailAccountView {
     address: r.address, username: r.username, imapHost: r.imap_host, imapPort: r.imap_port,
     sendAs: r.send_as, canSend: Boolean(r.smtp_host), status: r.status, lastError: r.last_error,
     lastSyncAt: r.last_sync_at, importedCount: r.imported_count, createdAt: r.created_at,
+    historyDone: r.history_done === true,
+    historySeen: Number(r.history_seen) || 0,
+    mailboxTotal: r.mailbox_total == null ? null : Number(r.mailbox_total),
   };
 }
 
