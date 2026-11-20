@@ -111,7 +111,12 @@ export async function verifyMisSessionDetailed(misToken: string): Promise<{
       headers: { Authorization: `Bearer ${misToken}` },
       signal: AbortSignal.timeout(Number(process.env.MIS_VERIFY_TIMEOUT_MS) || 10_000),
     });
-    if (!response.ok) return { state: 'invalid', accessVersion: null };
+    // Only the MIS refusing the token ends the session. A 5xx while the MIS
+    // restarts for a deploy, a proxy's 502 or a 429 says nothing about the
+    // token; treating those as "invalid" signed every open Tupo tab out and
+    // sent everyone back to the sign-in screen.
+    if ([400, 401, 403].includes(response.status)) return { state: 'invalid', accessVersion: null };
+    if (!response.ok) return { state: 'unreachable', accessVersion: null };
     let accessVersion: number | null = null;
     let avatarUrl: string | null | undefined;
     let coverUrl: string | null | undefined;

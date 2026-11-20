@@ -8,6 +8,7 @@ import {
   storeMode, systemTheme, type ThemeMode,
 } from '../lib/theme';
 import { beginSsoState } from '../lib/ssoState';
+import { clearSignInHolds, markSignedOut } from '../lib/autoSignIn';
 import { endActivity } from '../activity';
 import { setCacheOwner } from '../lib/localStore';
 import { storageOwner, tidOfToken } from '../lib/tenant';
@@ -36,7 +37,11 @@ interface AuthContextValue {
   /** Re-read the caller's role and permissions without a re-login, so an
    *  administrator's change lands on the next page view. */
   refreshPermissions: () => Promise<void>;
-  signOut: () => void;
+  /** 'expired': the session ended by itself (the MIS signed them out), so
+   *  the sign-in screen may send them straight back through the MIS. Anything
+   *  else (a button's click event included) is the person's own choice, and
+   *  holds them on the sign-in screen (lib/autoSignIn.ts). */
+  signOut: (reason?: unknown) => void;
   /** The colour on screen. */
   theme: Theme;
   /** What the person picked: light, dark, or follow the device (F-10). */
@@ -126,7 +131,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
-  const signOut = useCallback(() => {
+  const signOut = useCallback((reason?: unknown) => {
+    if (reason !== 'expired') markSignedOut();
     // Tell usage analytics this tab's session is over while the token that
     // identifies it still exists (it is read synchronously, before the clear).
     void endActivity();
@@ -166,7 +172,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       try {
         const res = await fetch('/api/sso/verify-mis', { headers: { Authorization: `Bearer ${token}` } });
         if (res.status === 401) {
-          signOut();
+          signOut('expired');
           return;
         }
         // The poll carries the central NGA profile picture: a change made in MIS
@@ -214,6 +220,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     newToken: string, newUser: SessionUser, perms: string[],
     rolePerms: string[], newRoleName: string | null
   ) => {
+    clearSignInHolds();
     localStorage.setItem(SESSION_KEY, newToken);
     localStorage.setItem(USER_KEY, JSON.stringify(newUser));
     localStorage.setItem(PERMISSIONS_KEY, JSON.stringify(perms));

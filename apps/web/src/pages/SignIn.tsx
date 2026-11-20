@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { ShieldCheck, ArrowRight } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { Logo } from '../components/Logo';
+import { noteAutoAttempt, shouldAutoSignIn, takeReturn } from '../lib/autoSignIn';
 
 /**
  * The entire sign-in surface of Tupo.
@@ -13,9 +14,29 @@ import { Logo } from '../components/Logo';
  */
 export const SignIn: React.FC = () => {
   const { signIn, isAuthenticated, loading } = useAuth();
+  // Decided once, on arrival: someone coming from the MIS (or any link) with
+  // no Tupo session goes straight through the MIS, which sends a person who is
+  // signed in there back at once. The screen below is for the exceptions
+  // (lib/autoSignIn.ts): a deliberate sign-out, a failed round trip, offline.
+  const [auto] = useState(() => shouldAutoSignIn());
+  useEffect(() => {
+    if (loading || isAuthenticated || !auto) return;
+    noteAutoAttempt();
+    signIn();
+  }, [loading, isAuthenticated, auto, signIn]);
 
   if (loading) return null;
-  if (isAuthenticated) return <Navigate to="/app" replace />;
+  if (isAuthenticated) return <Navigate to={takeReturn() ?? '/app'} replace />;
+  if (auto) {
+    return (
+      <div className="grid min-h-full place-items-center bg-slate-50 px-4 dark:bg-chrome-dark" aria-busy="true">
+        <div className="text-center">
+          <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-slate-200 border-t-blue-600 dark:border-border-dark dark:border-t-blue-500" />
+          <p className="text-sm font-medium text-slate-900 dark:text-slate-100">Signing you in with NGA MIS…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="grid min-h-full place-items-center bg-slate-50 px-4 dark:bg-chrome-dark">
