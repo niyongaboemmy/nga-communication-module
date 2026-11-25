@@ -70,6 +70,35 @@ async function applyScope(client: ScopedClient, scope: DbScope): Promise<void> {
   tenantPoolStats.switches++;
 }
 
+/**
+ * TP-ISO-6: the scope cache above trusts that a client comes back idle. One
+ * released with a transaction still open (a BEGIN whose COMMIT/ROLLBACK never
+ * ran) would carry that transaction -- and any SET LOCAL / set_config(.., true)
+ * inside it -- to the next caller, possibly another school, and a later
+ * ROLLBACK there could undo a scope switch behind the cache's back. Such a
+ * client is destroyed on release instead of returned to the pool.
+ */
+export const releasedInTransaction = { count: 0 };
+
+/** 'I' idle, 'T' in a transaction, 'E' in a failed transaction (pg >= 8.13). */
+export function clientInTransaction(client: pg.PoolClient): boolean {
+  const status = (client as unknown as { getTransactionStatus?: () => string | null }).getTransactionStatus?.();
+  return status === 'T' || status === 'E';
+}
+
+function guardRelease(client: ScopedClient): void {
+  const release = client.release;
+  client.release = ((err?: Error | boolean) => {
+    if (!err && clientInTransaction(client)) {
+      releasedInTransaction.count++;
+      client[SCOPE] = undefined;
+      console.warn('[db] a client was released inside an open transaction; destroying it instead of reusing it');
+      return release.call(client, new Error('released inside an open transaction'));
+    }
+    return release.call(client, err);
+  }) as typeof client.release;
+}
+
 type ConnectCallback = (err: Error | undefined, client?: pg.PoolClient, done?: (release?: Error | boolean) => void) => void;
 
 export class TenantPool extends pg.Pool {
@@ -90,6 +119,7 @@ export class TenantPool extends pg.Pool {
         client.release(err as Error);
         throw err;
       }
+      guardRelease(client as ScopedClient);
       return client;
     });
     if (!callback) return ready;

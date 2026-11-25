@@ -3,6 +3,7 @@ import type { Envelope } from '@tupo/shared';
 import { getDeviceId } from '../vendor/nga-activity';
 import { cacheClearAll } from './localStore';
 import { setSwSessionToken } from './swSession';
+import { signOutCleanup, type CleanupDeps } from './accountReplace';
 
 export class ApiError extends Error {
   /** `body`: the server's whole answer, for a refusal that carries more than a message (a code, the newer record). */
@@ -26,6 +27,20 @@ export function clearSession(): void {
   localStorage.removeItem(USER_KEY);
   localStorage.removeItem(PERMISSIONS_KEY);
   localStorage.removeItem(ROLE_PERMISSIONS_KEY);
+}
+
+/**
+ * The sign-out cleanup of the session holding `token` (WEB-ISO-1): this
+ * device's pushes for it, the chat outbox, then the stored session and caches.
+ * Dynamic imports: push and the outbox import this module.
+ */
+export function deviceCleanupDeps(token: string | null): CleanupDeps {
+  return {
+    disablePush: () => import('./push').then((p) => p.disablePushFor(token)),
+    clearOutbox: () => import('../pages/chat/outbox').then((o) => o.clearAll()),
+    keepOutbox: () => { void import('../pages/chat/outbox').then((o) => o.setOutboxOwner(null)).catch(() => {}); },
+    clearSession,
+  };
 }
 
 /**
@@ -102,8 +117,12 @@ async function request<T>(path: string, init: RequestInit & { timeoutMs?: number
       // than the MIS's now (plan §4.5) -- say so while the landing page signs in
       // again (no sign-out hold is set on this path either way).
       const code = (await res.clone().json().catch(() => null))?.code;
-      if (isSchoolChangeAnswer(401, code)) showSwitchingOverlay();
-      clearSession();
+      const schoolChange = isSchoolChangeAnswer(401, code);
+      if (schoolChange) showSwitchingOverlay();
+      // The full sign-out cleanup, as signOut does (WEB-ISO-1): whoever signs
+      // in next on this device must not get this person's pushes or queued
+      // messages. A school change keeps the queue for the old school.
+      await signOutCleanup(deviceCleanupDeps(token), schoolChange).catch(() => clearSession());
       window.location.href = '/';
     }
   }

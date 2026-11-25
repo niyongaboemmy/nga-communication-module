@@ -20,6 +20,15 @@ export interface EmailAttachments {
   omitted: Array<{ name: string; size: number; why: 'too_large' | 'unavailable' }>;
 }
 
+/**
+ * Headers of the loopback read from tupo-files. TP-ISO-5: it names the school
+ * the message belongs to (the current tenant), and tupo-files reads the file
+ * inside that school and refuses the read without it.
+ */
+export function internalReadHeaders(secret: string): Record<string, string> {
+  return { 'x-internal-secret': secret, 'x-tenant-id': String(effectiveTid('mail attachment')) };
+}
+
 export async function emailAttachments(
   messageId: string, env: NodeJS.ProcessEnv = process.env,
 ): Promise<EmailAttachments> {
@@ -41,7 +50,8 @@ export async function emailAttachments(
     if (!secret) { out.omitted.push({ name: a.name, size, why: 'unavailable' }); continue; }
     try {
       const res = await fetch(`${base}/internal/files/${encodeURIComponent(a.file_id)}/content`, {
-        headers: { 'x-internal-secret': secret }, signal: AbortSignal.timeout(30_000),
+        headers: internalReadHeaders(secret),
+        signal: AbortSignal.timeout(30_000),
       });
       if (!res.ok) throw new Error(`files answered ${res.status}`);
       const content = Buffer.from(await res.arrayBuffer());

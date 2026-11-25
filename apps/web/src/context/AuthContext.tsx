@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import type { SessionUser } from '@tupo/shared';
 import {
-  SESSION_KEY, USER_KEY, PERMISSIONS_KEY, ROLE_PERMISSIONS_KEY, clearSession, apiGet, apiPatch,
+  SESSION_KEY, USER_KEY, PERMISSIONS_KEY, ROLE_PERMISSIONS_KEY, clearSession, apiGet, apiPatch, deviceCleanupDeps,
 } from '../lib/api';
+import { msUntilExpiry, signOutCleanup, storedSessionUsable } from '../lib/accountReplace';
 import {
   THEME_KEY, hasStoredMode, onSystemThemeChange, patchCachedUserTheme, readStoredMode, resolveTheme,
   storeMode, systemTheme, type ThemeMode,
@@ -95,6 +96,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (savedToken && savedUser) {
       try {
         const parsed = JSON.parse(savedUser) as SessionUser;
+        // WEB-ISO-2: the cached chats and pages render from this session before
+        // the server has seen it (offline use). Only while its token is
+        // unexpired and names the stored user, who owns the on-device cache;
+        // anything else is cleared (as a sign-out does) and the landing page
+        // signs in again.
+        if (!storedSessionUsable(savedToken, parsed)) {
+          void signOutCleanup(deviceCleanupDeps(savedToken), false)
+            .catch(() => clearSession())
+            .finally(() => setLoading(false));
+          return;
+        }
         setToken(savedToken);
         setUser(parsed);
         setPermissions(JSON.parse(localStorage.getItem(PERMISSIONS_KEY) ?? '[]'));
@@ -165,6 +177,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       new Promise((r) => setTimeout(r, 1500)),
     ]).finally(finish);
   }, []);
+
+  // And no longer than that (WEB-ISO-2): offline, nothing else would end it.
+  useEffect(() => {
+    if (!token) return;
+    const ms = msUntilExpiry(token);
+    // setTimeout holds at most ~24.8 days; a session lives 24 h.
+    const id = setTimeout(() => signOut('expired'), Math.min(ms, 2_000_000_000));
+    return () => clearTimeout(id);
+  }, [token, signOut]);
 
   /**
    * Tupo's session is self-contained for its full 24h life, so logging out of

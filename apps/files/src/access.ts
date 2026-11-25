@@ -1,4 +1,5 @@
 import { getPool } from '@tupo/db';
+import { gateTenant, runWithTenant } from '@tupo/tenancy';
 
 /**
  * Who may read a file.
@@ -282,4 +283,38 @@ export async function listConversationFiles(
     senderName: r.sender_name ?? 'Unknown',
     createdAt: r.created_at,
   }));
+}
+
+/**
+ * Soft-delete one file of the current school. TP-ISO-4: true only when a row
+ * was actually changed -- another school's file id is invisible under RLS, so
+ * the UPDATE touches nothing and the caller must answer 404, not "deleted".
+ */
+export async function softDeleteFile(fileId: string): Promise<boolean> {
+  const { rowCount } = await getPool().query(
+    'UPDATE files SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL', [fileId]);
+  return (rowCount ?? 0) > 0;
+}
+
+export interface InternalFileRow { storage_key: string; mime_type: string; size_bytes: string }
+
+/**
+ * The file behind the service-to-service content read (mail attachments).
+ * TP-ISO-5: the caller names the school (`x-tenant-id`, as the internal upload
+ * does) and the row is read inside it, so a file id of another school is not
+ * found. Without a valid school the read is refused.
+ */
+export async function internalFileFor(
+  rawTid: unknown, fileId: string,
+): Promise<{ status: 200; file: InternalFileRow } | { status: number; message: string }> {
+  const tid = Number(rawTid);
+  if (rawTid === undefined || rawTid === '' || !Number.isSafeInteger(tid) || tid < 1) {
+    return { status: 400, message: 'tenant is required' };
+  }
+  const gate = await gateTenant(tid);
+  if (!gate.ok) return { status: gate.status, message: gate.message };
+  const { rows } = await runWithTenant(gate.tenant, () => getPool().query<InternalFileRow>(
+    `SELECT storage_key, mime_type, size_bytes FROM files WHERE id = $1 AND deleted_at IS NULL AND status = 'ready'`,
+    [fileId]));
+  return rows[0] ? { status: 200, file: rows[0] } : { status: 404, message: 'File not found.' };
 }

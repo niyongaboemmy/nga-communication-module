@@ -68,3 +68,24 @@ export async function disablePush(): Promise<PushState> {
   }
   return supported() ? 'off' : 'unsupported';
 }
+
+/**
+ * Off on this device for a session that is ending or being replaced
+ * (WEB-ISO-1): the server is asked with THAT session's token (raw fetch, so a
+ * dead token cannot trigger the app-wide 401 sign-out), and the browser
+ * subscription is dropped either way -- an unsubscribed endpoint can no longer
+ * deliver anyone's notifications here, and the server prunes it on its next push.
+ */
+export async function disablePushFor(token: string | null): Promise<void> {
+  const reg = supported() ? await navigator.serviceWorker.getRegistration().catch(() => undefined) : undefined;
+  const sub = await reg?.pushManager.getSubscription().catch(() => null);
+  if (!sub) return;
+  if (token) {
+    await fetch('/api/push/subscriptions', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ endpoint: sub.endpoint }),
+    }).catch(() => undefined);
+  }
+  await sub.unsubscribe().catch(() => false);
+}

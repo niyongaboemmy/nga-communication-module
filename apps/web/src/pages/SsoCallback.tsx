@@ -5,8 +5,14 @@ import { Logo } from '../components/Logo';
 import { useAuth } from '../context/AuthContext';
 import type { SsoExchangeResult } from '@tupo/shared';
 import { consumeSsoState } from '../lib/ssoState';
-import { SESSION_KEY, USER_KEY } from '../lib/api';
+import { SESSION_KEY, USER_KEY, deviceCleanupDeps } from '../lib/api';
+import { accountChange, decodeToken, prepareAccountReplace, storedAccount, tidOfClaims, type AccountRef } from '../lib/accountReplace';
 import { takeReturn } from '../lib/autoSignIn';
+
+/** The account an exchange result signs in. */
+const nextAccount = (r: SsoExchangeResult): AccountRef => ({
+  id: r.user.id, tid: tidOfClaims(decodeToken(r.token)), email: r.user.email ?? null,
+});
 
 /** Where the MIS sends the user back to. Exchanges the code for a Tupo session. */
 export const SsoCallback: React.FC = () => {
@@ -14,7 +20,15 @@ export const SsoCallback: React.FC = () => {
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<{ result: SsoExchangeResult; currentName: string } | null>(null);
-  const accept = (r: SsoExchangeResult) => {
+  const accept = async (r: SsoExchangeResult) => {
+    // Another account was signed in on this device (WEB-ISO-1): run its full
+    // sign-out cleanup first -- pushes off with its own token, its queued
+    // messages dropped (kept for a school switch of the same person), its
+    // session and on-device cache cleared -- and only then store the new one.
+    const prevToken = localStorage.getItem(SESSION_KEY);
+    await prepareAccountReplace(
+      storedAccount(prevToken, localStorage.getItem(USER_KEY)), nextAccount(r), deviceCleanupDeps(prevToken),
+    ).catch(() => null);
     setSession(r.token, r.user, r.permissions, r.rolePermissions ?? [], r.roleName ?? null);
     // Back to the address they first asked for, when there was one.
     navigate(takeReturn() ?? '/app', { replace: true });
@@ -66,11 +80,12 @@ export const SsoCallback: React.FC = () => {
           // replacing their session (it also signs out their other tabs).
           let current: { id?: string; name?: string } | null = null;
           try { current = localStorage.getItem(SESSION_KEY) ? JSON.parse(localStorage.getItem(USER_KEY) ?? 'null') : null; } catch { current = null; }
-          if (current?.id && current.id !== result.user.id) {
+          const stored = storedAccount(localStorage.getItem(SESSION_KEY), localStorage.getItem(USER_KEY));
+          if (current?.id && accountChange(stored, nextAccount(result)) === 'other-person') {
             setPending({ result, currentName: current.name ?? 'someone else' });
             return;
           }
-          accept(result);
+          await accept(result);
         } else if (body.code === 'ACCOUNT_SUSPENDED') {
           navigate('/suspended', { replace: true });
         } else {
@@ -92,7 +107,7 @@ export const SsoCallback: React.FC = () => {
               {pending.currentName} is signed in to Tupo in this browser. Continue as {pending.result.user.name}? Their other Tupo tabs will switch too.
             </p>
             <div className="mt-5 flex flex-col gap-2">
-              <button onClick={() => accept(pending.result)} className="rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+              <button onClick={() => { void accept(pending.result); }} className="rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
                 Continue as {pending.result.user.name}
               </button>
               <button onClick={() => navigate('/app', { replace: true })} className="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-border-dark dark:text-slate-200">

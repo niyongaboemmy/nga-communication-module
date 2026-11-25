@@ -23,7 +23,7 @@ import { userRoom } from '@tupo/shared';
 import { revocationSidOf, runWithTid, startFallbackReporting, type FallbackStore, type TenantCtx } from '@tupo/tenancy';
 import { bindSocketTenant, logoutReachesSession, relayRooms, relayTid, socketTid, tenantForSession } from './tenancy.js';
 import {
-  broadcastPresence, markOffline, readPresence, recomputePresence, toChoice, toStatus, writeChoice,
+  broadcastPresence, markOffline, presenceForQuery, recomputePresence, toChoice, toStatus, writeChoice,
 } from './presence.js';
 
 // Both pools (meet/db and @tupo/db's) use the same login role; a superuser /
@@ -559,14 +559,14 @@ function onConnection(socket: Parameters<Parameters<typeof io.on<'connection'>>[
     if (!decision?.ok || !decision.access.permissions.has('PRESENCE_VIEW')) return ack({ presence: {} });
     const wanted = [...new Set(Array.isArray(userIds) ? userIds : [])]
       .filter((id): id is string => typeof id === 'string' && id.length <= 32).slice(0, 200);
-    // A block hides presence both ways (B-05): those people read as offline.
-    const hidden = await chat.separatedFrom(user.id, wanted).catch(() => new Set<string>());
-    if (hidden.size) {
-      const shown = await readPresence(redisReady ? presence : null, wanted.filter((id) => !hidden.has(id)));
-      for (const id of hidden) shown[id] = { status: 'offline', lastSeenAt: null } as (typeof shown)[string];
-      return ack({ presence: shown });
-    }
-    ack({ presence: await readPresence(redisReady ? presence : null, wanted) });
+    // Only people of this socket's school (TP-ISO-2: the Redis keys are bare
+    // ids); a block hides presence both ways (B-05): those read as offline.
+    ack({
+      presence: await presenceForQuery(redisReady ? presence : null, wanted, {
+        visible: (ids) => chat.visibleUserIds(ids),
+        hidden: (ids) => chat.separatedFrom(user.id, ids),
+      }),
+    });
   });
 
   /*
