@@ -173,6 +173,9 @@ async function flushOnce(
   let sent = 0;
 
   for (const entry of queue) {
+    // Checked at send time, not once per flush: a school switch (or sign-out)
+    // mid-flush must never send the old school's message with the new session.
+    if (owner === null || (entry.ownerId !== owner && !(legacyOwner !== null && entry.ownerId === legacyOwner))) break;
     let ok = false;
     try { ok = await send(entry); } catch { ok = false; }
 

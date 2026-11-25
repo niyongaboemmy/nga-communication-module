@@ -2,7 +2,7 @@ import type express from 'express';
 import jwt from 'jsonwebtoken';
 import { fail } from '@tupo/shared';
 import {
-  gateTenant, legacyDefaultTid, runWithTenant, tidFromClaims, type TenantClaims, type TenantCtx,
+  gateTenant, runWithTenant, sessionTidFromClaims, type TenantClaims, type TenantCtx,
 } from '@tupo/tenancy';
 import { getPool } from '@tupo/db';
 import { config } from './config.js';
@@ -25,10 +25,10 @@ export async function tenantFromCredential(req: express.Request, res: express.Re
     return next();
   }
   if (!claims) return next();
-  const tid = tidFromClaims(claims, legacyDefaultTid());
+  const tid = sessionTidFromClaims(claims, 'files credential');
   if (claims.misToken) {
     const mis = jwt.decode(claims.misToken);
-    const misTid = tidFromClaims(mis && typeof mis === 'object' ? (mis as TenantClaims) : null, legacyDefaultTid());
+    const misTid = sessionTidFromClaims(mis && typeof mis === 'object' ? (mis as TenantClaims) : null, 'files mis token');
     if (misTid !== null && misTid !== tid) {
       return res.status(401).json({ ...fail('Your NGA session belongs to another school. Please sign in again.'), code: 'TENANT_MISMATCH' });
     }

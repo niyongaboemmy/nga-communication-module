@@ -2,7 +2,7 @@ import type { Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { fail } from '@tupo/shared';
 import {
-  gateTenant, legacyDefaultTid, runAsPlatform, runWithTenant, tidFromClaims,
+  gateTenant, runAsPlatform, runWithTenant, sessionTidFromClaims,
   type TenantClaims, type TenantCtx, type TenantGate,
 } from '@tupo/tenancy';
 import { getPool } from '@tupo/db';
@@ -14,16 +14,19 @@ import { getPool } from '@tupo/db';
  * caches and MIS calls downstream all see it.
  */
 
-/** The tid a token's claims speak for (legacy tokens: TENANCY_LEGACY_DEFAULT_TID). */
-export function tidOf(claims: TenantClaims | null | undefined): number | null {
-  return tidFromClaims(claims ?? null, legacyDefaultTid());
+/**
+ * The tid a token's claims speak for (legacy tokens: TENANCY_LEGACY_DEFAULT_TID,
+ * counted as a `legacy_tid` fallback for the strict-mode report).
+ */
+export function tidOf(claims: TenantClaims | null | undefined, site = 'api session token'): number | null {
+  return sessionTidFromClaims(claims ?? null, site);
 }
 
 /** The tid inside a MIS JWT we hold but cannot verify ourselves (MIS verified it). */
 export function misTokenTid(misToken: string | undefined | null): number | null {
   if (!misToken) return null;
   const claims = jwt.decode(misToken);
-  return tidOf(claims && typeof claims === 'object' ? (claims as TenantClaims) : null);
+  return tidOf(claims && typeof claims === 'object' ? (claims as TenantClaims) : null, 'api mis token');
 }
 
 export function sendTenantRefusal(res: Response, gate: Exclude<TenantGate, { ok: true }>) {

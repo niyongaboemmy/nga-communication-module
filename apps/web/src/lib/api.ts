@@ -1,3 +1,4 @@
+import { isSchoolChangeAnswer, showSwitchingOverlay } from './schoolGuard';
 import type { Envelope } from '@tupo/shared';
 import { getDeviceId } from '../vendor/nga-activity';
 import { cacheClearAll } from './localStore';
@@ -97,6 +98,11 @@ async function request<T>(path: string, init: RequestInit & { timeoutMs?: number
     if (!localStorage.getItem(SESSION_KEY)) {
       localStorage.removeItem(MEET_GUEST_KEY);
     } else {
+      // TENANT_MISMATCH / TENANT_UNKNOWN: the session belongs to another school
+      // than the MIS's now (plan §4.5) -- say so while the landing page signs in
+      // again (no sign-out hold is set on this path either way).
+      const code = (await res.clone().json().catch(() => null))?.code;
+      if (isSchoolChangeAnswer(401, code)) showSwitchingOverlay();
       clearSession();
       window.location.href = '/';
     }

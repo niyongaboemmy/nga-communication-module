@@ -2,8 +2,8 @@ import jwt from 'jsonwebtoken';
 import type { Socket } from 'socket.io';
 import { roomTenant } from '@tupo/shared';
 import {
-  PRIMARY_TENANT_ID, belongsToTenant, gateTenant, legacyDefaultTid, parseTid, runWithTenant,
-  tidFromClaims, type TenantClaims, type TenantCtx, type TenantRegistry,
+  PRIMARY_TENANT_ID, belongsToTenant, gateTenant, misTokenSid, noteFallback, parseTid, runWithTenant,
+  sessionTidFromClaims, tenancyMode, type TenantClaims, type TenantCtx, type TenantRegistry,
 } from '@tupo/tenancy';
 
 /**
@@ -26,10 +26,10 @@ export async function tenantForSession(
   claims: TenantClaims & { misToken?: string },
   registry?: Pick<TenantRegistry, 'get'>,
 ): Promise<HandshakeTenant> {
-  const tid = tidFromClaims(claims, legacyDefaultTid());
+  const tid = sessionTidFromClaims(claims, 'socket session token');
   if (claims.misToken) {
     const mis = jwt.decode(claims.misToken);
-    const misTid = tidFromClaims(mis && typeof mis === 'object' ? (mis as TenantClaims) : null, legacyDefaultTid());
+    const misTid = sessionTidFromClaims(mis && typeof mis === 'object' ? (mis as TenantClaims) : null, 'socket mis token');
     if (misTid !== null && misTid !== tid) return { ok: false, message: 'unauthorized: TENANT_MISMATCH' };
   }
   const gate = await gateTenant(tid, registry);
@@ -66,9 +66,27 @@ export function socketTid(socket: { data: Record<string, unknown> }): number {
   return (socket.data.tenant as TenantCtx | undefined)?.tid ?? PRIMARY_TENANT_ID;
 }
 
-/** The tenant a relay message is for: its `tid`, or tenant 1 from a publisher older than tenancy. */
-export function relayTid(message: unknown): number {
-  return parseTid((message as { tid?: unknown } | null)?.tid) ?? PRIMARY_TENANT_ID;
+/**
+ * The tenant a relay message is for: its `tid`, or tenant 1 from a publisher
+ * older than tenancy (counted as a `payload_no_tid` fallback). In enforce
+ * (strict) mode a message without `tid` is refused: null, and the caller drops it.
+ */
+export function relayTid(message: unknown, site = 'pub/sub relay'): number | null {
+  const tid = parseTid((message as { tid?: unknown } | null)?.tid);
+  if (tid) return tid;
+  noteFallback('payload_no_tid', site);
+  return tenancyMode() === 'enforce' ? null : PRIMARY_TENANT_ID;
+}
+
+/**
+ * Does a back-channel logout reach this socket's session? Without `sid`, every
+ * session of the person does; with one (a school switch on one browser, contract
+ * A.3), only sessions whose MIS token has that sid, or none at all.
+ */
+export function logoutReachesSession(user: { misToken?: string | null } | undefined, sid: string | null | undefined): boolean {
+  if (!sid) return true;
+  const own = misTokenSid(user?.misToken);
+  return own === null || own === sid;
 }
 
 /**

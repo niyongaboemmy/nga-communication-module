@@ -1,4 +1,6 @@
 import { pingDb, closeDb, guardDbRole } from '@tupo/db';
+import { Redis } from 'ioredis';
+import { startFallbackReporting, type FallbackStore } from '@tupo/tenancy';
 import { config } from './config.js';
 import { app } from './app.js';
 import { installProcessGuards } from './utils/asyncErrors.js';
@@ -16,6 +18,18 @@ installProcessGuards('api');
  * Outside pm2 (dev, tests) there is one process and it is instance 0.
  */
 const isPrimaryInstance = (process.env.NODE_APP_INSTANCE ?? '0') === '0';
+
+let stopFallbacks: (() => void) | null = null;
+/** A small Redis client of its own for the shared fallback counters (fail-soft). */
+function fallbackStore(): FallbackStore | null {
+  try {
+    const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 1, lazyConnect: false });
+    r.on('error', () => { /* counters keep in memory until Redis is back */ });
+    return r as unknown as FallbackStore;
+  } catch {
+    return null;
+  }
+}
 
 async function start(): Promise<void> {
   startApiMetrics();
@@ -40,6 +54,10 @@ async function start(): Promise<void> {
     // Publish the feature catalog (route patterns → named features) so the MIS
     // usage console can label Tupo's pages. Non-fatal: it only logs.
     if (isPrimaryInstance && activity().enabled) void activity().pushCatalog(activityCatalog);
+    // Tenancy fallback counters (TENANT_SWITCHING_PLAN.md A.6): every
+    // instance adds its counts to Redis; instance 0 reports the day's totals
+    // to MIS at start-up and hourly, and picks up the strict-mode flag.
+    stopFallbacks = startFallbackReporting({ store: fallbackStore(), report: isPrimaryInstance && process.env.TENANCY_FALLBACK_REPORT !== 'off' });
     // Abandoned meetings close themselves (MEET-RT2).
     if (isPrimaryInstance && process.env.MEET_SWEEP !== 'off') startMeetSweep();
     // pm2 (wait_ready) starts sending traffic here, and only then stops the
@@ -70,6 +88,7 @@ async function start(): Promise<void> {
     server.close(async () => {
       // Forward whatever analytics is still queued; bounded by the relay's own timeout.
       await activity().stop().catch(() => {});
+      stopFallbacks?.();
       await stopApiMetrics();
       await closeDb();
       process.exit(0);

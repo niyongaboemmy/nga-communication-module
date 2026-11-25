@@ -29,17 +29,22 @@ export interface PushSubscriptionInput {
   keys: { p256dh: string; auth: string };
 }
 
-export async function saveSubscription(userId: string, sub: PushSubscriptionInput, userAgent?: string | null): Promise<void> {
+/**
+ * `misSid`: the MIS browser session the subscription was made in (the `sid`
+ * of the session's MIS token), so a school switch on this browser can stop
+ * exactly this device's old-school pushes (TENANT_SWITCHING_PLAN.md A.3).
+ */
+export async function saveSubscription(userId: string, sub: PushSubscriptionInput, userAgent?: string | null, misSid?: string | null): Promise<void> {
   if (!sub?.endpoint || !/^https:\/\//.test(sub.endpoint) || sub.endpoint.length > 1000) throw new Error('Invalid push subscription.');
   if (!sub.keys?.p256dh || !sub.keys?.auth) throw new Error('Invalid push subscription.');
   // The endpoint identifies the browser; if another account signed in on it,
   // it now belongs to this one.
   await getPool().query(
-    `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, user_agent)
-     VALUES ($1,$2,$3,$4,$5,$6)
+    `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, user_agent, mis_sid)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)
      ON CONFLICT (tenant_id, endpoint) DO UPDATE SET user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh,
-       auth = EXCLUDED.auth, user_agent = EXCLUDED.user_agent, failures = 0`,
-    [snowflake(), userId, sub.endpoint, sub.keys.p256dh, sub.keys.auth, userAgent?.slice(0, 300) ?? null],
+       auth = EXCLUDED.auth, user_agent = EXCLUDED.user_agent, mis_sid = EXCLUDED.mis_sid, failures = 0`,
+    [snowflake(), userId, sub.endpoint, sub.keys.p256dh, sub.keys.auth, userAgent?.slice(0, 300) ?? null, misSid ?? null],
   );
 }
 
@@ -50,6 +55,14 @@ export async function removeSubscription(userId: string, endpoint: string): Prom
 /** Every subscription of a person (sign-out on all devices removes them). */
 export async function removeAllSubscriptions(userId: string): Promise<void> {
   await getPool().query('DELETE FROM push_subscriptions WHERE user_id = $1', [userId]);
+}
+
+/**
+ * The subscriptions made in one MIS browser session (a school switch there),
+ * plus those made before sids, which cannot be told apart (contract A.3).
+ */
+export async function removeSessionSubscriptions(userId: string, misSid: string): Promise<void> {
+  await getPool().query('DELETE FROM push_subscriptions WHERE user_id = $1 AND (mis_sid = $2 OR mis_sid IS NULL)', [userId, misSid]);
 }
 
 interface PushRow { user_id: string; kind: string; title: string; body: string | null; link: string | null; id: string; subject_id: string | null }

@@ -79,11 +79,17 @@ async function publishWhenReady(client: Redis, channel: string, message: string)
  * users (their sessions just ended via MIS back-channel logout).
  */
 export const LOGOUT_CHANNEL = 'tupo:logout';
-export function publishSessionEnd(userIds: string[]): void {
+/**
+ * `sid`: only the sockets whose session's MIS token has this sid (or none)
+ * are dropped — a school switch on one browser (TENANT_SWITCHING_PLAN.md A.3).
+ */
+export function publishSessionEnd(userIds: string[], sid: string | null = null): void {
   if (!userIds.length) return;
   const client = getPublisher();
   if (!client) return;
-  void publishWhenReady(client, LOGOUT_CHANNEL, JSON.stringify({ userIds, tid: effectiveTid('socket relay') })).catch(() => {});
+  void publishWhenReady(client, LOGOUT_CHANNEL, JSON.stringify({
+    userIds, tid: effectiveTid('socket relay'), ...(sid ? { sid } : {}),
+  })).catch(() => {});
 }
 
 function relay(msg: ChatRelayMessage): void {

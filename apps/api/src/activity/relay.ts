@@ -5,7 +5,7 @@ import {
   createActivityRelay, type ActivityRelay, type RelayOptions,
 } from '../vendor/nga-activity-relay/relay.js';
 import { config } from '../config.js';
-import { currentTenantOrNull } from '@tupo/tenancy';
+import { currentTenantOrNull, revocationSidOf } from '@tupo/tenancy';
 import { issuedBeforeRevocation } from '../utils/ssoLogout.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 
@@ -56,14 +56,15 @@ export async function misUserIdFromSession(req: Request): Promise<number | null>
     const header = req.headers.authorization;
     if (!header?.startsWith('Bearer ')) return null;
     const decoded = jwt.verify(header.slice(7), config.jwtSecret) as {
-      id?: string; misUserId?: string; iat?: number; guest?: boolean;
+      id?: string; misUserId?: string; iat?: number; guest?: boolean; misToken?: string;
     };
     if (decoded.guest === true || !decoded.id) return null;
     const { rows } = await getPool().query<{ status: string; mis_status: string | null; mis_user_id: string | null; revoked_at: Date | null }>(
-      `SELECT u.status, u.mis_status, u.mis_user_id, r.revoked_at
+      `SELECT u.status, u.mis_status, u.mis_user_id, GREATEST(r.revoked_at, sr.revoked_at) AS revoked_at
          FROM users u LEFT JOIN session_revocations r ON r.user_id = u.id
+         LEFT JOIN session_sid_revocations sr ON sr.user_id = u.id AND sr.sid = $2
         WHERE u.id = $1`,
-      [decoded.id],
+      [decoded.id, revocationSidOf(decoded)],
     );
     const user = rows[0];
     if (!user || !isActiveUser(user)) return null;

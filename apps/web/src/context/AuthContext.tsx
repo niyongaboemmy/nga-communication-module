@@ -9,6 +9,7 @@ import {
 } from '../lib/theme';
 import { beginSsoState } from '../lib/ssoState';
 import { clearSignInHolds, markSignedOut } from '../lib/autoSignIn';
+import { isSchoolChangeAnswer, parseSchoolCookie, schoolGuardDecision, showSwitchingOverlay, tidOfSessionToken } from '../lib/schoolGuard';
 import { endActivity } from '../activity';
 import { setCacheOwner } from '../lib/localStore';
 import { storageOwner, tidOfToken } from '../lib/tenant';
@@ -132,12 +133,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const signOut = useCallback((reason?: unknown) => {
-    if (reason !== 'expired') markSignedOut();
+    // `switch`: the person moved to another school in the MIS (school guard,
+    // plan §4.5). Not a sign-out: no hold, so the landing page signs in again
+    // at once -- into the MIS session's school.
+    const switching = reason === 'switch';
+    if (reason !== 'expired' && !switching) markSignedOut();
+    if (switching) showSwitchingOverlay();
     // Tell usage analytics this tab's session is over while the token that
     // identifies it still exists (it is read synchronously, before the clear).
     void endActivity();
-    // Nothing queued offline survives a sign-out to be sent as someone else.
-    void import('../pages/chat/outbox').then((o) => o.clearAll()).catch(() => {});
+    void import('../pages/chat/outbox').then((o) => {
+      // A switch keeps queued messages for the old school (owned by
+      // `<tid>:<userId>`, sent only after switching back) and stops any flush
+      // now. A real sign-out drops them: nothing is sent as someone else.
+      if (switching) o.setOutboxOwner(null);
+      else return o.clearAll();
+    }).catch(() => {});
     const finish = () => {
       clearSession();
       setToken(null);
@@ -167,12 +178,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!token) return;
     let last = 0;
     const check = async () => {
+      // School guard (plan Appendix A.1): the MIS session moved to another school.
+      if (schoolGuardDecision(parseSchoolCookie(document.cookie), tidOfSessionToken(token)) === 'switch') {
+        signOut('switch');
+        return;
+      }
       if (Date.now() - last < 5000) return;
       last = Date.now();
       try {
         const res = await fetch('/api/sso/verify-mis', { headers: { Authorization: `Bearer ${token}` } });
-        if (res.status === 401) {
-          signOut('expired');
+        if (res.status === 401 || res.status === 409) {
+          const code = (await res.clone().json().catch(() => null))?.code;
+          signOut(isSchoolChangeAnswer(res.status, code) ? 'switch' : 'expired');
           return;
         }
         // The poll carries the central NGA profile picture: a change made in MIS
