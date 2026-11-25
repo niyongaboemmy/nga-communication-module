@@ -30,10 +30,17 @@ import {
   parseTid,
   primaryTenantCtx,
   runWithTenant,
+  type TenantClaims,
   type TenantCtx,
 } from './vendor/nga-tenancy/index.js';
 
+import {
+  noteFallback, reportFallbacks, flushFallbacks, setRegistryStrict, strictActive, strictFromRegistryBody,
+  type FallbackStore,
+} from './fallbacks.js';
+
 export * from './vendor/nga-tenancy/index.js';
+export * from './fallbacks.js';
 
 // ---------------------------------------------------------------------------
 // Modes
@@ -48,6 +55,8 @@ export type TenancyMode = 'shadow' | 'enforce';
  * Read on every call so tests (and an operator's restart) can flip it.
  */
 export function tenancyMode(): TenancyMode {
+  // MIS's registry turned strict mode on for tupo (contract A.6).
+  if (strictActive()) return 'enforce';
   return (process.env.TENANCY_MODE ?? '').trim().toLowerCase() === 'enforce' ? 'enforce' : 'shadow';
 }
 
@@ -57,14 +66,29 @@ export function tenancyMode(): TenancyMode {
  * TENANT_REQUIRED) once it is set to `none`.
  */
 export function legacyDefaultTid(): number | null {
+  if (strictActive()) return null;
   const raw = (process.env.TENANCY_LEGACY_DEFAULT_TID ?? '').trim();
   if (!raw) return PRIMARY_TENANT_ID;
   if (raw.toLowerCase() === 'none') return null;
   return parseTid(raw) ?? PRIMARY_TENANT_ID;
 }
 
+/**
+ * The school a session token's claims (or a MIS token's) speak for. A token
+ * without `tid` (or the older `school_id`) gets TENANCY_LEGACY_DEFAULT_TID and
+ * is counted as a `legacy_tid` fallback; null = refuse (TENANT_REQUIRED).
+ */
+export function sessionTidFromClaims(claims: TenantClaims | null | undefined, site = 'session token'): number | null {
+  const explicit = claims ? (parseTid(claims.tid) ?? parseTid(claims.school_id)) : null;
+  if (explicit) return explicit;
+  const fallback = legacyDefaultTid();
+  if (fallback !== null) noteFallback('legacy_tid', site);
+  return fallback;
+}
+
 const warned = new Set<string>();
-function warnShadow(what: string): void {
+function warnShadow(what: string, kind: 'no_context' | 'payload_no_tid' = 'no_context'): void {
+  noteFallback(kind, what);
   if (warned.has(what) || warned.size > 50) return;
   warned.add(what);
   const where = new Error().stack?.split('\n').slice(3, 6).map((l) => l.trim()).join(' <- ');
@@ -189,16 +213,24 @@ export interface MisRegistryOptions {
   fetchImpl?: typeof fetch;
   /** 'local' skips MIS and reads only `localLoad` (tests, an isolated dev box). */
   source?: 'mis' | 'local';
+  /** Called with `tenancy.strict.tupo` each time MIS answers the registry fetch. */
+  onStrict?: (strict: boolean) => void;
 }
 
-export async function loadTenantsFromMis(opts: MisRegistryOptions): Promise<TenantCtx[]> {
-  const base = (opts.misBaseUrl ?? '').replace(/\/+$/, '');
-  if (!base) throw new Error('NGA_MIS_BASE_URL is not set');
+/** The service credentials MIS's platform endpoints take (registry fetch, fallback report). */
+export function misServiceHeaders(opts: Pick<MisRegistryOptions, 'clientId' | 'clientSecret' | 'integrationToken'>): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (opts.integrationToken) headers.Authorization = `Bearer ${opts.integrationToken}`;
   else if (opts.clientId && opts.clientSecret) {
     headers.Authorization = `Basic ${Buffer.from(`${opts.clientId}:${opts.clientSecret}`).toString('base64')}`;
   }
+  return headers;
+}
+
+export async function loadTenantsFromMis(opts: MisRegistryOptions): Promise<TenantCtx[]> {
+  const base = (opts.misBaseUrl ?? '').replace(/\/+$/, '');
+  if (!base) throw new Error('NGA_MIS_BASE_URL is not set');
+  const headers = misServiceHeaders(opts);
   const res = await (opts.fetchImpl ?? fetch)(`${base}/platform/tenants/active`, {
     headers, signal: AbortSignal.timeout(5_000),
   });
@@ -207,6 +239,8 @@ export async function loadTenantsFromMis(opts: MisRegistryOptions): Promise<Tena
   const raw = Array.isArray(body.tenants) ? body.tenants
     : Array.isArray(body.data?.tenants) ? body.data!.tenants as unknown[] : null;
   if (!raw) throw new Error('MIS /platform/tenants/active returned no tenant list');
+  // Automatic strict mode (contract A.6): an MIS without the flag means off.
+  opts.onStrict?.(strictFromRegistryBody(body));
   return raw
     .map((t) => (t && typeof t === 'object' ? normalizeTenant(t as Record<string, unknown>) : null))
     .filter((t): t is TenantCtx => t !== null);
@@ -258,6 +292,7 @@ export function tenantRegistry(): TenantRegistry {
       localLoad: localLoader,
       source: process.env.TENANCY_REGISTRY_SOURCE === 'local' ? 'local' : 'mis',
       ttlMs: Number(process.env.TENANCY_REGISTRY_TTL_MS) || 30_000,
+      onStrict: setRegistryStrict,
     });
   }
   return registry;
@@ -332,7 +367,7 @@ export function jobTid(data: unknown): number {
   const tid = parseTid((data as { tid?: unknown } | null | undefined)?.tid);
   if (tid) return tid;
   if (tenancyMode() === 'enforce') throw new TenantContextMissing('queue job without tid');
-  warnShadow('queue job without tid');
+  warnShadow('queue job without tid', 'payload_no_tid');
   return PRIMARY_TENANT_ID;
 }
 
@@ -341,4 +376,110 @@ export async function runJobInTenant<T>(data: unknown, fn: () => Promise<T>): Pr
   const tid = jobTid(data);
   const known = await tenantRegistry().get(tid).catch(() => null);
   return runWithTenant(tenantCtxFor(tid, known), fn);
+}
+
+// ---------------------------------------------------------------------------
+// Fallback reporting (contract A.6)
+// ---------------------------------------------------------------------------
+
+const HOUR_MS = 3_600_000;
+const FLUSH_MS = 60_000;
+
+/**
+ * Start this process's part of the fallback counters.
+ *  - Every process with Redis adds its counts to the shared hash every minute.
+ *  - The reporting process (the API's primary instance) also sends the day's
+ *    totals to MIS at start-up and every hour, and refreshes the registry so
+ *    a strict-mode flip is picked up even on a quiet server.
+ * Returns a stop function. Timers are unref'd: they never hold a process open.
+ */
+export function startFallbackReporting(opts: {
+  store?: FallbackStore | null;
+  report?: boolean;
+  fetchImpl?: typeof fetch;
+} = {}): () => void {
+  const timers: NodeJS.Timeout[] = [];
+  const store = opts.store ?? null;
+  if (store) {
+    const t = setInterval(() => { void flushFallbacks(store).catch(() => {}); }, FLUSH_MS);
+    t.unref?.();
+    timers.push(t);
+  }
+  if (opts.report) {
+    const send = async () => {
+      // A registry read applies the current strict flag before reporting.
+      await tenantRegistry().list().catch(() => []);
+      await reportFallbacks({
+        misBaseUrl: process.env.NGA_MIS_BASE_URL ?? 'https://mis.amashuri.com',
+        headers: misServiceHeaders({
+          clientId: process.env.SSO_CLIENT_ID,
+          clientSecret: process.env.SSO_CLIENT_SECRET,
+          integrationToken: process.env.MIS_TENANTS_TOKEN || undefined,
+        }),
+        store,
+        fetchImpl: opts.fetchImpl,
+      });
+    };
+    // Start-up report shortly after boot (the process is still settling).
+    const first = setTimeout(() => { void send(); }, 5_000);
+    first.unref?.();
+    timers.push(first);
+    const hourly = setInterval(() => { void send(); }, HOUR_MS);
+    hourly.unref?.();
+    timers.push(hourly);
+  }
+  return () => { for (const t of timers) clearInterval(t); };
+}
+
+// ---------------------------------------------------------------------------
+// MIS browser session id (TENANT_SWITCHING_PLAN.md Appendix A.2)
+// ---------------------------------------------------------------------------
+
+const SID_RE = /^[A-Za-z0-9_-]{8,32}$/;
+
+/** A valid MIS session id (`sid` claim, `nga_school` cookie), else null. */
+export function parseSid(raw: unknown): string | null {
+  return typeof raw === 'string' && SID_RE.test(raw) ? raw : null;
+}
+
+/**
+ * The `sid` claim of a MIS JWT we hold (nested in the Tupo session) — read,
+ * not verified: MIS verified it when it was issued to us. null for a token
+ * minted before sids (it cannot be told apart from any other session).
+ */
+export function misTokenSid(misToken: string | null | undefined): string | null {
+  if (!misToken || typeof misToken !== 'string') return null;
+  try {
+    const part = misToken.split('.')[1];
+    if (!part) return null;
+    const claims = JSON.parse(Buffer.from(part, 'base64url').toString('utf8')) as { sid?: unknown };
+    return parseSid(claims?.sid);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The key a session's per-session revocation is stored under: its MIS `sid`,
+ * or '' for a session whose MIS token has none (contract A.3: those are ended
+ * by every sid-scoped logout, since they cannot be told apart).
+ */
+export function revocationSidOf(claims: { misToken?: string | null } | null | undefined): string {
+  return misTokenSid(claims?.misToken) ?? '';
+}
+
+/** `nga_school=<tid>.<sid>` from a Cookie header (contract A.1), else null. */
+export function parseSchoolCookie(cookieHeader: string | null | undefined): { tid: number; sid: string } | null {
+  if (!cookieHeader || typeof cookieHeader !== 'string') return null;
+  for (const part of cookieHeader.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0 || part.slice(0, i).trim() !== 'nga_school') continue;
+    let value = part.slice(i + 1).trim();
+    try { value = decodeURIComponent(value); } catch { /* keep raw */ }
+    const m = /^(\d{1,9})\.([A-Za-z0-9_-]{8,32})$/.exec(value);
+    if (!m) return null;
+    const tid = parseTid(m[1]);
+    return tid ? { tid, sid: m[2]! } : null;
+  }
+  return null;
 }

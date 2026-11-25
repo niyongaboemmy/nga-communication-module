@@ -9,6 +9,7 @@ import { usePermissions } from '../hooks/usePermissions';
 import { Avatar, IconButton, UnreadBadge } from '../components/ui';
 import { avatarPreviewOpen } from '../components/AvatarPreview';
 import { AppsSwitcher } from '../components/shell/AppsSwitcher';
+import { SchoolMenu } from '../components/shell/SchoolMenu';
 import { MODULES, ADMIN, type NavEntry } from '../components/shell/navigation';
 import { ConnectionBanner, useConnectionStatus } from '../components/shell/ConnectionBanner';
 import { NotificationBell } from '../components/shell/NotificationCenter';
@@ -311,6 +312,7 @@ const UserMenu: React.FC<{ presence: Presence }> = ({ presence }) => {
           </p>
           <StatusPicker compact onPicked={() => setOpen(false)} />
           <div className="my-1 h-px bg-border-light dark:bg-card-dark/50" />
+          <SchoolMenu onPicked={() => setOpen(false)} />
           <NavLink
             role="menuitem"
             to="/app/settings"

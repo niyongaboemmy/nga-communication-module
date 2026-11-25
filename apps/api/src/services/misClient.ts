@@ -84,6 +84,78 @@ function readAiRoutesVersion(data: { ai_routes_v?: unknown } | undefined): numbe
   return raw != null && Number.isFinite(v) ? v : null;
 }
 
+function readTid(raw: unknown): number | null {
+  const n = Number(raw);
+  return raw != null && raw !== '' && Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+/** One of the person's schools, as MIS `GET /auth/my-schools` lists it (contract A.4). */
+export interface MisSchool {
+  tid: number;
+  slug: string;
+  name: string;
+  logoUrl: string | null;
+  status: string | null;
+  current: boolean;
+  roles: string[];
+}
+
+/**
+ * The signed-in person's schools. An empty list when MIS is unreachable or
+ * does not have the endpoint yet: "Switch school" then simply does not show.
+ */
+export async function fetchMySchools(misToken: string): Promise<MisSchool[]> {
+  try {
+    const response = await fetch(`${config.misBaseUrl}/auth/my-schools`, {
+      headers: { Authorization: `Bearer ${misToken}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) return [];
+    const body = (await response.json()) as { data?: { schools?: unknown } };
+    const raw = Array.isArray(body?.data?.schools) ? body.data!.schools as Record<string, unknown>[] : [];
+    const out: MisSchool[] = [];
+    for (const s of raw) {
+      const tid = readTid(s?.tid);
+      if (!tid) continue;
+      out.push({
+        tid,
+        slug: typeof s.slug === 'string' ? s.slug : `t${tid}`,
+        name: typeof s.name === 'string' && s.name ? s.name : `School ${tid}`,
+        logoUrl: safeHttpUrl(s.logoUrl),
+        status: typeof s.status === 'string' ? s.status : null,
+        current: s.current === true,
+        roles: Array.isArray(s.roles) ? s.roles.filter((r): r is string => typeof r === 'string').slice(0, 10) : [],
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** The public branding of a school (MIS `GET /tenant/branding?tid=`, contract A.5); null when unknown. */
+export async function fetchTenantBranding(tid: number): Promise<{ name: string | null; logoUrl: string | null } | null> {
+  try {
+    const response = await fetch(`${config.misBaseUrl}/tenant/branding?tid=${encodeURIComponent(String(tid))}`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { data?: Record<string, unknown> };
+    const d = body?.data;
+    if (!d) return null;
+    const name = typeof d.school_name === 'string' && d.school_name ? d.school_name
+      : typeof d.name === 'string' && d.name ? d.name : null;
+    return { name, logoUrl: safeHttpUrl(d.logoUrl ?? d.logo_url) };
+  } catch {
+    return null;
+  }
+}
+
+function safeHttpUrl(u: unknown): string | null {
+  return typeof u === 'string' && /^https?:\/\//.test(u) && u.length < 2048 ? u : null;
+}
+
 /** Is this MIS session still alive? Used by the /verify-mis poll. */
 export async function verifyMisSession(misToken: string): Promise<'valid' | 'invalid' | 'unreachable'> {
   return (await verifyMisSessionDetailed(misToken)).state;
@@ -103,6 +175,12 @@ export async function verifyMisSessionDetailed(misToken: string): Promise<{
   aiPolicyVersion?: number | null;
   /** This person's My AI routes version (`ai_routes_v`), when this MIS reports one. */
   aiRoutesVersion?: number | null;
+  /**
+   * The school MIS says this session is in now (`currentTid`, else the
+   * `tenant.tid` it answers with), when it says; compared with the Tupo
+   * session's school (TENANT_SWITCHING_PLAN.md §4.2, SCHOOL_CHANGED).
+   */
+  tid?: number | null;
 }> {
   try {
     // Bounded: a hung MIS must not hold the caller (the Home relay gives up
@@ -122,16 +200,18 @@ export async function verifyMisSessionDetailed(misToken: string): Promise<{
     let coverUrl: string | null | undefined;
     let aiPolicyVersion: number | null = null;
     let aiRoutesVersion: number | null = null;
+    let tid: number | null = null;
     try {
-      const body = (await response.json()) as { data?: { access_version?: unknown; ai_policy_v?: unknown; ai_routes_v?: unknown } };
+      const body = (await response.json()) as { data?: { access_version?: unknown; ai_policy_v?: unknown; ai_routes_v?: unknown; currentTid?: unknown; tenant?: { tid?: unknown } } };
       const v = Number(body?.data?.access_version);
       accessVersion = body?.data?.access_version != null && Number.isFinite(v) ? v : null;
       avatarUrl = misAvatarUrl(body?.data);
       coverUrl = misCoverUrl(body?.data);
       aiPolicyVersion = readAiPolicyVersion(body?.data);
       aiRoutesVersion = readAiRoutesVersion(body?.data);
+      tid = readTid(body?.data?.currentTid) ?? readTid(body?.data?.tenant?.tid);
     } catch { /* older MIS / empty body: no version */ }
-    return { state: 'valid', accessVersion, avatarUrl, coverUrl, aiPolicyVersion, aiRoutesVersion };
+    return { state: 'valid', accessVersion, avatarUrl, coverUrl, aiPolicyVersion, aiRoutesVersion, tid };
   } catch {
     return { state: 'unreachable', accessVersion: null };
   }

@@ -6,6 +6,7 @@ import type { Role, RoleLevel, SessionClaims } from '@tupo/shared';
 import { config } from '../config.js';
 import { attachAccess, type RequestAccess } from '../access/gate.js';
 import { issuedBeforeRevocation } from '../utils/ssoLogout.js';
+import { revocationSidOf } from '@tupo/tenancy';
 import { misTokenTid, sendTenantMismatch, tidOf, withRequestTenant } from './tenant.js';
 
 export interface AuthenticatedRequest extends Request {
@@ -60,13 +61,19 @@ async function authenticateInTenant(req: Request, res: Response, next: NextFunct
   // Everything below touches the database. A blip there is "try again", never
   // a crash — and never a 401 that would sign the person out for nothing.
   try {
+  // Two kinds of single sign-out: every session of the person (no sid), or
+  // one MIS browser session (a school switch, by `sid`; '' = sessions whose
+  // MIS token has none) — whichever ended later decides.
   const { rows } = await pool.query<{
     role: Role; status: string; mis_status: string | null; mis_user_id: string; avatar_url: string | null; revoked_at: Date | null;
   }>(
-    `SELECT u.role, u.status, u.mis_status, u.mis_user_id, u.avatar_url, r.revoked_at
-       FROM users u LEFT JOIN session_revocations r ON r.user_id = u.id
+    `SELECT u.role, u.status, u.mis_status, u.mis_user_id, u.avatar_url,
+            GREATEST(r.revoked_at, sr.revoked_at) AS revoked_at
+       FROM users u
+       LEFT JOIN session_revocations r ON r.user_id = u.id
+       LEFT JOIN session_sid_revocations sr ON sr.user_id = u.id AND sr.sid = $2
       WHERE u.id = $1`,
-    [decoded.id]
+    [decoded.id, revocationSidOf(decoded)]
   );
   const user = rows[0];
 

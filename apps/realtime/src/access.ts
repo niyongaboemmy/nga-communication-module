@@ -118,12 +118,23 @@ export async function findInactiveUsers(userIds: string[]): Promise<Set<string>>
   return new Set(userIds.filter((id) => !active.has(id)));
 }
 
-/** user id → revoked_at, for the sweep: one query for every connected user. */
-export async function revocationsFor(userIds: string[]): Promise<Map<string, Date>> {
+/**
+ * For the sweep, one query each: `<userId>` → when every session of the person
+ * ended, and `<userId>#<sid>` → when one MIS browser session ended (a school
+ * switch; sid '' = sessions whose MIS token has none).
+ */
+export async function revocationsFor(userIds: string[], sids: string[] = []): Promise<Map<string, Date>> {
   if (!userIds.length) return new Map();
   const { rows } = await getPool().query<{ user_id: string; revoked_at: Date }>(
     'SELECT user_id, revoked_at FROM session_revocations WHERE user_id = ANY($1::text[])', [userIds]);
-  return new Map(rows.map((r) => [r.user_id, r.revoked_at]));
+  const out = new Map(rows.map((r) => [r.user_id, r.revoked_at]));
+  if (sids.length) {
+    const { rows: bySid } = await getPool().query<{ user_id: string; sid: string; revoked_at: Date }>(
+      'SELECT user_id, sid, revoked_at FROM session_sid_revocations WHERE user_id = ANY($1::text[]) AND sid = ANY($2::text[])',
+      [userIds, sids]);
+    for (const r of bySid) out.set(`${r.user_id}#${r.sid}`, r.revoked_at);
+  }
+  return out;
 }
 
 /**
@@ -131,10 +142,14 @@ export async function revocationsFor(userIds: string[]): Promise<Map<string, Dat
  * token issued before the user signed out of NGA MIS? Fails open -- a lookup
  * error never locks anyone out; the API refuses the token on every request.
  */
-export async function sessionEnded(userId: string, iatSeconds: number | undefined): Promise<boolean> {
+export async function sessionEnded(userId: string, iatSeconds: number | undefined, sid = ''): Promise<boolean> {
   try {
-    const { rows } = await getPool().query<{ revoked_at: Date }>(
-      'SELECT revoked_at FROM session_revocations WHERE user_id = $1', [userId]
+    // The later of: every session ended (no sid), or this MIS browser session (sid).
+    const { rows } = await getPool().query<{ revoked_at: Date | null }>(
+      `SELECT GREATEST(
+         (SELECT revoked_at FROM session_revocations WHERE user_id = $1),
+         (SELECT revoked_at FROM session_sid_revocations WHERE user_id = $1 AND sid = $2)) AS revoked_at`,
+      [userId, sid]
     );
     return issuedBeforeRevocation(iatSeconds, rows[0]?.revoked_at ?? null);
   } catch {

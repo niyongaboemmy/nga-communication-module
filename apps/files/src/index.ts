@@ -8,7 +8,7 @@ import { getPool, pingDb, snowflake, closeDb, startProcessMetrics, guardDbRole }
 import { ok, fail, MEETING_FOLDER_PATTERN } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
 import { config } from './config.js';
-import { effectiveTenant, effectiveTid, forEachActiveTenant, tenantRegistry, gateTenant, runWithTenant } from '@tupo/tenancy';
+import { effectiveTenant, effectiveTid, forEachActiveTenant, tenantRegistry, gateTenant, runWithTenant, revocationSidOf } from '@tupo/tenancy';
 import { overTenantQuota, tenantFromCredential, tenantStorageKey } from './tenancy.js';
 import { createStorageDriver } from './storage/driver.js';
 import { canReadFile, canDeleteFile, listConversationFiles } from './access.js';
@@ -61,11 +61,14 @@ interface FileRequest extends express.Request { user?: SessionClaims }
  * any of that — a suspended or signed-out token kept uploading and
  * downloading for the rest of its 24 hours.
  */
-async function accountState(userId: string, iatSeconds: number | undefined): Promise<'ok' | 'gone' | 'suspended' | 'signed-out'> {
+async function accountState(userId: string, iatSeconds: number | undefined, sid = ''): Promise<'ok' | 'gone' | 'suspended' | 'signed-out'> {
+  // `sid`: the session's MIS browser session ('' = none / a media ticket), for
+  // the one-browser sign-out a school switch sends (contract A.3).
   const { rows } = await getPool().query<{ status: string; revoked_at: Date | null }>(
-    `SELECT u.status, r.revoked_at FROM users u
+    `SELECT u.status, GREATEST(r.revoked_at, sr.revoked_at) AS revoked_at FROM users u
        LEFT JOIN session_revocations r ON r.user_id = u.id
-      WHERE u.id = $1`, [userId]);
+       LEFT JOIN session_sid_revocations sr ON sr.user_id = u.id AND sr.sid = $2
+      WHERE u.id = $1`, [userId, sid]);
   const u = rows[0];
   if (!u) return 'gone';
   if (u.status !== 'active') return 'suspended';
@@ -93,7 +96,7 @@ async function requireSession(req: express.Request, res: express.Response, next:
   } catch {
     return res.status(401).json(fail('Invalid or expired session token.'));
   }
-  const state = await accountState(claims.id, claims.iat);
+  const state = await accountState(claims.id, claims.iat, revocationSidOf(claims));
   if (state === 'suspended') return res.status(403).json(fail('This account has been suspended.'));
   if (state !== 'ok') return res.status(401).json(fail('Your session is no longer valid. Please sign in again.'));
   (req as FileRequest).user = claims;
@@ -160,12 +163,12 @@ app.post('/api/files/:id/ticket', requireSession, requireFilePermission('FILE_DO
  * harmless image cannot be replayed against anything else.
  */
 async function resolveMediaCaller(req: express.Request): Promise<string | null> {
-  let who: { id: string; iat?: number } | null = null;
+  let who: { id: string; iat?: number; sid?: string } | null = null;
   const header = req.headers.authorization;
   if (header?.startsWith('Bearer ')) {
     try {
       const c = jwt.verify(header.slice(7), config.jwtSecret) as SessionClaims & { iat?: number };
-      who = { id: c.id, iat: c.iat };
+      who = { id: c.id, iat: c.iat, sid: revocationSidOf(c) };
     } catch { return null; }
   } else {
     const ticket = typeof req.query.t === 'string' ? req.query.t : null;
@@ -179,7 +182,7 @@ async function resolveMediaCaller(req: express.Request): Promise<string | null> 
     }
   }
   // A ticket or token is only as good as the account behind it, right now.
-  return (await accountState(who.id, who.iat)) === 'ok' ? who.id : null;
+  return (await accountState(who.id, who.iat, who.sid ?? '')) === 'ok' ? who.id : null;
 }
 
 /**

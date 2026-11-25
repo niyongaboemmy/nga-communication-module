@@ -1,13 +1,13 @@
 import express, { Router, type Request, type Response } from 'express';
 import { LogoutTokenError, verifyLogoutTokenSubject } from '../utils/ssoLogout.js';
 import { publishSessionEnd } from '../services/chatRealtime.js';
-import { removeAllSubscriptions } from '@tupo/notify';
+import { removeAllSubscriptions, removeSessionSubscriptions } from '@tupo/notify';
 import jwt from 'jsonwebtoken';
 import { ok, fail, resolveMisRole, ssoExchangeSchema } from '@tupo/shared';
 import type { SessionClaims } from '@tupo/shared';
 import { ensureTenantProvisioned, getPool, normaliseMisStatus, resolveUserPermissions } from '@tupo/db';
 import {
-  PRIMARY_TENANT_ID, gateTenant, normalizeTenant, parseTid, primaryTenantCtx, runWithTenant, tenantRegistry,
+  PRIMARY_TENANT_ID, currentTenantOrNull, noteFallback, parseSchoolCookie, tenancyMode, gateTenant, normalizeTenant, parseTid, primaryTenantCtx, runWithTenant, tenantRegistry,
   type TenantClaims, type TenantCtx, type TenantGate,
 } from '@tupo/tenancy';
 import { misTokenTid, sendTenantMismatch, sendTenantRefusal, tidOf } from '../middleware/tenant.js';
@@ -16,7 +16,10 @@ import { config } from '../config.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 import { noteAiPolicyVersion } from '../services/aiPolicy.js';
 import { noteAiRoutesVersion } from '../services/myAiGateway.js';
-import { exchangeCode, fetchMe, misAvatarUrl, misCoverUrl, verifyMisSessionDetailed } from '../services/misClient.js';
+import {
+  exchangeCode, fetchMe, fetchMySchools, fetchTenantBranding, misAvatarUrl, misCoverUrl, verifyMisSessionDetailed,
+  type MisSchool,
+} from '../services/misClient.js';
 import { accessMode } from '../access/mode.js';
 import { getAccessSnapshot, noteAccessVersion } from '../access/snapshot.js';
 import { academicFromSnapshot, placementDiffers, syncAccessProfile } from '../access/profileSync.js';
@@ -312,7 +315,7 @@ router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: 
   res.set('Cache-Control', 'no-store');
   try {
     const logoutToken = (req.body || {}).logout_token;
-    const { sub: misUserId, tid: logoutClaimTid } = await verifyLogoutTokenSubject(logoutToken, {
+    const { sub: misUserId, tid: logoutClaimTid, sid } = await verifyLogoutTokenSubject(logoutToken, {
       misBaseUrl: config.misBaseUrl,
       clientId: config.ssoClientId,
     });
@@ -327,12 +330,41 @@ router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: 
     // Spokes revoke on (tid, sub) (contract §2): the person is looked up in
     // the school the token names, never by MIS id alone.
     // Any status: a suspended school's sign-outs still have to land.
-    // A token minted before tenancy (no tid) is tenant 1.
+    // A token minted before tenancy (no tid) is tenant 1 -- counted for the
+    // strict-mode report, and refused once strict (enforce) mode is on.
+    if (logoutClaimTid === null) {
+      noteFallback('payload_no_tid', 'backchannel logout');
+      if (tenancyMode() === 'enforce') throw new LogoutTokenError('logout_token names no school');
+    }
     const logoutTid = logoutClaimTid ?? PRIMARY_TENANT_ID;
     const known = logoutTid ? await tenantRegistry().get(logoutTid).catch(() => null) : null;
     const tenant = known ?? (logoutTid === PRIMARY_TENANT_ID ? primaryTenantCtx() : null);
     if (!tenant) throw new LogoutTokenError('logout_token names an unknown school');
     await runWithTenant(tenant, async () => {
+    // A school switch (TENANT_SWITCHING_PLAN.md A.3): only this browser's
+    // sessions end -- those whose MIS token carries this sid, and those whose
+    // MIS token has none (they cannot be told apart). The person's other
+    // devices stay signed in.
+    if (sid) {
+      const { rows: ended } = await getPool().query<{ id: string }>(
+        `INSERT INTO session_sid_revocations (user_id, sid, revoked_at)
+           SELECT u.id, s.sid, now() FROM users u CROSS JOIN (VALUES ($2::text), ('')) AS s(sid)
+            WHERE u.mis_user_id = $1
+         ON CONFLICT (user_id, sid) DO UPDATE SET revoked_at = EXCLUDED.revoked_at
+         RETURNING user_id AS id`,
+        [String(misUserId), sid],
+      );
+      const ids = [...new Set(ended.map((r) => r.id))];
+      if (ids.length) {
+        // A session lives 24 h: older rows can never matter again.
+        await getPool().query(
+          `DELETE FROM session_sid_revocations WHERE user_id = ANY($1::text[]) AND revoked_at < now() - interval '2 days'`, [ids]);
+      }
+      publishSessionEnd(ids, sid);
+      // This browser stops getting the old school's pushes; other devices keep theirs.
+      for (const id of ids) void removeSessionSubscriptions(id, sid).catch(() => {});
+      return;
+    }
     const { rows } = await getPool().query<{ id: string }>(
       `INSERT INTO session_revocations (user_id, revoked_at)
          SELECT id, now() FROM users WHERE mis_user_id = $1
@@ -362,12 +394,35 @@ router.post('/backchannel-logout', express.urlencoded({ extended: false, limit: 
   }
 });
 
+/**
+ * The person switched school in NGA MIS on this browser (TENANT_SWITCHING_PLAN.md
+ * §4.2): the web drops this session without the "signed out" hold and signs in
+ * again silently, into the school MIS is in now.
+ */
+export function sendSchoolChanged(res: Response, tid: number) {
+  return res.status(409).json({
+    ...fail('You switched school in NGA. Signing you in to it…'),
+    code: 'SCHOOL_CHANGED', tid,
+  });
+}
+
 router.get('/verify-mis', authMiddleware, async (req: Request, res: Response) => {
   const misToken = (req as AuthenticatedRequest).user?.misToken;
   if (!misToken) return res.status(401).json(fail('No MIS session on this token.'));
 
-  const { state, accessVersion, avatarUrl, coverUrl, aiPolicyVersion, aiRoutesVersion } = await verifyMisSessionDetailed(misToken);
+  // The school this session is in (authMiddleware runs the request inside it).
+  const sessionTid = currentTenantOrNull()?.tid ?? null;
+  // The shared `nga_school` cookie (A.1) reaches this API too (same parent
+  // domain): a different school there is a switch made in MIS, no MIS call needed.
+  const cookie = parseSchoolCookie(req.headers.cookie);
+  if (cookie && sessionTid !== null && cookie.tid !== sessionTid) return sendSchoolChanged(res, cookie.tid);
+
+  const { state, accessVersion, avatarUrl, coverUrl, aiPolicyVersion, aiRoutesVersion, tid: misTid } = await verifyMisSessionDetailed(misToken);
   if (state === 'invalid') return res.status(401).json(fail('Your MIS session has ended.'));
+  // MIS says the browser session is in another school now (currentTid).
+  if (state === 'valid' && misTid != null && sessionTid !== null && misTid !== sessionTid) {
+    return sendSchoolChanged(res, misTid);
+  }
   // Access control v2: a new access_version means the user's grants changed —
   // drop the cached snapshot so the next check re-fetches it.
   const misUserId = (req as AuthenticatedRequest).user?.misUserId;
@@ -390,6 +445,65 @@ router.get('/verify-mis', authMiddleware, async (req: Request, res: Response) =>
     return res.json(ok({ valid: true, degraded: false, avatarUrl }));
   }
   return res.json(ok({ valid: true, degraded: state === 'unreachable' }));
+});
+
+// ---------------------------------------------------------------------------
+// The school in the header, and "Switch school" (TENANT_SWITCHING_PLAN.md A.5)
+// ---------------------------------------------------------------------------
+
+const SCHOOLS_TTL_MS = 60_000;
+const BRANDING_TTL_MS = 5 * 60_000;
+const schoolsCache = new Map<string, { at: number; schools: MisSchool[] }>();
+const brandingCache = new Map<number, { at: number; value: { name: string | null; logoUrl: string | null } | null }>();
+const trimCache = (m: Map<unknown, unknown>) => { if (m.size > 2000) m.clear(); };
+
+/** Tests only. */
+export function __resetSchoolCaches(): void { schoolsCache.clear(); brandingCache.clear(); }
+
+async function mySchoolsFor(userId: string, tid: number, misToken: string): Promise<MisSchool[]> {
+  const key = `${tid}:${userId}`;
+  const hit = schoolsCache.get(key);
+  if (hit && Date.now() - hit.at < SCHOOLS_TTL_MS) return hit.schools;
+  const schools = await fetchMySchools(misToken);
+  trimCache(schoolsCache);
+  schoolsCache.set(key, { at: Date.now(), schools });
+  return schools;
+}
+
+async function brandingOf(tid: number) {
+  const hit = brandingCache.get(tid);
+  if (hit && Date.now() - hit.at < BRANDING_TTL_MS) return hit.value;
+  const value = await fetchTenantBranding(tid);
+  trimCache(brandingCache);
+  brandingCache.set(tid, { at: Date.now(), value });
+  return value;
+}
+
+/**
+ * The person's schools, from MIS `/auth/my-schools` with the session's MIS
+ * token (the browser never holds it). Fails open: an empty list hides
+ * "Switch school" rather than breaking the menu.
+ */
+router.get('/my-schools', authMiddleware, async (req: Request, res: Response) => {
+  const user = (req as AuthenticatedRequest).user!;
+  const tid = currentTenantOrNull()?.tid ?? PRIMARY_TENANT_ID;
+  const schools = user.misToken ? await mySchoolsFor(user.id, tid, user.misToken) : [];
+  res.set('Cache-Control', 'private, no-store');
+  return res.json(ok({ schools, canSwitch: schools.length >= 2 }));
+});
+
+/** The current school's name and logo for the header (MIS public branding). */
+router.get('/school', authMiddleware, async (_req: Request, res: Response) => {
+  const tenant = currentTenantOrNull();
+  const tid = tenant?.tid ?? PRIMARY_TENANT_ID;
+  const branding = await brandingOf(tid);
+  res.set('Cache-Control', 'private, no-store');
+  return res.json(ok({
+    tid,
+    slug: tenant?.slug ?? null,
+    name: branding?.name ?? tenant?.name ?? null,
+    logoUrl: branding?.logoUrl ?? null,
+  }));
 });
 
 /**

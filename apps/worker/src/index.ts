@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import { Queue, Worker, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
-import { parseTid, runWithoutTenant } from '@tupo/tenancy';
+import { flushFallbacks, parseTid, runWithoutTenant, startFallbackReporting, type FallbackStore } from '@tupo/tenancy';
 import { pingDb, installProcessGuards, startProcessMetrics, recordError, RELEASE, guardDbRole } from '@tupo/db';
 import { runMeetWrapUp, type MeetWrapUpData } from './jobs/meetWrapUp.js';
 import { dispatchTenantJob } from './tenantJobs.js';
@@ -39,6 +39,13 @@ const port = parseInt(process.env.PORT ?? '5193', 10);
 const redisUrl = process.env.REDIS_QUEUE_URL ?? 'redis://127.0.0.1:6379/1';
 
 const connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
+
+// Tenancy fallback counters (TENANT_SWITCHING_PLAN.md A.6): jobs without `tid`
+// are counted here and added every minute to the shared hash in the realtime
+// Redis db (REDIS_URL), where the API's hourly report to MIS reads them.
+const fallbackRedis = new Redis(process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/0', { maxRetriesPerRequest: 1 });
+fallbackRedis.on('error', () => { /* counts wait in memory until Redis is back */ });
+startFallbackReporting({ store: fallbackRedis as unknown as FallbackStore });
 
 // BullMQ reserves ':' as its internal Redis key separator and rejects it in names.
 export const QUEUE_NAME = 'tupo-jobs';
@@ -441,6 +448,8 @@ const shutdown = async () => {
   await metrics.stop();
   await queue.close();
   await connection.quit();
+  await flushFallbacks(fallbackRedis as unknown as FallbackStore).catch(() => {});
+  await fallbackRedis.quit().catch(() => {});
   server.close(() => process.exit(0));
 };
 process.on('SIGINT', () => void shutdown());

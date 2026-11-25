@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { ok, fail } from '@tupo/shared';
 import * as notifications from '@tupo/notify';
+import { misTokenSid } from '@tupo/tenancy';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
 
 /**
@@ -20,7 +21,7 @@ router.get('/config', (_req: Request, res: Response) => {
 router.post('/subscriptions', async (req: Request, res: Response) => {
   if (!notifications.pushConfigFromEnv()) return res.status(503).json(fail('Push notifications are not set up on this server.'));
   try {
-    await notifications.saveSubscription(actor(req).id, req.body?.subscription, req.headers['user-agent'] ?? null);
+    await notifications.saveSubscription(actor(req).id, req.body?.subscription, req.headers['user-agent'] ?? null, misTokenSid(actor(req).misToken));
     res.status(201).json(ok({ subscribed: true }));
   } catch (err) {
     res.status(400).json(fail(err instanceof Error ? err.message : 'Invalid subscription.'));

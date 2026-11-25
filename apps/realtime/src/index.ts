@@ -20,8 +20,8 @@ import { issuedBeforeRevocation } from './utils/ssoLogout.js';
 import { stopActivity } from './activity.js';
 import { startProcessMetrics, guardDbRole } from '@tupo/db';
 import { userRoom } from '@tupo/shared';
-import { runWithTid, type TenantCtx } from '@tupo/tenancy';
-import { bindSocketTenant, relayRooms, relayTid, socketTid, tenantForSession } from './tenancy.js';
+import { revocationSidOf, runWithTid, startFallbackReporting, type FallbackStore, type TenantCtx } from '@tupo/tenancy';
+import { bindSocketTenant, logoutReachesSession, relayRooms, relayTid, socketTid, tenantForSession } from './tenancy.js';
 import {
   broadcastPresence, markOffline, readPresence, recomputePresence, toChoice, toStatus, writeChoice,
 } from './presence.js';
@@ -108,7 +108,8 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
         // Delivery is per-user-room, so a notification reaches every device
         // that person has open and nobody else's -- in the tenant it was
         // raised in (`t<tid>:user:<id>`).
-        const tid = relayTid(parsed);
+        const tid = relayTid(parsed, 'notification relay');
+        if (tid === null) return;
         for (const id of userIds ?? []) {
           io.local.to(userRoom(id, tid)).emit('notification:new', notification);
         }
@@ -125,7 +126,8 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
         };
         // Everything below stays inside the tenant the message names: rooms of
         // any other tenant are dropped (relayRooms), never delivered.
-        const tid = relayTid(parsed);
+        const tid = relayTid(parsed, 'chat relay');
+        if (tid === null) return;
         // A meeting ended outside the room: tell whoever is still in it here,
         // and drop this node's in-memory state for it (E-04).
         const ended = (parsed as { meetEnded?: { meetingId?: string; by?: string | null } }).meetEnded;
@@ -159,10 +161,12 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
     logoutSub.on('message', (_channel, payload) => {
       void (async () => {
         try {
-          const parsed = JSON.parse(payload) as { userIds: string[]; tid?: number };
+          const parsed = JSON.parse(payload) as { userIds: string[]; tid?: number; sid?: string };
           const ended = new Set(parsed.userIds ?? []);
-          const tid = relayTid(parsed);
-          if (ended.size === 0) return;
+          const tid = relayTid(parsed, 'logout relay');
+          if (ended.size === 0 || tid === null) return;
+          // A school switch ends one browser session only (contract A.3).
+          const sid = typeof parsed.sid === 'string' ? parsed.sid : null;
           const sockets = [
             ...(await io.local.fetchSockets()),
             ...(await meetNsp.local.fetchSockets()),
@@ -170,6 +174,7 @@ for (const c of [pubClient, subClient, presence, notifySub, chatSub, logoutSub])
           for (const s of sockets) {
             const u = s.data.user as SessionClaims | undefined;
             if (!u?.id || s.data.guest || !ended.has(u.id) || socketTid(s) !== tid) continue;
+            if (!logoutReachesSession(u, sid)) continue;
             s.disconnect(true);
           }
         } catch {
@@ -271,7 +276,7 @@ io.use((socket, next) => {
     socket.data.tenant = t.tenant;
     const err = await runWithTid(t.tenant.tid, () => admitUser(claims.id));
     if (err) return next(err);
-    if (await runWithTid(t.tenant.tid, () => sessionEnded(claims.id, (claims as { iat?: number }).iat))) return next(new Error(SESSION_ENDED));
+    if (await runWithTid(t.tenant.tid, () => sessionEnded(claims.id, (claims as { iat?: number }).iat, revocationSidOf(claims)))) return next(new Error(SESSION_ENDED));
     socket.data.user = claims;
     next();
   })().catch(() => next(new Error('unauthorized: could not check the session')));
@@ -301,7 +306,7 @@ meetNsp.use((socket, next) => {
     const user = socket.data.user as SessionClaims | undefined;
     const err = await runWithTid(t.tenant.tid, () => admitUser(user?.id));
     if (err) return next(err);
-    if (user?.id && await runWithTid(t.tenant.tid, () => sessionEnded(user.id, (user as { iat?: number }).iat))) return next(new Error(SESSION_ENDED));
+    if (user?.id && await runWithTid(t.tenant.tid, () => sessionEnded(user.id, (user as { iat?: number }).iat, revocationSidOf(user)))) return next(new Error(SESSION_ENDED));
     next();
   })().catch(() => next(new Error('unauthorized: could not check the session')));
 });
@@ -323,19 +328,21 @@ function startAccessSweep(): NodeJS.Timeout {
         // Grouped by tenant: each school's users are read inside its own
         // context (RLS would hide every other school's rows).
         const idsByTenant = new Map<number, Set<string>>();
+        const sidsByTenant = new Map<number, Set<string>>();
         for (const s of sockets) {
           const u = s.data.user as SessionClaims | undefined;
           if (!u?.id || s.data.guest) continue;
           const tid = socketTid(s);
-          if (!idsByTenant.has(tid)) idsByTenant.set(tid, new Set());
+          if (!idsByTenant.has(tid)) { idsByTenant.set(tid, new Set()); sidsByTenant.set(tid, new Set()); }
           idsByTenant.get(tid)!.add(u.id);
+          sidsByTenant.get(tid)!.add(revocationSidOf(u));
         }
         const inactive = new Set<string>();
         const revokedAt = new Map<string, Date>();
         for (const [tid, ids] of idsByTenant) {
           await runWithTid(tid, async () => {
             for (const id of await findInactiveUsers([...ids])) inactive.add(`${tid}:${id}`);
-            for (const [id, at] of await revocationsFor([...ids])) revokedAt.set(`${tid}:${id}`, at);
+            for (const [key, at] of await revocationsFor([...ids], [...(sidsByTenant.get(tid) ?? [])])) revokedAt.set(`${tid}:${key}`, at);
           });
         }
         const nowSec = Date.now() / 1000;
@@ -346,8 +353,12 @@ function startAccessSweep(): NodeJS.Timeout {
           // the sweep also ends sessions that expired or were revoked since
           // (single sign-out, suspension) — RT-04.
           const key = `${socketTid(s)}:${u.id}`;
+          // The later of: every session of the person ended, or this browser session (sid).
+          const userEnd = revokedAt.get(key) ?? null;
+          const sidEnd = revokedAt.get(`${key}#${revocationSidOf(u)}`) ?? null;
+          const ended = userEnd && sidEnd ? (userEnd > sidEnd ? userEnd : sidEnd) : (userEnd ?? sidEnd);
           const reason = inactive.has(key) ? 'suspended'
-            : issuedBeforeRevocation(u.iat, revokedAt.get(key) ?? null) ? 'signed_out'
+            : issuedBeforeRevocation(u.iat, ended) ? 'signed_out'
             : u.exp && u.exp < nowSec ? 'expired'
             : null;
           if (!reason) continue;
@@ -365,6 +376,9 @@ function startAccessSweep(): NodeJS.Timeout {
   }, ACCESS_SWEEP_MS);
 }
 const accessSweep = startAccessSweep();
+// Tenancy fallback counters (TENANT_SWITCHING_PLAN.md A.6): this process adds
+// its counts to the shared Redis hash every minute; the API reports them.
+startFallbackReporting({ store: pubClient as unknown as FallbackStore });
 
 /**
  * Keep the presence keys of everyone still connected from expiring.

@@ -396,3 +396,10 @@ export const sessionRevocations = pgTable('session_revocations', {
   userId: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
   revokedAt: timestamp('revoked_at', { withTimezone: true }).notNull(),
 });
+
+/** One browser session's end (school switch): MIS sid, or '' for sessions without one (0053). */
+export const sessionSidRevocations = pgTable('session_sid_revocations', {
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  sid: text('sid').notNull(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }).notNull(),
+}, (t) => ({ pk: primaryKey({ columns: [t.userId, t.sid] }) }));
