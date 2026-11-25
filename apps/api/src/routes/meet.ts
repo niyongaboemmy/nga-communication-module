@@ -126,15 +126,15 @@ router.post('/:idOrCode/guest', inMeetingTenant, async (req: Request, res: Respo
 
   const raw = req.params.idOrCode ?? '';
   const m = await meet.findMeeting(raw.includes('-') ? normalizeJoinCode(raw) : raw);
-  if (!m) return res.status(404).json(fail('No meeting with that code.'));
+  // TP-ISO-7: a meeting that is not public answers exactly like one that does
+  // not exist (as /public does), checked before anything else about it, so a
+  // stranger cannot probe for valid codes -- of this school or another.
+  const settings = m ? parseMeetSettings(m.settings) : null;
+  if (!m || !settings || settings.admissionPolicy !== 'public') {
+    return res.status(404).json(fail('No public meeting with that code.'));
+  }
   if (m.status === 'ended' || m.status === 'cancelled') {
     return res.status(410).json(fail('This meeting has ended.'));
-  }
-
-  const settings = parseMeetSettings(m.settings);
-  if (settings.admissionPolicy !== 'public') {
-    return res.status(403).json(fail(
-      'This meeting is only open to members of the institution. Please sign in.'));
   }
   if (settings.locked) return res.status(403).json(fail('This meeting is locked.'));
 

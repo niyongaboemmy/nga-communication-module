@@ -122,6 +122,34 @@ export async function readPresence(
 }
 
 /**
+ * Presence for the ids a client asked about (`presence:query`).
+ *
+ * TP-ISO-2: the Redis keys are bare user ids, so on their own they would
+ * answer for anyone -- another school's people included. Only ids that
+ * `visible` confirms (users readable under RLS in the asker's school) are
+ * looked up; the rest are left out of the answer altogether. People in
+ * `hidden` (a block, B-05) read as offline.
+ */
+export async function presenceForQuery(
+  redis: Redis | null,
+  wanted: string[],
+  deps: {
+    visible: (ids: string[]) => Promise<Set<string>>;
+    hidden: (ids: string[]) => Promise<Set<string>>;
+    read?: typeof readPresence;
+  },
+): Promise<Record<string, PresenceSnapshot>> {
+  if (!wanted.length) return {};
+  const known = await deps.visible(wanted).catch(() => new Set<string>());
+  const ids = wanted.filter((id) => known.has(id));
+  if (!ids.length) return {};
+  const hidden = await deps.hidden(ids).catch(() => new Set<string>());
+  const shown = await (deps.read ?? readPresence)(redis, ids.filter((id) => !hidden.has(id)));
+  for (const id of hidden) shown[id] = { status: 'offline', lastSeenAt: null } as PresenceSnapshot;
+  return shown;
+}
+
+/**
  * Tell the people who render this person's dot that it moved.
  *
  * DM counterparts only, and deliberately so. Their sidebar row shows the dot

@@ -47,6 +47,21 @@ export async function lastSeenFor(userIds: string[]): Promise<Record<string, str
 }
 
 /**
+ * Which of these ids are people of the current school (TP-ISO-2).
+ *
+ * Presence lives in Redis under bare user ids, which RLS cannot bound; this is
+ * the one database read that does: `users` is under FORCE RLS, so an id of
+ * another school (or no one) is simply not returned.
+ */
+export async function visibleUserIds(userIds: string[]): Promise<Set<string>> {
+  if (!userIds.length) return new Set();
+  const { rows } = await getPool().query<{ id: string }>(
+    'SELECT id FROM users WHERE id = ANY($1::text[])', [userIds],
+  );
+  return new Set(rows.map((r) => r.id));
+}
+
+/**
  * Does this person let others see their presence?
  *
  * Read straight from the preference row rather than through `getPrefs`, which

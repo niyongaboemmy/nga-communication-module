@@ -10,6 +10,7 @@
  * running, so it says so loudly.
  */
 import { getPool } from '@tupo/db';
+import { runAsPlatform } from '@tupo/tenancy';
 
 export const PARTITION_MONTHS_AHEAD = 3;
 
@@ -20,7 +21,8 @@ export async function runPartitionMaintenance(): Promise<{ created: number; inDe
   );
   const inDefault: Record<string, number> = {};
   for (const table of ['messages_default', 'meeting_events_default']) {
-    const r = await pool.query<{ n: string }>(`SELECT count(*)::text AS n FROM ${table}`);
+    // The partitions are under FORCE RLS (0054): count every school's rows.
+    const r = await runAsPlatform('partition check', () => pool.query<{ n: string }>(`SELECT count(*)::text AS n FROM ${table}`));
     inDefault[table] = Number(r.rows[0]?.n ?? 0);
     if (inDefault[table]! > 0) {
       console.warn(`[worker] partitions:ensure — ${inDefault[table]} row(s) in ${table}; a monthly partition was missing when they were written`);

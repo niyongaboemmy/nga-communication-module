@@ -11,7 +11,7 @@ import { config } from './config.js';
 import { effectiveTenant, effectiveTid, forEachActiveTenant, tenantRegistry, gateTenant, runWithTenant, revocationSidOf } from '@tupo/tenancy';
 import { overTenantQuota, tenantFromCredential, tenantStorageKey } from './tenancy.js';
 import { createStorageDriver } from './storage/driver.js';
-import { canReadFile, canDeleteFile, listConversationFiles } from './access.js';
+import { canReadFile, canDeleteFile, listConversationFiles, softDeleteFile, internalFileFor } from './access.js';
 import { makeThumbnail, thumbKey, THUMBABLE, type ThumbResult } from './thumbnails.js';
 
 installProcessGuards('files');
@@ -508,11 +508,10 @@ app.get('/internal/files/:id/content', async (req, res) => {
   if (!want.length || !loopback || given.length !== want.length || !timingSafeEqual(given, want)) {
     return res.status(404).json(fail('Not found'));
   }
-  const { rows } = await getPool().query<{ storage_key: string; mime_type: string; size_bytes: string }>(
-    `SELECT storage_key, mime_type, size_bytes FROM files WHERE id = $1 AND deleted_at IS NULL AND status = 'ready'`,
-    [req.params.id]);
-  const file = rows[0];
-  if (!file) return res.status(404).json(fail('File not found.'));
+  // Inside the school the caller names (TP-ISO-5); refused without one.
+  const found = await internalFileFor(req.headers['x-tenant-id'], req.params.id!);
+  if (found.status !== 200 || !('file' in found)) return res.status(found.status).json(fail('message' in found ? found.message : 'File not found.'));
+  const file = found.file;
   res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
   res.setHeader('Content-Length', file.size_bytes);
   (await storage.get(file.storage_key)).on('error', () => res.destroy()).pipe(res);
@@ -594,9 +593,8 @@ app.delete('/api/files/:id', requireSession, async (req, res) => {
     return res.status(404).json(fail('File not found.'));
   }
 
-  await getPool().query(
-    `UPDATE files SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL`,
-    [req.params.id]);
+  // RLS hides another school's row: nothing changed means not found (TP-ISO-4).
+  if (!(await softDeleteFile(req.params.id!))) return res.status(404).json(fail('File not found.'));
   res.json(ok({ deleted: true }));
 });
 

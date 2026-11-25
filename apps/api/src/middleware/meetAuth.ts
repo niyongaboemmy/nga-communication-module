@@ -7,6 +7,8 @@ import { fail, GUEST_PERMISSIONS } from '@tupo/shared';
 import type { Role, RoleLevel, SessionClaims } from '@tupo/shared';
 import { config } from '../config.js';
 import type { AuthenticatedRequest } from './auth.js';
+import { issuedBeforeRevocation } from '../utils/ssoLogout.js';
+import { revocationSidOf } from '@tupo/tenancy';
 
 /**
  * Authentication for the Meet router, which — uniquely in Tupo — has to serve
@@ -163,8 +165,17 @@ async function meetAuthInTenant(req: Request, res: Response, next: NextFunction)
   /* ---- ordinary session ---- */
   const claims = decoded as SessionClaims;
   const pool = getPool();
-  const { rows } = await pool.query<{ role: Role; status: string; mis_status: string | null }>(
-    'SELECT role, status, mis_status FROM users WHERE id = $1', [claims.id],
+  // Same single sign-out rule as authMiddleware (TP-ISO-1): every session of
+  // the person (session_revocations) or one MIS browser session, e.g. a school
+  // switch (session_sid_revocations by sid) -- whichever ended later decides.
+  const { rows } = await pool.query<{ role: Role; status: string; mis_status: string | null; revoked_at: Date | null }>(
+    `SELECT u.role, u.status, u.mis_status,
+            GREATEST(r.revoked_at, sr.revoked_at) AS revoked_at
+       FROM users u
+       LEFT JOIN session_revocations r ON r.user_id = u.id
+       LEFT JOIN session_sid_revocations sr ON sr.user_id = u.id AND sr.sid = $2
+      WHERE u.id = $1`,
+    [claims.id, revocationSidOf(claims)],
   );
   const user = rows[0];
 
@@ -178,6 +189,9 @@ async function meetAuthInTenant(req: Request, res: Response, next: NextFunction)
   // the session is over, as MIS's own /auth/verify now says.
   if (!isActiveUser({ status: 'active', mis_status: user.mis_status })) {
     return res.status(401).json({ ...fail('This NGA account is no longer active.'), code: 'ACCOUNT_INACTIVE' });
+  }
+  if (issuedBeforeRevocation((claims as { iat?: number }).iat, user.revoked_at)) {
+    return res.status(401).json({ ...fail('You signed out of NGA. Please sign in again.'), code: 'SESSION_ENDED' });
   }
 
   const resolved = await resolveUserPermissions(pool, claims.id);
