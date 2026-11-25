@@ -16,6 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "migrate": "tsx src/migrate.ts",
     "seed": "tsx src/seed.ts",
+    "rls-check": "tsx src/rlsCheck.ts",
     "test": "vitest run"
   },
   "dependencies": {

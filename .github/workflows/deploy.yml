@@ -121,6 +121,16 @@ jobs:
             # never has to be remembered as a manual step.
             npm run db:migrate
 
+            # School isolation gate: every table and partition with tenant_id
+            # must be under FORCE RLS with the tenant_isolation policy (on
+            # tupo_tenant_id()), and every table without tenant_id must be on
+            # the global allowlist (packages/db/src/rlsCoverage.ts). Read-only,
+            # same credentials and runner (tsx) as db:migrate. Prints
+            # "RLS check: N tables/partitions covered, 0 missing"; on any
+            # offender it exits 1, which (bash -e) fails the deploy here,
+            # BEFORE pm2 reload, so the new release never goes live on it.
+            npm run --silent db:rls-check
+
             # RBAC seeding is deliberately NOT run on every deploy. Unlike a
             # migration, seedRbac REPLACES each system role's permission grants
             # with DEFAULT_ROLE_PERMISSIONS from code — so seeding on every push
