@@ -215,6 +215,12 @@ export interface MisRegistryOptions {
   source?: 'mis' | 'local';
   /** Called with `tenancy.strict.tupo` each time MIS answers the registry fetch. */
   onStrict?: (strict: boolean) => void;
+  /**
+   * Called with the list each time MIS answers. Used to keep Tupo's own
+   * `tenants` table (the fallback of a process that cannot reach MIS) saying
+   * what MIS says. Must not throw.
+   */
+  onLoaded?: (list: TenantCtx[]) => void;
 }
 
 /** The service credentials MIS's platform endpoints take (registry fetch, fallback report). */
@@ -260,6 +266,7 @@ export function createMisTenantRegistry(opts: MisRegistryOptions = {}): TenantRe
         const list = await loadTenantsFromMis(opts);
         // MIS answered: it is the control plane. The primary tenant always exists.
         if (!list.some((t) => t.tid === PRIMARY_TENANT_ID)) list.push(primaryTenantCtx());
+        try { opts.onLoaded?.(list); } catch { /* the copy is best effort */ }
         return list;
       } catch (err) {
         if (opts.localLoad) {
@@ -281,18 +288,33 @@ export function setLocalTenantLoader(fn: () => Promise<TenantCtx[]>): void {
   registry = null;
 }
 
+let localSync: ((list: TenantCtx[]) => void) | undefined;
+
+/**
+ * @tupo/db registers a writer that copies what MIS says (status, name, slug,
+ * timezone, package) onto the local `tenants` rows. Without it a school stayed
+ * as it was when Tupo first saw it: one first seen while PENDING was refused
+ * for ever by the processes that read only the local table (the realtime
+ * gateway had no MIS credentials), while the API, asking MIS, let it in.
+ */
+export function setLocalTenantSync(fn: ((list: TenantCtx[]) => void) | undefined): void {
+  localSync = fn;
+  registry = null;
+}
+
 /** The process-wide registry, built from env on first use. */
 export function tenantRegistry(): TenantRegistry {
   if (!registry) {
     registry = createMisTenantRegistry({
       misBaseUrl: process.env.NGA_MIS_BASE_URL ?? 'https://mis.amashuri.com',
-      clientId: process.env.SSO_CLIENT_ID,
+      clientId: process.env.SSO_CLIENT_ID || 'tupo',
       clientSecret: process.env.SSO_CLIENT_SECRET,
       integrationToken: process.env.MIS_TENANTS_TOKEN || undefined,
       localLoad: localLoader,
       source: process.env.TENANCY_REGISTRY_SOURCE === 'local' ? 'local' : 'mis',
       ttlMs: Number(process.env.TENANCY_REGISTRY_TTL_MS) || 30_000,
       onStrict: setRegistryStrict,
+      onLoaded: (list) => localSync?.(list),
     });
   }
   return registry;
@@ -412,7 +434,7 @@ export function startFallbackReporting(opts: {
       await reportFallbacks({
         misBaseUrl: process.env.NGA_MIS_BASE_URL ?? 'https://mis.amashuri.com',
         headers: misServiceHeaders({
-          clientId: process.env.SSO_CLIENT_ID,
+          clientId: process.env.SSO_CLIENT_ID || 'tupo',
           clientSecret: process.env.SSO_CLIENT_SECRET,
           integrationToken: process.env.MIS_TENANTS_TOKEN || undefined,
         }),

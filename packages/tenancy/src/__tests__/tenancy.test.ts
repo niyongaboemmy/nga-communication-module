@@ -96,6 +96,18 @@ describe('registry (contract §4)', () => {
     const bare = createMisTenantRegistry({ misBaseUrl: 'http://mis', fetchImpl: down as never });
     expect((await bare.list()).map((t) => t.tid)).toEqual([1]);
   });
+
+  it('hands each MIS answer to onLoaded (the local copy), never a fallback, and survives it throwing', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ tenants: [{ tenant_id: 7, slug: 'seven', status: 'active' }] })));
+    const seen: number[][] = [];
+    const r = createMisTenantRegistry({ misBaseUrl: 'http://mis', fetchImpl: fetchImpl as never, ttlMs: 0, onLoaded: (l) => { seen.push(l.map((t) => t.tid)); throw new Error('copy failed'); } });
+    expect((await r.get(7))?.status).toBe('ACTIVE');
+    expect(seen).toEqual([[7, 1]]);
+    const down = vi.fn(async () => new Response('nope', { status: 500 }));
+    const local = createMisTenantRegistry({ misBaseUrl: 'http://mis', fetchImpl: down as never, localLoad: async () => [T7], onLoaded: (l) => { seen.push(l.map((t) => t.tid)); } });
+    await local.list();
+    expect(seen).toHaveLength(1);
+  });
 });
 
 describe('service calls and jobs', () => {
