@@ -47,8 +47,26 @@ if ! has ALERT_EMAILS "$WORKER_ENV"; then
   echo "setup: alert recipients added to $WORKER_ENV"
 fi
 
+# ── School registry (multi-tenancy) ───────────────────────────────────────
+# Every process that admits a session checks its school against the MIS school
+# list. Only the api had the MIS credentials, so the gateway, the files service
+# and the worker fell back to Tupo's own copy of the list, which could be stale:
+# a school first seen while PENDING was refused by the gateway for ever
+# ("Reconnecting…", 2026-11-26). They now ask MIS as the api does.
+FILES_ENV="apps/files/.env"; REALTIME_ENV="apps/realtime/.env"
+for key in NGA_MIS_BASE_URL SSO_CLIENT_ID SSO_CLIENT_SECRET; do
+  if has "$key" "$API_ENV"; then
+    LINE="$(grep "^$key=" "$API_ENV" | tail -n 1)"
+    for f in "$REALTIME_ENV" "$FILES_ENV" "$WORKER_ENV"; do
+      if [ -f "$f" ] && ! has "$key" "$f"; then
+        printf '\n# Added by scripts/deploy-setup.sh (school registry)\n%s\n' "$LINE" >> "$f"
+        echo "setup: $key added to $f"
+      fi
+    done
+  fi
+done
+
 # ── Email copies: attachments and unsubscribe links (M5) ─────────────────
-FILES_ENV="apps/files/.env"
 # One value shared by the listed files; generated once, then reused.
 share_secret() {
   local key="$1"; shift

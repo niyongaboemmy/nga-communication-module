@@ -1,7 +1,7 @@
 import type { Pool } from 'pg';
 import {
   PRIMARY_TENANT_ID, effectiveTid, normalizeTenant, runWithTenant, runWithoutTenant,
-  setLocalTenantLoader, type TenantCtx,
+  setLocalTenantLoader, setLocalTenantSync, type TenantCtx,
 } from '@tupo/tenancy';
 import { getPool } from './pool.js';
 import { snowflake } from './snowflake.js';
@@ -24,6 +24,34 @@ export async function loadLocalTenants(pool: Pool = getPool()): Promise<TenantCt
 
 // The registry in @tupo/tenancy reads this table when MIS is unreachable.
 setLocalTenantLoader(() => loadLocalTenants());
+
+/**
+ * Make the local rows say what MIS says. Only rows that exist are touched (a
+ * school is created here by seedTenant, with its spaces and roles), and only
+ * when something differs. Returns the tids that changed.
+ */
+export async function syncLocalTenants(list: TenantCtx[], pool: Pool = getPool()): Promise<number[]> {
+  const changed: number[] = [];
+  for (const t of list) {
+    const { rowCount } = await runWithoutTenant('tenant registry (sync)', () => pool.query(
+      `UPDATE tenants SET slug = $2, name = $3, status = $4, timezone = $5, pkg = $6, updated_at = now()
+        WHERE tid = $1 AND (slug, name, status, timezone, pkg) IS DISTINCT FROM ($2, $3, $4, $5, $6)`,
+      [t.tid, t.slug, t.name, t.status, t.timezone, t.pkg]));
+    if (rowCount) changed.push(t.tid);
+  }
+  return changed;
+}
+
+// Each time MIS answers the registry, copy its answer here (in the background).
+let syncing = false;
+setLocalTenantSync((list) => {
+  if (syncing) return;
+  syncing = true;
+  void syncLocalTenants(list)
+    .then((changed) => { if (changed.length) console.log(`[tenancy] local tenants updated from MIS: ${changed.join(', ')}`); })
+    .catch((err) => { console.warn('[tenancy] could not update local tenants from MIS:', err instanceof Error ? err.message : err); })
+    .finally(() => { syncing = false; });
+});
 
 /**
  * The id of the space that holds subject channels. Tenant 1 keeps the row
